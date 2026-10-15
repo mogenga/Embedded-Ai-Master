@@ -10,3 +10,9 @@
   2. 知识库树因 `flex-basis:0` 被压扁到 174px 只露 5 行 → 改为 grid `minmax(0,58%)` 固定分区 + 头部 sticky；
   3. 本机 git-bash 的 `sed` / `which` 会挂起 → 文本替换统一改用 Node。
 - **验证方式**：本机 Chromium（无头）注入探针实测几何量——三栏头部 y=48 / h=40 一致、内容宽 874 与头部内边距对齐、无横向溢出、无文本截断；三主题 computed 颜色正确（含 system 随 `prefers-color-scheme` 解析）。
+## 2026-10-15 · 缺陷修复：夜间滚动条未适配
+
+- **用户关键原话**："问题：夜间模式滚动条未做适配"。
+- **关键产出**：`prototypes/index.html` 新增 `--scroll-thumb` / `--scroll-thumb-hover` / `--scroll-track` 三个变量（dark / light / system 三处各一份，track 透明），并加全局滚动条规则：标准属性 `scrollbar-color` + `scrollbar-width:thin` 与 `::-webkit-scrollbar` 伪元素双写（现代 Chromium / Firefox 走标准属性，旧 Chromium 与 Safari 走伪元素，渐进增强）。
+- **验证方式**：无头实测 dark thumb `rgb(47,61,75)`、light thumb `rgb(198,208,217)`、track 透明、width `thin`、滚动条实占 10px；三栏头部仍均 40px，无横向溢出与文本截断。
+- **翻车与返工**：无。

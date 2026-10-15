@@ -44,6 +44,10 @@
   --wave-3:#d97bab;
   --wave-4:#7fb2e5;
 
+  --scroll-thumb:#2f3d4b;
+  --scroll-thumb-hover:#41546a;
+  --scroll-track:transparent;
+
   --shadow:0 12px 32px rgba(0,0,0,.38);
   --radius:8px;
   --radius-sm:6px;
@@ -86,6 +90,10 @@
   --wave-3:#b04d80;
   --wave-4:#2c6db0;
 
+  --scroll-thumb:#c6d0d9;
+  --scroll-thumb-hover:#a8b5c0;
+  --scroll-track:transparent;
+
   --shadow:0 10px 28px rgba(23,42,58,.14);
 }
 @media (prefers-color-scheme: light){
@@ -119,6 +127,9 @@
     --wave-2:#a9701a;
     --wave-3:#b04d80;
     --wave-4:#2c6db0;
+    --scroll-thumb:#c6d0d9;
+    --scroll-thumb-hover:#a8b5c0;
+    --scroll-track:transparent;
     --shadow:0 10px 28px rgba(23,42,58,.14);
   }
 }
@@ -140,6 +151,13 @@ input,textarea,select{font:inherit;color:inherit}
 ul{margin:0;padding:0;list-style:none}
 ::selection{background:var(--accent-line)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+
+*{scrollbar-color:var(--scroll-thumb) var(--scroll-track);scrollbar-width:thin}
+::-webkit-scrollbar{width:11px;height:11px}
+::-webkit-scrollbar-track{background:var(--scroll-track)}
+::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border:3px solid transparent;background-clip:padding-box;border-radius:999px}
+::-webkit-scrollbar-thumb:hover{background:var(--scroll-thumb-hover);background-clip:padding-box}
+::-webkit-scrollbar-corner{background:transparent}
 .ico{width:16px;height:16px;flex:none;display:block}
 .mono{font-family:var(--font-mono);font-variant-numeric:tabular-nums;letter-spacing:-.1px}
 .num{font-variant-numeric:tabular-nums}
