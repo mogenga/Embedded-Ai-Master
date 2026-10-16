@@ -1,9 +1,9 @@
 # P0 内核架构方案(embeddedAgent harness)
 
-> 版本: v0.1 草案 · 日期: 2026-10-15 · 状态: **M1 设计稿,待评审**
-> 决策来源: 用户选型(2026-10-15)+ [harness-comparison.md](harness-comparison.md) 七工具调研 + [BRD.md](BRD.md) M1。
+> 版本: v0.2 · 日期: 2026-10-16 · 状态: **M1 设计稿,待评审(决策点 #1 已关闭)**
+> 决策来源: 用户选型(2026-10-15/16)+ [harness-comparison.md](harness-comparison.md) 七工具调研 + [BRD.md](BRD.md) M1。
 > 选型决定: 主循环 / 上下文管理 / 工具系统 / MCP 客户端取 **Claude Code** 母本;模型接入融合 **dsh + opencode** 并简化;会话管理取 **dsh** 母本。
-> 语言栈假设: **TypeScript + Node**(决策点 #1 的落地倾向——本设计大量依赖 async generator / Zod / TS 类型系统,选型即隐含此假设;正式关闭 #1 待评审确认)。
+> 语言栈(决策点 #1,**已关闭**): **TypeScript + Node 24**(ESM-only,本机 24.14.1 已具备)。复用边界: MCP 官方 TS SDK v2(`@modelcontextprotocol/client` / `@modelcontextprotocol/server`)与 Zod v4 为协议层复用;内核(主循环/会话/工具/上下文/MCP 生命周期)自研;模型适配层自研极简适配器(仅 complete/countTokens 两方法,P0 只实现 OpenAI 兼容,语法借鉴 dsh llm-pi-ai,不整体引第三方);测试用 vitest。选型依据 Context7 查证: MCP TS SDK v2 官方支持 Node 20+,开发环境要求 Node 24.x + npm 11.x 与本机相符;七工具 5/7 为 TS,全栈同构。(v0.2 修订)
 > 定位: 领域无关内核;嵌入式调试的垂直影响以"贯穿约束"形式表达(§7),内核代码不含领域逻辑。
 
 ---
@@ -298,7 +298,7 @@ MCP 客户端收敛为"本地 stdio + 会话级生命周期":每个 server 一�
 
 | 决策点 | 状态 | 结论/去向 |
 |---|---|---|
-| #1 语言栈与复用边界 | **本设计隐含 TS**,待评审正式关闭 | async generator / Zod / MCP TS SDK 全按 TS 表达;MCP SDK 复用,harness 本体自研 |
+| #1 语言栈与复用边界 | **已关闭(2026-10-16)** | TypeScript + Node 24(ESM);协议层复用 MCP TS SDK v2 / Zod v4;内核自研;模型适配自研极简适配器;vitest 测试(§0) |
 | #2 KB 渐进加载载体 | **仍开放**(P1 范畴) | 待 RAG 对照实验;P0 不受阻塞 |
 | #3 内置工具集最小范围 | **关闭** | fs/shell/glob/grep 四件进内核,取证全走 MCP(§4.2) |
 | #4 会话存储与回放协议 | **大半关闭** | SessionEvent JSONL schema + 投影式回放;具体字段表随 M1 实现定稿 |

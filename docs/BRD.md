@@ -1,6 +1,6 @@
 # 业务需求文档(BRD)— 嵌入式调试 Agent 平台(Embedded-Ai-Master)
 
-> 版本: v1.1 · 日期: 2026-10-15 · 状态: **初稿,待评审**
+> 版本: v1.2 · 日期: 2026-10-16 · 状态: **初稿,待评审**
 > 方向输入: [framework-architecture-inventory.md](framework-architecture-inventory.md)(方向变更)、[rag-vs-agentic-search-todo.md](rag-vs-agentic-search-todo.md)、[harness-comparison.md](harness-comparison.md)。
 > 文档边界: 本文档回答"**业务要什么、验收是什么**",不回答"技术上怎么做"——框架能力清单与决策点见 [framework-architecture-inventory.md](framework-architecture-inventory.md)。
 
@@ -304,7 +304,7 @@ ESP32 仿真不用 Renode,用 Espressif QEMU fork(按需接)。
 
 | 风险 | 影响 | 对策 |
 |---|---|---|
-| **全新建设工程量大**(平台 + 领域层并行,无现成 harness) | 交付周期 | Phase 0 经验与基准直接复用(§11);决策点 #1 复用协议库(MCP SDK/pi-ai 等);按 P0→P1→P2 严格分期,内核先行 |
+| **全新建设工程量大**(平台 + 领域层并行,无现成 harness) | 交付周期 | Phase 0 经验与基准直接复用(§11);决策点 #1 已定案:协议层(MCP TS SDK v2/Zod v4)复用,内核自研;按 P0→P1→P2 严格分期,内核先行 |
 | KB 质量随规模退化 | 误诊 | R5/R6 门禁自动化;R8 一次修完;触发词覆盖审计 |
 | 检索选型未定(设计结论 4 未实测) | 知识层接口返工 | 对照实验已立项,判定标准先固化(R9);接口按"可插拔检索层"预留 |
 | 模型依赖本地网关 | 可用性 | PLAT-1 多 provider + 降级 |
@@ -319,7 +319,7 @@ ESP32 仿真不用 Renode,用 Espressif QEMU fork(按需接)。
 
 完整清单见 framework-architecture-inventory.md §3,此处列业务侧关切:
 
-1. 语言栈与复用边界(TS vs Python;MCP SDK 等协议库可复用,harness 本体自研边界在哪——调研倾向 TS,见 harness-comparison.md §4 #1);
+1. 语言栈与复用边界(TS vs Python;MCP SDK 等协议库可复用,harness 本体自研边界在哪——**已关闭 2026-10-16: TypeScript + Node 24,协议层复用 / 内核自研**,详见 p0-kernel-design.md §0);
 2. KB 渐进加载载体(Skills vs 检索工具 vs 并存)——RAG 对照实验数据是关键输入;
 3. 内置工具集最小范围(pi 四件套为下界、全家桶为上界,光谱见 harness-comparison.md §4 #3);
 4. 会话存储与回放协议(BR-6 依赖);
@@ -338,5 +338,6 @@ ESP32 仿真不用 Renode,用 Espressif QEMU fork(按需接)。
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
+| v1.2 | 2026-10-16 | 决策点 #1(语言栈)正式关闭:TypeScript + Node 24,协议层复用 / 内核自研(§14 第 1 项) |
 | v1.0 | 2026-10-15 | 首版:基于 work-summary 重新梳理;纳入 2026-10-15 方向变更(独立 harness),需求按领域层 BR / 平台层 PLAT 两层编号;设计结论 4 标注为待验证 |
 | v1.1 | 2026-10-15 | **忽略 dsh 现有资产**:领域层(BR-2/3/5/6/7)改为新建口径,Phase 0 实现资产不再作为复用输入;§11 改为"建设范围与 Phase 0 经验利用"(仅 KB 语料与评测集/夹具作为内容资产直接迁移);里程碑 M0 改为 Phase 0,M2 起含领域层新建;M2 验收从"对等复现"改为"全新建成达到并超过 Phase 0 水平"(G5);范围外新增"排除基于现成 harness 二次开发";补充 harness-comparison.md 为决策输入 |

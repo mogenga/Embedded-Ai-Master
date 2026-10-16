@@ -84,7 +84,7 @@
 
 ## 3. 待调研决策点(进入设计前必须回答)
 
-1. **语言栈与复用边界**: TS(贴近 CLI / UI 同构生态,七工具调研 5/7 为 TS)vs Python(贴近取证工具与科学计算);MCP SDK 等协议库可复用,harness 本体自研的边界画在哪。
+1. **语言栈与复用边界**: ~~TS(贴近 CLI / UI 同构生态,七工具调研 5/7 为 TS)vs Python(贴近取证工具与科学计算);MCP SDK 等协议库可复用,harness 本体自研的边界画在哪。~~ **已关闭(2026-10-16)**: TypeScript + **Node 24**(ESM-only,本机 24.14.1 已具备);复用边界 = 协议层复用(MCP 官方 TS SDK v2 / Zod v4),内核(主循环/会话/工具/上下文/MCP 生命周期)自研,模型适配层自研极简适配器(仅 complete/countTokens,语法借鉴 dsh llm-pi-ai,不整体引第三方),测试用 vitest。依据: 七工具调研 5/7 TS + Context7 查证 MCP SDK v2 官方支持 Node 20+(开发环境要求 Node 24.x + npm 11.x,与本机相符)。详见 [p0-kernel-design.md §0](p0-kernel-design.md)。
 2. **KB 渐进加载的载体**: Skills 机制 vs 独立检索工具 vs 两者并存——决定知识层接口形态。
 3. **内置工具集最小范围**: fs / shell / edit / glob / grep 哪些进内核,哪些挂插件。
 4. **会话存储与回放协议**: transcript 格式,UI 如何从日志重建工具结果状态(设备面板依赖)。
