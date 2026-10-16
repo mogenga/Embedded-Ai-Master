@@ -1,6 +1,6 @@
 # P0 内核维度 1+2 可实现设计(主循环 + 模型接入)
 
-> 日期: 2026-10-16 · 状态: 草稿(已过 builder check,4 项澄清已落定) · 上游: [p0-kernel-design.md](../../p0-kernel-design.md) §1 §2。
+> 日期: 2026-10-16 · 状态: 待复审(已完成 spec/plan 审查修订) · 上游: [p0-kernel-design.md](../../p0-kernel-design.md) §1 §2。
 > 本轮交付终点: **可运行代码**(设计 → 计划 → 实现 → 测试一步到底)。
 
 ## 1. 意图与为什么
@@ -51,7 +51,7 @@ src/
 ├── model/           # 维度2 模型接入
 │   ├── protocol.ts  #   ModelProtocol 接口(complete/countTokens)
 │   ├── openai.ts   #   OpenAI 兼容 /v1/chat/completions 实现
-│   ├── providers.ts#   providers.json 加载 + 声明式 schema 校验
+│   ├── providers.ts  #   providers.json 加载 + 声明式 schema 校验
 │   └── retry.ts     #   有界指数退避 + jitter
 ├── session/         # 最小会话子集(#6 扩展位)
 │   ├── types.ts     #   SessionEvent / EventType 共享通型
@@ -62,7 +62,7 @@ src/
 │   ├── pipeline.ts  #   五阶段管线骨架(权限恒 allow;后处理 = 大输出截断+事件发布+usage)
 │   └── echo.ts      #   demo 工具
 ├── context/         # 最小上下文投影(#3 扩展位)
-│   ├── build.ts     #   日志投影 → 模型消息(目前仅恒等投影)
+│   ├── build.ts     #   日志投影 → 模型消息(按工具批次重组)
 │   └── budget.ts    #   countTokens 软阈值判断(contextOverBudget)
 ├── config/
 │   └── harness-home.ts  # HARNESS_HOME 解析(%USERPROFILE%/.harness,可注入)
@@ -89,7 +89,7 @@ type LoopEvent =
 async function* query(ctx: LoopCtx, input: UserInput, cfg: LoopConfig): AsyncGenerator<LoopEvent>;
 ```
 
-- `LoopCtx` 携带 `session`(append)、`model`(complete/countTokens)、`tools`(ToolRegistry)、`budget`(contextOverBudget)、`signal`(AbortController)。
+- `LoopCtx` 携带 `session`(append)、`model`(complete/countTokens)、`tools`(ToolRegistry)、`budget`(contextOverBudget)、可选 `compactor`(压缩器)、`signal`(AbortController)。`budget` 与 `compactor` 均通过依赖注入，不由主循环自行创建。
 - 循环体严格按 v0.2 §1.2 伪代码: 落 user 事件 → 每轮熔断检查 → complete → 落 assistant 事件(**含 tool_calls 明细,见 B4**) → yield 事件流 → 收集 tool_use → executeBatch → 结果落日志 → 两个续跑点(A: overBudget 且 compactor 可用则 compaction; B: truncatedByMaxTokens 直接 continue)→ 无工具调用即 `finish("no_tool_calls")`。
 - 本轮 compactor 为**可选注入**,缺省空实现,续跑点 A 存在但"无压缩器可调"时继续(不挂死、不静默丢证据)。预算判断本身必实现(`countTokens` + `contextWindow*0.8`),这样 #3 接入是"挂一个 compactor"而非改主循环。
 - 批内并行: tools 的 `annotations.readOnly` 为 false 或缺失 → 串行;全部 readOnly → `Promise.all`。
@@ -114,7 +114,7 @@ export interface ModelToolSchema {
 
 export interface CompletionResult {
   content: string;
-  toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
+  toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> | { error: "invalid_json"; raw: string } }>;
   truncatedByMaxTokens: boolean;
   usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number };
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | unknown;
@@ -128,7 +128,7 @@ export interface ModelProtocol {
 }
 ```
 
-- OpenAI 实现(`openai.ts`): 组装 `/v1/chat/completions` body;`stream: false` 首版(流式留 onDelta 扩展位,实现可先整段返回);解析 `message.tool_calls` 的 `arguments` JSON 字符串 → 对象;`finish_reason === "length"` → `truncatedByMaxTokens=true`;usage 透传。
+- OpenAI 实现(`openai.ts`): 组装 `/v1/chat/completions` body;`stream: false` 首版(流式留 onDelta 扩展位,实现可先整段返回);解析 `message.tool_calls` 的 `arguments` JSON 字符串 → 对象,非法 JSON 不抛异常而返回 `{ error: "invalid_json", raw }`;`finish_reason === "length"` → `truncatedByMaxTokens=true`;usage 透传。
 - 错误面(openai.ts 内部): 429/5xx 抛**可重试信号**(进 retry.ts);4xx 非 429 与认证失败抛**不可重试终止错**(结构化,主循环上抛)。
 - `providers.json` schema(Zod v4,声明式):
   ```ts
@@ -144,7 +144,7 @@ export interface ModelProtocol {
   });
   ```
   默认读 `$HARNESS_HOME/providers.json`;API 允许注入文本(测试友好)。模型引用 `provider/model` 二元组。
-- `retry.ts`: 有界指数退避 + jitter,初值 1s,倍率 2,上限 5 次;超上限上抛结构化终止错。Live 测试时验证真实重试日志,单测用假定时器。
+- `retry.ts`: 有界指数退避 + jitter,初值 1s,倍率 2,最多重试 5 次;第 n 次重试等待 `baseDelayMs * 2^(n-1) * (0.5 + rand() * 0.5)`,超上限上抛结构化终止错。Live 测试时验证真实重试日志,单测注入 sleep/rand。
 
 ### 4.4 最小会话子集与事件模型(#6 扩展位)
 
@@ -164,7 +164,7 @@ interface ToolDef<I> {
   annotations?: { readOnly?: boolean; evidence?: boolean; destructive?: boolean };
   execute(input: I, ctx: ToolCtx, signal: AbortSignal): Promise<ToolResult>;
 }
-type ToolResult = { isError: boolean; code: string; message: string; detail?: unknown; text: string };
+type ToolResult = { isError: boolean; code: string; message: string; detail?: unknown; artifactPath?: string; text: string };
 ```
 
 - 管线五阶段: lookup → schema 校验(safeParse,失败=结构化错误回传,不 throw)→ 权限(P0 恒 allow,接口位)→ execute(超时=signal 中止+结构化超时错)→ 后处理(结果 >8k tokens 全文落盘 `artifacts/<eventId>.txt` 并留 `artifactPath`,事件 text 为截断体且**不超过 25k tokens**,发布 tool_result 事件 + usage 记账)。
