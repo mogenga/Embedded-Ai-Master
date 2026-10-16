@@ -19,9 +19,7 @@ const ProviderConfigSchema = z.object({
   }).optional(),
 });
 
-const ProvidersFileSchema = z.object({
-  providers: z.record(z.string(), ProviderConfigSchema),
-});
+const ProvidersFileSchema = z.record(z.string(), ProviderConfigSchema);
 
 export type ModelCfg = z.infer<typeof ModelConfigSchema>;
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
@@ -52,6 +50,17 @@ export class ConfigLoadError extends Error {
     this.name = "ConfigLoadError";
     this.code = code;
     this.detail = detail;
+  }
+}
+
+export class ModelReferenceError extends Error {
+  readonly code = "model_reference_invalid";
+  readonly detail: { ref: string; validReferences: string[] };
+
+  constructor(ref: string, validReferences: string[]) {
+    super(`模型引用无效: ${ref}。合法引用: ${validReferences.join(", ") || "<none>"}`);
+    this.name = "ModelReferenceError";
+    this.detail = { ref, validReferences };
   }
 }
 
@@ -111,7 +120,7 @@ export function resolveModelRef(
   const provider = providers[providerName];
   const model = provider?.models[modelName];
   if (!provider || !model || !providerName || !modelName) {
-    throw new Error(`模型引用无效: ${ref}。合法引用: ${references.join(", ") || "<none>"}`);
+    throw new ModelReferenceError(ref, references);
   }
   return { providerName, provider, modelName, model };
 }

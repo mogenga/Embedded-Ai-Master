@@ -4,28 +4,27 @@ import {
   ConfigLoadError,
   ConfigValidationError,
   loadProviders,
+  ModelReferenceError,
   parseProviders,
   resolveModelRef,
 } from "../src/config/providers.js";
 
 const GOOD = JSON.stringify({
-  providers: {
-    "local-gw": {
-      protocol: "openai-chat-completions",
-      baseUrl: "http://127.0.0.1:8080/v1",
-      models: { flash: { contextWindow: 128000, maxOutput: 8192 } },
-    },
+  "local-gw": {
+    protocol: "openai-chat-completions",
+    baseUrl: "http://127.0.0.1:8080/v1",
+    models: { flash: { contextWindow: 128000, maxOutput: 8192 } },
   },
 });
 
 describe("配置加载", () => {
   it("parseProviders 接受有效配置", () => {
-    expect(parseProviders(GOOD).providers["local-gw"]?.models.flash.contextWindow).toBe(128000);
+    expect(parseProviders(GOOD)["local-gw"]?.models.flash.contextWindow).toBe(128000);
   });
 
   it("parseProviders 拒绝缺少 contextWindow", () => {
     expect(() => parseProviders(JSON.stringify({
-      providers: { p: { protocol: "openai-chat-completions", baseUrl: "http://x/v1", models: { m: { maxOutput: 1 } } } },
+      p: { protocol: "openai-chat-completions", baseUrl: "http://x/v1", models: { m: { maxOutput: 1 } } },
     }))).toThrowError(expect.objectContaining({ code: "providers_invalid" }));
   });
 
@@ -36,7 +35,7 @@ describe("配置加载", () => {
   });
 
   it("resolveModelRef 返回 provider 和 model", () => {
-    expect(resolveModelRef(parseProviders(GOOD).providers, "local-gw/flash")).toMatchObject({
+    expect(resolveModelRef(parseProviders(GOOD), "local-gw/flash")).toMatchObject({
       providerName: "local-gw",
       modelName: "flash",
       model: { contextWindow: 128000, maxOutput: 8192 },
@@ -44,7 +43,17 @@ describe("配置加载", () => {
   });
 
   it("resolveModelRef 不存在时列出合法引用", () => {
-    expect(() => resolveModelRef(parseProviders(GOOD).providers, "nope/x")).toThrow(/local-gw\/flash/);
+    try {
+      resolveModelRef(parseProviders(GOOD), "nope/x");
+      expect.fail("应拒绝未知模型引用");
+    } catch (error) {
+      expect(error).toBeInstanceOf(ModelReferenceError);
+      expect(error).toMatchObject({
+        code: "model_reference_invalid",
+        message: expect.stringContaining("local-gw/flash"),
+        detail: { ref: "nope/x", validReferences: ["local-gw/flash"] },
+      });
+    }
   });
 
   it("HARNESS_HOME env 优先于缺省", () => {
