@@ -1,0 +1,23 @@
+{
+  "name": "embedded-ai-master-kernel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "coverage": "vitest run --coverage",
+    "build": "tsc -p tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.1.6",
+    "@types/node": "^24.10.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.6"
+  }
+}
