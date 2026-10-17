@@ -151,7 +151,8 @@ export interface ModelProtocol {
 - 目录布局与事件模型对齐 v0.2 §6(每会话 `<id>/header.json + session.v1.jsonl`,本轮建 `artifacts/` 但只落大输出全文,B3)。
 - `SessionEvent = { seq, ts, type, payload, parent? }`,`type ∈ user / **system**(B2,会话首条) / assistant(含 tool_calls 明细,B4) / tool_call / tool_result(含 artifactPath?,B3) / usage / checkpoint / status / interrupted`。**进模型上下文的每一 token 必先落日志**,本轮即实现。
 - 提供 `Session.append(ev)` / `Session.replay(): SessionEvent[]` / `Session.events()`;`class Session` 持文件句柄,append 走 fs.appendFile 同步语义(小文件、保序)。
-- 本轮不实现 fork / 分代迁移 / 损坏检测(接口留位,#6 全量实现)。
+- **不可变与快照语义**(核验回填): `append` 在**入队前**快照整个事件信封(`type`/`payload`/`parent`);落日志事件与 header 深冻结;`events()` 返回只读视图。理由: 日志是唯一事实源,信封被事后篡改等同于改写历史。
+- 本轮不实现 fork / 分代迁移 / 损坏检测(接口留位,#6 全量实现)。**损坏检测的本轮边界**: 只对 JSON 语法错 fail-closed;JSON 合法但结构不符(如某行为 `null`)本**不**校验,留 #6 与 header 对账一并实现。
 
 ### 4.5 最小工具管线(#4 扩展位)
 
