@@ -1,7 +1,16 @@
 import { defineConfig } from 'vitest/config'
 
+// 默认只收集版本控制内的 tests；显式传入 .tmp 页面测试路径时才纳入 ignored 用例。
+// Vitest 的位置参数只过滤已收集文件，无法绕过 include，因此这里按 CLI 参数放宽。
+const cliArgs = process.argv.slice(2).map((arg) => arg.replace(/\\/g, '/'))
+const includesTmpTests = cliArgs.some((arg) => arg.startsWith('.tmp/') || arg.includes('/.tmp/'))
+
 export default defineConfig({
   test: {
+    include: [
+      'tests/**/*.test.{ts,js}',
+      ...(includesTmpTests ? ['.tmp/**/*.test.js'] : []),
+    ],
     unstubEnvs: true,
     coverage: {
       include: ['src/**'],

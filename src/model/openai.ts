@@ -7,7 +7,7 @@ export interface OpenAIProviderCfg {
   apiKey?: string;
   model: string;
   fetchImpl?: typeof fetch;
-  retry?: Partial<RetryConfig>;
+  retry?: Partial<Omit<RetryConfig, "isRetryable">>;
 }
 
 class ModelFatalError extends Error {
@@ -87,7 +87,7 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
         isFirstAttempt = false;
         let response: Response;
         try {
-          response = await fetchImpl(`${cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+          response = await fetchImpl(`${cfg.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
             method: "POST",
             headers,
             body: JSON.stringify(requestBody),
@@ -119,8 +119,6 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
       }
       const choice = data.choices?.[0];
       const message = choice?.message;
-      const content = typeof message?.content === "string" ? message.content : "";
-      if (content) opts.onDelta?.(content);
       const rawToolCalls = message?.tool_calls;
       if (rawToolCalls !== undefined && !Array.isArray(rawToolCalls)) {
         throw new ModelResponseError("Model API returned malformed tool_calls");
@@ -145,6 +143,8 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
         }
         return { id: call.id, name: call.function.name, arguments: args };
       });
+      const content = typeof message?.content === "string" ? message.content : "";
+      if (content) opts.onDelta?.(content);
       const usage = data.usage;
       const hasCompleteUsage = Number.isFinite(usage?.prompt_tokens)
         && Number.isFinite(usage?.completion_tokens);

@@ -77,6 +77,14 @@
 
 见 D-006。
 
+### D-009 · 仅映射 cached token,其余 usage 明细字段未支持
+
+- **发现**: 2026-10-17,Task 6 最终 review。
+- **现象**: `Usage` 只映射 `promptTokens` / `completionTokens` / `cachedTokens`(`prompt_tokens_details.cached_tokens`);`completion_tokens_details.reasoning_tokens`、`audio_tokens`、`accepted_prediction_tokens` 等字段被忽略。
+- **影响**: 当前预算与计价只依赖 prompt/completion/cached,不影响 Task 6 契约;若未来需要按推理 token 计价或诊断,数据会缺失。
+- **触发升级条件**: ① providers 价格表需要新增明细字段;② 需要展示/审计推理 token;③ 出现网关返回 usage 明细但内核无法解释的计价偏差。
+- **修复建议**: 在 `Usage` 增加可选字段并从 `prompt_tokens_details` / `completion_tokens_details` 定向读取;保持缺字段省略语义。
+
 ---
 
 ## 变更记录
@@ -84,3 +92,4 @@
 | 日期 | 变更 |
 |---|---|
 | 2026-10-17 | 建档,录入 D-001 ~ D-008 |
+| 2026-10-17 | 录入 D-009(cached token 之外的 usage 明细延后) |
