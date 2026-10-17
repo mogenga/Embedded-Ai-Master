@@ -5,6 +5,16 @@ export interface ModelChatMessage {
   content: string;
   tool_call_id?: string;
   name?: string;
+  /**
+   * assistant 消息声明过的工具调用,形取 OpenAI wire 格式(`arguments` 为原始字符串)。
+   * Task 9 的 buildMessages 靠它把会话日志里的 toolCalls 投影回模型上下文;
+   * 本层只做透传,不改写。
+   */
+  tool_calls?: Array<{
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }>;
 }
 
 export interface ModelToolSchema {
