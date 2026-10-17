@@ -64,7 +64,6 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
     baseDelayMs: cfg.retry?.baseDelayMs ?? 1000,
     sleep: cfg.retry?.sleep,
     rand: cfg.retry?.rand,
-    now: cfg.retry?.now,
     isRetryable: (err) => err instanceof RetryableHttpError || err instanceof NetworkError,
   };
 
@@ -115,11 +114,18 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
         }
       }, retryConfig);
 
+      if (data === null || typeof data !== "object" || Array.isArray(data)) {
+        throw new ModelResponseError("Model API returned an invalid response shape");
+      }
       const choice = data.choices?.[0];
       const message = choice?.message;
       const content = typeof message?.content === "string" ? message.content : "";
       if (content) opts.onDelta?.(content);
-      const toolCalls = (message?.tool_calls ?? []).map((call: any) => {
+      const rawToolCalls = message?.tool_calls;
+      if (rawToolCalls !== undefined && !Array.isArray(rawToolCalls)) {
+        throw new ModelResponseError("Model API returned malformed tool_calls");
+      }
+      const toolCalls = (rawToolCalls ?? []).map((call: any) => {
         if (typeof call?.id !== "string" || typeof call?.function?.name !== "string") {
           throw new ModelResponseError("Model API returned a malformed tool call");
         }
@@ -129,7 +135,10 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
           args = { error: "invalid_json", raw: String(raw) };
         } else {
           try {
-            args = JSON.parse(raw);
+            const parsed: unknown = JSON.parse(raw);
+            args = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+              ? parsed as Record<string, unknown>
+              : { error: "invalid_json", raw };
           } catch {
             args = { error: "invalid_json", raw };
           }
@@ -148,7 +157,7 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
           usage: {
             promptTokens: usage.prompt_tokens,
             completionTokens: usage.completion_tokens,
-            ...(usage.prompt_tokens_details?.cached_tokens !== undefined
+            ...(Number.isFinite(usage.prompt_tokens_details?.cached_tokens)
               ? { cachedTokens: usage.prompt_tokens_details.cached_tokens }
               : {}),
           },

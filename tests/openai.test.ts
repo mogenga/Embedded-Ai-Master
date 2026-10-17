@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { createOpenAIProvider } from "../src/model/openai.js";
 import type { ModelChatMessage, ModelToolSchema } from "../src/model/protocol.js";
+import type { RetryConfig } from "../src/model/retry.js";
+
+type Assert<T extends true> = T;
+type HasNow<T> = "now" extends keyof T ? true : false;
+type RetryConfigHasNoNow = Assert<HasNow<RetryConfig> extends false ? true : false>;
 
 const OK_BODY = {
   choices: [{ message: { content: "hi" }, finish_reason: "stop" }],
@@ -69,6 +74,14 @@ describe("OpenAI 兼容模型适配器", () => {
     expect(result.toolCalls[0].arguments).toEqual({ error: "invalid_json", raw: "{bad" });
   });
 
+  it.each(["null", "[]"])("JSON arguments 为 %s 时返回 invalid_json", async (raw) => {
+    const result = await complete(successFetch({ choices: [{ message: { content: "", tool_calls: [
+      { id: "call-1", function: { name: "echo", arguments: raw } },
+    ] }, finish_reason: "tool_calls" }] }));
+
+    expect(result.toolCalls[0].arguments).toEqual({ error: "invalid_json", raw });
+  });
+
   it("非字符串 tool_calls arguments 返回结构化错误且保留字符串化值", async () => {
     const result = await complete(successFetch({ choices: [{ message: { content: "", tool_calls: [
       { id: "call-1", function: { name: "echo", arguments: { value: 1 } } },
@@ -96,6 +109,27 @@ describe("OpenAI 兼容模型适配器", () => {
     }));
 
     expect(result.usage).toEqual({ promptTokens: 10, completionTokens: 3, cachedTokens: 4 });
+  });
+
+  it.each(["bad", null, Infinity])("忽略非有限数值 cached_tokens: %s", async (cachedTokens) => {
+    const result = await complete(successFetch({
+      ...OK_BODY,
+      usage: { prompt_tokens: 10, completion_tokens: 3, prompt_tokens_details: { cached_tokens: cachedTokens } },
+    }));
+
+    expect(result.usage).toEqual({ promptTokens: 10, completionTokens: 3 });
+  });
+
+  it("不读取或转发过期 retry.now", async () => {
+    const now = vi.fn(() => 123);
+    const fetchImpl = successFetch();
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1", model: "m", fetchImpl,
+      retry: { now } as unknown as Partial<import("../src/model/retry.js").RetryConfig>,
+    });
+
+    await provider.complete(MESSAGES, [], { signal: new AbortController().signal, maxOutputTokens: 1 });
+    expect(now).not.toHaveBeenCalled();
   });
 
   it("usage 缺少必需字段时省略 usage", async () => {
@@ -127,6 +161,17 @@ describe("OpenAI 兼容模型适配器", () => {
 
     await expect(complete(fetchImpl)).rejects.toMatchObject({ code: "invalid_response" });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([{ label: "null", body: null }, { label: "[]", body: [] }])("顶层响应 $label 抛 invalid_response", async ({ body }) => {
+    await expect(complete(successFetch(body)))
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("tool_calls 为 object 时抛 invalid_response", async () => {
+    await expect(complete(successFetch({
+      choices: [{ message: { content: "", tool_calls: {} }, finish_reason: "tool_calls" }],
+    }))).rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("仅 apiKey 非空时发送 Bearer Authorization", async () => {

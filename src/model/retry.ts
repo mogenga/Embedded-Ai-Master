@@ -2,7 +2,6 @@ export interface RetryConfig {
   maxRetries: number;
   baseDelayMs: number;
   isRetryable: (err: unknown) => boolean;
-  now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   rand?: () => number;
 }
