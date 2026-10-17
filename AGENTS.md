@@ -28,6 +28,19 @@
 ## 过程留痕（每阶段必做，禁止收尾一次性补记）
 在 `dev-notes/{开发阶段}.md`（如 `dev-notes/P0-主循环.md`）**增量**追记。每完成一个阶段——定稿、计划评审通过、每个任务完成、code review 结论、finish——就补一段，每段记四样：用户关键原话、关键产出（spec / plan 路径、评审结论）、被拒绝或纠偏的内容、翻车与返工。
 
+## 子代理派发（SDD / subagent-driven-development）
+
+用 `superpowers:subagent-driven-development` 按计划逐任务派发子代理时，**brief 必须先用技能自带脚本生成，再派发**：
+
+```bash
+bash "<skills-dir>/subagent-driven-development/scripts/task-brief" <plan.md> <N>
+```
+
+- 脚本按 `### Task N` 标题抽取该节全文，写入 `.superpowers/sdd/<plan-basename>/task-N-brief.md` 并打印路径；该目录已由 `.superpowers/sdd/.gitignore`（内容 `*`）整体忽略，不进版本库。
+- 派发提示里只给 brief 路径（"read this first — it is your requirements"）+ report 路径 + 前序任务接口，**禁止把整份 plan 塞给子代理**，也禁止手写/口述 brief 代替脚本产物。
+- **brief 不存在就不得派发**。若脚本以 exit 3 报 `task N not found`，说明 plan 的标题格式不匹配——修正 plan 标题，不要绕过。
+- 已发生事故（2026-10-16/17）：Task 2、Task 3 派发时 brief 从未生成，子代理如实报告"brief 不存在"后自行降级去读整份 plan；`task-1/2-brief.md` 的出生时间晚于对应 report，属事后补写，实施需求因此未被 brief 约束。核验任务时把 brief 的出生时间与 report 对照，可发现此类偏差。
+
 ## 提交信息规范
 - 格式 `type(scope): description`。
 - `type` 仅限：`feat` / `fix` / `docs` / `refactor` / `perf` / `test` / `chore`。
