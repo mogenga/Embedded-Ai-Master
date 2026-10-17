@@ -4,6 +4,14 @@ import { appendFile, mkdir, open, rm } from "node:fs/promises";
 import path from "node:path";
 import type { SessionEvent } from "./types.js";
 
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    for (const child of Object.values(value)) deepFreeze(child);
+  }
+  return value;
+}
+
 export interface SessionHandle {
   id: string;
   dir: string;
@@ -56,14 +64,15 @@ export async function createSession(
     header,
     append(ev) {
       if (!accepting) return Promise.reject(new Error("Session is closed"));
+      const payload = structuredClone(ev.payload);
       const operation = pending.then(async () => {
         const event: SessionEvent = {
           ...ev,
+          payload,
           seq: eventList.length,
           ts: new Date().toISOString(),
         };
-        Object.freeze(event.payload);
-        Object.freeze(event);
+        deepFreeze(event);
         await appendFile(logPath, `${JSON.stringify(event)}\n`, "utf8");
         eventList.push(event);
         return event;
@@ -86,7 +95,7 @@ export async function createSession(
   if (opts.systemPrompt !== undefined) {
     await handle.append({ type: "system", payload: { content: opts.systemPrompt } });
   }
-  Object.freeze(header);
+  deepFreeze(header);
   return handle;
 }
 

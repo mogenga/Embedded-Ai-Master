@@ -95,4 +95,57 @@ describe("会话持久化", () => {
     expect(readSessionFile(path.join(dir, "session.v1.jsonl"))).toEqual(appended);
     await expect(session.append({ type: "user", payload: { content: "late" } })).rejects.toThrow(/closed|关闭/i);
   });
+
+  it("append 深拷贝并冻结事件数据而不冻结调用方 payload", async () => {
+    const session = await createSession(makeTempDir());
+    const payload = { content: "before", nested: { values: [1] } };
+    const event = await session.append({ type: "user", payload });
+
+    expect(Object.isFrozen(payload)).toBe(false);
+    expect(Object.isFrozen(payload.nested)).toBe(false);
+    expect(Object.isFrozen(payload.nested.values)).toBe(false);
+    payload.nested.values.push(2);
+    payload.content = "after";
+
+    expect(event.payload).toEqual({ content: "before", nested: { values: [1] } });
+    expect(Object.isFrozen(event)).toBe(true);
+    expect(Object.isFrozen(event.payload)).toBe(true);
+    expect(Object.isFrozen(event.payload.nested)).toBe(true);
+    expect(Object.isFrozen((event.payload.nested as { values: number[] }).values)).toBe(true);
+    expect(() => {
+      event.payload.content = "changed";
+    }).toThrow();
+    expect(() => {
+      (event.payload.nested as { values: number[] }).values.push(3);
+    }).toThrow();
+    expect(event.payload.content).toBe("before");
+    expect((event.payload.nested as { values: number[] }).values).toEqual([1]);
+  });
+
+  it("append 在入队前快照 payload", async () => {
+    const session = await createSession(makeTempDir());
+    const payload = { content: "before", nested: { values: [1] } };
+    const appended = session.append({ type: "user", payload });
+    payload.content = "after";
+    payload.nested.values.push(2);
+
+    const event = await appended;
+
+    expect(event.payload).toEqual({ content: "before", nested: { values: [1] } });
+    expect(readSessionFile(path.join(session.dir, "session.v1.jsonl"))).toEqual([event]);
+  });
+
+  it("header 深层冻结且不能修改会话元数据", async () => {
+    const session = await createSession(makeTempDir());
+
+    expect(Object.isFrozen(session.header)).toBe(true);
+    expect(() => {
+      session.header.status = "closed";
+    }).toThrow();
+    expect(session.header.status).toBe("open");
+    expect(() => {
+      (session.header as Record<string, unknown>).createdAt = "changed";
+    }).toThrow();
+    expect(typeof session.header.createdAt).toBe("string");
+  });
 });
