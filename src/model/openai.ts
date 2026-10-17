@@ -57,8 +57,23 @@ function isCancellationError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
 
+function resolveChatCompletionsUrl(baseUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new TypeError(`baseUrl is not a valid URL: ${baseUrl}`);
+  }
+  if (url.search || url.hash) {
+    throw new TypeError("baseUrl must not contain a query or hash");
+  }
+  url.pathname = `${url.pathname.replace(/\/+$/, "")}/chat/completions`;
+  return url.toString();
+}
+
 export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
   const fetchImpl = cfg.fetchImpl ?? fetch;
+  const chatCompletionsUrl = resolveChatCompletionsUrl(cfg.baseUrl);
   const retryConfig: RetryConfig = {
     maxRetries: cfg.retry?.maxRetries ?? 5,
     baseDelayMs: cfg.retry?.baseDelayMs ?? 1000,
@@ -87,7 +102,7 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
         isFirstAttempt = false;
         let response: Response;
         try {
-          response = await fetchImpl(`${cfg.baseUrl.replace(/\/+$/, "")}/chat/completions`, {
+          response = await fetchImpl(chatCompletionsUrl, {
             method: "POST",
             headers,
             body: JSON.stringify(requestBody),
@@ -117,10 +132,13 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
       if (data === null || typeof data !== "object" || Array.isArray(data)) {
         throw new ModelResponseError("Model API returned an invalid response shape");
       }
-      const choice = data.choices?.[0];
+      if (!Array.isArray(data.choices) || data.choices.length === 0) {
+        throw new ModelResponseError("Model API returned no choices");
+      }
+      const choice = data.choices[0];
       const message = choice?.message;
       const rawToolCalls = message?.tool_calls;
-      if (rawToolCalls !== undefined && !Array.isArray(rawToolCalls)) {
+      if (rawToolCalls !== undefined && rawToolCalls !== null && !Array.isArray(rawToolCalls)) {
         throw new ModelResponseError("Model API returned malformed tool_calls");
       }
       const toolCalls = (rawToolCalls ?? []).map((call: any) => {

@@ -90,6 +90,19 @@ describe("OpenAI 兼容模型适配器", () => {
     expect(capturedUrl).toBe("http://gw/v1/chat/completions");
   });
 
+  it.each([
+    ["query", "http://gw/v1?api-version=1"],
+    ["hash", "http://gw/v1#frag"],
+  ])("baseUrl 携带 %s 时拒绝配置", (_label, baseUrl) => {
+    expect(() => createOpenAIProvider({ baseUrl, model: "m", fetchImpl: successFetch() }))
+      .toThrowError(/baseUrl must not contain a query or hash/);
+  });
+
+  it("baseUrl 非法时拒绝配置", () => {
+    expect(() => createOpenAIProvider({ baseUrl: "not-a-url", model: "m", fetchImpl: successFetch() }))
+      .toThrowError(/baseUrl is not a valid URL/);
+  });
+
   it("将合法 tool_calls arguments JSON 解析为对象", async () => {
     const result = await complete(successFetch({ choices: [{ message: { content: "", tool_calls: [
       { id: "call-1", function: { name: "echo", arguments: '{"value":1}' } },
@@ -132,6 +145,16 @@ describe("OpenAI 兼容模型适配器", () => {
     const result = await complete(successFetch(OK_BODY));
 
     expect(result.toolCalls).toEqual([]);
+  });
+
+  it.each([
+    ["缺失", {}],
+    ["空数组", { choices: [] }],
+    ["非数组", { choices: "bad" }],
+    ["null", { choices: null }],
+  ])("choices %s 时抛 invalid_response", async (_label, body) => {
+    await expect(complete(successFetch(body)))
+      .rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("finish_reason=length 标记输出截断", async () => {
@@ -206,16 +229,21 @@ describe("OpenAI 兼容模型适配器", () => {
       .rejects.toMatchObject({ code: "invalid_response" });
   });
 
-  it("tool_calls 为 object 时抛 invalid_response", async () => {
+  it.each([
+    ["object", {}],
+    ["string", "bad"],
+  ])("tool_calls 为 %s 时抛 invalid_response", async (_label, toolCalls) => {
     await expect(complete(successFetch({
-      choices: [{ message: { content: "", tool_calls: {} }, finish_reason: "tool_calls" }],
+      choices: [{ message: { content: "", tool_calls: toolCalls }, finish_reason: "tool_calls" }],
     }))).rejects.toMatchObject({ code: "invalid_response" });
   });
 
-  it("tool_calls 为 null 时抛 invalid_response", async () => {
-    await expect(complete(successFetch({
+  it("tool_calls 为 null 时等同缺失返回空数组", async () => {
+    const result = await complete(successFetch({
       choices: [{ message: { content: "", tool_calls: null }, finish_reason: "tool_calls" }],
-    }))).rejects.toMatchObject({ code: "invalid_response" });
+    }));
+
+    expect(result.toolCalls).toEqual([]);
   });
 
   it("retry 配置不接受调用方覆盖 isRetryable", () => {
@@ -387,10 +415,35 @@ describe("OpenAI 兼容模型适配器", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("401 抛 ModelFatalError 且不重试", async () => {
-    const fetchImpl = mockFetch(() => ({ status: 401, body: { error: "unauthorized" } }));
+  it("未注入 sleep/rand 时默认退避路径可完成重试", async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 500, json: async () => ({}), text: async () => "server error" })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => OK_BODY, text: async () => JSON.stringify(OK_BODY) }) as unknown as typeof fetch;
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      retry: { maxRetries: 1, baseDelayMs: 1 },
+    });
 
-    await expect(complete(fetchImpl)).rejects.toMatchObject({ code: "api_4xx", status: 401 });
+    const result = await provider.complete(MESSAGES, [], { signal: new AbortController().signal, maxOutputTokens: 1 });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(result.content).toBe("hi");
+  });
+
+  it("401 抛 ModelFatalError 且不重试，bodyPreview 截断到 512", async () => {
+    const body = "x".repeat(600);
+    const expectedPreview = JSON.stringify(body).slice(0, 512);
+    const fetchImpl = mockFetch(() => ({ status: 401, body }));
+
+    try {
+      await complete(fetchImpl);
+      expect.fail("应拒绝 401 响应");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "api_4xx", status: 401, bodyPreview: expectedPreview });
+      expect((error as { bodyPreview: string }).bodyPreview).toHaveLength(512);
+    }
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
