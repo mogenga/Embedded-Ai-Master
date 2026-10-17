@@ -103,6 +103,7 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
 ### 2.2 方案实现
 
 - **协议接口**:`ModelProtocol` 接口只有两个方法——`complete(messages, tools, signal)`(含流式增量回调)与 `countTokens(messages)`(启发式)。P0 只实现 `openai-chat-completions` 一种;接口留 enum 扩展位(`anthropic-messages` / `openai-responses` 按需后补)。
+- **认证(P0 仅 Bearer)**:`apiKeyEnv` 声明的环境变量存在且非空 → 适配器以 `Authorization: Bearer <key>` 发送;未设置或为空 → **不发该头**(本地网关空跑)。消费点在装配层(读 env → 传 `apiKey`),适配器只认 `apiKey`,不自己读环境。
 - **声明式注册**:provider 即一段配置,不做代码注册——
   ```jsonc
   // providers.json(用户级)
@@ -112,12 +113,13 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
   ```
   模型引用统一为 `provider/model` 二元组;`contextWindow` / `maxOutput` 显式声明(上下文管理 #3 的预算依据),不探测。
 - **重试**:有界指数退避 + jitter(初值 1s,倍率 2,上限 5 次,超上限上抛)。母本 dsh llm-retry 的参数化策略,保留——成本低、夜批必需。
+- **响应读取契约(fail-soft,不 fail-closed)**:响应体**不做整体 Zod 校验**——模型输出不可控,把"多一个字段/少一个字段"判为非法,等于让 harness 在网关稍改响应时变砖。只做**定向读取**并区分三种情形:① `message.content` 缺失或非字符串 → `content = ""`;② `message.tool_calls` 缺失 → `toolCalls = []`;③ 单个 `tool_calls[i].arguments` 非法 JSON → 该项读作 `{ error: "invalid_json", raw }` **回传模型**(结构性回传,不 throw——模型据此自我修正)。其余未知字段一律忽略。工具**入参**校验是另一回事:那里走 Zod `safeParse` 严格校验(§4.2),因为输入契约由我们自己定义。
 - **用量统计**:累计每次响应 `usage`(prompt/completion/cached tokens),写入会话日志的 usage 事件;`maxCostUsd` 熔断与 UI 成本显示都读这里。单价表随 provider 配置声明,缺省不计价只计 token。
 - **不做**(明确出边界):自动降级链(诊断可复现性 NFR-3 要求夜批固定模型,降级反而有害)、OAuth/账号门户、模型路由热切换、models.dev 集成。换模型 = 改配置重启会话。
 
 ### 2.3 方案简述
 
-模型接入刻意做薄:一个只有 `complete/countTokens` 两个方法的协议接口,P0 只实现 OpenAI chat completions 兼容一种(本地网关 Phase 0 已验证),provider 全部声明式配置(base_url + 环境变量取 key + 显式声明模型上下文窗口),重试用有界指数退避,用量按响应 usage 累计入会话日志。dsh 与 opencode 都证明了"多 provider 是配置问题而非架构问题",因此这里只为未来留接口,不为多协议付当下的复杂度;自动降级链明确不做——夜批可复现性(固定模型)与诊断证据链的严肃性都要求模型面越窄越好。
+模型接入刻意做薄:一个只有 `complete/countTokens` 两个方法的协议接口,P0 只实现 OpenAI chat completions 兼容一种(本地网关 Phase 0 已验证),provider 全部声明式配置(base_url + 环境变量取 key + 显式声明模型上下文窗口),重试用有界指数退避,响应只做定向读取(缺字段容错,坏 `tool_calls.arguments` 结构化回传),用量按响应 usage 累计入会话日志。dsh 与 opencode 都证明了"多 provider 是配置问题而非架构问题",因此这里只为未来留接口,不为多协议付当下的复杂度;自动降级链明确不做——夜批可复现性(固定模型)与诊断证据链的严肃性都要求模型面越窄越好。
 
 ### 2.4 简化对照
 

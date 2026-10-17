@@ -128,19 +128,19 @@ export interface ModelProtocol {
 }
 ```
 
-- OpenAI 实现(`openai.ts`): 组装 `/v1/chat/completions` body;`stream: false` 首版(流式留 onDelta 扩展位,实现可先整段返回);解析 `message.tool_calls` 的 `arguments` JSON 字符串 → 对象,非法 JSON 不抛异常而返回 `{ error: "invalid_json", raw }`;`finish_reason === "length"` → `truncatedByMaxTokens=true`;usage 透传。
+- OpenAI 实现(`openai.ts`): 组装 `/v1/chat/completions` body;`stream: false` 首版(流式留 onDelta 扩展位,实现可先整段返回);**响应只做定向读取,不做整体 schema 校验**(以 v0.2 §2.2 响应读取契约为准: `content` 缺失/非字符串 ⇒ `""`;`tool_calls` 缺失 ⇒ `[]`;非法 JSON 的 `arguments` 不抛异常而返回 `{ error: "invalid_json", raw }`;未知字段忽略);`finish_reason === "length"` → `truncatedByMaxTokens=true`;usage 透传;**apiKey 存在且非空时发 `Authorization: Bearer <key>` 头,缺省不发**(与 v0.2 §2.2 认证约定一致,`apiKeyEnv` 的 env 读取与空值判定由装配层 Task 10 负责)。
 - 错误面(openai.ts 内部): 429/5xx 抛**可重试信号**(进 retry.ts);4xx 非 429 与认证失败抛**不可重试终止错**(结构化,主循环上抛)。
 - `providers.json` schema(Zod v4,声明式):
   ```ts
   const ProviderConfig = z.object({
     protocol: z.literal("openai-chat-completions"),
     baseUrl: z.string().url(),              // http(s)://host:port/v1
-    apiKeyEnv: z.string().optional(),       // 读 process.env,缺 key 时 P0 本地网关可空跑
+    apiKeyEnv: z.string().optional(),       // env 名;装配层读之: 非空 → 发 Authorization: Bearer,P0 本地网关可缺省空跑
     models: z.record(z.object({
       contextWindow: z.number().int().positive(),
       maxOutput: z.number().int().positive(),
     })),
-    pricePerMillion?: z.object({ input: z.number(), output: z.number(), cachedInput: z.number() }).optional(), // 缺省不计价只记token
+    pricePerMillion?: z.object({ input: z.number(), output: z.number(), cachedInput: z.number().optional() }).optional(), // 缺省不计价只记token;cachedInput 可缺省(计价口径见计划 Task 9)
   });
   ```
   默认读 `$HARNESS_HOME/providers.json`;API 允许注入文本(测试友好)。模型引用 `provider/model` 二元组。
