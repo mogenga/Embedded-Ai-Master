@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createSession, readSessionFile } from "../src/session/session.js";
+import type { SessionEvent } from "../src/session/types.js";
 
 const tempDirs: string[] = [];
 
@@ -133,6 +134,39 @@ describe("会话持久化", () => {
 
     expect(event.payload).toEqual({ content: "before", nested: { values: [1] } });
     expect(readSessionFile(path.join(session.dir, "session.v1.jsonl"))).toEqual([event]);
+  });
+
+  it("append 入队后修改事件信封不影响落盘", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    const draft = { type: "user" as "user" | "assistant", payload: { content: "before" } };
+    const appended = session.append(draft);
+    draft.type = "assistant";
+    draft.payload.content = "after";
+
+    const event = await appended;
+
+    expect(event.type).toBe("user");
+    expect(event.payload).toEqual({ content: "before" });
+    expect(readSessionFile(path.join(dir, "session.v1.jsonl"))).toEqual([event]);
+  });
+
+  it("events() 返回只读视图,外部 push 会抛错", async () => {
+    const session = await createSession(makeTempDir());
+    await session.append({ type: "user", payload: { content: "a" } });
+
+    expect(() => (session.events() as SessionEvent[]).push({} as SessionEvent)).toThrow();
+    expect(session.events()).toHaveLength(1);
+  });
+
+  it("初始化中途失败时回滚已建文件", async () => {
+    const dir = makeTempDir();
+    mkdirSync(path.join(dir, "session.v1.jsonl"));
+
+    await expect(createSession(dir)).rejects.toThrow(/initialization failed/i);
+
+    expect(existsSync(path.join(dir, "header.json"))).toBe(false);
+    expect(existsSync(path.join(dir, "session.v1.jsonl"))).toBe(true);
   });
 
   it("header 深层冻结且不能修改会话元数据", async () => {

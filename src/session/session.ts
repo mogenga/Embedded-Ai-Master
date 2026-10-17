@@ -64,11 +64,10 @@ export async function createSession(
     header,
     append(ev) {
       if (!accepting) return Promise.reject(new Error("Session is closed"));
-      const payload = structuredClone(ev.payload);
+      const snapshot = structuredClone(ev);
       const operation = pending.then(async () => {
         const event: SessionEvent = {
-          ...ev,
-          payload,
+          ...snapshot,
           seq: eventList.length,
           ts: new Date().toISOString(),
         };
@@ -81,7 +80,7 @@ export async function createSession(
       return operation;
     },
     events() {
-      return eventList.slice();
+      return Object.freeze(eventList.slice());
     },
     close() {
       if (!closePromise) {
