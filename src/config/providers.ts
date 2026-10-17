@@ -15,7 +15,7 @@ const ProviderConfigSchema = z.object({
   pricePerMillion: z.object({
     input: z.number(),
     output: z.number(),
-    cachedInput: z.number(),
+    cachedInput: z.number().optional(),
   }).optional(),
 });
 

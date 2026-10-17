@@ -22,6 +22,18 @@ describe("配置加载", () => {
     expect(parseProviders(GOOD)["local-gw"]?.models.flash.contextWindow).toBe(128000);
   });
 
+  it("parseProviders 接受缺省 cachedInput 的价格表", () => {
+    const text = JSON.stringify({
+      "local-gw": {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        models: { flash: { contextWindow: 128000, maxOutput: 8192 } },
+        pricePerMillion: { input: 1, output: 2 },
+      },
+    });
+    expect(parseProviders(text)["local-gw"]?.pricePerMillion).toEqual({ input: 1, output: 2 });
+  });
+
   it("parseProviders 拒绝缺少 contextWindow", () => {
     expect(() => parseProviders(JSON.stringify({
       p: { protocol: "openai-chat-completions", baseUrl: "http://x/v1", models: { m: { maxOutput: 1 } } },
