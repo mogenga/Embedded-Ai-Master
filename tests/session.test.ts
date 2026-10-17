@@ -53,4 +53,46 @@ describe("会话持久化", () => {
 
     expect(() => readSessionFile(file)).toThrow();
   });
+
+  it("目标会话已存在时拒绝创建且不覆盖原始数据", async () => {
+    const dir = makeTempDir();
+    const existing = await createSession(dir);
+    await existing.append({ type: "user", payload: { content: "保留" } });
+    const headerBefore = readFileSync(path.join(dir, "header.json"), "utf8");
+    const logBefore = readFileSync(path.join(dir, "session.v1.jsonl"), "utf8");
+
+    await expect(createSession(dir)).rejects.toThrow(/already exists|已存在/i);
+
+    expect(readFileSync(path.join(dir, "header.json"), "utf8")).toBe(headerBefore);
+    expect(readFileSync(path.join(dir, "session.v1.jsonl"), "utf8")).toBe(logBefore);
+  });
+
+  it("Promise.all 追加顺序与 JSONL 持久化顺序一致", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    const writes = Array.from({ length: 20 }, (_, index) =>
+      session.append({ type: "user", payload: { content: String(index) } }),
+    );
+
+    const appended = await Promise.all(writes);
+    const persisted = readSessionFile(path.join(dir, "session.v1.jsonl"));
+
+    expect(appended.map((event) => event.seq)).toEqual(Array.from({ length: 20 }, (_, i) => i));
+    expect(persisted).toEqual(appended);
+  });
+
+  it("close 等待已排队 append 完成并拒绝后续 append", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    const writes = Array.from({ length: 20 }, (_, index) =>
+      session.append({ type: "user", payload: { content: String(index) } }),
+    );
+    const closing = session.close();
+    const appended = await Promise.all(writes);
+    await closing;
+
+    expect(session.events()).toEqual(appended);
+    expect(readSessionFile(path.join(dir, "session.v1.jsonl"))).toEqual(appended);
+    await expect(session.append({ type: "user", payload: { content: "late" } })).rejects.toThrow(/closed|关闭/i);
+  });
 });
