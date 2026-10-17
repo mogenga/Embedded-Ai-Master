@@ -105,6 +105,11 @@ export interface ModelChatMessage {
   content: string;            // 本轮仅文本(P0 之 OpenAI 兼容)
   tool_call_id?: string;      // role=tool 时
   name?: string;              // role=tool 时
+  tool_calls?: Array<{        // role=assistant 且该轮声明了工具调用时(Task 9 投影依赖)
+    id: string;
+    type: "function";
+    function: { name: string; arguments: string };
+  }>;
 }
 
 export interface ModelToolSchema {
@@ -128,7 +133,7 @@ export interface ModelProtocol {
 }
 ```
 
-- OpenAI 实现(`openai.ts`): 组装 `/v1/chat/completions` body;`stream: false` 首版(流式留 onDelta 扩展位,实现可先整段返回);**响应只做定向读取,不做整体 schema 校验**(以 v0.2 §2.2 响应读取契约为准: `content` 缺失/非字符串 ⇒ `""`;`tool_calls` 缺失 ⇒ `[]`;非法 JSON 的 `arguments` 不抛异常而返回 `{ error: "invalid_json", raw }`;未知字段忽略);`finish_reason === "length"` → `truncatedByMaxTokens=true`;usage 透传;**apiKey 存在且非空时发 `Authorization: Bearer <key>` 头,缺省不发**(与 v0.2 §2.2 认证约定一致,`apiKeyEnv` 的 env 读取与空值判定由装配层 Task 10 负责)。
+- OpenAI 实现(`openai.ts`): 组装 `/v1/chat/completions` body;`stream: false` 首版(流式留 onDelta 扩展位,实现可先整段返回);**响应只做定向读取,不做整体 schema 校验**(以 v0.2 §2.2 响应读取契约为准: `content` 缺失/非字符串 ⇒ `""`;`tool_calls` 缺失 ⇒ `[]`;非法 JSON 的 `arguments` 不抛异常而返回 `{ error: "invalid_json", raw }`;未知字段忽略);**但承载语义的必需结构缺失属另一类**——顶层非对象、`choices` 缺失/非数组/空数组、`choices[0]` 非对象、`tool_calls` 非数组非 null、tool call 缺 `id`/`function.name` → 抛 `ModelResponseError(code: "invalid_response")` 且不重试(边界理由见 v0.2 §2.2「fail-soft 的边界」);`finish_reason === "length"` → `truncatedByMaxTokens=true`;usage 透传;**apiKey 存在且非空时发 `Authorization: Bearer <key>` 头,缺省不发**(与 v0.2 §2.2 认证约定一致,`apiKeyEnv` 的 env 读取与空值判定由装配层 Task 10 负责)。
 - 错误面(openai.ts 内部): 429/5xx 抛**可重试信号**(进 retry.ts);4xx 非 429 与认证失败抛**不可重试终止错**(结构化,主循环上抛)。
 - `providers.json` schema(Zod v4,声明式):
   ```ts

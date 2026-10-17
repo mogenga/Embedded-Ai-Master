@@ -114,6 +114,7 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
   模型引用统一为 `provider/model` 二元组;`contextWindow` / `maxOutput` 显式声明(上下文管理 #3 的预算依据),不探测。
 - **重试**:有界指数退避 + jitter(初值 1s,倍率 2,上限 5 次,超上限上抛)。母本 dsh llm-retry 的参数化策略,保留——成本低、夜批必需。
 - **响应读取契约(fail-soft,不 fail-closed)**:响应体**不做整体 Zod 校验**——模型输出不可控,把"多一个字段/少一个字段"判为非法,等于让 harness 在网关稍改响应时变砖。只做**定向读取**并区分三种情形:① `message.content` 缺失或非字符串 → `content = ""`;② `message.tool_calls` 缺失 → `toolCalls = []`;③ 单个 `tool_calls[i].arguments` 非法 JSON → 该项读作 `{ error: "invalid_json", raw }` **回传模型**(结构性回传,不 throw——模型据此自我修正)。其余未知字段一律忽略。工具**入参**校验是另一回事:那里走 Zod `safeParse` 严格校验(§4.2),因为输入契约由我们自己定义。
+- **fail-soft 的边界(2026-10-17 Task 6 核验回填)**: fail-soft 只覆盖**可选字段缺失或类型漂移**,不覆盖**承载语义的必需结构**。以下情形属"响应本身不成形",抛 `ModelResponseError(code: "invalid_response")` 终止,不重试(重试同一个坏网关没有意义,且会掩盖网关故障):① 顶层不是对象,或 `choices` 缺失/非数组/空数组;② **`choices[0]` 不是对象**;③ `message.tool_calls` 存在但既非数组也非 `null`;④ 单个 tool call 缺 `id` 或 `function.name`(字符串)。判据: 这些结构缺失时,内核无法区分"模型没说话"与"网关返回了畸形数据",静默降级会把网关故障伪装成正常空响应(违背 R3 诚实原则)。
 - **用量统计**:累计每次响应 `usage`(prompt/completion/cached tokens),写入会话日志的 usage 事件;`maxCostUsd` 熔断与 UI 成本显示都读这里。单价表随 provider 配置声明,缺省不计价只计 token。
 - **不做**(明确出边界):自动降级链(诊断可复现性 NFR-3 要求夜批固定模型,降级反而有害)、OAuth/账号门户、模型路由热切换、models.dev 集成。换模型 = 改配置重启会话。
 
