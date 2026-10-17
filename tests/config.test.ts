@@ -72,8 +72,17 @@ describe("配置加载", () => {
     expect(resolveHarnessHome({ HARNESS_HOME: "C:/custom/home" })).toBe("C:/custom/home");
   });
 
+  it("HARNESS_HOME 保留非空路径首尾空格", () => {
+    expect(resolveHarnessHome({ HARNESS_HOME: "  C:/custom home  " })).toBe("  C:/custom home  ");
+  });
+
   it("HARNESS_HOME 缺省时使用用户目录下的 .harness", () => {
     expect(resolveHarnessHome({})).toMatch(/\.harness$/);
+  });
+
+  it("HARNESS_HOME 为空或仅空白时使用用户目录下的 .harness", () => {
+    expect(resolveHarnessHome({ HARNESS_HOME: "" })).toMatch(/\.harness$/);
+    expect(resolveHarnessHome({ HARNESS_HOME: "   " })).toMatch(/\.harness$/);
   });
 
   it("loadProviders 文件缺失抛 providers_not_found", () => {
