@@ -8,6 +8,7 @@
 - `docs/framework-architecture-inventory.md` — 框架能力清单 24 项 + 10 个决策点。
 - `docs/harness-comparison.md` — Claude Code / dsh / Codex / Gemini CLI / opencode / goose / pi 横向调研。
 - `docs/rag-vs-agentic-search-todo.md` — 待办对照实验（决策点 #2 的判据）。
+- `docs/deferred-issues.md` — 已知但暂不修的缺陷与覆盖缺口，含升级触发条件；改动前先查，避免重复发现。
 
 架构为两层：**平台层**（领域无关 harness，模型接入/上下文/工具/会话/权限）与**领域层**（嵌入式调试能力，经 MCP / 插件挂载）。内核代码不得含领域逻辑——嵌入式取证一律走 MCP，不进内核。
 
