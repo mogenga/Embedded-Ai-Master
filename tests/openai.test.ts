@@ -178,6 +178,31 @@ describe("OpenAI 兼容模型适配器", () => {
     expect(result.content).toBe("hi");
   });
 
+  it("退避期间取消时不再发送下一次请求", async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn(async () => ({
+      ok: false,
+      status: 429,
+      json: async () => ({}),
+      text: async () => "{}",
+    })) as unknown as typeof fetch;
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      retry: {
+        maxRetries: 3,
+        baseDelayMs: 1,
+        sleep: async () => controller.abort(),
+        rand: () => 0.5,
+      },
+    });
+
+    await expect(provider.complete(MESSAGES, [], { signal: controller.signal, maxOutputTokens: 1 }))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
   it("AbortError 直接终止且不重试", async () => {
     const abortError = new DOMException("Aborted", "AbortError");
     const fetchImpl = vi.fn().mockRejectedValue(abortError) as unknown as typeof fetch;

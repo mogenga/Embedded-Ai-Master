@@ -80,7 +80,12 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
       };
       if (tools !== undefined) requestBody.tools = tools;
 
+      let isFirstAttempt = true;
       const data = await retry(async () => {
+        if (!isFirstAttempt && opts.signal.aborted) {
+          throw new DOMException("The operation was aborted", "AbortError");
+        }
+        isFirstAttempt = false;
         let response: Response;
         try {
           response = await fetchImpl(`${cfg.baseUrl.replace(/\/$/, "")}/chat/completions`, {
