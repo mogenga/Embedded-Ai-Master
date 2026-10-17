@@ -69,6 +69,14 @@ describe("OpenAI 兼容模型适配器", () => {
     expect(result.toolCalls[0].arguments).toEqual({ error: "invalid_json", raw: "{bad" });
   });
 
+  it("非字符串 tool_calls arguments 返回结构化错误且保留字符串化值", async () => {
+    const result = await complete(successFetch({ choices: [{ message: { content: "", tool_calls: [
+      { id: "call-1", function: { name: "echo", arguments: { value: 1 } } },
+    ] }, finish_reason: "tool_calls" }] }));
+
+    expect(result.toolCalls[0].arguments).toEqual({ error: "invalid_json", raw: "[object Object]" });
+  });
+
   it("message.content 缺失时返回空字符串", async () => {
     const result = await complete(successFetch({ choices: [{ message: { tool_calls: [] }, finish_reason: "tool_calls" }] }));
 
@@ -88,6 +96,37 @@ describe("OpenAI 兼容模型适配器", () => {
     }));
 
     expect(result.usage).toEqual({ promptTokens: 10, completionTokens: 3, cachedTokens: 4 });
+  });
+
+  it("usage 缺少必需字段时省略 usage", async () => {
+    const result = await complete(successFetch({
+      ...OK_BODY,
+      usage: { prompt_tokens: 10 },
+    }));
+
+    expect(result).not.toHaveProperty("usage");
+  });
+
+  it("缺少 tool call id 或 name 时抛 invalid_response", async () => {
+    for (const call of [
+      { function: { name: "echo", arguments: "{}" } },
+      { id: "call-1", function: { arguments: "{}" } },
+    ]) {
+      await expect(complete(successFetch({ choices: [{ message: { content: "", tool_calls: [call] }, finish_reason: "tool_calls" }] })))
+        .rejects.toMatchObject({ code: "invalid_response" });
+    }
+  });
+
+  it("成功响应 JSON 解析失败抛 invalid_response 且不重试", async () => {
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError("bad json"); },
+      text: async () => "{bad",
+    })) as unknown as typeof fetch;
+
+    await expect(complete(fetchImpl)).rejects.toMatchObject({ code: "invalid_response" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("仅 apiKey 非空时发送 Bearer Authorization", async () => {
@@ -137,6 +176,21 @@ describe("OpenAI 兼容模型适配器", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(result.content).toBe("hi");
+  });
+
+  it("AbortError 直接终止且不重试", async () => {
+    const abortError = new DOMException("Aborted", "AbortError");
+    const fetchImpl = vi.fn().mockRejectedValue(abortError) as unknown as typeof fetch;
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      retry: { maxRetries: 3, baseDelayMs: 1, sleep: async () => {}, rand: () => 0.5 },
+    });
+
+    await expect(provider.complete(MESSAGES, [], { signal: AbortSignal.abort(), maxOutputTokens: 1 }))
+      .rejects.toBe(abortError);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
   it("401 抛 ModelFatalError 且不重试", async () => {

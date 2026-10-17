@@ -44,6 +44,19 @@ class NetworkError extends Error {
   }
 }
 
+class ModelResponseError extends Error {
+  readonly code = "invalid_response";
+
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = "ModelResponseError";
+  }
+}
+
+function isCancellationError(err: unknown): boolean {
+  return err instanceof Error && err.name === "AbortError";
+}
+
 export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
   const fetchImpl = cfg.fetchImpl ?? fetch;
   const retryConfig: RetryConfig = {
@@ -77,6 +90,7 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
             signal: opts.signal,
           });
         } catch (err) {
+          if (isCancellationError(err) || opts.signal.aborted) throw err;
           throw new NetworkError(err);
         }
         if (!response.ok) {
@@ -89,7 +103,11 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
           }
           throw new UnexpectedHttpError(response.status, bodyPreview);
         }
-        return response.json() as Promise<Record<string, any>>;
+        try {
+          return await response.json() as Record<string, any>;
+        } catch (err) {
+          throw new ModelResponseError("Model API returned invalid JSON", err);
+        }
       }, retryConfig);
 
       const choice = data.choices?.[0];
@@ -97,22 +115,31 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
       const content = typeof message?.content === "string" ? message.content : "";
       if (content) opts.onDelta?.(content);
       const toolCalls = (message?.tool_calls ?? []).map((call: any) => {
+        if (typeof call?.id !== "string" || typeof call?.function?.name !== "string") {
+          throw new ModelResponseError("Model API returned a malformed tool call");
+        }
         const raw = call.function?.arguments;
         let args: Record<string, unknown> | { error: "invalid_json"; raw: string };
-        try {
-          args = JSON.parse(typeof raw === "string" ? raw : "{}");
-        } catch {
+        if (typeof raw !== "string") {
           args = { error: "invalid_json", raw: String(raw) };
+        } else {
+          try {
+            args = JSON.parse(raw);
+          } catch {
+            args = { error: "invalid_json", raw };
+          }
         }
-        return { id: call.id, name: call.function?.name, arguments: args };
+        return { id: call.id, name: call.function.name, arguments: args };
       });
       const usage = data.usage;
+      const hasCompleteUsage = Number.isFinite(usage?.prompt_tokens)
+        && Number.isFinite(usage?.completion_tokens);
 
       return {
         content,
         toolCalls,
         truncatedByMaxTokens: choice?.finish_reason === "length",
-        ...(usage ? {
+        ...(hasCompleteUsage ? {
           usage: {
             promptTokens: usage.prompt_tokens,
             completionTokens: usage.completion_tokens,
