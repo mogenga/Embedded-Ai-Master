@@ -1,12 +1,14 @@
 # Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 内核。当前交付 P0 维度 1+2+6：Agent 主循环与模型接入层，带来可恢复/可分代的会话事实源、工具管线与 headless demo。
+面向嵌入式调试场景的 agent 内核，附带一个可运行的 Web 诊断工作台。当前交付 P0 内核（主循环与模型接入、会话事实源、工具管线、headless demo）与前端工作台（三栏布局、三态主题、消息流、调试坞、会话回放）。
 
 ## 技术栈
 
 - TypeScript + Node.js >= 24（ESM-only）
 - Zod v4
 - Vitest v4
+- Preact 10 + Vite 8（前端工作台；`@preact/preset-vite`、happy-dom 仅用于构建与测试）
+- 实时通道：SSE + HTTP POST（前端保留 `EventSource` 替换点，当前交付抽象层）
 
 ## 安装
 
@@ -17,11 +19,17 @@ npm install
 ## 命令
 
 ```bash
-npm test          # 全量单元/集成测试（不触网）
-npm run coverage  # 覆盖率（lines 阈值 85%）
-npm run lint      # 当前为 tsc --noEmit
-npm run typecheck # tsc --noEmit
-npm run build     # 编译到 dist/
+npm test            # 全量单元/集成测试（不触网）
+npm run coverage    # 覆盖率（lines 阈值 85%）
+npm run lint        # 当前为 tsc --noEmit
+npm run typecheck   # tsc --noEmit（内核）
+npm run build       # 编译到 dist/
+
+npm run dev:web       # 启动前端开发服务器（Vite）
+npm run build:web     # 构建前端到 dist-web/
+npm run test:ui       # 仅跑前端测试（tests/ui）
+npm run typecheck:web # 前端类型检查（tsconfig.web.json）
+npm run verify:ui     # V1-V14 浏览器视觉验收（需 Chrome/Edge）
 ```
 
 ## 目录结构
@@ -35,8 +43,11 @@ src/
 ├── model/        模型协议、OpenAI 兼容适配器、重试、token 估算
 ├── session/      append-only JSONL 会话
 ├── tools/        工具契约、注册表、echo、五阶段执行管线
+├── ui/           前端工作台（Preact 组件、TranscriptView 投影、SSE 抽象）
 └── index.ts      runSession 装配
-tests/            Vitest 测试
+web/              Vite 入口 HTML
+scripts/          verify-ui.mjs 浏览器视觉验收
+tests/            Vitest 测试（tests/ui 为前端测试）
 docs/             设计、计划与已知问题
 ```
 
@@ -88,6 +99,20 @@ demo 不读取 `HARNESS_COMPAT_API_KEY`（该变量仅 live 测试使用）；de
 | 2 | 用法或装配错误（含运行期未恢复错误：模型 4xx/网络/响应非法/会话写入失败） |
 
 会话写入 `$HARNESS_HOME/sessions/<id>/`：`header.json`、`session.v1.jsonl`、按需生成 `session.vN.jsonl` 与 `artifacts/`。
+
+## Web 工作台
+
+```bash
+npm run dev:web     # http://localhost:5173/web/index.html
+npm run build:web   # 产物 dist-web/web/index.html
+```
+
+- **架构**：Preact 只承担组件化与增量 diff；全部业务状态经 `src/ui/view/transcript.ts` 的纯函数投影 `TranscriptView`，实时渲染与回放共用同一归约。前端类型直接复用内核 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations`，不维护第二套事件模型。
+- **回放模式**：未配置事件流时，页面渲染 `src/ui/demo/fixtures.ts` 的演示会话，可离线评审完整诊断流程（症状 → 分流 → KB → 取证 → 判决 → 写操作确认）。
+- **实时通道**：配置 `VITE_EVENT_STREAM_URL` 后通过 `EventSource` 消费 `LoopEvent`；配置 `VITE_ACTION_URL` 后 Composer 以 `POST {"text":...}` 提交。二者均为可注入抽象（`src/ui/view/sse.ts`），服务端接入前不伪造提交成功。
+- **主题**：`light` / `system` / `dark` 三态，`localStorage` 键 `eam-theme`，默认 `system`；切换不重载页面。所有颜色经 CSS 变量，图标为内联 SVG sprite。
+- **验收**：`npm run verify:ui` 通过无头 Chromium 实测 V1-V14（三栏几何、无溢出/截断、滚动条配色与占位、三主题解析、无 emoji、焦点可见、减少动效、回放一致性、写操作确认）。浏览器探测优先 `CHROME_PATH`，其次 Chrome/Edge 常见安装路径；找不到时以 exit 2 明确失败。
+- **安全边界**：写内存/复位需显式确认，确认后仅进入「执行中，等待工具结果」，不会在前端伪造「已执行」（R2）；工具失败显式展示错误码与文本（R3）。
 
 ## 会话管理
 
@@ -168,10 +193,6 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 
 `HARNESS_COMPAT_MODEL` 同样使用 `provider/model` 引用，测试会从 `providers.json` 解析出裸模型名与 `apiKeyEnv`；`HARNESS_COMPAT_BASE_URL` 可覆盖 `baseUrl`；`HARNESS_COMPAT_API_KEY` 优先于 `apiKeyEnv`。
 
-## 临时 API 连通性页面
-
-`.tmp/api-connectivity/` 是本机可选临时页面；`.tmp/` 已被 `.gitignore` 忽略，不随仓库分发。若本地存在，可直接用浏览器打开 `index.html`，填写 Base URL、API Key、Model，发送一次最小 Chat Completions 请求；页面从浏览器直连网关，若被 CORS/本地文件策略阻止会明确提示，API Key 仅保存在页面内存。
-
 ## 已知限制
 
 见 `docs/deferred-issues.md`。当前与 P0 直接相关的：
@@ -184,10 +205,23 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 - 4xx 除 429 外均不重试，408/409/425 未细分（D-036）。
 - 工具 JSON Schema 可能携带 `$schema`，严格网关兼容性待 live 验证（D-019）。
 
+前端工作台：
+
+- SSE 事件流与 action 端点契约未定，后端接入前不伪造提交成功（D-051、D-060）。
+- Dock/设备/日志为静态演示数据，尚未由会话事件驱动（D-058）。
+- 回放/导出按钮已渲染但未接行为（D-059）。
+- StatusBar 的探针/串口状态由 props 推断，缺少显式状态枚举（D-052）。
+- 无后端时输入不会回填，接入端点后需补提交中/失败态（D-053）。
+- 717px 工作区下知识库整树需内部滚动（D-054）；V3/V11 的验收口径边界见 D-055、D-056。
+- Chromium 非标准安装需设置 `CHROME_PATH`（D-057）。
+
 ## 设计文档
 
 - `docs/BRD.md` — 业务需求与路线图
 - `docs/p0-kernel-design.md` — P0 内核设计
+- `docs/frontend-design.md` — 前端设计规范（布局、令牌、组件、验收）
 - `docs/superpowers/specs/2026-10-16-p0-kernel-dims-1-2-design.md` — 维度 1+2 可实现设计
 - `docs/superpowers/plans/2026-10-16-p0-kernel-dims-1-2.md` — 实现计划
+- `docs/superpowers/specs/2026-10-18-ui-workbench-design.md` — 前端工程实现设计
+- `docs/superpowers/plans/2026-10-18-ui-workbench.md` — 前端实现计划
 - `docs/deferred-issues.md` — 已知问题与升级条件
