@@ -7,7 +7,9 @@ import type { LoopEvent } from "./loop/events.js";
 import { query } from "./loop/query.js";
 import type { LoopCtx } from "./loop/query.js";
 import { createOpenAIProvider } from "./model/openai.js";
-import { createSession } from "./session/session.js";
+import { SessionResumeError } from "./session/errors.js";
+import { createSession, resumeSession } from "./session/session.js";
+import type { SessionHandle } from "./session/session.js";
 import { echoTool } from "./tools/echo.js";
 import { isWindowsReservedName } from "./tools/pipeline.js";
 import { ToolRegistry } from "./tools/registry.js";
@@ -17,6 +19,7 @@ export interface RunOptions {
   model: string;
   sessionId?: string;
   sessionDir?: string;
+  resume?: boolean;
   providersText?: string;
   systemPrompt?: string;
   fetchImpl?: typeof fetch;
@@ -42,7 +45,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   const home = resolveHarnessHome();
   const providers =
     opts.providersText === undefined ? loadProviders(home) : parseProviders(opts.providersText);
-  const { provider, modelName, model } = resolveModelRef(providers, opts.model);
+  const { providerName, provider, modelName, model } = resolveModelRef(providers, opts.model);
 
   const apiKeyEnv = provider.apiKeyEnv;
   const rawApiKey = apiKeyEnv === undefined ? undefined : process.env[apiKeyEnv];
@@ -55,23 +58,74 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   });
 
   const id = opts.sessionId ?? randomUUID();
-  const sessionDir = opts.sessionDir ?? path.join(home, "sessions", id);
-  const session = await createSession(sessionDir, { id, systemPrompt: opts.systemPrompt });
+  const resume = opts.resume === true;
+  let session: SessionHandle;
 
-  const ctx: LoopCtx = {
-    session,
-    model: modelProtocol,
-    modelCfg: model,
-    tools: new ToolRegistry([echoTool]),
-    budget: (messages) => checkBudget(messages, model.contextWindow),
-    signal: opts.signal ?? new AbortController().signal,
-    artifactDir: path.join(session.dir, "artifacts"),
-    cwd: opts.cwd,
-    timeoutMs: opts.timeoutMs,
-    pricePerMillion: provider.pricePerMillion,
-  };
+  if (resume) {
+    if (opts.sessionDir === undefined) {
+      throw new SessionResumeError(
+        "missing_session_dir",
+        "resume requires an explicit sessionDir",
+      );
+    }
+    session = await resumeSession(opts.sessionDir);
+  } else {
+    const sessionDir = opts.sessionDir ?? path.join(home, "sessions", id);
+    session = await createSession(sessionDir, {
+      id,
+      systemPrompt: opts.systemPrompt,
+      provider: providerName,
+      model: opts.model,
+      workdir: opts.cwd ?? process.cwd(),
+    });
+  }
 
   try {
+    if (resume) {
+      const headerModel = session.header.model;
+      if (headerModel !== undefined && headerModel !== opts.model) {
+        throw new SessionResumeError(
+          "model_mismatch",
+          `Session model ${headerModel} does not match requested model ${opts.model}`,
+          { expected: opts.model, actual: headerModel },
+        );
+      }
+      if (opts.systemPrompt !== undefined) {
+        const events = session.events();
+        const systemEvent = events.find((event) => event.type === "system");
+        if (systemEvent !== undefined) {
+          const content = systemEvent.payload.content;
+          if (content !== opts.systemPrompt) {
+            throw new SessionResumeError(
+              "system_prompt_mismatch",
+              "Session system prompt does not match the provided systemPrompt",
+              { expected: opts.systemPrompt, actual: content },
+            );
+          }
+        } else if (events.length > 0) {
+          throw new SessionResumeError(
+            "system_prompt_mismatch",
+            "Cannot add a system prompt to a non-empty session without a system event",
+          );
+        } else {
+          await session.append({ type: "system", payload: { content: opts.systemPrompt } });
+        }
+      }
+    }
+
+    const ctx: LoopCtx = {
+      session,
+      model: modelProtocol,
+      modelCfg: model,
+      tools: new ToolRegistry([echoTool]),
+      budget: (messages) => checkBudget(messages, model.contextWindow),
+      signal: opts.signal ?? new AbortController().signal,
+      artifactDir: path.join(session.dir, "artifacts"),
+      cwd: opts.cwd,
+      timeoutMs: opts.timeoutMs,
+      pricePerMillion: provider.pricePerMillion,
+    };
+
     yield* query(ctx, opts.input, {
       maxTurns: opts.maxTurns ?? 10,
       maxCostUsd: opts.maxCostUsd,

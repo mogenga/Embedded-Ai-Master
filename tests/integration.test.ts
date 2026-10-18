@@ -7,7 +7,8 @@ import { buildMessages } from "../src/context/build.js";
 import { ConfigLoadError, ModelReferenceError } from "../src/config/providers.js";
 import { runSession } from "../src/index.js";
 import type { LoopEvent } from "../src/loop/events.js";
-import { readSessionFile } from "../src/session/session.js";
+import { SessionResumeError } from "../src/session/errors.js";
+import { createSession, readSessionFile } from "../src/session/session.js";
 
 const tempDirs: string[] = [];
 
@@ -433,5 +434,325 @@ describe("runSession 端到端装配", () => {
 
     expect(error).toBeInstanceOf(TypeError);
     expect((error as Error).message).toContain("sessionId");
+  });
+});
+function providersWith(models: Record<string, { contextWindow: number; maxOutput: number }>): string {
+  return JSON.stringify({
+    gw: { ...PROVIDERS.gw, models: { ...PROVIDERS.gw.models, ...models } },
+  });
+}
+
+async function readHeader(sessionDir: string): Promise<Record<string, unknown>> {
+  return JSON.parse(await readFile(path.join(sessionDir, "header.json"), "utf8")) as Record<
+    string,
+    unknown
+  >;
+}
+
+describe("runSession resume", () => {
+  it("resume:true 继续同一会话并续写事件", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "resume-continue");
+
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    const secondFetch = mockFetch([EMPTY_RESPONSE]);
+    const generator = runSession({
+      input: "again",
+      model: "gw/flash",
+      providersText: providersText(),
+      sessionDir,
+      resume: true,
+      fetchImpl: secondFetch.impl,
+    });
+
+    const firstEvent = await generator.next();
+    expect(firstEvent.done).toBe(false);
+    expect((await readHeader(sessionDir)).status).toBe("open");
+
+    for await (const _event of generator) {
+      void _event;
+    }
+
+    const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(log.filter((event) => event.type === "user").map((event) => event.payload.content)).toEqual([
+      "hi",
+      "again",
+    ]);
+    expect(secondFetch.calls).toHaveLength(1);
+    expect(secondFetch.calls[0].body.messages).toEqual([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "done", tool_calls: [] },
+      { role: "user", content: "again" },
+    ]);
+  });
+
+  it("resume:true 缺 sessionDir 时首个 next 抛 missing_session_dir", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+
+    await expect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        resume: true,
+      }).next(),
+    ).rejects.toMatchObject({
+      name: "SessionResumeError",
+      code: "missing_session_dir",
+    });
+  });
+
+  it("resume:true 且 model 与 header 不一致时抛 model_mismatch", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "resume-model");
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    const secondFetch = mockFetch([EMPTY_RESPONSE]);
+    const error = await runSession({
+      input: "again",
+      model: "gw/other",
+      providersText: providersWith({ other: { contextWindow: 8192, maxOutput: 512 } }),
+      sessionDir,
+      resume: true,
+      fetchImpl: secondFetch.impl,
+    })
+      .next()
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(SessionResumeError);
+    expect((error as SessionResumeError).code).toBe("model_mismatch");
+    expect(secondFetch.calls).toHaveLength(0);
+  });
+
+  it("header 无 model 时允许 resume", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "resume-no-model");
+    await createSession(sessionDir, { id: "no-model" });
+
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        fetchImpl: impl,
+      }),
+    );
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(calls).toHaveLength(1);
+    expect((await readHeader(sessionDir)).model).toBeUndefined();
+    expect(
+      readSessionFile(path.join(sessionDir, "session.v1.jsonl")).some(
+        (event) => event.type === "user" && event.payload.content === "hi",
+      ),
+    ).toBe(true);
+  });
+
+  it("resume:true 且 systemPrompt 内容不一致时抛 system_prompt_mismatch", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "resume-system-diff");
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        systemPrompt: "be brief",
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    const secondFetch = mockFetch([EMPTY_RESPONSE]);
+    const error = await runSession({
+      input: "again",
+      model: "gw/flash",
+      providersText: providersText(),
+      sessionDir,
+      resume: true,
+      systemPrompt: "be verbose",
+      fetchImpl: secondFetch.impl,
+    })
+      .next()
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(SessionResumeError);
+    expect((error as SessionResumeError).code).toBe("system_prompt_mismatch");
+    expect(secondFetch.calls).toHaveLength(0);
+  });
+
+  it("会话无 system 且非空时提供 systemPrompt 抛 system_prompt_mismatch", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "resume-system-late");
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    const secondFetch = mockFetch([EMPTY_RESPONSE]);
+    const error = await runSession({
+      input: "again",
+      model: "gw/flash",
+      providersText: providersText(),
+      sessionDir,
+      resume: true,
+      systemPrompt: "late",
+      fetchImpl: secondFetch.impl,
+    })
+      .next()
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(SessionResumeError);
+    expect((error as SessionResumeError).code).toBe("system_prompt_mismatch");
+    expect(secondFetch.calls).toHaveLength(0);
+  });
+
+  it("空会话 resume 提供 systemPrompt 时补写 system", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "resume-system-empty");
+    await createSession(sessionDir, { id: "empty-session" });
+
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        systemPrompt: "be brief",
+        fetchImpl: impl,
+      }),
+    );
+
+    const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(log[0]).toMatchObject({ type: "system", payload: { content: "be brief" } });
+    expect(log[1]).toMatchObject({ type: "user", payload: { content: "hi" } });
+    expect(calls[0].body.messages).toEqual([
+      { role: "system", content: "be brief" },
+      { role: "user", content: "hi" },
+    ]);
+  });
+
+  it("create 路径 header 写入 provider/model/workdir", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const cwd = path.join(home, "workdir");
+    const sessionDir = path.join(home, "header-create");
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        cwd,
+        fetchImpl: impl,
+      }),
+    );
+
+    expect(await readHeader(sessionDir)).toMatchObject({
+      provider: "gw",
+      model: "gw/flash",
+      workdir: cwd,
+    });
+
+    const defaultDir = path.join(home, "header-default-workdir");
+    const second = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir: defaultDir,
+        fetchImpl: second.impl,
+      }),
+    );
+    expect((await readHeader(defaultDir)).workdir).toBe(process.cwd());
+  });
+
+  it("resume 时 provider 与 apiKey 按当前 providers 解析而非 header", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "resume-current-provider");
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    vi.stubEnv("RESUME_API_KEY", "fresh-secret");
+    const resumeProviders = JSON.stringify({
+      gw: {
+        ...PROVIDERS.gw,
+        baseUrl: "http://127.0.0.1:7777/v1",
+        apiKeyEnv: "RESUME_API_KEY",
+      },
+    });
+    const secondFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "again",
+        model: "gw/flash",
+        providersText: resumeProviders,
+        sessionDir,
+        resume: true,
+        fetchImpl: secondFetch.impl,
+      }),
+    );
+
+    expect(secondFetch.calls[0].url).toBe("http://127.0.0.1:7777/v1/chat/completions");
+    expect(secondFetch.calls[0].headers.get("authorization")).toBe("Bearer fresh-secret");
+    expect(Object.keys(await readHeader(sessionDir))).not.toContain("apiKey");
   });
 });
