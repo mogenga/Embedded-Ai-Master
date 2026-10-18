@@ -3,6 +3,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createSession, readSessionFile } from "../src/session/session.js";
+import {
+  SessionCorruptionError,
+  SessionForkError,
+  SessionResumeError,
+} from "../src/session/errors.js";
 import type { SessionEvent } from "../src/session/types.js";
 
 const tempDirs: string[] = [];
@@ -169,6 +174,71 @@ describe("会话持久化", () => {
     expect(existsSync(path.join(dir, "session.v1.jsonl"))).toBe(true);
   });
 
+  it("createSession 写入 header 元数据且状态 open", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir, {
+      provider: "gw",
+      model: "flash",
+      workdir: "/w",
+    });
+
+    expect(session.header).toMatchObject({
+      id: session.id,
+      status: "open",
+      provider: "gw",
+      model: "flash",
+      workdir: "/w",
+    });
+    const onDisk = JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as {
+      status: string;
+      provider: string;
+      model: string;
+      workdir: string;
+    };
+    expect(onDisk).toMatchObject({
+      status: "open",
+      provider: "gw",
+      model: "flash",
+      workdir: "/w",
+    });
+  });
+
+  it("close 原子更新 status 为 closed 且幂等", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+
+    await session.close();
+    await session.close();
+
+    const onDisk = JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as {
+      status: string;
+    };
+    expect(onDisk.status).toBe("closed");
+    expect(session.header.status).toBe("closed");
+  });
+
+  it("close 后 append 拒绝", async () => {
+    const session = await createSession(makeTempDir());
+    await session.close();
+
+    await expect(session.append({ type: "user", payload: { content: "x" } })).rejects.toThrow();
+  });
+
+  it("结构化会话错误保留 name、code 与 detail", () => {
+    const corruption = new SessionCorruptionError("invalid_seq", "seq broken", { line: 3 });
+    const fork = new SessionForkError("not_turn_boundary", "not boundary");
+    const resume = new SessionResumeError("model_mismatch", "model differs");
+
+    expect(corruption).toBeInstanceOf(Error);
+    expect(corruption.name).toBe("SessionCorruptionError");
+    expect(corruption.code).toBe("invalid_seq");
+    expect(corruption.detail).toEqual({ line: 3 });
+    expect(fork.name).toBe("SessionForkError");
+    expect(fork.code).toBe("not_turn_boundary");
+    expect(resume.name).toBe("SessionResumeError");
+    expect(resume.code).toBe("model_mismatch");
+  });
+
   it("header 深层冻结且不能修改会话元数据", async () => {
     const session = await createSession(makeTempDir());
 
@@ -178,7 +248,7 @@ describe("会话持久化", () => {
     }).toThrow();
     expect(session.header.status).toBe("open");
     expect(() => {
-      (session.header as Record<string, unknown>).createdAt = "changed";
+      session.header.createdAt = "changed";
     }).toThrow();
     expect(typeof session.header.createdAt).toBe("string");
   });

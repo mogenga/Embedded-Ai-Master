@@ -37,7 +37,7 @@ function makeSession(dir: string): { session: SessionHandle; append: ReturnType<
   const session: SessionHandle = {
     id: "sess-1",
     dir,
-    header: {},
+    header: { id: "sess-1", createdAt: "2026-01-01T00:00:00.000Z", status: "open" },
     append,
     events: () => [],
     close: async () => {},

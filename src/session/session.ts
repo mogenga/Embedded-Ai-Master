@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { appendFile, mkdir, open, rm } from "node:fs/promises";
+import { appendFile, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { SessionEvent } from "./types.js";
+import type { SessionEvent, SessionHeader } from "./types.js";
 
 function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
@@ -15,7 +15,7 @@ function deepFreeze<T>(value: T): T {
 export interface SessionHandle {
   id: string;
   dir: string;
-  header: Record<string, unknown>;
+  header: SessionHeader;
   append(ev: Omit<SessionEvent, "seq" | "ts">): Promise<SessionEvent>;
   events(): readonly SessionEvent[];
   close(): Promise<void>;
@@ -23,14 +23,24 @@ export interface SessionHandle {
 
 export async function createSession(
   sessionDir: string,
-  opts: { systemPrompt?: string; id?: string } = {},
+  opts: {
+    systemPrompt?: string;
+    id?: string;
+    provider?: string;
+    model?: string;
+    workdir?: string;
+    generationThresholdBytes?: number;
+  } = {},
 ): Promise<SessionHandle> {
   const id = opts.id ?? randomUUID();
   const dir = path.resolve(sessionDir);
-  const header: Record<string, unknown> = {
+  const header: SessionHeader = {
     id,
     createdAt: new Date().toISOString(),
     status: "open",
+    ...(opts.provider === undefined ? {} : { provider: opts.provider }),
+    ...(opts.model === undefined ? {} : { model: opts.model }),
+    ...(opts.workdir === undefined ? {} : { workdir: opts.workdir }),
   };
   await mkdir(dir, { recursive: true });
   const headerPath = path.join(dir, "header.json");
@@ -58,10 +68,13 @@ export async function createSession(
   let pending = Promise.resolve();
   let accepting = true;
   let closePromise: Promise<void> | undefined;
+  let currentHeader = header;
   const handle: SessionHandle = {
     id,
     dir,
-    header,
+    get header() {
+      return currentHeader;
+    },
     append(ev) {
       if (!accepting) return Promise.reject(new Error("Session is closed"));
       const snapshot = structuredClone(ev);
@@ -85,7 +98,19 @@ export async function createSession(
     close() {
       if (!closePromise) {
         accepting = false;
-        closePromise = pending;
+        closePromise = (async () => {
+          await pending;
+          const closedHeader: SessionHeader = { ...currentHeader, status: "closed" };
+          const tmpPath = `${headerPath}.tmp`;
+          try {
+            await writeFile(tmpPath, `${JSON.stringify(closedHeader)}\n`, "utf8");
+            await rename(tmpPath, headerPath);
+          } catch (error) {
+            await rm(tmpPath, { force: true }).catch(() => undefined);
+            throw error;
+          }
+          currentHeader = deepFreeze(closedHeader);
+        })();
       }
       return closePromise;
     },
