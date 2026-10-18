@@ -83,7 +83,13 @@ export function applyLoadFailure(state: WorkbenchState, message: string): Workbe
 }
 
 export function startSessionSwitch(state: WorkbenchState): WorkbenchState {
-  return { ...state, switching: true, detailError: undefined, failedSessionId: undefined };
+  return {
+    ...state,
+    switching: true,
+    detailError: undefined,
+    failedSessionId: undefined,
+    streamError: undefined,
+  };
 }
 
 export function applySessionLoaded(
@@ -100,6 +106,7 @@ export function applySessionLoaded(
     switching: false,
     detailError: undefined,
     failedSessionId: undefined,
+    streamError: undefined,
   };
 }
 

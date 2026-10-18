@@ -117,6 +117,15 @@ describe("workbench state", () => {
     expect(state.failedSessionId).toBeUndefined();
   });
 
+  it("进入回放清除实时流错误，避免残留横幅", () => {
+    const replay = applySessionLoaded(
+      { ...baseState(), streamError: "事件流中断" },
+      "s1",
+      { ...makeTranscriptView(), sessionId: "s1" },
+    );
+    expect(replay.streamError).toBeUndefined();
+  });
+
   it("回放模式下实时事件不覆盖已选会话", () => {
     const replay = applySessionLoaded(baseState(), "s1", { ...makeTranscriptView(), sessionId: "s1" });
     const live = { ...makeTranscriptView(), sessionId: "live" };
