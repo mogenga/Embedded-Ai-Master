@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -67,6 +67,20 @@ function canSymlink(): boolean {
 
 const SYMLINK_SUPPORTED = canSymlink();
 
+function canJunction(): boolean {
+  if (process.platform !== "win32") return false;
+  const root = mkdtempSync(path.join(tmpdir(), "eam-junction-"));
+  mkdirSync(path.join(root, "target"));
+  try {
+    symlinkSync(path.join(root, "target"), path.join(root, "link"), "junction");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const JUNCTION_SUPPORTED = canJunction();
+
 describe("ui api", () => {
   let close: (() => Promise<void>) | undefined;
   afterEach(async () => { await close?.(); close = undefined; });
@@ -112,6 +126,50 @@ describe("ui api", () => {
     };
     expect(body.sessions.map((item) => item.id)).toEqual(["s1"]);
     expect(body.errors).toContainEqual({ dir: "broken", code: "invalid_header" });
+  });
+
+  it("坏事件日志会话仍出现在列表", async () => {
+    const home = makeHome();
+    writeFileSync(path.join(home, "sessions", "s1", "session.v1.jsonl"), "{bad\n");
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/sessions`)).json() as {
+      sessions: Array<{ id: string }>;
+      errors: Array<{ code: string }>;
+    };
+    expect(body.sessions.map((item) => item.id)).toContain("s1");
+    expect(body.errors).toEqual([]);
+  });
+
+  it("有效 header 但无日志文件进 errors", async () => {
+    const home = makeHome();
+    rmSync(path.join(home, "sessions", "s1", "session.v1.jsonl"));
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/sessions`)).json() as {
+      sessions: unknown[];
+      errors: Array<{ dir: string; code: string }>;
+    };
+    expect(body.sessions).toHaveLength(0);
+    expect(body.errors).toContainEqual({ dir: "s1", code: "invalid_header" });
+  });
+
+  it.skipIf(!JUNCTION_SUPPORTED)("junction 目录记 skipped_link 且不进列表", async () => {
+    const home = makeHome();
+    const outside = mkdtempSync(path.join(tmpdir(), "eam-outside-"));
+    writeFileSync(path.join(outside, "header.json"), JSON.stringify({
+      id: "linked", createdAt: "2026-10-18T00:00:00.000Z", status: "closed",
+    }));
+    writeFileSync(path.join(outside, "session.v1.jsonl"), "{}\n");
+    symlinkSync(outside, path.join(home, "sessions", "linked"), "junction");
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/sessions`)).json() as {
+      sessions: Array<{ id: string }>;
+      errors: Array<{ dir: string; code: string }>;
+    };
+    expect(body.sessions.map((item) => item.id)).not.toContain("linked");
+    expect(body.errors).toContainEqual({ dir: "linked", code: "skipped_link" });
   });
 
   it("会话根不可读时列表进 errors 而非静默为空", async () => {

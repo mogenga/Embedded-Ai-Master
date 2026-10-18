@@ -6,6 +6,7 @@ export interface WorkbenchState {
   connection: "loading" | "ready" | "error";
   view: TranscriptView;
   sessions: SessionSummary[];
+  sessionErrors?: Array<{ dir: string; code: string }>;
   activeSessionId?: string;
   kbTree: KbNode[];
   kbRoot: string | null;
@@ -60,6 +61,7 @@ export function applyLoadSuccess(
     view: liveView ?? loaded.view,
     viewSource: liveView === undefined ? undefined : "live",
     sessions: loaded.sessions,
+    sessionErrors: loaded.errors,
     ...(loaded.activeSessionId === undefined ? { activeSessionId: undefined } : { activeSessionId: loaded.activeSessionId }),
     kbTree: loaded.kbTree,
     kbRoot: loaded.kbRoot,
@@ -96,13 +98,14 @@ export function applySessionLoaded(
   state: WorkbenchState,
   id: string,
   view: TranscriptView,
+  source?: "replay" | "live",
 ): WorkbenchState {
   return {
     ...state,
     activeSessionId: id,
     view,
     connection: "ready",
-    viewSource: "replay",
+    viewSource: source ?? (state.viewSource === "live" ? "live" : "replay"),
     switching: false,
     detailError: undefined,
     failedSessionId: undefined,

@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, statSync } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Dirent } from "node:fs";
@@ -117,6 +117,14 @@ function isPermissionError(error: unknown): boolean {
   return code === "EACCES" || code === "EPERM";
 }
 
+function isLinkedDirectory(target: string): boolean {
+  try {
+    return statSync(target).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 export function readSessionHeader(dir: string): SessionHeader {
   const file = path.join(dir, "header.json");
   try {
@@ -165,8 +173,14 @@ async function handleSessions(res: ServerResponse, harnessHome: string): Promise
     if (code !== "ENOENT") errors.push({ dir: "sessions", code: "unreadable" });
   }
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
     const dir = entry.name;
+    if (entry.isSymbolicLink()) {
+      if (isLinkedDirectory(path.join(sessionsDir, dir))) {
+        errors.push({ dir, code: "skipped_link" });
+      }
+      continue;
+    }
+    if (!entry.isDirectory()) continue;
     if (!SESSION_ID_PATTERN.test(dir) || dir === "." || dir === "..") {
       errors.push({ dir, code: "invalid_id" });
       continue;

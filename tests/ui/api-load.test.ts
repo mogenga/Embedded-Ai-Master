@@ -68,6 +68,29 @@ describe("workbench load", () => {
     expect(calls).not.toContain("/api/sessions/s1");
   });
 
+  it("透传会话列表坏目录", async () => {
+    const errors = [{ dir: "broken", code: "invalid_header" }];
+    const fetchImpl = routedFetch({
+      "/api/sessions": { sessions: [SESSION_SUMMARY], errors },
+      "/api/sessions/s1": SESSION_DETAIL,
+      "/api/kb": { root: null, tree: [] },
+      "/api/device": { probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" },
+    });
+    const loaded = await loadWorkbench({ fetchImpl });
+    expect(loaded.errors).toEqual(errors);
+  });
+
+  it("列表缺 errors 字段时返回空数组", async () => {
+    const fetchImpl = routedFetch({
+      "/api/sessions": { sessions: [SESSION_SUMMARY] },
+      "/api/sessions/s1": SESSION_DETAIL,
+      "/api/kb": { root: null, tree: [] },
+      "/api/device": { probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" },
+    });
+    const loaded = await loadWorkbench({ fetchImpl });
+    expect(loaded.errors).toEqual([]);
+  });
+
   it("会话详情失败时上抛 ApiError", async () => {
     const fetchImpl = routedFetch({
       "/api/sessions": { sessions: [SESSION_SUMMARY], errors: [] },

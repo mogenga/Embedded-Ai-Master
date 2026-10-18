@@ -41,15 +41,24 @@ export function SessionPane({
   sessions,
   activeId,
   onSelect,
+  errors,
   state = "ready",
 }: {
   sessions: SessionSummary[];
   activeId?: string;
   onSelect?: (id: string) => void;
+  errors?: Array<{ dir: string; code: string }>;
   state?: "loading" | "ready" | "error";
 }): JSX.Element {
   const open = sessions.filter((session) => session.status === "open");
   const closed = sessions.filter((session) => session.status === "closed");
+  const unreadable = errors?.length ?? 0;
+  const summary =
+    unreadable === 0 ? null : (
+      <p class="pane-warn" role="status">
+        {unreadable} 个会话目录不可读
+      </p>
+    );
   return (
     <section class="rail-bottom" aria-label="诊断会话">
       <div class="pane-head">
@@ -87,6 +96,7 @@ export function SessionPane({
           ))}
         </ul>
       )}
+      {state === "ready" ? summary : null}
     </section>
   );
 }

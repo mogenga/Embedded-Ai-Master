@@ -15,6 +15,7 @@ import type { GuardModel, TranscriptView } from "./view/transcript.js";
 export interface AppProps {
   view: TranscriptView;
   sessions: SessionSummary[];
+  sessionErrors?: Array<{ dir: string; code: string }>;
   activeSessionId?: string;
   onSelectSession?: (id: string) => void;
   kbTree: KbNode[];
@@ -64,6 +65,7 @@ function logGuard(action: "确认" | "拒绝"): (guard: GuardModel) => void {
 export function App({
   view,
   sessions,
+  sessionErrors,
   activeSessionId,
   onSelectSession,
   kbTree,
@@ -103,6 +105,7 @@ export function App({
           <KnowledgePane nodes={kbTree} root={kbRoot} state={connection} />
           <SessionPane
             sessions={sessions}
+            errors={sessionErrors}
             activeId={activeSessionId}
             onSelect={onSelectSession}
             state={connection}

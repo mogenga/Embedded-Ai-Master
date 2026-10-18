@@ -213,11 +213,11 @@ export type TranscriptEvent =
 
 ### 7.1 只读 HTTP API（`src/server/api.ts`）
 
-服务端只读复用 `src/session/persistence.ts` 的 `readSessionDir`，不改变内核语义。所有响应 `Content-Type: application/json`；错误响应 `{ error: { code, message } }` 与对应状态码。
+服务端只读：`/api/sessions` 仅读 `header.json` 并检查日志文件存在性，不解析事件（D-066）；`/api/sessions/:id` 复用 `src/session/persistence.ts` 的 `readSessionDir` 读取完整事件，不改变内核语义；`sessions/` 根下的符号链接 / junction 目录记 `skipped_link` 并跳过。所有响应 `Content-Type: application/json`；错误响应 `{ error: { code, message } }` 与对应状态码。
 
 | 方法 | 路径 | 响应 | 说明 |
 |---|---|---|---|
-| GET | `/api/sessions` | `{ sessions: SessionSummary[], errors: Array<{ dir, code }> }` | 扫描 `resolveHarnessHome()/sessions/*`，按 `header.createdAt` 倒序；`id` 一律取目录名，header 只读不解析事件；`header.id` 不一致进 `errors`（`id_mismatch`），读取失败进 `unreadable`，不影响其余会话 |
+| GET | `/api/sessions` | `{ sessions: SessionSummary[], errors: Array<{ dir, code }> }` | 扫描 `resolveHarnessHome()/sessions/*`，按 `header.createdAt` 倒序；`id` 一律取目录名，header 只读不解析事件；`header.id` 不一致进 `errors`（`id_mismatch`），读取失败进 `unreadable`，符号链接 / junction 目录进 `skipped_link`，均不影响其余会话 |
 | GET | `/api/sessions/:id` | `{ header: SessionHeader, events: SessionEvent[] }` | 校验 id 仅含 `[A-Za-z0-9._-]` 且解析后位于会话根内；不存在 → 404 `session_not_found` |
 | GET | `/api/kb` | `{ root: string \| null, tree: KbNode[] }` | 扫描 `resolveHarnessHome()/kb`；目录不存在 → `root:null, tree:[]` |
 | GET | `/api/device` | `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` | 未接真实探测，诚实返回 unknown |
@@ -250,9 +250,10 @@ export async function fetchDevice(deps?: { fetchImpl?: typeof fetch }): Promise<
 ### 7.4 真实数据与空态（禁止演示数据）
 
 - `src/ui/demo/fixtures.ts` 删除；生产代码不得再出现 UART 演示会话、固定知识库树、固定会话列表、DEMO 寄存器/日志常量。
-- 会话列表来自 `fetchSessions`；选中会话事件来自 `fetchSession` 并交给 `transcriptFromSession`。
+- 会话列表来自 `fetchSessions`；坏目录进 `errors`，前端在会话面板底部显示「N 个会话目录不可读」，不阻塞其余会话（D-065 已解决）。
+- 选中会话事件来自 `fetchSession` 并交给 `transcriptFromSession`。
 - 知识库树来自 `fetchKb`；设备字段来自 `fetchDevice`（`unknown` 显示「未接入」，不显示「已连接」）。
-- 调试坞日志从 `TranscriptView.events` 的工具事件派生；寄存器从工具结果 `detail` 中出现 `registers`/`readout` 时派生；无数据时显示空态说明。
+- 调试坞日志从 `TranscriptView.events` 的工具事件派生；寄存器与读数从工具结果 `detail.readout`（兼容 `detail.fields`）和 `detail.evidence`（兼容 `detail.rows`）派生；无数据时显示空态说明。
 - 加载失败显示错误与重试入口；无会话显示「暂无会话」；无 KB 显示「未配置知识库」。
 - 测试内部数据放 `tests/ui/support/builders.ts`，不得被生产代码 import。
 

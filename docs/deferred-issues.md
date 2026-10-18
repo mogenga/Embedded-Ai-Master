@@ -550,6 +550,7 @@
 - **影响**: 损坏、权限不足或格式非法的会话在界面上完全不可见,用户无法区分「没有会话」与「会话损坏」;排查只能直接看 API 响应或服务端日志。
 - **触发升级条件**: 出现 `session_corrupt` / 权限错误;需要在界面提示可修复项。
 - **修复建议**: 前端保留 `errors` 并在会话面板展示可折叠告警(区分损坏与读取失败);提供重试或定位目录的入口。
+- **状态**: 2026-10-18 Task 17 已解决——`loadWorkbench` 透传 `errors`,`SessionPane` 底部显示「N 个会话目录不可读」;逐目录详情与定位入口仍未提供。
 
 ### D-066 · 会话列表 header-only 读取后仍不解析事件
 
@@ -567,13 +568,31 @@
 - **触发升级条件**: 实现 `/api/actions`;或需要在浏览器中承载不可信来源页面。
 - **修复建议**: 校验 `Host` 仅为 `127.0.0.1:<port>` / `localhost:<port>`,拒绝跨源 `Origin`;或引入启动时生成的一次性 token。
 
-### D-068 · Windows 尾随点 id 别名
+### D-068 · Windows 尾随点目录名与实测行为不一致
 
-- **发现**: 2026-10-18,Task 16 审查修复。
-- **现象**: `SESSION_ID_PATTERN` 允许尾随点(如 `s1.`),而 Windows 文件系统把 `s1.` 与 `s1` 视为同一目录;列表 id 取目录名,可能产生别名或同一目录被重复列出。
-- **影响**: 会话 id 跨平台不稳定,`GET /api/sessions/s1.` 可能命中 `s1`,前端选中态与缓存键可能混淆。
-- **触发升级条件**: Windows 上出现尾随点或尾随空格目录名;或要求 id 跨平台一致。
-- **修复建议**: Windows 上拒绝以点或空格结尾的目录名(列表记 `invalid_id`,请求返回 400),或在入口统一规范化 id。
+- **发现**: 2026-10-18,Task 16 审查修复;2026-10-18,Task 17 按实测重写。
+- **实测**: Node 24 + Windows 11 下 `mkdirSync("s1.")` 创建独立目录 `s1.`;`readdir` / `lstat` / `realpath` 均保留尾随点,`s1.` 与 `s1` 不会互相命中,列表也不会重复。
+- **现象**: 内核 `isValidSessionId` 仅接受 `[a-zA-Z0-9_-]`,header.id 不能含点。因此正常创建的 `s1.` 会话目录无法通过 header 校验:列表记 `invalid_header`,`GET /api/sessions/s1.` 返回 500 `session_corrupt`。若手工把 header.id 写成合法值(如 `s1`),列表会以目录名 `s1.` 出现并记 `id_mismatch`(既有「目录名即 id」语义),详情仍可打开。
+- **影响**: API 不会把 `s1.` 与 `s1` 混为同一会话;残余风险是 Win32 友好 API(cmd、资源管理器)会把 `s1.` 显示为 `s1`,误导人工排查与备份/同步工具,且 Linux/macOS 行为不同。
+- **触发升级条件**: 非 Node 工具参与会话目录管理;或要求目录名跨平台一致。
+- **修复建议**: Windows 上在会话创建入口拒绝尾随点目录名(而不是等 header 解析失败),或统一规范化目录名。
+
+### D-069 · Windows 大小写不敏感导致 id 大小写别名
+
+- **发现**: 2026-10-18,Task 17 第二轮红队修复。
+- **实测**: Windows/NTFS 上 `GET /api/sessions/S1` 经 `realpath` 命中目录 `s1` 并返回 200(合法会话),响应 `header.id` 为磁盘原大小写 `s1`;列表 id 同样取目录名 `s1`。
+- **现象**: `SESSION_ID_PATTERN` 允许大写,目录 `s1` 与 `S1` 无法共存;同一会话可用不同大小写的 id 访问。Linux 部署下 `S1` 返回 404。
+- **影响**: 前端选中态、缓存键或外部调用方按字符串精确比较时,同一会话可能表现为不同 id;跨平台行为不一致。
+- **触发升级条件**: 调用方依赖 id 字符串相等;或要求跨平台一致。
+- **修复建议**: 列表与请求统一按小写规范化,或在 Windows 上拒绝大小写不一致的请求并补跨平台测试。
+
+### D-070 · 会话目录不可读 / ACL 拒绝未验证
+
+- **发现**: 2026-10-18,Task 17 第二轮红队修复。
+- **现象**: `/api/sessions` 把 `readSessionHeader` 的 `EACCES` / `EPERM` 及其它 I/O 错误都记为 `unreadable`,但测试以同一用户 / 管理员运行,无法稳定构造 Windows ACL 拒绝,该分支没有真实用例。`/api/sessions/:id` 遇到 `EACCES` 时 `readSessionDir` 的错误不被 `SessionCorruptionError` 分支捕获,由顶层兜底为 500 `internal_error`,未映射为 403 / 404。
+- **影响**: 权限受限目录只能显示为「N 个会话目录不可读」,无法区分损坏与 ACL;详情请求返回泛化的内部错误,缺少可操作信息。
+- **触发升级条件**: 真实环境出现 ACL / 只读介质拒绝;或需要区分错误类型。
+- **修复建议**: 显式把 `EACCES` / `EPERM` 映射为 403 `session_forbidden`;在 Windows 上用 `icacls` 构造拒绝访问并补集成测试。
 
 ---
 
@@ -605,6 +624,7 @@
 | 2026-10-18 | 最终加固:header 临时文件改为 `header.json.<uuid>.tmp` + `wx`,避免预置链接写入越界;补 `readSessionFile` symlink 直达用例与 Windows 无权限 skipIf;design §5 补 symlink/payload/恢复幂等/realpath 条目;录入 D-049(create/resume 跟随目录链接与 fork 不一致)、D-050(payload 非对象 fail-closed 的旧日志兼容性影响);dev-notes 明确恢复补偿分支为防御性 |
 | 2026-10-18 | P0 前端 Task 11 第一轮整体审查修复:录入 D-058 ~ D-061(Dock 静态数据、回放/导出未接线、SSE 无后端输入处理、StatusBar context/limit 来源);V13 改为检查一致性测试文件,验收脚本清理失败不再吞汇总 |
 | 2026-10-18 | P0 前端 Task 10 视觉验收:录入 D-051 ~ D-057(action 端点契约、StatusBar 状态推断、无后端清空输入、717px 树内部滚动、V3 滚动条口径、V11 静态 Tab 范围、Chromium 探测覆盖);设计 v1.2 同步 V2/V3/V6/V11 口径 |
+| 2026-10-18 | P0 前端 Task 17 第二轮红队修复:锁定 header-only 会话列表(坏事件日志仍在列表、无日志文件 `invalid_header`)、junction/符号链接目录记 `skipped_link`、`errors` 透传到会话面板;实时态切换会话后保持 live;README/spec 补 `src/server/`、header-only 读取与寄存器来源;D-065 标注已解决,D-068 按实测改写,录入 D-069(大小写别名)、D-070(ACL 未验证) |
 | 2026-10-18 | P0 前端 Task 12 第二轮红队审查修复:修正空 text + artifact 投影、SSE 单 timer 重连/close 后静默/构造抛错收敛、折叠摘要截断、costUsd 有限非负校验;清理 `styles.css` 重复 `.dock` 与 media 查询;录入 D-062(usage 缺字段补 0) |
 | 2026-10-18 | P0 前端 Task 15 真实数据验收:验收脚本改为启动 `dist/server/serve.js`(临时 `HARNESS_HOME` 写入真实会话与 KB),V14 断言真实 guard 文案并新增 V0 空态附加检查;修复 V11 以坐标区分同文案控件(设备 unknown 下三个「未接入」chip 曾导致遍历提前终止);README 改为真实数据流程与 API 表;D-053/D-060 标记已解决,D-058 标记数据来源已解决,D-051 补 501 现状;录入 D-063(API 只读、actions/events 未实现)、D-064(KB 深度/条目上限)、D-065(坏目录 errors 未展示) |
 | 2026-10-18 | Task 16 审查修复:会话列表改 header-only 读取(id 取目录名,`id_mismatch`/`unreadable`)、静态路径 NUL/穿越 400、Dock 状态点与日志 mark 由真实数据派生、V13 改实跑一致性测试、V14 删除恒真断言;D-053 验证描述修正;录入 D-066(列表不解析事件)、D-067(Host/Origin 未校验)、D-068(Windows 尾随点 id 别名) |

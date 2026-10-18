@@ -42,6 +42,7 @@ src/
 ├── loop/         事件类型、熔断、query 主循环
 ├── model/        模型协议、OpenAI 兼容适配器、重试、token 估算
 ├── session/      append-only JSONL 会话
+├── server/       只读 HTTP API（会话 / 知识库 / 设备）与静态资源服务
 ├── tools/        工具契约、注册表、echo、五阶段执行管线
 ├── ui/           前端工作台（Preact 组件、TranscriptView 投影、SSE 抽象）
 └── index.ts      runSession 装配
@@ -117,7 +118,7 @@ npm run serve:ui    # 真实数据服务，默认 http://127.0.0.1:5174/
 
   | 方法 | 路径 | 行为 |
   |---|---|---|
-  | GET | `/api/sessions` | `{ sessions: [{ id, createdAt, status, model?, workdir? }], errors: [{ dir, code }] }`；坏会话目录进 `errors` 而不是中断列表 |
+  | GET | `/api/sessions` | `{ sessions: [{ id, createdAt, status, model?, workdir? }], errors: [{ dir, code }] }`；坏会话目录进 `errors` 而不是中断列表，符号链接 / junction 目录记 `skipped_link` |
   | GET | `/api/sessions/:id` | `{ header, events }`；非法 id 400，不存在 404，损坏会话 500 `session_corrupt` |
   | GET | `/api/kb` | `{ root, tree }`；未配置 `kb/` 时返回 `{ root: null, tree: [] }` |
   | GET | `/api/device` | 当前恒为 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` |
@@ -226,7 +227,7 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 - 服务端 API 只读，写操作与 SSE 事件流尚未实现（501）；action/事件流契约待定（D-051、D-063）。
 - Dock 的寄存器与日志已由工具卡投影，设备状态仍恒为 `unknown`，缺少显式连接状态枚举（D-052、D-058）。
 - 回放/导出按钮已渲染但未接行为（D-059）。
-- 会话列表的坏目录只进 `errors`，界面暂不展示（D-065）。
+- 会话列表的坏目录进 `errors`，界面在会话面板底部显示「N 个会话目录不可读」（D-065 已解决）。
 - 知识库扫描深度上限 8、条目上限 2000，超出会静默截断（D-064）。
 - 717px 工作区下知识库整树需内部滚动（D-054）；V3/V11 的验收口径边界见 D-055、D-056。
 - Chromium 非标准安装需设置 `CHROME_PATH`（D-057）。

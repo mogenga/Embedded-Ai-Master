@@ -1541,3 +1541,96 @@ Expected: 全绿；V1-V14 + V0 全 PASS。
 git add -A
 git commit -m "fix(ui): 修复真实数据链路与验收强度问题"
 ```
+---
+
+### Task 17: 真实数据改造第二轮红队修复（覆盖缺口 + 状态机 + 文档）
+
+**Files:**
+- Modify: `src/ui/state.ts`
+- Modify: `src/ui/api/load.ts`
+- Modify: `src/ui/main.tsx`
+- Modify: `src/ui/app.tsx`
+- Modify: `src/ui/components/rail/session-pane.tsx`
+- Modify: `tests/ui/state.test.ts`
+- Modify: `tests/ui/api-load.test.ts`
+- Modify: `tests/ui/components/rail.test.tsx`
+- Modify: `tests/server/api.test.ts`
+- Modify: `src/server/api.ts`（仅补 errors 标记）
+- Modify: `README.md`
+- Modify: `docs/superpowers/specs/2026-10-18-ui-workbench-design.md`
+- Modify: `docs/deferred-issues.md`
+
+**Interfaces:**
+- Consumes: Task 13-16 产物。
+- Produces:
+  - `applySessionLoaded(state, id, view, source?: "replay" | "live")`：缺省保持旧行为（replay），但若 `state.viewSource === "live"` 且未显式传 source，则保持 `"live"`（切换会话不永久阻塞实时流）。
+  - `loadWorkbench` 返回 `errors: Array<{ dir: string; code: string }>`（会话列表坏目录）并透传到 App；`SessionPane` 在列表底部显示「N 个会话目录不可读」；无错误不显示。
+  - `/api/sessions` 对 sessions 根下的 reparse point/junction 目录追加 `{ dir, code: "skipped_link" }`，不再静默跳过。
+  - 测试：
+    - `tests/server/api.test.ts` 增「坏事件日志会话仍在列表出现（header-only）」与「有效 header + 无日志文件 → 列表 invalid_header」。
+    - `tests/ui/state.test.ts` 增「live 状态切换会话后仍为 live」「replay 状态保持 replay」。
+    - `tests/ui/components/rail.test.tsx` 增「errors 摘要展示」。
+- [ ] **Step 1: 写失败测试**
+
+```ts
+// tests/ui/state.test.ts 追加
+it("live 状态切换会话后保持 live", () => {
+  const live = applyStreamEvent({ ...baseState, viewSource: "live" } as WorkbenchState, makeView());
+  const loaded = applySessionLoaded(live, "s2", makeView());
+  expect(loaded.viewSource).toBe("live");
+});
+it("replay 状态切换后保持 replay", () => {
+  const loaded = applySessionLoaded({ ...baseState, viewSource: "replay" } as WorkbenchState, "s2", makeView());
+  expect(loaded.viewSource).toBe("replay");
+});
+```
+
+```ts
+// tests/server/api.test.ts 追加
+it("坏事件日志会话仍出现在列表", async () => {
+  const home = makeHome();
+  writeFileSync(path.join(home, "sessions", "s1", "session.v1.jsonl"), "{bad\n");
+  const s = createUiServer({ harnessHome: home }); close = s.close;
+  const body = await (await fetch(`http://127.0.0.1:${s.port}/api/sessions`)).json() as { sessions: Array<{ id: string }>; errors: Array<{ code: string }> };
+  expect(body.sessions.map((x) => x.id)).toContain("s1");
+});
+it("有效 header 但无日志文件进 errors", async () => {
+  const home = makeHome();
+  rmSync(path.join(home, "sessions", "s1", "session.v1.jsonl"));
+  const s = createUiServer({ harnessHome: home }); close = s.close;
+  const body = await (await fetch(`http://127.0.0.1:${s.port}/api/sessions`)).json() as { sessions: unknown[]; errors: Array<{ code: string }> };
+  expect(body.sessions).toHaveLength(0);
+  expect(body.errors.map((e) => e.code)).toContain("invalid_header");
+});
+```
+
+- [ ] **Step 2: 运行确认 RED**
+
+Run: `node ./node_modules/vitest/vitest.mjs run tests/ui/state.test.ts tests/ui/api-load.test.ts tests/ui/components/rail.test.tsx tests/server/api.test.ts`
+Expected: 新增用例失败。
+
+- [ ] **Step 3: 实现修复**
+
+1. `state.ts`：按 Interfaces 调整 `applySessionLoaded`。
+2. `api/load.ts` + `main.tsx` + `app.tsx`：透传 `errors`；`SessionPane` 展示摘要；无错误不渲染。
+3. `api.ts`：reparse point/junction 记录 `skipped_link`；不读事件（保持 header-only）。
+4. 文档：README 目录树补 `src/server/`；spec §7.1 去掉“复用 readSessionDir”表述；spec 寄存器来源改为 `detail.evidence`/`detail.rows`/`detail.readout`；D-068 按实测改写；新增 D-069（Windows 大小写别名）、D-070（不可读目录/ACL 未验证）。
+
+- [ ] **Step 4: 全量验证**
+
+```bash
+node ./node_modules/vitest/vitest.mjs run
+node ./node_modules/typescript/bin/tsc --noEmit
+node ./node_modules/typescript/bin/tsc -p tsconfig.web.json --noEmit
+node ./node_modules/vite/bin/vite.js build
+node ./node_modules/typescript/bin/tsc -p tsconfig.build.json
+node scripts/verify-ui.mjs
+```
+Expected: 全绿；V1-V14 + V0 全 PASS。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add -A
+git commit -m "fix(ui): 补齐真实数据覆盖并修复实时态恢复"
+```

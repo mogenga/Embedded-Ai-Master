@@ -92,6 +92,34 @@ describe("rail", () => {
     expect(root.textContent).not.toContain("暂无会话");
   });
 
+  it("会话目录错误显示摘要", () => {
+    const root = mount();
+    render(
+      <SessionPane
+        sessions={SESSIONS}
+        errors={[
+          { dir: "broken", code: "invalid_header" },
+          { dir: "linked", code: "skipped_link" },
+        ]}
+      />,
+      root,
+    );
+    expect(root.textContent).toContain("2 个会话目录不可读");
+  });
+
+  it("无会话目录错误时不显示摘要", () => {
+    const root = mount();
+    render(<SessionPane sessions={SESSIONS} />, root);
+    expect(root.textContent).not.toContain("会话目录不可读");
+  });
+
+  it("空列表但有错误时仍显示摘要", () => {
+    const root = mount();
+    render(<SessionPane sessions={[]} errors={[{ dir: "broken", code: "invalid_header" }]} />, root);
+    expect(root.textContent).toContain("暂无会话");
+    expect(root.textContent).toContain("1 个会话目录不可读");
+  });
+
   it("会话列表按状态分组、标记当前项并回传选择", () => {
     const root = mount();
     const selected: string[] = [];

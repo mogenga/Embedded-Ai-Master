@@ -5,6 +5,7 @@ import type { DeviceStatus, FetchDeps, KbNode, SessionSummary } from "./client.j
 
 export interface LoadedWorkbench {
   sessions: SessionSummary[];
+  errors: Array<{ dir: string; code: string }>;
   activeSessionId?: string;
   view: TranscriptView;
   kbTree: KbNode[];
@@ -27,6 +28,7 @@ export async function loadWorkbench(deps?: FetchDeps): Promise<LoadedWorkbench> 
   const view = first === undefined ? emptyTranscriptView() : await loadSessionView(first.id, deps);
   return {
     sessions: sessions.sessions,
+    errors: sessions.errors ?? [],
     ...(first === undefined ? {} : { activeSessionId: first.id }),
     view,
     kbTree: kb.tree,

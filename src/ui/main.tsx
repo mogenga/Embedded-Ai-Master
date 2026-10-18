@@ -71,6 +71,7 @@ function renderApp(): void {
       <App
         view={state.view}
         sessions={state.sessions}
+        sessionErrors={state.sessionErrors}
         activeSessionId={state.activeSessionId}
         onSelectSession={(id) => {
           void selectSession(id);

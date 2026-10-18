@@ -28,6 +28,7 @@ function baseState(): WorkbenchState {
 
 const LOADED = {
   sessions: [{ id: "s2", createdAt: "2026-10-18T21:40:00.000Z", status: "open" as const }],
+  errors: [],
   activeSessionId: "s2",
   view: { ...makeTranscriptView(), sessionId: "s2" },
   kbTree: [],
@@ -124,6 +125,32 @@ describe("workbench state", () => {
       { ...makeTranscriptView(), sessionId: "s1" },
     );
     expect(replay.streamError).toBeUndefined();
+  });
+
+  it("live 状态切换会话后保持 live", () => {
+    const live = applyStreamEvent({ ...baseState(), viewSource: "live" } as WorkbenchState, makeTranscriptView());
+    const loaded = applySessionLoaded(live, "s2", makeTranscriptView());
+    expect(loaded.viewSource).toBe("live");
+  });
+
+  it("replay 状态切换后保持 replay", () => {
+    const loaded = applySessionLoaded({ ...baseState(), viewSource: "replay" } as WorkbenchState, "s2", makeTranscriptView());
+    expect(loaded.viewSource).toBe("replay");
+  });
+
+  it("未标记来源时切换按回放处理", () => {
+    const loaded = applySessionLoaded(baseState(), "s2", makeTranscriptView());
+    expect(loaded.viewSource).toBe("replay");
+  });
+
+  it("可显式指定切换后的视图来源", () => {
+    const loaded = applySessionLoaded(
+      { ...baseState(), viewSource: "live" } as WorkbenchState,
+      "s2",
+      makeTranscriptView(),
+      "replay",
+    );
+    expect(loaded.viewSource).toBe("replay");
   });
 
   it("回放模式下实时事件不覆盖已选会话", () => {
