@@ -60,8 +60,8 @@ describe("resolveModelRefFromEnv", () => {
     expect(resolveModelRefFromEnv({ HARNESS_COMPAT_MODEL: "   " })).toBeUndefined();
   });
 
-  it("存在时返回原始引用", () => {
-    expect(resolveModelRefFromEnv({ HARNESS_COMPAT_MODEL: "gw/flash" })).toBe("gw/flash");
+  it("存在时返回 trim 后的引用", () => {
+    expect(resolveModelRefFromEnv({ HARNESS_COMPAT_MODEL: "  gw/flash  " })).toBe("gw/flash");
   });
 });
 

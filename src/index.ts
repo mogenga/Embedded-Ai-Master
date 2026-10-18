@@ -26,7 +26,18 @@ export interface RunOptions {
   timeoutMs?: number;
 }
 
+const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+
+function assertSessionId(sessionId: string): void {
+  if (!SESSION_ID_PATTERN.test(sessionId)) {
+    throw new TypeError(
+      `invalid sessionId: ${JSON.stringify(sessionId)}; must match ${SESSION_ID_PATTERN.source}`,
+    );
+  }
+}
+
 export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
+  if (opts.sessionId !== undefined) assertSessionId(opts.sessionId);
   const home = resolveHarnessHome();
   const providers =
     opts.providersText === undefined ? loadProviders(home) : parseProviders(opts.providersText);

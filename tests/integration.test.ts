@@ -402,4 +402,33 @@ describe("runSession 端到端装配", () => {
     };
     expect(header.id).toBe("fixed-session-id");
   });
+
+  it.each([
+    ["路径穿越", "../evil"],
+    ["空串", ""],
+    ["路径分隔符", "a/b"],
+    ["反斜杠", "a\\b"],
+    ["超长", "a".repeat(129)],
+  ])("非法 sessionId（%s）抛 TypeError", async (_label, sessionId) => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    const error = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir: path.join(home, "invalid-session"),
+        sessionId,
+        fetchImpl: impl,
+      }),
+    ).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toBeInstanceOf(TypeError);
+    expect((error as Error).message).toContain("sessionId");
+  });
 });

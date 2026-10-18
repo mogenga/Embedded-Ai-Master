@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveHarnessHome } from "../src/config/harness-home.js";
 import { loadProviders, resolveModelRef } from "../src/config/providers.js";
 import type { ProviderConfig } from "../src/config/providers.js";
@@ -7,12 +7,12 @@ import { createOpenAIProvider } from "../src/model/openai.js";
 const live = process.env.HARNESS_COMPAT_LIVE === "1";
 const configuredModelRef = process.env.HARNESS_COMPAT_MODEL;
 
-function requireModelRef(): string {
+export function requireModelRef(): string {
   const value = process.env.HARNESS_COMPAT_MODEL;
   if (value === undefined || value.trim() === "") {
     throw new Error("HARNESS_COMPAT_MODEL is required");
   }
-  return value;
+  return value.trim();
 }
 
 function resolveBaseUrl(provider: ProviderConfig): string {
@@ -27,6 +27,20 @@ function resolveApiKey(provider: ProviderConfig): string | undefined {
   const value = direct !== undefined && direct.trim() !== "" ? direct : fromEnv;
   return value !== undefined && value.trim() !== "" ? value.trim() : undefined;
 }
+
+describe("live env helper", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("requireModelRef 返回 trim 后的引用", () => {
+    vi.stubEnv("HARNESS_COMPAT_MODEL", "  gw/flash  ");
+    expect(requireModelRef()).toBe("gw/flash");
+  });
+
+  it("空白引用视为缺失", () => {
+    vi.stubEnv("HARNESS_COMPAT_MODEL", "   ");
+    expect(() => requireModelRef()).toThrow(/HARNESS_COMPAT_MODEL/);
+  });
+});
 
 describe.skipIf(!live || configuredModelRef === undefined || configuredModelRef.trim() === "")(
   "live OpenAI 兼容网关",

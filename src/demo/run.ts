@@ -41,7 +41,7 @@ export function resolveModelRefFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): string | undefined {
   const value = env.HARNESS_COMPAT_MODEL;
-  return value !== undefined && value.trim() !== "" ? value : undefined;
+  return value !== undefined && value.trim() !== "" ? value.trim() : undefined;
 }
 
 export function withOverrides(
