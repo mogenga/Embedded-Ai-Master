@@ -14,6 +14,7 @@ import { ToolRegistry } from "./tools/registry.js";
 export interface RunOptions {
   input: string;
   model: string;
+  sessionId?: string;
   sessionDir?: string;
   providersText?: string;
   systemPrompt?: string;
@@ -32,7 +33,8 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   const { provider, modelName, model } = resolveModelRef(providers, opts.model);
 
   const apiKeyEnv = provider.apiKeyEnv;
-  const apiKey = apiKeyEnv === undefined ? undefined : process.env[apiKeyEnv];
+  const rawApiKey = apiKeyEnv === undefined ? undefined : process.env[apiKeyEnv];
+  const apiKey = rawApiKey === undefined ? undefined : rawApiKey.trim();
   const modelProtocol = createOpenAIProvider({
     baseUrl: provider.baseUrl,
     model: modelName,
@@ -40,7 +42,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     ...(apiKey !== undefined && apiKey !== "" ? { apiKey } : {}),
   });
 
-  const id = randomUUID();
+  const id = opts.sessionId ?? randomUUID();
   const sessionDir = opts.sessionDir ?? path.join(home, "sessions", id);
   const session = await createSession(sessionDir, { id, systemPrompt: opts.systemPrompt });
 
