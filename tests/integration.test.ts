@@ -409,6 +409,9 @@ describe("runSession 端到端装配", () => {
     ["路径分隔符", "a/b"],
     ["反斜杠", "a\\b"],
     ["超长", "a".repeat(129)],
+    ["Windows 保留名 CON", "CON"],
+    ["Windows 保留名 com1", "com1"],
+    ["Windows 保留名 NUL", "NUL"],
   ])("非法 sessionId（%s）抛 TypeError", async (_label, sessionId) => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);

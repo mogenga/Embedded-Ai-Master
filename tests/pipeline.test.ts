@@ -274,7 +274,7 @@ describe("executeBatch 错误与取消", () => {
     expect(results[0].result.text).toContain("kaboom");
   });
 
-  it("execute 抛超长 Error → message ≤2000,text 走 finalize", async () => {
+  it("execute 抛超长 Error → message 与 text 同源截断至 2000", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const message = "e".repeat(200000);
     const reg = new ToolRegistry([
@@ -282,20 +282,18 @@ describe("executeBatch 错误与取消", () => {
         throw new Error(message);
       }, true),
     ]);
-    const dir = artifactDir();
+
 
     const results = await executeBatch(session, reg, [call("boom-long", "boom")], {
       signal: new AbortController().signal,
-      artifactDir: dir,
+      artifactDir: artifactDir(),
     });
 
     const result = results[0].result;
     expect(result.code).toBe("tool_execution_error");
-    expect(result.message.length).toBeLessThanOrEqual(2000);
-    expect(result.text.startsWith(message.slice(0, 100000))).toBe(true);
-    expect(result.text).toContain("[truncated; full output at");
-    const artifactPath = artifactPathOf(result.artifactPath, dir, "boom-long");
-    expect(result.text).toContain(artifactPath);
+    expect(result.message).toBe("e".repeat(2000));
+    expect(result.text).toBe(result.message);
+    expect(result.artifactPath).toBeUndefined();
   });
 
   it("timeoutMs 到期 → tool_timeout,且工具收到的 signal 已 abort", async () => {
@@ -836,7 +834,7 @@ describe("executeBatch 落盘失败", () => {
     return blocked;
   }
 
-  it("成功结果保留 isError/text 并记录 artifactError", async () => {
+  it("成功结果落盘失败且未超限时保留全文并追加 retained 标记", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "t".repeat(40000);
     const reg = new ToolRegistry([outputTool("big", text)]);
@@ -848,14 +846,15 @@ describe("executeBatch 落盘失败", () => {
     });
 
     const result = results[0].result;
+    const marker = "\n[artifact write failed; full output retained]";
     expect(result.isError).toBe(false);
     expect(result.code).toBe("ok");
-    expect(result.text).toBe(text);
+    expect(result.text).toBe(text + marker);
     expect(result.artifactPath).toBeUndefined();
     expect(result.detail).toMatchObject({ artifactError: expect.any(String) });
   });
 
-  it("错误结果保留原 code 并记录 artifactError", async () => {
+  it("错误结果落盘失败且未超限时保留全文并追加 retained 标记", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "u".repeat(40000);
     const reg = new ToolRegistry([
@@ -873,9 +872,10 @@ describe("executeBatch 落盘失败", () => {
     });
 
     const result = results[0].result;
+    const marker = "\n[artifact write failed; full output retained]";
     expect(result.isError).toBe(true);
     expect(result.code).toBe("tool_failed");
-    expect(result.text).toBe(text);
+    expect(result.text).toBe(text + marker);
     expect(result.detail).toMatchObject({ artifactError: expect.any(String) });
   });
 
@@ -902,23 +902,21 @@ describe("executeBatch 落盘失败", () => {
 });
 
 describe("executeBatch 出口限长", () => {
-  it("300000 字符 call.name → text 截断/落盘并带 truncated 标记", async () => {
+  it("300000 字符 call.name → message 与 text 同源截断至 200", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const reg = new ToolRegistry([]);
-    const dir = artifactDir();
+
 
     const results = await executeBatch(session, reg, [call("long-name", "n".repeat(300000))], {
       signal: new AbortController().signal,
-      artifactDir: dir,
+      artifactDir: artifactDir(),
     });
 
     const result = results[0].result;
     expect(result.code).toBe("tool_not_found");
-    expect(result.message.length).toBeLessThanOrEqual(220);
-    expect(result.text.startsWith("tool not found: ")).toBe(true);
-    expect(result.text).toContain("[truncated; full output at");
-    const artifactPath = artifactPathOf(result.artifactPath, dir, "long-name");
-    expect(result.text).toContain(artifactPath);
+    expect(result.message).toBe(`tool not found: ${"n".repeat(200)}`);
+    expect(result.text).toBe(result.message);
+    expect(result.artifactPath).toBeUndefined();
   });
 
   it("200000 字符 schema 键 → detail 白名单且 JSON ≤10000", async () => {

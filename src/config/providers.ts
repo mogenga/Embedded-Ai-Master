@@ -119,8 +119,10 @@ export function resolveModelRef(
   const separator = ref.indexOf("/");
   const providerName = separator < 0 ? ref : ref.slice(0, separator);
   const modelName = separator < 0 ? "" : ref.slice(separator + 1);
-  const provider = providers[providerName];
-  const model = provider?.models[modelName];
+  const provider = Object.hasOwn(providers, providerName) ? providers[providerName] : undefined;
+  const model = provider !== undefined && Object.hasOwn(provider.models, modelName)
+    ? provider.models[modelName]
+    : undefined;
   if (!provider || !model || !providerName || !modelName) {
     throw new ModelReferenceError(ref, references);
   }

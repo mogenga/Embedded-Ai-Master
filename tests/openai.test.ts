@@ -157,6 +157,32 @@ describe("OpenAI 兼容模型适配器", () => {
       .rejects.toMatchObject({ code: "invalid_response" });
   });
 
+  it.each([
+    ["null", [null]],
+    ["数组", [[]]],
+    ["字符串", ["bad"]],
+  ])("choices 元素为 %s 时抛 invalid_response", async (_label, choices) => {
+    await expect(complete(successFetch({ choices })))
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("choices 元素缺少 message 时按空内容成功", async () => {
+    const result = await complete(successFetch({ choices: [{}] }));
+
+    expect(result.content).toBe("");
+    expect(result.toolCalls).toEqual([]);
+  });
+
+  it("choices 元素 message 为 null 时抛 invalid_response", async () => {
+    await expect(complete(successFetch({ choices: [{ message: null }] })))
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("choices 元素 message 为非对象时抛 invalid_response", async () => {
+    await expect(complete(successFetch({ choices: [{ message: "bad" }] })))
+      .rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("finish_reason=length 标记输出截断", async () => {
     const result = await complete(successFetch({ choices: [{ message: { content: "hi" }, finish_reason: "length" }] }));
 
@@ -222,6 +248,33 @@ describe("OpenAI 兼容模型适配器", () => {
 
     await expect(complete(fetchImpl)).rejects.toMatchObject({ code: "invalid_response" });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("成功响应 json() 抛 AbortError 时原样透传", async () => {
+    const abortError = new DOMException("Aborted", "AbortError");
+    const fetchImpl = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => { throw abortError; },
+      text: async () => "",
+    })) as unknown as typeof fetch;
+
+    await expect(complete(fetchImpl)).rejects.toBe(abortError);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("将 opts.signal 原样传给 fetch", async () => {
+    const controller = new AbortController();
+    let captured: AbortSignal | null | undefined;
+    const fetchImpl = mockFetch((_url, init) => {
+      captured = init.signal as AbortSignal | null | undefined;
+      return { status: 200, body: OK_BODY };
+    });
+
+    await createOpenAIProvider({ baseUrl: "http://gw/v1", model: "m", fetchImpl })
+      .complete(MESSAGES, [], { signal: controller.signal, maxOutputTokens: 1 });
+
+    expect(captured).toBe(controller.signal);
   });
 
   it.each([{ label: "null", body: null }, { label: "[]", body: [] }])("顶层响应 $label 抛 invalid_response", async ({ body }) => {

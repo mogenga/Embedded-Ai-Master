@@ -9,6 +9,7 @@ import type { LoopCtx } from "./loop/query.js";
 import { createOpenAIProvider } from "./model/openai.js";
 import { createSession } from "./session/session.js";
 import { echoTool } from "./tools/echo.js";
+import { isWindowsReservedName } from "./tools/pipeline.js";
 import { ToolRegistry } from "./tools/registry.js";
 
 export interface RunOptions {
@@ -29,9 +30,9 @@ export interface RunOptions {
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 
 function assertSessionId(sessionId: string): void {
-  if (!SESSION_ID_PATTERN.test(sessionId)) {
+  if (!SESSION_ID_PATTERN.test(sessionId) || isWindowsReservedName(sessionId)) {
     throw new TypeError(
-      `invalid sessionId: ${JSON.stringify(sessionId)}; must match ${SESSION_ID_PATTERN.source}`,
+      `invalid sessionId: ${JSON.stringify(sessionId)}; must match ${SESSION_ID_PATTERN.source} and not be a Windows reserved name`,
     );
   }
 }

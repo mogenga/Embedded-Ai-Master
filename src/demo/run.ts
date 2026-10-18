@@ -49,6 +49,9 @@ export function withOverrides(
   providerName: string,
   env: NodeJS.ProcessEnv,
 ): ProvidersConfig {
+  if (!Object.hasOwn(providers, providerName)) {
+    throw new Error(`provider not found: ${providerName}`);
+  }
   const next = structuredClone(providers);
   const provider = next[providerName];
   const baseUrl = env.HARNESS_COMPAT_BASE_URL;
@@ -56,6 +59,12 @@ export function withOverrides(
   if (baseUrl !== undefined && baseUrl.trim() !== "") provider.baseUrl = baseUrl.trim();
   if (apiKeyEnv !== undefined && apiKeyEnv.trim() !== "") provider.apiKeyEnv = apiKeyEnv.trim();
   return next;
+}
+
+const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
+
+export function sanitizeTerminalText(text: string): string {
+  return text.replace(TERMINAL_CONTROL_CHARS, "");
 }
 
 export interface SessionCost {
@@ -171,19 +180,19 @@ async function main(): Promise<number> {
       switch (event.kind) {
         case "model_message":
           turns += 1;
-          console.log(`[model] ${event.content}`);
+          console.log(`[model] ${sanitizeTerminalText(event.content)}`);
           break;
         case "tool_use":
-          console.log(`[tool] ${event.name}`);
+          console.log(`[tool] ${sanitizeTerminalText(event.name)}`);
           break;
         case "tool_result":
-          console.log(`[tool_result] ${event.ok ? "ok" : "error"} ${event.text}`);
+          console.log(`[tool_result] ${event.ok ? "ok" : "error"} ${sanitizeTerminalText(event.text)}`);
           break;
         case "compacted":
           console.log("[compacted]");
           break;
         case "interrupted":
-          console.log(`[interrupted] ${event.reason}`);
+          console.log(`[interrupted] ${sanitizeTerminalText(event.reason)}`);
           break;
         case "done":
           finishReason = event.finishReason;

@@ -71,9 +71,13 @@ function failure(code: string, message: string, detail?: unknown, text = message
   return result;
 }
 
+export function isWindowsReservedName(name: string): boolean {
+  return WINDOWS_RESERVED_NAME.test(name);
+}
+
 function safeArtifactId(id: string): string {
   const safe = id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, MAX_ARTIFACT_ID_CHARS) || "tool";
-  return WINDOWS_RESERVED_NAME.test(safe) ? `_${safe}` : safe;
+  return isWindowsReservedName(safe) ? `_${safe}` : safe;
 }
 
 function artifactBaseName(callId: string): string {
@@ -254,9 +258,15 @@ async function finalizeResult(
   } catch (error) {
     const truncated = result.text.length > MAX_TEXT_CHARS;
     const body = truncated ? result.text.slice(0, MAX_TEXT_CHARS) : result.text;
-    const text = truncated ? `${body}\n[truncated; artifact write failed]` : body;
+    const marker = truncated
+      ? "\n[truncated; artifact write failed]"
+      : "\n[artifact write failed; full output retained]";
     const artifactError = error instanceof Error ? error.message : String(error);
-    return { ...result, text, detail: mergeArtifactError(result.detail, artifactError) };
+    return {
+      ...result,
+      text: `${body}${marker}`,
+      detail: mergeArtifactError(result.detail, artifactError),
+    };
   }
 }
 
@@ -280,7 +290,7 @@ async function executeOne(
       "tool_not_found",
       `tool not found: ${displayName}`,
       undefined,
-      `tool not found: ${call.name}`,
+      `tool not found: ${displayName}`,
     );
   }
 
@@ -332,11 +342,12 @@ async function executeOne(
       return failure("tool_aborted", error.message || "tool aborted");
     }
     const message = error instanceof Error ? error.message : String(error);
+    const truncated = truncateText(message, MAX_ERROR_MESSAGE_CHARS);
     return failure(
       "tool_execution_error",
-      truncateText(message, MAX_ERROR_MESSAGE_CHARS),
+      truncated,
       undefined,
-      message,
+      truncated,
     );
   } finally {
     if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
