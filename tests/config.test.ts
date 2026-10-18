@@ -142,12 +142,26 @@ describe("配置加载", () => {
     }
   });
 
+  it.each(["local-gw/__proto__", "local-gw/constructor", "local-gw/toString"])(
+    "resolveModelRef 拒绝原型链模型键 %s",
+    (ref) => {
+      expect(() => resolveModelRef(parseProviders(GOOD), ref)).toThrowError(ModelReferenceError);
+    },
+  );
+
+  it.each(["__proto__/flash", "constructor/flash", "toString/flash"])(
+    "resolveModelRef 拒绝原型链 provider 键 %s",
+    (ref) => {
+      expect(() => resolveModelRef(parseProviders(GOOD), ref)).toThrowError(ModelReferenceError);
+    },
+  );
+
   it("HARNESS_HOME env 优先于缺省", () => {
     expect(resolveHarnessHome({ HARNESS_HOME: "C:/custom/home" })).toBe("C:/custom/home");
   });
 
-  it("HARNESS_HOME 保留非空路径首尾空格", () => {
-    expect(resolveHarnessHome({ HARNESS_HOME: "  C:/custom home  " })).toBe("  C:/custom home  ");
+  it("HARNESS_HOME 返回 trim 后的路径", () => {
+    expect(resolveHarnessHome({ HARNESS_HOME: "  C:/custom home  " })).toBe("C:/custom home");
   });
 
   it("HARNESS_HOME 缺省时使用用户目录下的 .harness", () => {

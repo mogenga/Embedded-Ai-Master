@@ -7,6 +7,7 @@ import {
   parseArgs,
   resolveExitCode,
   resolveModelRefFromEnv,
+  sanitizeTerminalText,
   sessionCost,
   withOverrides,
 } from "../src/demo/run.js";
@@ -89,6 +90,29 @@ describe("withOverrides", () => {
 
     expect(next.gw.baseUrl).toBe("http://127.0.0.1:9/v1");
     expect(next.gw.apiKeyEnv).toBeUndefined();
+  });
+
+  it("拒绝原型链 provider 名且不污染 Object.prototype", () => {
+    expect(() => withOverrides(PROVIDERS, "__proto__", {
+      HARNESS_COMPAT_BASE_URL: "http://polluted/v1",
+    })).toThrowError();
+
+    expect(({} as { baseUrl?: string }).baseUrl).toBeUndefined();
+    expect(PROVIDERS.gw.baseUrl).toBe("http://127.0.0.1:9/v1");
+  });
+});
+
+describe("sanitizeTerminalText", () => {
+  it("剥离 C0/C1 控制字符并保留换行与制表符", () => {
+    const input = `a\x00b\x07c\x1bd\x9be\n\tf`;
+    expect(sanitizeTerminalText(input)).toBe("abcde\n\tf");
+  });
+
+  it("剥离 ESC、OSC 52 与清屏序列的控制字符", () => {
+    const input = `before\x1b]52;c;Zm9v\x07\x1b[2Jafter\x1b[3J`;
+    const result = sanitizeTerminalText(input);
+    expect(result).toBe("before]52;c;Zm9v[2Jafter[3J");
+    expect(result).not.toMatch(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/);
   });
 });
 

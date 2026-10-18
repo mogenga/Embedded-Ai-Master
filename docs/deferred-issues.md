@@ -88,6 +88,7 @@
 
 ### D-011 · 响应体读取期间的取消被误报为 `invalid_response`
 
+- **状态**: **已解决**(2026-10-18,`fix/p0-full-review`;`json()` 的 catch 先判 `isCancellationError(err) || opts.signal.aborted`,命中原样抛出,并补 AbortError 透传测试)。
 - **发现**: 2026-10-17,Task 6 交付核验。
 - **现象**: `src/model/openai.ts` 中成功响应的 `await response.json()` 若抛 `AbortError`(响应头已到、体读取阶段被取消),被 `catch` 统一包装为 `ModelResponseError(code: "invalid_response")`,cause 才是 `AbortError`。同文件错误路径的 `response.text()` 抛 `AbortError` 时却原样透传,两条路径语义不一致。
 - **影响**: Task 9 主循环按错误类型区分"取消 → 落 `interrupted` + `done(aborted)`"与"模型响应非法 → 终止错";此场景会被记成后者,取消被误报为协议错误。
@@ -96,6 +97,7 @@
 
 ### D-012 · `choices[0]` 非对象被静默当作空成功
 
+- **状态**: **已解决**(2026-10-18,`fix/p0-full-review`;校验 `choices[0]` 与 `message` 的元素形状,畸形响应抛 `invalid_response`,并补 `null`/数组/字符串/message null 用例)。
 - **发现**: 2026-10-17,Task 6 交付核验。
 - **现象**: `{"choices":[null]}` 或 `{"choices":["bad"]}` 返回 `{ content: "", toolCalls: [], truncatedByMaxTokens: false }`,不抛错。`21b8e63` 已把「`choices` 缺失/非数组/空数组」判为 `invalid_response`,但元素级未校验。
 - **影响**: 网关畸形响应被伪装成"模型正常地没说话",主循环会以 `no_tool_calls` 正常终止并写入日志——违背 R3 诚实原则,且故障被掩盖。
@@ -120,6 +122,7 @@
 
 ### D-015 · `opts.signal` 是否传给 `fetch` 无断言看守
 
+- **状态**: **已解决**(2026-10-18,`fix/p0-full-review`;新增断言 `init.signal === opts.signal`)。
 - **发现**: 2026-10-17,Task 6 交付核验。
 - **现象**: 变异探针删除 `fetch(...)` 中的 `signal: opts.signal` 后,43 条测试全绿。现有取消测试只覆盖"退避期间取消不再发下一次请求"与"fetch 自身抛 AbortError"。
 - **影响**: 真实请求进行中的取消依赖 `signal` 传到 `fetch`;若被误删,长请求(串口长读、大模型响应)将无法中断,且无测试报警。
@@ -260,6 +263,70 @@
 - **关联 N3(补偿写失败未测)**: catch/finally 的补偿 append 已用 try/catch 吞错以保留原错误,但现有测试只覆盖单次瞬时 append 失败,未覆盖补偿写本身失败(如 `tool_result_lost` 写失败、`interrupted(error)` 写失败)。影响: 补偿完整性无断言看守。触发: 会话写持续失败。建议补两条负例,断言原错误仍上抛且不抛补偿错误。
 - **关联 N5(批次交错负例)**: `buildMessages` 已实现批次未完成时拒绝 user/system/assistant,但测试只覆盖 user 插批与 system 位置;未覆盖 assistant 插批、system 插批、跨批次 parent、批次完成后的孤立 `tool_result`。影响: 交错回归可能漏网。触发: 引入回放/并发写入方。建议补对应负例。
 
+### D-031 · 模型响应体无大小上限
+
+- **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
+- **现象**: `src/model/openai.ts` 对成功响应直接 `await response.json()`,不检查 `Content-Length`,也没有流式字节上限;响应体始终整体驻留内存。
+- **影响**: 异常或恶意网关可返回超大 JSON 耗尽内存,长时间运行的嵌入式会话可能被单个响应拖垮。
+- **触发升级条件**: 接入不可信网关;出现响应体导致的内存异常;需要限制单次响应开销。
+- **修复建议**: 读取时累计字节数,超上限即取消并抛 `ModelResponseError`;或在请求前用 `Content-Length` 预检,并补上限边界测试。
+
+### D-032 · 模型请求无超时
+
+- **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
+- **现象**: `fetch` 只传 `opts.signal`,没有请求级超时;工具管线有 `timeoutMs`,模型请求没有对应机制。
+- **影响**: 网关接受连接后长期不返回时,主循环会无限等待(除非调用方主动 abort),无人值守场景不可用。
+- **触发升级条件**: 真实网关出现挂起;需要长时间无人值守运行;出现无法解释的会话停滞。
+- **修复建议**: 为模型请求增加可配置超时,超时映射为可重试或终止错误(需固定语义),并补「挂起 → 超时」测试。
+
+### D-033 · token 预算不计 tool_calls
+
+- **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
+- **现象**: `heuristicCountTokens` 只累加 `message.content.length`;assistant 消息的 `tool_calls` 名称与参数、以及回填的工具调用结构不计入预算。
+- **影响**: 工具密集会话的预算被系统性低估,可能直到真实上下文超限才暴露。
+- **触发升级条件**: 出现上下文超限;工具调用占比高的会话预算明显偏离 `usage`;引入 usage 锚定校准。
+- **修复建议**: 将 `tool_calls[].function.name/arguments` 按序列化长度计入估算,或在 usage 锚定时按实际值校准。
+
+### D-034 · 文本截断可能切断代理对
+
+- **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
+- **现象**: `src/tools/pipeline.ts` 的 `truncateText` 按 UTF-16 code unit 直接 `slice`,当截断点落在代理对中间时会留下孤立代理字符;`MAX_TEXT_CHARS` 与 200/2000 的出口截断均受影响。
+- **影响**: 含 emoji 或扩展 CJK 的工具输出被截断后,日志/JSON 可能出现替换字符或编码异常。
+- **触发升级条件**: 真实工具输出含 emoji/扩展 CJK 且触发截断;下游对文本编码做严格校验。
+- **修复建议**: 截断时检测 `charCodeAt(max - 1)` 是否为高代理,若是则回退一位;补代理对边界测试。
+
+### D-035 · 会话 append 原子性与初始化回滚不完整
+
+- **发现**: 2026-10-18,`fix/p0-full-review` 全量复核;关联 D-003、D-030。
+- **现象**: `append` 通过队列追加 JSONL,无 `fsync`,进程崩溃或断电可能留下半行;初始化阶段 `systemPrompt`/首条 `user` 写入失败不进入统一 `interrupted(error)` 出口,回滚分支覆盖也不完整。
+- **影响**: 会话日志可能不可回放或缺少终止原因,违背「日志是唯一事实源」的审计要求。
+- **触发升级条件**: 真实断电/强杀/磁盘满;多进程并发写同一会话;消费者依赖日志还原终止原因。
+- **修复建议**: 写入后 `fsync` 或采用临时文件 + rename;启动时校验并隔离坏尾行;把初始化写入纳入统一错误出口并补失败回滚测试。
+
+### D-036 · 4xx 未细分 408/409/425
+
+- **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
+- **现象**: `src/model/openai.ts` 将所有 4xx(429 除外)归为不可重试的 `ModelFatalError(api_4xx)`;408/409/425 等本可重试的状态同样立即终止。
+- **影响**: 网关短暂过载或请求过早时无法自动恢复,会话以非预期 4xx 失败结束。
+- **触发升级条件**: 网关返回 408/409/425;出现需要重试的 4xx 故障;扩展错误码分类。
+- **修复建议**: 明确 4xx 状态 → 可重试/不可重试映射表,将 408/409/425 纳入重试集合,并补状态矩阵测试。
+
+### D-037 · tool call type/content 校验缺失
+
+- **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
+- **现象**: 适配器只校验 `tool_calls[].id` 与 `function.name` 为字符串;不校验 `type === "function"`、`function.arguments` 的原始类型,`message.content` 非字符串时静默转空字符串。
+- **影响**: 畸形 tool call 可能被当作正常调用执行;网关字段类型漂移被 fail-soft 掩盖,难以诊断。
+- **触发升级条件**: 网关返回非 `function` 类型 tool call;content 类型漂移;需要严格协议合规审计。
+- **修复建议**: 校验 `type` 与 `function` 形状,对非法形状抛 `invalid_response`;content 非字符串时落明确 `status` 事件而非静默替换。
+
+### D-038 · `invalid_json` marker 形状可能被模型输出误判
+
+- **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
+- **现象**: `src/context/build.ts` 与 `src/loop/query.ts` 通过 `value.error === "invalid_json" && typeof value.raw === "string"` 识别内部 marker;模型真实输出的工具参数若恰好是同一形状,会被误判为解析失败 marker。
+- **影响**: 正常工具参数可能被绕过或改写成错误回填,行为与模型意图不一致;该形状也可被输入构造利用。
+- **触发升级条件**: 模型输出该形状参数;工具参数来自不可信来源;需要区分内部标记与模型数据。
+- **修复建议**: 使用不可伪造的内部标识(独立字段、品牌化对象或仅在解析失败路径生成并携带校验标记),避免仅靠形状判别。
+
 ---
 
 ## 变更记录
@@ -278,3 +345,4 @@
 | 2026-10-18 | Task 9 第三轮红队审查:录入 D-027(无 usage 时 `maxCostUsd` 静默失效)、D-028(marker raw 无上限)、D-029(assistant 重复 tool call id 投影未拦截) |
 | 2026-10-18 | Task 9 第四轮整合审查:录入 D-030(初始化 append 失败不落 `interrupted(error)`),N3(补偿写失败未测)与 N5(批次交错负例)并入;`pricePerMillion` 在 config schema 增加非负有限校验 |
 | 2026-10-18 | Task 9 交付核验:D-029 升级为阻塞并**修复**(重复 tool call id 会使会话永久不可回放;query 落日志前拒绝 + buildMessages 二次守卫);补齐乱序 tool_result 投影断言 |
+| 2026-10-18 | `fix/p0-full-review` 全量复核:修复 C1/C2/C3/I3/I7/I9/I6/D15;录入 D-031 ~ D-038(响应体上限、请求超时、tool_calls 预算、代理对截断、会话原子性、4xx 细分、tool call 校验、marker 形状) |

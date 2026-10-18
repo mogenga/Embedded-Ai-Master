@@ -125,6 +125,7 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
         try {
           return await response.json() as Record<string, any>;
         } catch (err) {
+          if (isCancellationError(err) || opts.signal.aborted) throw err;
           throw new ModelResponseError("Model API returned invalid JSON", err);
         }
       }, retryConfig);
@@ -136,7 +137,16 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
         throw new ModelResponseError("Model API returned no choices");
       }
       const choice = data.choices[0];
-      const message = choice?.message;
+      if (choice === null || typeof choice !== "object" || Array.isArray(choice)) {
+        throw new ModelResponseError("Model API returned an invalid choice");
+      }
+      const message = choice.message;
+      if (
+        message !== undefined
+        && (message === null || typeof message !== "object" || Array.isArray(message))
+      ) {
+        throw new ModelResponseError("Model API returned an invalid message");
+      }
       const rawToolCalls = message?.tool_calls;
       if (rawToolCalls !== undefined && rawToolCalls !== null && !Array.isArray(rawToolCalls)) {
         throw new ModelResponseError("Model API returned malformed tool_calls");

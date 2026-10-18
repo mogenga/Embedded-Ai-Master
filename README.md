@@ -120,7 +120,10 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 
 - 超时只保证管线返回，不保证工具真正停止（D-022）。
 - 网关不返回 `usage` 时 `maxCostUsd` 无法生效（D-027）。
-- token 估算按 UTF-16 字符数 / 4，CJK 场景偏低（D-005）。
+- token 估算按 UTF-16 字符数 / 4，CJK 场景偏低（D-005）；且不计 `tool_calls` 参数（D-033）。
+- 模型响应体无大小上限，模型请求无请求级超时（D-031、D-032）。
+- 会话 append 无 `fsync`，断电或强杀可能留下半行（D-035）。
+- 4xx 除 429 外均不重试，408/409/425 未细分（D-036）。
 - 工具 JSON Schema 可能携带 `$schema`，严格网关兼容性待 live 验证（D-019）。
 
 ## 设计文档
