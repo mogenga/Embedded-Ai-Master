@@ -48,6 +48,24 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 const tempDirs: string[] = [];
 
+function detectFileSymlinkSupport(): boolean {
+  const dir = mkdtempSync(path.join(tmpdir(), "session-persistence-symlink-probe-"));
+  try {
+    const target = path.join(dir, "target.txt");
+    writeFileSync(target, "probe", "utf8");
+    symlinkSync(target, path.join(dir, "link.txt"), "file");
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EPERM" || code === "EACCES" || code === "ENOTSUP") return false;
+    throw error;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const symlinkSupported = detectFileSymlinkSupport();
+
 function makeTempDir(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "session-persistence-"));
   tempDirs.push(dir);
@@ -131,7 +149,7 @@ describe("readSessionDir", () => {
     expect(captureCorruption(() => readSessionDir(dir)).code).toBe("invalid_header");
   });
 
-  it("header 为符号链接 → invalid_header 且不跟随", () => {
+  it.skipIf(!symlinkSupported)("header 为符号链接 → invalid_header 且不跟随", () => {
     const dir = makeTempDir();
     const realHeader = path.join(makeTempDir(), "real-header.json");
     writeFileSync(realHeader, `${JSON.stringify(defaultHeader())}\n`, "utf8");
@@ -155,7 +173,7 @@ describe("readSessionDir", () => {
     expect(error.detail).toMatchObject({ file: "header.json" });
   });
 
-  it("日志为符号链接 → invalid_event_line 且不跟随", () => {
+  it.skipIf(!symlinkSupported)("日志为符号链接 → invalid_event_line 且不跟随", () => {
     const dir = makeTempDir();
     const realLog = path.join(makeTempDir(), "real-log.jsonl");
     writeFileSync(realLog, `${JSON.stringify(makeEvent(0))}\n`, "utf8");
@@ -612,7 +630,7 @@ describe("forkSession", () => {
     expect(existsSync(targetDir)).toBe(false);
   });
 
-  it("targetDir 经符号链接落在源目录内 → invalid_target 且不写文件", async () => {
+  it.skipIf(!symlinkSupported)("targetDir 经符号链接落在源目录内 → invalid_target 且不写文件", async () => {
     const { dir, session } = await makeSource();
     await session.append({ type: "user", payload: { content: "u" } });
     const inner = path.join(dir, "inner");
@@ -627,7 +645,7 @@ describe("forkSession", () => {
     expect(existsSync(targetDir)).toBe(false);
   });
 
-  it("fork 源目录为符号链接 → invalid_target 且不写目标", async () => {
+  it.skipIf(!symlinkSupported)("fork 源目录为符号链接 → invalid_target 且不写目标", async () => {
     const { dir, session } = await makeSource();
     await session.append({ type: "user", payload: { content: "u" } });
     const link = path.join(makeTempDir(), "source-link");
@@ -744,7 +762,7 @@ describe("forkSession", () => {
     expect(existsSync(path.join(targetDir, "artifacts"))).toBe(false);
   });
 
-  it("artifact 符号链接指向源目录外 → 不复制并按缺失标记", async () => {
+  it.skipIf(!symlinkSupported)("artifact 符号链接指向源目录外 → 不复制并按缺失标记", async () => {
     const { dir, session } = await makeSource();
     mkdirSync(path.join(dir, "artifacts"), { recursive: true });
     const outside = path.join(makeTempDir(), "outside.txt");
@@ -805,7 +823,7 @@ describe("forkSession", () => {
     const { dir, session } = await makeSource();
     await session.append({ type: "user", payload: { content: "u" } });
     const targetDir = path.join(makeTempDir(), "fork");
-    fsFaults.writeFile = (file) => file.endsWith("header.json.tmp");
+    fsFaults.writeFile = (file) => file.includes("header.json.") && file.endsWith(".tmp");
 
     await expect(forkSession(dir, 0, { targetDir, id: "fork" })).rejects.toThrow("write boom");
     expect(existsSync(targetDir)).toBe(false);

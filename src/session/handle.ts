@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { appendFile, lstat, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SessionCorruptionError } from "./errors.js";
@@ -118,9 +119,9 @@ export async function writeHeaderAtomic(
   header: SessionHeader,
 ): Promise<SessionHeader> {
   const next = deepFreeze({ ...header });
-  const tmpPath = `${headerPath}.tmp`;
+  const tmpPath = `${headerPath}.${randomUUID()}.tmp`;
   try {
-    await writeFile(tmpPath, `${JSON.stringify(next)}\n`, "utf8");
+    await writeFile(tmpPath, `${JSON.stringify(next)}\n`, { encoding: "utf8", flag: "wx" });
     await rename(tmpPath, headerPath);
   } catch (error) {
     await rm(tmpPath, { force: true }).catch(() => undefined);

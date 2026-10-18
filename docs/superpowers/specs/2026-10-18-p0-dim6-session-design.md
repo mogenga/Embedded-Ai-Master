@@ -173,6 +173,10 @@ forkSession(
 全部单测, 不触网; 临时目录 `mkdtemp` + `afterEach` 清理。
 
 - header: create open → close closed(原子写); 重复 close 幂等; resume closed 目录后状态 open。
+- header 临时文件: 预置 `header.json.tmp` 符号链接指向外部文件时, close 成功后外部文件不变、`header.json` 正常且无随机 tmp 残留; rename 失败时随机 tmp 被清理。
+- symlink 与 payload: `header.json`/日志/`readSessionFile` 为符号链接 → 对应 `SessionCorruptionError`; `payload` 为 null/数组/字符串/缺失 → `invalid_event_line`; 无法创建符号链接的环境(如 Windows 无权限)相关用例 `skipIf`。
+- resume 恢复幂等/补偿: interrupted 写入失败 → 抛原错误、header 保持原 status、日志无 interrupted; 再次 resume 补 interrupted、header open、`buildMessages` 成功; 重复 resume 不重复补。
+- fork 路径边界: target 经符号链接落入源目录 → `invalid_target`; 源目录为符号链接 → `invalid_target`; artifact 符号链接指向源目录外 → 不复制并标记 `artifactMissing`。
 - resume: 正常恢复续写; seq 连续; 坏 header/坏行/seq 跳号/未知类型 → `SessionCorruptionError` 对应 code; 空目录 → 错; runSession `resume:true` 缺 sessionDir → 错; model 不一致 → `SessionResumeError`; systemPrompt 不一致 → 错。
 - fork: `atSeq` 使前缀可被 `buildMessages` 投影时成功(含 tool_result/usage/user/无工具轮 assistant 前缀); 前缀不可投影(批中 usage、部分 result、未闭合批次)、越界/负数/非整数 → `SessionForkError`; 前缀事件与 parent 保留; 新 header.forkedFrom; 原会话追加不受影响; targetDir 非空 → 错; 被引用 artifact 复制并重写路径, 缺失/越界时 `artifactMissing`。
 - rollover: 阈值 1KB, 写入多事件产生 v1/v2; 读取合并顺序与 seq 正确; 旧文件内容不变。
@@ -193,6 +197,6 @@ forkSession(
 
 - `SessionCorruptionError`/`SessionForkError` 的类名与 code 字面量(需稳定, 测试钉死)。
 - rollover 的字节计数实现(内存计数 vs `stat`); 倾向内存计数 + 首次 `stat` 校准。
-- header 原子写的临时文件命名。
+- header 原子写的临时文件命名(已定: `header.json.<randomUUID()>.tmp` + `wx`, 不跟随预置链接)。
 - fork 的 `targetDir` 缺省是否使用 `HARNESS_HOME`(倾向是, 但接口允许注入以避免测试依赖全局)。
 - 同一目录跨进程锁(P0 不做, 登记 deferred)。

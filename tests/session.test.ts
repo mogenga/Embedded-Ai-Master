@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -54,10 +55,34 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 
 const tempDirs: string[] = [];
 
+function detectFileSymlinkSupport(): boolean {
+  const dir = mkdtempSync(path.join(tmpdir(), "session-symlink-probe-"));
+  try {
+    const target = path.join(dir, "target.txt");
+    writeFileSync(target, "probe", "utf8");
+    symlinkSync(target, path.join(dir, "link.txt"), "file");
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EPERM" || code === "EACCES" || code === "ENOTSUP") return false;
+    throw error;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const symlinkSupported = detectFileSymlinkSupport();
+
 function makeTempDir(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "session-test-"));
   tempDirs.push(dir);
   return dir;
+}
+
+function headerTempFiles(dir: string): string[] {
+  return readdirSync(dir).filter(
+    (name) => name.startsWith("header.json.") && name.endsWith(".tmp"),
+  );
 }
 
 afterEach(() => {
@@ -154,6 +179,25 @@ describe("会话持久化", () => {
     writeFileSync(file, '{"seq":0}\n{oops}\n', "utf8");
 
     expect(() => readSessionFile(file)).toThrow();
+  });
+
+  it.skipIf(!symlinkSupported)("readSessionFile 拒绝符号链接", () => {
+    const external = path.join(makeTempDir(), "external.jsonl");
+    writeFileSync(external, "", "utf8");
+    const link = path.join(makeTempDir(), "session.v1.jsonl");
+    symlinkSync(external, link, "file");
+
+    let caught: unknown;
+    try {
+      readSessionFile(link);
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(SessionCorruptionError);
+    expect(caught).toMatchObject({
+      code: "invalid_event_line",
+      detail: { file: "session.v1.jsonl" },
+    });
   });
 
   it("目标会话已存在时拒绝创建且不覆盖原始数据", async () => {
@@ -281,7 +325,7 @@ describe("会话持久化", () => {
     expect(readSessionFile(path.join(dir, "session.v1.jsonl"))).toEqual([event]);
   });
 
-  it("append 当前日志为符号链接 → SessionCorruptionError 且不写外部文件", async () => {
+  it.skipIf(!symlinkSupported)("append 当前日志为符号链接 → SessionCorruptionError 且不写外部文件", async () => {
     const dir = makeTempDir();
     const session = await createSession(dir);
     const logPath = path.join(dir, "session.v1.jsonl");
@@ -435,6 +479,23 @@ describe("会话持久化", () => {
     };
     expect(onDisk.status).toBe("closed");
     expect(session.header.status).toBe("closed");
+    expect(headerTempFiles(dir)).toEqual([]);
+  });
+
+  it.skipIf(!symlinkSupported)("close 不跟随预置 header.json.tmp 符号链接", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    const external = path.join(makeTempDir(), "external-header.txt");
+    writeFileSync(external, "external", "utf8");
+    symlinkSync(external, path.join(dir, "header.json.tmp"), "file");
+
+    await session.close();
+
+    expect(readFileSync(external, "utf8")).toBe("external");
+    expect(
+      (JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as { status: string }).status,
+    ).toBe("closed");
+    expect(headerTempFiles(dir)).toEqual(["header.json.tmp"]);
   });
 
   it("close 原子写失败时拒绝且磁盘与内存 header 保持 open", async () => {
@@ -452,7 +513,7 @@ describe("会话持久化", () => {
     expect(readFileSync(path.join(dir, "header.json"), "utf8")).toBe(headerBefore);
     expect((JSON.parse(headerBefore) as { status: string }).status).toBe("open");
     expect(session.header.status).toBe("open");
-    expect(existsSync(path.join(dir, "header.json.tmp"))).toBe(false);
+    expect(headerTempFiles(dir)).toEqual([]);
   });
 
   it("close 后 append 拒绝", async () => {
@@ -612,7 +673,7 @@ describe("会话持久化", () => {
     expect(
       (JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as { status: string }).status,
     ).toBe("closed");
-    expect(existsSync(path.join(dir, "header.json.tmp"))).toBe(false);
+    expect(headerTempFiles(dir)).toEqual([]);
   });
 
   it("usageTotals 累加并忽略缺失字段、非有限值与负值", async () => {

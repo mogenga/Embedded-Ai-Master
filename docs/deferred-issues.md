@@ -413,6 +413,22 @@
 - **触发升级条件**: 需要严格的日志完整性/审计证明;出现跨代缺档导致的断点续跑或定位错误;引入日志同步/备份。
 - **修复建议**: 读取时校验代编号从 1 连续到最大代,缺档抛 `SessionCorruptionError`(新增专用 code 或复用 `invalid_event_line`),并补「只有 v2」「v1+v3」等缺档测试。
 
+### D-049 · create/resume 允许目录符号链接,与 fork 拒绝源目录链接口径不一致
+
+- **发现**: 2026-10-18,最终加固审查。
+- **现象**: `createSession`/`resumeSession` 通过 `path.resolve` + `stat` 跟随目录符号链接,允许在链接指向的真实目录中创建/读取会话;`forkSession` 则显式 `lstat` 源目录并拒绝符号链接(`invalid_target`)。同一会话目录经链接访问时,create/resume 可用而 fork 不可用。
+- **影响**: 行为不一致会让调用方难以判断链接目录是否是受支持输入;若链接在 create/resume 期间被替换,实际读写位置可能与调用方预期不同,也削弱 fork 边界检查的可解释性。
+- **触发升级条件**: CLI/UI 允许用户指定会话目录;需要统一链接语义(一律拒绝或一律解析);出现链接目录被替换导致的写入位置偏差。
+- **修复建议**: 明确并统一策略——推荐 create/resume 与 fork 一致,对目录本身 `lstat` 拒绝符号链接;或全部改为 `realpath` 后按真实目录工作并在 header 记录,同时补三入口一致性的测试。
+
+### D-050 · payload 非对象 fail-closed 后,含 `payload:null` 的旧日志无法读取
+
+- **发现**: 2026-10-18,最终加固审查。
+- **现象**: 第二轮修复后 `readSessionDir` 对 `payload` 非对象(含 `null`、数组、字符串、缺失)统一抛 `SessionCorruptionError("invalid_event_line")`。旧版本可能已写出 `payload:null` 或缺 `payload` 的 `usage` 事件,这类日志升级后从「可读取、`usageTotals` 按 0 跳过」变为整份会话不可读。
+- **影响**: 兼容性回退:旧日志无法 resume/回放,只能人工修复或降级读取;这是有意的 fail-closed 收紧,但当前没有迁移/告警路径。
+- **触发升级条件**: 需要读取历史会话;出现旧日志因 `payload:null` 无法恢复的事故;引入日志版本/迁移机制。
+- **修复建议**: 明确日志 schema 版本并在读取时区分「旧版可容忍」与「新版必须对象」;或提供一次性修复工具把非对象 payload 归一为 `{}` 并记录迁移标记;至少在错误信息中提示兼容性变更。
+
 ---
 
 ## 变更记录
@@ -440,3 +456,4 @@
 | 2026-10-18 | 维度6 Task8 收尾:复核 D-039 ~ D-044 均仍为未解决,描述与当前实现一致;录入 D-045(checkpoint.turn 每次 query 从 1 重编号、resume 后与历史重复)、D-046(无主错误时 close 异常上抛分支缺真实路径测试) |
 | 2026-10-18 | 第一轮整体审查修复:fork 边界改为前缀可投影;resume 增加崩溃尾部恢复;统一 header 校验;D-042 扩展记录越界/缺失共用 artifactMissing;D-046 补充 close 失败不重试语义 |
 | 2026-10-18 | 第二轮红队修复 C-1/I-1:读取与 append 增加 lstat 普通文件/非链接校验;resume 崩溃恢复改为先 append 后写 header open 并支持失败回滚与幂等补 interrupted;fork source/target/artifact 增加 realpath 边界;录入 D-047(TOCTOU/junction/短名)、D-048(代文件不连续仍被接受);D-040 扩展记录 realpath 接线与残余缺口 |
+| 2026-10-18 | 最终加固:header 临时文件改为 `header.json.<uuid>.tmp` + `wx`,避免预置链接写入越界;补 `readSessionFile` symlink 直达用例与 Windows 无权限 skipIf;design §5 补 symlink/payload/恢复幂等/realpath 条目;录入 D-049(create/resume 跟随目录链接与 fork 不一致)、D-050(payload 非对象 fail-closed 的旧日志兼容性影响);dev-notes 明确恢复补偿分支为防御性 |
