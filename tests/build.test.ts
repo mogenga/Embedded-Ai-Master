@@ -27,7 +27,7 @@ describe("buildMessages 投影重组", () => {
 
     const messages = buildMessages(events);
 
-    expect(messages).toEqual([
+    expect(messages).toStrictEqual([
       { role: "system", content: "SYS" },
       { role: "user", content: "hello" },
       {
@@ -50,7 +50,7 @@ describe("buildMessages 投影重组", () => {
     ]);
 
     expect(messages[0]).toMatchObject({ role: "assistant", content: "我先调用工具" });
-    expect(messages[0].tool_calls).toEqual([
+    expect(messages[0].tool_calls).toStrictEqual([
       { id: "c1", type: "function", function: { name: "echo", arguments: '{"text":"hi"}' } },
     ]);
   });
@@ -72,7 +72,7 @@ describe("buildMessages 投影重组", () => {
       '{"text":"a"}',
       '{"text":"b"}',
     ]);
-    expect(messages[1].tool_calls).toEqual([]);
+    expect(messages[1].tool_calls).toStrictEqual([]);
   });
 
   it("invalid_json 标记的 toolCalls 回填原 raw 字符串", () => {
@@ -95,15 +95,15 @@ describe("buildMessages 投影重组", () => {
       mk(4, "interrupted", { reason: "aborted" }),
     ]);
 
-    expect(messages).toEqual([{ role: "user", content: "hi" }]);
+    expect(messages).toStrictEqual([{ role: "user", content: "hi" }]);
   });
 
   it("未知 type 事件抛错,不静默丢弃", () => {
     expect(() => buildMessages([mk(0, "mystery" as EventType, { content: "x" })])).toThrow();
   });
 
-  it("tool_call 类型不属于投影输入并抛错", () => {
-    expect(() => buildMessages([mk(0, "tool_call", { id: "c1" })])).toThrow();
+  it("tool_call 类型事件显式丢弃", () => {
+    expect(buildMessages([mk(0, "tool_call", { id: "c1" })])).toStrictEqual([]);
   });
 
   it("system/user 的 content 非字符串时抛错", () => {
@@ -173,15 +173,39 @@ describe("buildMessages 投影重组", () => {
     ).toThrow();
   });
 
-  it("parent 乱序也按 seq 解析归属", () => {
+  it("parent 按 seq 解析并允许 seq 间隔", () => {
     const messages = buildMessages([
-      mk(2, "tool_result", { id: "c1", ok: true, text: "x" }, 1),
-      mk(1, "assistant", { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] }),
       mk(0, "user", { content: "hi" }),
+      mk(5, "assistant", { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] }),
+      mk(9, "tool_result", { id: "c1", ok: true, text: "x" }, 5),
     ]);
 
-    expect(messages.map((message) => message.role)).toEqual(["tool", "assistant", "user"]);
-    expect(messages[0]).toMatchObject({ role: "tool", tool_call_id: "c1", content: "x" });
+    expect(messages.map((message) => message.role)).toStrictEqual(["user", "assistant", "tool"]);
+    expect(messages[2]).toStrictEqual({ role: "tool", tool_call_id: "c1", content: "x" });
+  });
+
+  it("tool_result 的 parent seq 必须先于自身", () => {
+    expect(() =>
+      buildMessages([
+        mk(2, "assistant", { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] }),
+        mk(1, "tool_result", { id: "c1", text: "x" }, 2),
+      ]),
+    ).toThrow();
+    expect(() =>
+      buildMessages([
+        mk(1, "assistant", { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] }),
+        mk(1, "tool_result", { id: "c1", text: "x" }, 1),
+      ]),
+    ).toThrow();
+  });
+
+  it("tool_result 的 id 必须属于 parent 的 toolCalls", () => {
+    expect(() =>
+      buildMessages([
+        mk(0, "assistant", { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] }),
+        mk(1, "tool_result", { id: "c2", text: "x" }, 0),
+      ]),
+    ).toThrow();
   });
 
   it("不修改输入事件", () => {

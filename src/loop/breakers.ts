@@ -41,7 +41,8 @@ export function assertBreakers(
 
 export function computeCostUsd(usage: TokenUsage, price?: PricePerMillion): number {
   if (price === undefined) return 0;
-  const cached = usage.cachedTokens ?? 0;
+  const rawCached = usage.cachedTokens ?? 0;
+  const cached = Math.min(Math.max(rawCached, 0), usage.promptTokens);
   const uncached = usage.promptTokens - cached;
   const cachedPrice = price.cachedInput ?? price.input;
   return (uncached * price.input + cached * cachedPrice + usage.completionTokens * price.output) / 1_000_000;

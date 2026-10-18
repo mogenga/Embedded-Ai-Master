@@ -250,6 +250,36 @@ describe("query 主循环", () => {
     expect(session.events().filter((event) => event.type === "usage")).toHaveLength(1);
   });
 
+  it("cost 恰等于 maxCostUsd 时熔断", async () => {
+    const provider = scriptedProvider([
+      reply("x", [echoCall("c1")], false, { promptTokens: 1, completionTokens: 0 }),
+    ]);
+    const { ctx } = await makeCtx(provider, {
+      pricePerMillion: { input: 1_000_000, output: 1_000_000 },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10, maxCostUsd: 1 }));
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "max_cost_usd" });
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  it("两轮各自低于阈值、累计超阈值 → max_cost_usd", async () => {
+    const usage = { promptTokens: 1, completionTokens: 0 };
+    const provider = scriptedProvider([
+      reply("a", [echoCall("c1")], false, usage),
+      reply("b", [echoCall("c2")], false, usage),
+    ]);
+    const { ctx } = await makeCtx(provider, {
+      pricePerMillion: { input: 1_000_000, output: 1_000_000 },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10, maxCostUsd: 1.5 }));
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "max_cost_usd" });
+    expect(provider.calls).toHaveLength(2);
+  });
+
   it("maxCostUsd 未配 → 只计 token 不熔断", async () => {
     const usage = { promptTokens: 1000, completionTokens: 1000 };
     const provider = scriptedProvider([
@@ -288,10 +318,24 @@ describe("query 主循环", () => {
     const withoutCachedPrice = computeCostUsd(usage, { input: 1, output: 2 });
     const withCachedPrice = computeCostUsd(usage, { input: 1, output: 2, cachedInput: 0.1 });
 
-    expect(withoutCachedPrice).toBeCloseTo(200 / 1_000_000);
-    expect(withCachedPrice).toBeCloseTo(164 / 1_000_000);
+    expect(withoutCachedPrice).toBeCloseTo(200 / 1_000_000, 12);
+    expect(withCachedPrice).toBeCloseTo(164 / 1_000_000, 12);
     expect(withoutCachedPrice).toBeGreaterThan(withCachedPrice);
     expect(computeCostUsd(usage)).toBe(0);
+  });
+
+  it("cachedTokens 越界时钳制到 [0, promptTokens]", () => {
+    const huge = computeCostUsd(
+      { promptTokens: 10, completionTokens: 0, cachedTokens: 100 },
+      { input: 1, output: 1, cachedInput: 10 },
+    );
+    const negative = computeCostUsd(
+      { promptTokens: 10, completionTokens: 0, cachedTokens: -5 },
+      { input: 1, output: 1, cachedInput: 10 },
+    );
+
+    expect(huge).toBeCloseTo(100 / 1_000_000, 12);
+    expect(negative).toBeCloseTo(10 / 1_000_000, 12);
   });
 
   it("usage 事件按字段落日志,cachedTokens 缺省时不写该键", async () => {
@@ -342,6 +386,82 @@ describe("query 主循环", () => {
     ]);
   });
 
+  it("取消时已声明的 toolCalls 全部补 tool_aborted 结果", async () => {
+    let executed = 0;
+    const spyTool: ToolDef<{ text: string }> = {
+      name: "echo",
+      description: "执行计数",
+      schema: z.object({ text: z.string() }),
+      annotations: { readOnly: true },
+      execute: async (input) => {
+        executed += 1;
+        return { isError: false, code: "ok", message: "", text: input.text };
+      },
+    };
+    const controller = new AbortController();
+    const provider = scriptedProvider(
+      [reply("调用两个", [echoCall("c1", "a"), echoCall("c2", "b")])],
+      () => controller.abort(),
+    );
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([spyTool]),
+      signal: controller.signal,
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(executed).toBe(0);
+    expect(events.map((event) => event.kind)).toEqual([
+      "model_message",
+      "tool_use",
+      "tool_use",
+      "interrupted",
+      "done",
+    ]);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
+
+    const assistant = session.events().find((event) => event.type === "assistant");
+    const logged = session.events().filter((event) => event.type === "tool_result");
+    expect(logged).toHaveLength(2);
+    expect(logged.map((event) => event.payload)).toStrictEqual([
+      {
+        id: "c1",
+        ok: false,
+        text: "tool aborted before execution",
+        code: "tool_aborted",
+      },
+      {
+        id: "c2",
+        ok: false,
+        text: "tool aborted before execution",
+        code: "tool_aborted",
+      },
+    ]);
+    expect(logged.map((event) => event.parent)).toStrictEqual([
+      assistant?.seq,
+      assistant?.seq,
+    ]);
+
+    const messages = buildMessages(session.events());
+    expect(messages.map((message) => message.role)).toStrictEqual([
+      "user",
+      "assistant",
+      "tool",
+      "tool",
+    ]);
+    expect(messages[1].tool_calls?.map((call) => call.id)).toStrictEqual(["c1", "c2"]);
+    expect(messages[2]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "tool aborted before execution",
+    });
+    expect(messages[3]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c2",
+      content: "tool aborted before execution",
+    });
+  });
+
   it("模型抛 AbortError → interrupted + done(aborted)", async () => {
     const provider = scriptedProvider([new DOMException("aborted", "AbortError")]);
     const { ctx, session } = await makeCtx(provider);
@@ -364,6 +484,18 @@ describe("query 主循环", () => {
     expect(events.map((event) => event.kind)).toEqual(["interrupted", "done"]);
     expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
     expect(provider.calls).toHaveLength(0);
+    expect(session.events().map((event) => event.type)).toEqual(["user", "interrupted"]);
+  });
+
+  it("provider 在 abort 后抛普通 Error → interrupted + done(aborted)", async () => {
+    const controller = new AbortController();
+    const provider = scriptedProvider([new Error("network died")], () => controller.abort());
+    const { ctx, session } = await makeCtx(provider, { signal: controller.signal });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.map((event) => event.kind)).toEqual(["interrupted", "done"]);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
     expect(session.events().map((event) => event.type)).toEqual(["user", "interrupted"]);
   });
 

@@ -88,6 +88,11 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
         if (event.parent === undefined) {
           throw new TypeError(`tool_result event ${event.seq} must have a parent`);
         }
+        if (event.parent >= event.seq) {
+          throw new TypeError(
+            `tool_result event ${event.seq} parent ${event.parent} must precede it`,
+          );
+        }
         const parent = bySeq.get(event.parent);
         if (parent === undefined) {
           throw new TypeError(`tool_result event ${event.seq} parent ${event.parent} not found`);
@@ -97,9 +102,19 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
             `tool_result event ${event.seq} parent ${event.parent} must be an assistant event`,
           );
         }
+        const parentCalls = parent.payload.toolCalls;
+        if (
+          !Array.isArray(parentCalls) ||
+          !parentCalls.some((call) => isRecord(call) && call.id === id)
+        ) {
+          throw new TypeError(
+            `tool_result event ${event.seq} id ${id} not found in parent ${event.parent} toolCalls`,
+          );
+        }
         messages.push({ role: "tool", content: text, tool_call_id: id });
         break;
       }
+      case "tool_call":
       case "usage":
       case "checkpoint":
       case "status":

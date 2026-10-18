@@ -182,6 +182,19 @@ export async function* query(
     }
 
     if (ctx.signal.aborted) {
+      for (const call of response.toolCalls) {
+        const result: ToolResult = {
+          isError: true,
+          code: "tool_aborted",
+          message: "tool aborted before execution",
+          text: "tool aborted before execution",
+        };
+        await session.append({
+          type: "tool_result",
+          payload: toResultPayload(call.id, result),
+          parent: assistantEvent.seq,
+        });
+      }
       yield* emitInterrupted(session, "aborted");
       return;
     }
