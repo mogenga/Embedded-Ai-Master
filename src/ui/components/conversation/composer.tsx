@@ -46,13 +46,21 @@ export function Composer({
     if (!canSend || sending) return;
     const value = (field.current?.value ?? text).trim();
     if (!value) return;
-    const result = onSend?.(value);
+    setSending(true);
+    let result: void | Promise<void>;
+    try {
+      result = onSend?.(value);
+    } catch {
+      setSending(false);
+      setFailed(true);
+      return;
+    }
     if (result === undefined) {
+      setSending(false);
       clear();
       return;
     }
     setFailed(false);
-    setSending(true);
     try {
       await result;
     } catch {

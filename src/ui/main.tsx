@@ -12,6 +12,8 @@ import {
   applySessionLoaded,
   applyStreamError,
   applyStreamEvent,
+  RequestGate,
+  retryTarget,
   startLoad,
   startSessionSwitch,
 } from "./state.js";
@@ -53,9 +55,8 @@ let state: WorkbenchState = {
 
 let themeChoice: ThemeChoice = readStoredTheme();
 let dockOpen = true;
-let requestSeq = 0;
 let liveView: TranscriptView | undefined;
-let pendingRetry: () => Promise<void> = load;
+const gate = new RequestGate();
 
 function errorMessageOf(error: unknown): string {
   if (error instanceof ApiError && error.code === "invalid_response") return "接口返回内容无法解析";
@@ -97,7 +98,7 @@ function renderApp(): void {
         detailError={state.detailError}
         streamError={state.streamError}
         onRetry={() => {
-          void pendingRetry();
+          void retry();
         }}
       />
     </>,
@@ -106,39 +107,44 @@ function renderApp(): void {
 }
 
 async function load(): Promise<void> {
-  const seq = ++requestSeq;
+  const isCurrent = gate.begin();
   state = startLoad(state);
-  pendingRetry = load;
   renderApp();
   try {
     const loaded = await loadWorkbench({ fetchImpl });
-    if (seq !== requestSeq || abort.signal.aborted) return;
+    if (!isCurrent() || abort.signal.aborted) return;
     state = applyLoadSuccess(state, loaded, liveView);
     renderApp();
   } catch (error) {
-    if (seq !== requestSeq || abort.signal.aborted) return;
+    if (!isCurrent() || abort.signal.aborted) return;
     state = applyLoadFailure(state, errorMessageOf(error));
     renderApp();
   }
 }
 
 async function selectSession(id: string): Promise<void> {
-  const seq = ++requestSeq;
+  const isCurrent = gate.begin();
   state = startSessionSwitch(state);
-  pendingRetry = () => selectSession(id);
   renderApp();
   try {
     const view = await loadSessionView(id, { fetchImpl });
-    if (seq !== requestSeq || abort.signal.aborted) return;
+    if (!isCurrent() || abort.signal.aborted) return;
     state = applySessionLoaded(state, id, view);
-    liveView = undefined;
-    pendingRetry = load;
     renderApp();
   } catch (error) {
-    if (seq !== requestSeq || abort.signal.aborted) return;
-    state = applySessionFailure(state, errorMessageOf(error));
+    if (!isCurrent() || abort.signal.aborted) return;
+    state = applySessionFailure(state, id, errorMessageOf(error));
     renderApp();
   }
+}
+
+async function retry(): Promise<void> {
+  const target = retryTarget(state);
+  if (target.kind === "session" && target.id !== undefined) {
+    await selectSession(target.id);
+    return;
+  }
+  await load();
 }
 
 if (streamUrl !== undefined) {

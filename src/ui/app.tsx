@@ -135,7 +135,7 @@ export function App({
           )}
           <Composer
             onSend={onSend}
-            canSend={onSend !== undefined && canSend && connection === "ready" && !switching}
+            canSend={onSend !== undefined && canSend && connection === "ready" && !switching && !failed}
             disabledReason={
               connection === "ready"
                 ? switching

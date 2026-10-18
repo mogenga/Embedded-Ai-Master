@@ -14,10 +14,39 @@ export interface WorkbenchState {
   detailError?: string;
   switching?: boolean;
   streamError?: string;
+  viewSource?: "live" | "replay";
+  failedSessionId?: string;
+}
+
+export interface RetryTarget {
+  kind: "load" | "session";
+  id?: string;
+}
+
+export class RequestGate {
+  private seq = 0;
+
+  begin(): () => boolean {
+    const seq = ++this.seq;
+    return () => seq === this.seq;
+  }
+}
+
+export function retryTarget(state: WorkbenchState): RetryTarget {
+  return state.failedSessionId === undefined
+    ? { kind: "load" }
+    : { kind: "session", id: state.failedSessionId };
 }
 
 export function startLoad(state: WorkbenchState): WorkbenchState {
-  return { ...state, connection: "loading", errorMessage: undefined, detailError: undefined };
+  return {
+    ...state,
+    connection: "loading",
+    errorMessage: undefined,
+    detailError: undefined,
+    failedSessionId: undefined,
+    viewSource: undefined,
+  };
 }
 
 export function applyLoadSuccess(
@@ -29,6 +58,7 @@ export function applyLoadSuccess(
     ...state,
     connection: "ready",
     view: liveView ?? loaded.view,
+    viewSource: liveView === undefined ? "replay" : "live",
     sessions: loaded.sessions,
     ...(loaded.activeSessionId === undefined ? { activeSessionId: undefined } : { activeSessionId: loaded.activeSessionId }),
     kbTree: loaded.kbTree,
@@ -36,17 +66,24 @@ export function applyLoadSuccess(
     device: loaded.device,
     errorMessage: undefined,
     detailError: undefined,
+    failedSessionId: undefined,
     switching: false,
     streamError: undefined,
   };
 }
 
 export function applyLoadFailure(state: WorkbenchState, message: string): WorkbenchState {
-  return { ...state, connection: "error", errorMessage: message, switching: false };
+  return {
+    ...state,
+    connection: "error",
+    errorMessage: message,
+    failedSessionId: undefined,
+    switching: false,
+  };
 }
 
 export function startSessionSwitch(state: WorkbenchState): WorkbenchState {
-  return { ...state, switching: true, detailError: undefined };
+  return { ...state, switching: true, detailError: undefined, failedSessionId: undefined };
 }
 
 export function applySessionLoaded(
@@ -54,20 +91,33 @@ export function applySessionLoaded(
   id: string,
   view: TranscriptView,
 ): WorkbenchState {
-  return { ...state, activeSessionId: id, view, switching: false, detailError: undefined };
+  return {
+    ...state,
+    activeSessionId: id,
+    view,
+    viewSource: "replay",
+    switching: false,
+    detailError: undefined,
+    failedSessionId: undefined,
+  };
 }
 
-export function applySessionFailure(state: WorkbenchState, message: string): WorkbenchState {
-  return { ...state, switching: false, detailError: message };
+export function applySessionFailure(
+  state: WorkbenchState,
+  id: string,
+  message: string,
+): WorkbenchState {
+  return { ...state, switching: false, detailError: message, failedSessionId: id };
 }
 
 export function applyStreamEvent(state: WorkbenchState, view: TranscriptView): WorkbenchState {
+  if (state.viewSource === "replay") return state;
   return {
     ...state,
     view,
+    viewSource: "live",
     connection: "ready",
     errorMessage: undefined,
-    detailError: undefined,
     streamError: undefined,
   };
 }

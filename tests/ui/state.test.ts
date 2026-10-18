@@ -6,6 +6,8 @@ import {
   applySessionLoaded,
   applyStreamError,
   applyStreamEvent,
+  retryTarget,
+  RequestGate,
   startLoad,
   startSessionSwitch,
 } from "../../src/ui/state.js";
@@ -88,11 +90,54 @@ describe("workbench state", () => {
   });
 
   it("会话加载失败保留原 activeSessionId 并只设置详情错误", () => {
-    const state = applySessionFailure({ ...baseState(), activeSessionId: "s1", switching: true }, "会话读取失败");
+    const state = applySessionFailure(
+      { ...baseState(), activeSessionId: "s1", switching: true },
+      "s2",
+      "会话读取失败",
+    );
     expect(state.activeSessionId).toBe("s1");
     expect(state.connection).toBe("ready");
     expect(state.detailError).toBe("会话读取失败");
+    expect(state.failedSessionId).toBe("s2");
     expect(state.errorMessage).toBeUndefined();
+  });
+
+  it("重试目标优先指向失败会话，加载成功后回到全量加载", () => {
+    const failed = applySessionFailure({ ...baseState(), activeSessionId: "s1" }, "s2", "会话读取失败");
+    expect(retryTarget(failed)).toEqual({ kind: "session", id: "s2" });
+    expect(retryTarget(applySessionLoaded(failed, "s2", makeTranscriptView()))).toEqual({ kind: "load" });
+    expect(retryTarget(startLoad(failed))).toEqual({ kind: "load" });
+    expect(retryTarget(applyLoadFailure(failed, "连接失败"))).toEqual({ kind: "load" });
+  });
+
+  it("切换开始清除旧的详情错误与失败会话", () => {
+    const failed = applySessionFailure(baseState(), "s2", "会话读取失败");
+    const state = startSessionSwitch(failed);
+    expect(state.detailError).toBeUndefined();
+    expect(state.failedSessionId).toBeUndefined();
+  });
+
+  it("回放模式下实时事件不覆盖已选会话", () => {
+    const replay = applySessionLoaded(baseState(), "s1", { ...makeTranscriptView(), sessionId: "s1" });
+    const live = { ...makeTranscriptView(), sessionId: "live" };
+    expect(applyStreamEvent(replay, live)).toBe(replay);
+  });
+
+  it("实时模式下事件写入视图并清事件流错误", () => {
+    const state = applyStreamEvent({ ...baseState(), viewSource: "live", streamError: "断线" }, makeTranscriptView());
+    expect(state.viewSource).toBe("live");
+    expect(state.streamError).toBeUndefined();
+  });
+
+  it("请求门只放行最新一次请求", () => {
+    const gate = new RequestGate();
+    const first = gate.begin();
+    const second = gate.begin();
+    expect(first()).toBe(false);
+    expect(second()).toBe(true);
+    const third = gate.begin();
+    expect(second()).toBe(false);
+    expect(third()).toBe(true);
   });
 
   it("实时事件清空错误并写入视图", () => {
