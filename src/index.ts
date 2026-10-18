@@ -45,7 +45,15 @@ function assertSessionId(sessionId: string): void {
 interface ResumePlan {
   session: SessionHandle;
   systemPromptToAppend?: string;
-  cwd?: string;
+  cwd: string;
+}
+
+function sameWorkdir(left: string, right: string): boolean {
+  const normalize = (value: string): string => {
+    const resolved = path.resolve(value);
+    return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+  };
+  return normalize(left) === normalize(right);
 }
 
 async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumePlan> {
@@ -84,7 +92,7 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
   if (
     header.workdir !== undefined
     && opts.cwd !== undefined
-    && path.resolve(header.workdir) !== path.resolve(opts.cwd)
+    && !sameWorkdir(header.workdir, opts.cwd)
   ) {
     throw new SessionResumeError(
       "workdir_mismatch",
@@ -93,7 +101,7 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
     );
   }
 
-  const cwd = opts.cwd ?? header.workdir;
+  const cwd = opts.cwd ?? header.workdir ?? process.cwd();
 
   let systemPromptToAppend: string | undefined;
   if (opts.systemPrompt !== undefined) {
@@ -119,8 +127,8 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
 
   const session = await resumeSession(sessionDir);
   return systemPromptToAppend === undefined
-    ? { session, ...(cwd === undefined ? {} : { cwd }) }
-    : { session, systemPromptToAppend, ...(cwd === undefined ? {} : { cwd }) };
+    ? { session, cwd }
+    : { session, systemPromptToAppend, cwd };
 }
 
 export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
@@ -170,7 +178,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   const id = opts.sessionId ?? randomUUID();
   let session: SessionHandle;
   let systemPromptToAppend: string | undefined;
-  let runCwd: string | undefined;
+  let runCwd: string;
 
   if (resume && resumeDir !== undefined) {
     const plan = await planResume(resumeDir, opts);

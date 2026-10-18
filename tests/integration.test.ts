@@ -886,6 +886,7 @@ describe("runSession 内置工具装配", () => {
     const result = events.find((event) => event.kind === "tool_result");
     expect(result).toMatchObject({ kind: "tool_result", id: "call-fs", ok: true, code: "ok" });
     expect((result as { text: string }).text).toContain("hello fs");
+    expect((await readHeader(sessionDir)).workdir).toBe(workdir);
     expect(calls[1].body.messages).toEqual([
       { role: "user", content: "read" },
       expect.objectContaining({ role: "assistant" }),
@@ -893,18 +894,15 @@ describe("runSession 内置工具装配", () => {
     ]);
   });
 
-  it("缺省 cwd 时 header.workdir 与工具根都用 process.cwd()", async () => {
+  it("缺省 cwd 时 header.workdir 用 process.cwd()", async () => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
     const sessionDir = path.join(home, "default-cwd-tools");
-    const { impl } = mockFetch([
-      toolCallResponse("call-pkg", "fs", { op: "read", path: "package.json" }),
-      EMPTY_RESPONSE,
-    ]);
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
 
-    const events = await collect(
+    await collect(
       runSession({
-        input: "read",
+        input: "hi",
         model: "gw/flash",
         providersText: providersText(),
         sessionDir,
@@ -913,9 +911,66 @@ describe("runSession 内置工具装配", () => {
     );
 
     expect((await readHeader(sessionDir)).workdir).toBe(process.cwd());
+  });
+
+  it("resume 旧会话无 workdir 时运行 workdir 回退 process.cwd()", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "legacy-no-workdir");
+    await createSession(sessionDir, { id: "legacy-no-workdir", model: "gw/flash" });
+    const { impl } = mockFetch([
+      toolCallResponse("call-cwd", "shell", { command: 'node -e "console.log(process.cwd())"' }),
+      EMPTY_RESPONSE,
+    ]);
+
+    const events = await collect(
+      runSession({
+        input: "where",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        fetchImpl: impl,
+      }),
+    );
+
     const result = events.find((event) => event.kind === "tool_result");
-    expect(result).toMatchObject({ kind: "tool_result", ok: true, code: "ok" });
-    expect((result as { text: string }).text).toContain('"name"');
+    expect(result).toMatchObject({ kind: "tool_result", id: "call-cwd", ok: true, code: "ok" });
+    expect((result as { text: string }).text.toLowerCase()).toContain(process.cwd().toLowerCase());
+  });
+
+  it.skipIf(process.platform !== "win32")("win32 下 cwd 大小写差异不触发 workdir_mismatch", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "workdir-case");
+    const workdir = await tempDir();
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        cwd: workdir,
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    const secondFetch = mockFetch([EMPTY_RESPONSE]);
+    const events = await collect(
+      runSession({
+        input: "again",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        cwd: workdir.toUpperCase(),
+        fetchImpl: secondFetch.impl,
+      }),
+    );
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect((await readHeader(sessionDir)).workdir).toBe(workdir);
   });
 
   it("resume 时 opts.cwd 与 header.workdir 冲突 → workdir_mismatch 且不改变会话", async () => {
