@@ -1,6 +1,9 @@
 import type { ComponentChildren, JSX } from "preact";
 import { Icon } from "../../icons.js";
 import type { TranscriptEvent, TranscriptView } from "../../view/transcript.js";
+import { GuardNotice } from "./guard-notice.js";
+import { ToolCard } from "./tool-card.js";
+import { VerdictCard } from "./verdict-card.js";
 
 const AGENT_NAME = "Embedded-Ai-Master";
 const ASK_TAG = "第 0 步分流 · 一次只问一个问题";
@@ -9,9 +12,7 @@ const ASK_PREFIX = "第 0 步分流";
 type UserEvent = Extract<TranscriptEvent, { kind: "user" }>;
 type AssistantEvent = Extract<TranscriptEvent, { kind: "assistant" }>;
 type AskEvent = Extract<TranscriptEvent, { kind: "ask" }>;
-type ToolEvent = Extract<TranscriptEvent, { kind: "tool" }>;
-type VerdictEvent = Extract<TranscriptEvent, { kind: "verdict" }>;
-type GuardEvent = Extract<TranscriptEvent, { kind: "guard" }>;
+
 type InterruptedEvent = Extract<TranscriptEvent, { kind: "interrupted" }>;
 
 function renderInline(text: string): ComponentChildren {
@@ -72,23 +73,6 @@ function AskBlock({ entry }: { entry: AskEvent }): JSX.Element {
   );
 }
 
-function PlaceholderCard({ label }: { label: string }): JSX.Element {
-  return <div class="card-slot">{label}</div>;
-}
-
-function ToolPlaceholder({ entry }: { entry: ToolEvent }): JSX.Element {
-  return <PlaceholderCard label={`工具调用 · ${entry.tool.name}`} />;
-}
-
-function VerdictPlaceholder({ entry }: { entry: VerdictEvent }): JSX.Element {
-  return <PlaceholderCard label={`根因判决 · 证据 ${entry.verdict.evidence.length} 条`} />;
-}
-
-function GuardPlaceholder({ entry }: { entry: GuardEvent }): JSX.Element {
-  const { action, address, value, state } = entry.guard;
-  return <PlaceholderCard label={`安全提示 · ${action} ${address} = ${value} · ${state}`} />;
-}
-
 function InterruptedNotice({ entry }: { entry: InterruptedEvent }): JSX.Element {
   return (
     <div class="interrupted" role="status">
@@ -107,11 +91,11 @@ function renderEvent(entry: TranscriptEvent): JSX.Element {
     case "ask":
       return <AskBlock key={entry.id} entry={entry} />;
     case "tool":
-      return <ToolPlaceholder key={entry.id} entry={entry} />;
+      return <ToolCard key={entry.id} tool={entry.tool} />;
     case "verdict":
-      return <VerdictPlaceholder key={entry.id} entry={entry} />;
+      return <VerdictCard key={entry.id} verdict={entry.verdict} />;
     case "guard":
-      return <GuardPlaceholder key={entry.id} entry={entry} />;
+      return <GuardNotice key={entry.id} guard={entry.guard} />;
     case "interrupted":
       return <InterruptedNotice key={entry.id} entry={entry} />;
   }
