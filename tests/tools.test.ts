@@ -23,7 +23,14 @@ describe("ToolRegistry", () => {
     const reg = new ToolRegistry([echoTool]);
 
     expect(reg.find("echo").tool?.name).toBe("echo");
-    expect(reg.find("nope")).toEqual({});
+    expect(reg.find("nope")).toStrictEqual({});
+  });
+
+  it("空注册表 lookup 未命中且 all 为空", () => {
+    const reg = new ToolRegistry([]);
+
+    expect(reg.lookup("echo")).toBeUndefined();
+    expect(reg.all()).toEqual([]);
   });
 
   it("all 返回全部工具,且外部修改返回数组不影响注册表", () => {
@@ -74,6 +81,7 @@ describe("toModelToolSchemas", () => {
     expect(s.function.parameters).toMatchObject({
       type: "object",
       properties: { text: { type: "string" } },
+      required: ["text"],
     });
   });
 
@@ -83,13 +91,32 @@ describe("toModelToolSchemas", () => {
     expect(schemas.map((s) => s.function.name)).toEqual(["echo", "other"]);
   });
 
+  it("toModelToolSchemas([]) 返回空数组", () => {
+    expect(toModelToolSchemas([])).toEqual([]);
+  });
+
   it("不修改输入工具数组", () => {
     const tools = [echoTool, otherTool];
-    const snapshot = [...tools];
+    const fieldsBefore = tools.map((t) => ({
+      tool: t,
+      name: t.name,
+      description: t.description,
+      annotations: t.annotations,
+      schema: t.schema,
+    }));
+    const serializedBefore = JSON.stringify(tools);
 
     toModelToolSchemas(tools);
 
-    expect(tools).toEqual(snapshot);
     expect(tools).toHaveLength(2);
+    expect(JSON.stringify(tools)).toBe(serializedBefore);
+    tools.forEach((tool, index) => {
+      const before = fieldsBefore[index];
+      expect(tool).toBe(before.tool);
+      expect(tool.name).toBe(before.name);
+      expect(tool.description).toBe(before.description);
+      expect(tool.annotations).toBe(before.annotations);
+      expect(tool.schema).toBe(before.schema);
+    });
   });
 });
