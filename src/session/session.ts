@@ -14,6 +14,10 @@ function deepFreeze<T>(value: T): T {
   return value;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function toCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 }
@@ -114,7 +118,7 @@ function createHandle(
     usageTotals() {
       const totals: UsageTotals = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
       for (const event of eventList) {
-        if (event.type !== "usage") continue;
+        if (event.type !== "usage" || !isRecord(event.payload)) continue;
         totals.promptTokens += toCount(event.payload.promptTokens);
         totals.completionTokens += toCount(event.payload.completionTokens);
         totals.cachedTokens += toCount(event.payload.cachedTokens);
@@ -135,6 +139,16 @@ function createHandle(
       return closePromise;
     },
   };
+}
+
+export function openSessionHandle(
+  dir: string,
+  header: SessionHeader,
+  events: SessionEvent[],
+  _opts: { generationThresholdBytes?: number } = {},
+): SessionHandle {
+  const sessionDir = path.resolve(dir);
+  return createHandle(sessionDir, header, events, path.join(sessionDir, "session.v1.jsonl"));
 }
 
 export async function createSession(
@@ -180,7 +194,9 @@ export async function createSession(
     throw new Error(`Session already exists or initialization failed: ${String(error)}`, { cause: error });
   }
 
-  const handle = createHandle(dir, header, [], logPath);
+  const handle = openSessionHandle(dir, header, [], {
+    generationThresholdBytes: opts.generationThresholdBytes,
+  });
 
   if (opts.systemPrompt !== undefined) {
     await handle.append({ type: "system", payload: { content: opts.systemPrompt } });

@@ -303,6 +303,7 @@
 - **影响**: 会话日志可能不可回放或缺少终止原因,违背「日志是唯一事实源」的审计要求。
 - **触发升级条件**: 真实断电/强杀/磁盘满;多进程并发写同一会话;消费者依赖日志还原终止原因。
 - **修复建议**: 写入后 `fsync` 或采用临时文件 + rename;启动时校验并隔离坏尾行;把初始化写入纳入统一错误出口并补失败回滚测试。
+- **扩展**: 2026-10-18,维度6 Task3 审查。closed 会话末行缺换行时,`readSessionDir` 仍能解析,`resumeSession` 成功;后续 `append` 直接追加,与上一行粘连,再次读取报 `invalid_event_line`。已补测试钉死当前行为(`tests/session.test.ts`「closed 会话末行缺换行时 resume 仍成功续写」),未实现自动补换行或坏尾隔离,留待本项修复。
 
 ### D-036 · 4xx 未细分 408/409/425
 
@@ -329,6 +330,14 @@
 - **修复**: 适配器在解析失败分支额外置 `invalidJson: true`(模型自己输出的参数不可能带该标记,除非恰好被 JSON.parse 成带此键的对象——但那需要模型显式输出该键,且解析成功路径不会补标记);`query` 与 `buildMessages` 的 marker 判定都改为「`invalidJson === true` 且形状匹配」的双条件。`CompletionResult.toolCalls[]` 与 `AssistantPayload.toolCalls[]` 增加 `invalidJson?: boolean`;该标记不进入工具入参。
 - **测试**: `openai.test.ts` 三条 invalid_json 用例改为断言完整对象含 `invalidJson: true`,并新增「模型输出恰好形如 marker 的合法 arguments 时不标记」;`build.test.ts` 新增「未标记 invalidJson 的同形 arguments 按普通对象序列化」;`query.test.ts` 新增「模型输出形如 marker 的合法参数时照常执行工具」。变异探针:适配器永不置标记 → 4 failed,`query` 退回仅看形状 → 1 failed,`buildMessages` 退回仅看形状 → 1 failed。
 
+### D-039 · 同一会话目录并发 resume/append 无跨进程锁
+
+- **发现**: 2026-10-18,维度6 Task3 审查。
+- **现象**: `resumeSession` 只校验目录与 header 后重建 handle,不获取目录级锁;同一会话目录可被多个进程或句柄同时 resume/append,seq 来自各自内存的 `eventList.length`,可产生重复 seq 或交错行。
+- **影响**: 并发写会破坏 JSONL 的 seq 连续性,使日志无法回放;当前仅靠「同一目录只有一个活跃 handle」的约定规避。
+- **触发升级条件**: CLI/UI 支持多窗口或多进程打开同一会话;出现实际重复 seq、交错写入或读取 `invalid_event_line`/`invalid_seq`。
+- **修复建议**: 引入目录级锁文件(如 `session.lock`,`O_EXCL` 创建,带超时与陈旧锁回收),`resumeSession` 持有到 `close`;或改为单写者服务统一代理写入。
+
 ---
 
 ## 变更记录
@@ -349,3 +358,4 @@
 | 2026-10-18 | Task 9 交付核验:D-029 升级为阻塞并**修复**(重复 tool call id 会使会话永久不可回放;query 落日志前拒绝 + buildMessages 二次守卫);补齐乱序 tool_result 投影断言 |
 | 2026-10-18 | `fix/p0-full-review` 全量复核:修复 C1/C2/C3/I3/I7/I9/I6/D15;录入 D-031 ~ D-038(响应体上限、请求超时、tool_calls 预算、代理对截断、会话原子性、4xx 细分、tool call 校验、marker 形状) |
 | 2026-10-18 | 全量复核(二轮):D-038 探针证实可触发并**修复**(适配器解析失败才置 `invalidJson: true`,query/buildMessages 双条件判定);补齐三处变异探针看守 |
+| 2026-10-18 | 维度6 Task3 审查修复:录入 D-039(同目录并发 resume/append 无跨进程锁);D-035 扩展记录末行缺换行导致续写粘连;`usageTotals` 容错非对象 payload,导出 `openSessionHandle` 供 fork 复用 |

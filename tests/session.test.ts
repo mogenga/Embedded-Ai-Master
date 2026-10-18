@@ -10,13 +10,19 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createSession, readSessionFile, resumeSession } from "../src/session/session.js";
+import { readSessionDir } from "../src/session/persistence.js";
+import {
+  createSession,
+  openSessionHandle,
+  readSessionFile,
+  resumeSession,
+} from "../src/session/session.js";
 import {
   SessionCorruptionError,
   SessionForkError,
   SessionResumeError,
 } from "../src/session/errors.js";
-import type { SessionEvent } from "../src/session/types.js";
+import type { SessionEvent, SessionHeader } from "../src/session/types.js";
 
 const fsFaults = vi.hoisted(() => ({ rename: null as Error | null }));
 
@@ -222,6 +228,27 @@ describe("会话持久化", () => {
       model: "flash",
       workdir: "/w",
     });
+  });
+
+  it("openSessionHandle 以 v1 日志构造可写句柄", async () => {
+    const dir = makeTempDir();
+    const header: SessionHeader = {
+      id: "sess-open",
+      createdAt: "2026-10-18T00:00:00.000Z",
+      status: "open",
+    };
+    writeFileSync(path.join(dir, "header.json"), `${JSON.stringify(header)}\n`, "utf8");
+    writeFileSync(path.join(dir, "session.v1.jsonl"), "", "utf8");
+
+    const handle = openSessionHandle(dir, header, []);
+    const event = await handle.append({ type: "user", payload: { content: "a" } });
+    await handle.close();
+
+    expect(event.seq).toBe(0);
+    expect(readSessionFile(path.join(dir, "session.v1.jsonl"))).toEqual([event]);
+    expect(
+      (JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as { status: string }).status,
+    ).toBe("closed");
   });
 
   it("close 原子更新 status 为 closed 且幂等", async () => {
@@ -440,6 +467,62 @@ describe("会话持久化", () => {
       completionTokens: 2,
       cachedTokens: 0,
     });
+  });
+
+  it("usageTotals 跳过 payload 为 null 或缺失的 usage 事件", async () => {
+    const dir = makeTempDir();
+    writeFileSync(
+      path.join(dir, "header.json"),
+      `${JSON.stringify({
+        id: "sess-null-usage",
+        createdAt: "2026-10-18T00:00:00.000Z",
+        status: "closed",
+      })}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      path.join(dir, "session.v1.jsonl"),
+      `${JSON.stringify({
+        seq: 0,
+        ts: "2026-10-18T00:00:00.000Z",
+        type: "usage",
+        payload: null,
+      })}\n${JSON.stringify({
+        seq: 1,
+        ts: "2026-10-18T00:00:00.000Z",
+        type: "usage",
+      })}\n`,
+      "utf8",
+    );
+
+    const read = readSessionDir(dir);
+    expect(read.events).toHaveLength(2);
+
+    const resumed = await resumeSession(dir);
+    expect(resumed.events()).toHaveLength(2);
+    expect(() => resumed.usageTotals()).not.toThrow();
+    expect(resumed.usageTotals()).toEqual({
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedTokens: 0,
+    });
+  });
+
+  it("closed 会话末行缺换行时 resume 仍成功续写（当前行为，D-035 扩展）", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "a" } });
+    await session.close();
+    const logPath = path.join(dir, "session.v1.jsonl");
+    const before = readFileSync(logPath, "utf8").trimEnd();
+    writeFileSync(logPath, before, "utf8");
+
+    const resumed = await resumeSession(dir);
+    const appended = await resumed.append({ type: "user", payload: { content: "b" } });
+
+    expect(appended.seq).toBe(1);
+    expect(readFileSync(logPath, "utf8")).toBe(`${before}${JSON.stringify(appended)}\n`);
+    expect(() => readSessionDir(dir)).toThrow(SessionCorruptionError);
   });
 
   it("结构化会话错误保留 name、code 与 detail", () => {
