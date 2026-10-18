@@ -26,7 +26,8 @@ function detectSymlinkSupport(): boolean {
   }
 }
 
-const symlinkSupported = detectSymlinkSupport();
+const fileSymlinkSupported = detectSymlinkSupport();
+const dirLinkSupported = process.platform === "win32" ? true : fileSymlinkSupported;
 
 function catchPathError(fn: () => unknown): ToolPathError {
   try {
@@ -104,7 +105,7 @@ describe("resolveInWorkdir 拒绝越界", () => {
 });
 
 describe("resolveInWorkdir symlink 边界", () => {
-  it.skipIf(!symlinkSupported)("拒绝指向外部的 symlink 文件", () => {
+  it.skipIf(!fileSymlinkSupported)("拒绝指向外部的 symlink 文件", () => {
     const workdir = makeTempDir();
     const outside = makeTempDir("eam-outside-");
     writeFileSync(path.join(outside, "secret.txt"), "secret", "utf8");
@@ -115,7 +116,17 @@ describe("resolveInWorkdir symlink 边界", () => {
     expect(error.code).toBe("path_outside_workdir");
   });
 
-  it.skipIf(!symlinkSupported)("拒绝经 symlink 目录逃逸(含不存在子文件)", () => {
+  it.skipIf(!fileSymlinkSupported)("悬空 symlink 文件 fail-closed 为 path_invalid", () => {
+    const workdir = makeTempDir();
+    const outside = makeTempDir("eam-outside-");
+    symlinkSync(path.join(outside, "missing.txt"), path.join(workdir, "dangling.txt"), "file");
+
+    const error = catchPathError(() => resolveInWorkdir(workdir, "dangling.txt"));
+
+    expect(error.code).toBe("path_invalid");
+  });
+
+  it.skipIf(!dirLinkSupported)("拒绝经 symlink 目录逃逸(含不存在子文件)", () => {
     const workdir = makeTempDir();
     const outside = makeTempDir("eam-outside-");
     const linkType = process.platform === "win32" ? "junction" : "dir";
@@ -126,7 +137,7 @@ describe("resolveInWorkdir symlink 边界", () => {
     expect(error.code).toBe("path_outside_workdir");
   });
 
-  it.skipIf(!symlinkSupported)("允许指向 workdir 内部的 symlink", () => {
+  it.skipIf(!dirLinkSupported)("允许指向 workdir 内部的 symlink", () => {
     const workdir = makeTempDir();
     const realDir = path.join(workdir, "real");
     mkdirSync(realDir);

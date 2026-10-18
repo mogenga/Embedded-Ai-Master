@@ -1,5 +1,7 @@
+import { createReadStream } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { z } from "zod";
 import { resolveInWorkdir, ToolPathError } from "./path-safety.js";
 import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
@@ -18,6 +20,7 @@ export type FsInput = z.infer<typeof fsInputSchema>;
 
 const MAX_READ_LINES = 2000;
 const MAX_READ_BYTES = 256 * 1024;
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
 
 function failure(code: string, message: string, detail?: unknown): ToolResult {
   return { isError: true, code, message, detail, text: message };
@@ -48,77 +51,95 @@ function takeUtf8(text: string, maxBytes: number): string {
   return buffer.subarray(0, end).toString("utf8");
 }
 
-function splitLines(raw: string): string[] {
-  if (raw.length === 0) return [];
-  const lines = raw.split(/\r?\n/);
-  if (raw.endsWith("\n") && lines[lines.length - 1] === "") lines.pop();
-  return lines;
+function normalizeNewlines(text: string): string {
+  return text.replace(/\r\n/g, "\n");
 }
 
-type FileFailure = { failure: ToolResult } | { info: Awaited<ReturnType<typeof stat>> };
+function applyFileStyle(text: string, crlf: boolean): string {
+  const normalized = normalizeNewlines(text);
+  return crlf ? normalized.replace(/\n/g, "\r\n") : normalized;
+}
 
-async function statRegularFile(absolute: string, inputPath: string): Promise<FileFailure> {
+function reservedDeviceName(input: string): string | undefined {
+  const base = path.win32.basename(input);
+  return WINDOWS_RESERVED.test(base) ? base : undefined;
+}
+
+async function ensureRegularFile(absolute: string, inputPath: string): Promise<ToolResult | undefined> {
   let info: Awaited<ReturnType<typeof stat>>;
   try {
     info = await stat(absolute);
   } catch (error) {
     const code = errorCode(error);
     if (code === "ENOENT" || code === "ENOTDIR") {
-      return { failure: failure("not_found", `file not found: ${inputPath}`) };
+      return failure("not_found", `file not found: ${inputPath}`);
     }
-    return { failure: failure("read_failed", `failed to stat ${inputPath}: ${errorMessage(error)}`) };
+    return failure("read_failed", `failed to stat ${inputPath}: ${errorMessage(error)}`);
   }
   if (!info.isFile()) {
-    return { failure: failure("not_a_file", `not a regular file: ${inputPath}`) };
+    return failure("not_a_file", `not a regular file: ${inputPath}`);
   }
-  return { info };
+  return undefined;
 }
 
 async function readOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
   const absolute = resolveInWorkdir(ctx.cwd, input.path);
-  const checked = await statRegularFile(absolute, input.path);
-  if ("failure" in checked) return checked.failure;
+  const invalid = await ensureRegularFile(absolute, input.path);
+  if (invalid) return invalid;
 
-  let raw: string;
-  try {
-    raw = await readFile(absolute, "utf8");
-  } catch (error) {
-    return failure("read_failed", `failed to read ${input.path}: ${errorMessage(error)}`);
-  }
-
-  const lines = splitLines(raw);
   const start = input.offset ?? 0;
   const maxLines = input.limit ?? MAX_READ_LINES;
   const output: string[] = [];
   let used = 0;
+  let linesSeen = 0;
   let truncated = false;
-  let index = start;
-
-  for (; index < lines.length && output.length < maxLines; index++) {
-    const prefix = `${String(index + 1).padStart(4, " ")}| `;
-    const candidate = prefix + lines[index]!;
-    const separator = output.length === 0 ? 0 : 1;
-    const cost = separator + Buffer.byteLength(candidate, "utf8");
-    if (used + cost > MAX_READ_BYTES) {
-      const available = MAX_READ_BYTES - used - separator - Buffer.byteLength(prefix, "utf8");
-      const piece = takeUtf8(lines[index]!, available);
-      if (piece.length > 0) output.push(prefix + piece);
-      truncated = true;
-      break;
+  const stream = createReadStream(absolute, { encoding: "utf8" });
+  const reader = createInterface({ input: stream, crlfDelay: Infinity });
+  try {
+    for await (const line of reader) {
+      linesSeen++;
+      if (linesSeen <= start) continue;
+      if (output.length >= maxLines) {
+        truncated = true;
+        break;
+      }
+      const prefix = `${String(linesSeen).padStart(4, " ")}| `;
+      const candidate = prefix + line;
+      const separator = output.length === 0 ? 0 : 1;
+      const cost = separator + Buffer.byteLength(candidate, "utf8");
+      if (used + cost > MAX_READ_BYTES) {
+        const available = MAX_READ_BYTES - used - separator - Buffer.byteLength(prefix, "utf8");
+        const piece = takeUtf8(line, available);
+        if (piece.length > 0) output.push(prefix + piece);
+        truncated = true;
+        break;
+      }
+      output.push(candidate);
+      used += cost;
     }
-    output.push(candidate);
-    used += cost;
+  } catch (error) {
+    return failure("read_failed", `failed to read ${input.path}: ${errorMessage(error)}`);
+  } finally {
+    reader.close();
+    stream.destroy();
   }
-  if (!truncated && index < lines.length) truncated = true;
 
+  const relative = toRelative(ctx.cwd, absolute);
+  if (output.length === 0 && start > 0) {
+    return success("(no lines at offset)", { path: relative, lines: 0, truncated: false });
+  }
   const body = output.join("\n");
   const text = truncated ? (body.length > 0 ? `${body}\n[truncated]` : "[truncated]") : body;
-  return success(text, { path: toRelative(ctx.cwd, absolute), lines: output.length, truncated });
+  return success(text, { path: relative, lines: output.length, truncated });
 }
 
 async function writeOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
   if (typeof input.content !== "string") {
     return failure("invalid_input", "write requires content");
+  }
+  const reserved = reservedDeviceName(input.path);
+  if (reserved) {
+    return failure("reserved_name", `reserved Windows device name: ${reserved}`);
   }
   const absolute = resolveInWorkdir(ctx.cwd, input.path);
   try {
@@ -136,9 +157,13 @@ async function editOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
   if (typeof input.oldText !== "string" || input.oldText.length === 0 || typeof input.newText !== "string") {
     return failure("invalid_input", "edit requires non-empty oldText and newText");
   }
+  const reserved = reservedDeviceName(input.path);
+  if (reserved) {
+    return failure("reserved_name", `reserved Windows device name: ${reserved}`);
+  }
   const absolute = resolveInWorkdir(ctx.cwd, input.path);
-  const checked = await statRegularFile(absolute, input.path);
-  if ("failure" in checked) return checked.failure;
+  const invalid = await ensureRegularFile(absolute, input.path);
+  if (invalid) return invalid;
 
   let content: string;
   try {
@@ -147,15 +172,18 @@ async function editOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
     return failure("read_failed", `failed to read ${input.path}: ${errorMessage(error)}`);
   }
 
-  const first = content.indexOf(input.oldText);
+  const crlf = content.includes("\r\n");
+  const needle = applyFileStyle(input.oldText, crlf);
+  const replacement = applyFileStyle(input.newText, crlf);
+  const first = content.indexOf(needle);
   if (first === -1) {
     return failure("edit_not_found", `oldText not found in ${input.path}`);
   }
-  if (content.indexOf(input.oldText, first + input.oldText.length) !== -1) {
+  if (content.indexOf(needle, first + needle.length) !== -1) {
     return failure("edit_not_unique", `oldText matches multiple times in ${input.path}`);
   }
 
-  const next = content.slice(0, first) + input.newText + content.slice(first + input.oldText.length);
+  const next = content.slice(0, first) + replacement + content.slice(first + needle.length);
   try {
     await writeFile(absolute, next, "utf8");
   } catch (error) {

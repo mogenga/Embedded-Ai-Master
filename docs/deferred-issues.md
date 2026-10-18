@@ -594,6 +594,22 @@
 - **触发升级条件**: 真实环境出现 ACL / 只读介质拒绝;或需要区分错误类型。
 - **修复建议**: 显式把 `EACCES` / `EPERM` 映射为 403 `session_forbidden`;在 Windows 上用 `icacls` 构造拒绝访问并补集成测试。
 
+### D-071 · `fs` 不响应 `AbortSignal`,取消后大文件 IO 仍继续
+
+- **发现**: 2026-10-18,维度4 Task1 审查修复。(注: 原拟编号 D-051/D-052 已被前端任务占用,顺延为 D-071/D-072。)
+- **现象**: `fsTool.execute` 签收 `signal` 但从未读取;`read` 的 `createReadStream`、`edit` 的 `readFile`/`writeFile`、`write` 的 `writeFile` 均未接取消。管线超时/abort 只影响结果返回,不会终止已发起的文件 IO。
+- **影响**: 会话取消或工具超时后,超大文件的读/写仍可能继续占用句柄与磁盘带宽;`read` 在启动后到首次命中截断前不会主动停止。
+- **触发升级条件**: 取消后出现长时间 IO 占用、句柄泄漏,或接入 P1 权限层需要强制终止工具。
+- **修复建议**: 把 `signal` 传给流并在 abort 时 `destroy()`,读循环内检查 `signal.aborted` 并关闭 `readline`;`readFile`/`writeFile` 前先快速检查 abort,失败返回结构化 `aborted`。
+
+### D-072 · `edit` 唯一性按非重叠匹配计数
+
+- **发现**: 2026-10-18,维度4 Task1 审查修复。
+- **现象**: `edit` 从 `first + needle.length` 继续查找第二处,重叠出现不计。例如内容 `aaa`、`oldText: "aa"` 被视为唯一匹配并替换为 `ba`。
+- **影响**: 与“出现次数”的直觉不同;模型可能预期重叠匹配报 `edit_not_unique`。当前行为已在 design §4.2 明确为非重叠。
+- **触发升级条件**: 实测需要重叠匹配语义,或模型反复因该差异产生错误编辑。
+- **修复建议**: 若需重叠计数,用滑动窗口统计所有起点并在 `>1` 时返回 `edit_not_unique`;否则保持并补一条固化非重叠语义的测试。
+
 ---
 
 ## 变更记录
@@ -628,3 +644,4 @@
 | 2026-10-18 | P0 前端 Task 12 第二轮红队审查修复:修正空 text + artifact 投影、SSE 单 timer 重连/close 后静默/构造抛错收敛、折叠摘要截断、costUsd 有限非负校验;清理 `styles.css` 重复 `.dock` 与 media 查询;录入 D-062(usage 缺字段补 0) |
 | 2026-10-18 | P0 前端 Task 15 真实数据验收:验收脚本改为启动 `dist/server/serve.js`(临时 `HARNESS_HOME` 写入真实会话与 KB),V14 断言真实 guard 文案并新增 V0 空态附加检查;修复 V11 以坐标区分同文案控件(设备 unknown 下三个「未接入」chip 曾导致遍历提前终止);README 改为真实数据流程与 API 表;D-053/D-060 标记已解决,D-058 标记数据来源已解决,D-051 补 501 现状;录入 D-063(API 只读、actions/events 未实现)、D-064(KB 深度/条目上限)、D-065(坏目录 errors 未展示) |
 | 2026-10-18 | Task 16 审查修复:会话列表改 header-only 读取(id 取目录名,`id_mismatch`/`unreadable`)、静态路径 NUL/穿越 400、Dock 状态点与日志 mark 由真实数据派生、V13 改实跑一致性测试、V14 删除恒真断言;D-053 验证描述修正;录入 D-066(列表不解析事件)、D-067(Host/Origin 未校验)、D-068(Windows 尾随点 id 别名) |
+| 2026-10-18 | 维度4 Task1 审查修复:fs read 改流式读取、edit 按 CRLF/LF 风格映射、拒绝 Windows 保留设备名、offset 越界显式返回;design §4.2 补齐 read_failed/invalid_input/reserved_name/internal_error;拟用 D-051/D-052 与前端冲突,改录 D-071(fs 不响应 AbortSignal)、D-072(edit 非重叠匹配) |

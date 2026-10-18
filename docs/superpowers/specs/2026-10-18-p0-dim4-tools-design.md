@@ -76,10 +76,10 @@ schema = z.object({
 annotations = { readOnly: false, destructive: true };
 ```
 
-- `read`: UTF-8 文本; 默认最多 2000 行/256 KiB; 返回带 1-based 行号的行(`   1| text`); `offset/limit` 可选; 超出时 `text` 末尾加 `[truncated]`。
-- `write`: `content` 必填; 父目录在 workdir 内且不存在则 `mkdir(recursive)`; 覆盖写; 返回 `wrote <bytes> bytes to <relpath>`。
-- `edit`: `oldText`/`newText` 必填; 读取全文; `oldText` 必须**恰好出现一次**, 否则 `edit_not_unique`/`edit_not_found`; 替换后写回; 返回 `replaced 1 occurrence in <relpath>`。
-- 错误码: `path_outside_workdir`、`path_invalid`、`not_found`、`not_a_file`、`edit_not_found`、`edit_not_unique`、`write_failed`。
+- `read`: UTF-8 文本; 流式读取(`createReadStream` + `readline`), 不整文件载入内存; 默认最多 2000 行/256 KiB; 返回带 1-based 行号的行(`   1| text`); `offset/limit` 可选; 超出时 `text` 末尾加 `[truncated]`; `offset` 不小于总行数时返回 `(no lines at offset)` 且 `detail.lines=0`(不返回空成功)。
+- `write`: `content` 必填; 父目录在 workdir 内且不存在则 `mkdir(recursive)`; 覆盖写; 返回 `wrote <bytes> bytes to <relpath>`; 拒绝 Windows 保留设备名(`CON`/`PRN`/`AUX`/`NUL`/`COM1-9`/`LPT1-9`, 含扩展名, 大小写不敏感)。
+- `edit`: `oldText`/`newText` 必填; 读取全文; 按文件换行风格(`\r\n` / `\n`)归一 `oldText`/`newText` 后匹配与替换, CRLF 文件保持 CRLF; `oldText` 必须**恰好出现一次**(非重叠匹配), 否则 `edit_not_unique`/`edit_not_found`; 替换后写回; 返回 `replaced 1 occurrence in <relpath>`; 同样拒绝 Windows 保留设备名。
+- 错误码: `path_outside_workdir`、`path_invalid`、`not_found`、`not_a_file`、`read_failed`、`edit_not_found`、`edit_not_unique`、`write_failed`、`invalid_input`、`reserved_name`、`internal_error`。
 - 读失败/文件不存在必须显式报错(R3), 不返回空内容。
 
 ### 4.3 `shell` 工具

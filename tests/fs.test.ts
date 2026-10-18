@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -76,6 +76,17 @@ describe("fs read", () => {
     expect(r.text).not.toContain("   3| c");
   });
 
+  it.each([3, 10])("offset=%i 超过行数 → (no lines at offset) 且 detail.lines=0", async (offset) => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "a.txt"), "a\nb\nc\n", "utf8");
+
+    const r = await run(workdir, { op: "read", path: "a.txt", offset });
+
+    expect(r.isError).toBe(false);
+    expect(r.text).toBe("(no lines at offset)");
+    expect(r.detail).toMatchObject({ lines: 0 });
+  });
+
   it("默认最多 2000 行并标记截断", async () => {
     const workdir = makeWorkdir();
     const lines = Array.from({ length: 2005 }, (_, i) => `line-${i + 1}`);
@@ -100,6 +111,21 @@ describe("fs read", () => {
     expect(r.isError).toBe(false);
     expect(r.text.endsWith("[truncated]")).toBe(true);
     expect(Buffer.byteLength(r.text, "utf8")).toBeLessThan(256 * 1024 + 32);
+  });
+
+  it("5MB 文件流式读取:≤256KiB+标记、不抛、行号正确", async () => {
+    const workdir = makeWorkdir();
+    const line = "0123456789".repeat(20);
+    const content = Array.from({ length: 26215 }, () => line).join("\n");
+    writeFileSync(path.join(workdir, "huge.log"), content, "utf8");
+
+    const r = await run(workdir, { op: "read", path: "huge.log" });
+
+    expect(r.isError).toBe(false);
+    expect(r.text.startsWith("   1| 0123456789")).toBe(true);
+    expect(r.text).toContain("\n   2| ");
+    expect(r.text.endsWith("[truncated]")).toBe(true);
+    expect(Buffer.byteLength(r.text, "utf8")).toBeLessThanOrEqual(256 * 1024 + 16);
   });
 
   it("不存在 → not_found,不返回空内容", async () => {
@@ -189,6 +215,53 @@ describe("fs edit", () => {
     expect(readFileSync(path.join(workdir, "note.txt"), "utf8")).toBe("alpha gamma");
   });
 
+  it("CRLF 文件:多行 oldText(LF) 编辑成功并保留 CRLF", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "crlf.txt"), "line1\r\nline2\r\nline3\r\n", "utf8");
+
+    const r = await run(workdir, {
+      op: "edit",
+      path: "crlf.txt",
+      oldText: "line2\nline3",
+      newText: "changed2\nchanged3",
+    });
+
+    expect(r.isError).toBe(false);
+    expect(readFileSync(path.join(workdir, "crlf.txt"), "utf8")).toBe(
+      "line1\r\nchanged2\r\nchanged3\r\n",
+    );
+  });
+
+  it("CRLF 文件:oldText 自带 CRLF 同样可匹配", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "crlf.txt"), "a\r\nb\r\nc\r\n", "utf8");
+
+    const r = await run(workdir, {
+      op: "edit",
+      path: "crlf.txt",
+      oldText: "a\r\nb",
+      newText: "x\r\ny",
+    });
+
+    expect(r.isError).toBe(false);
+    expect(readFileSync(path.join(workdir, "crlf.txt"), "utf8")).toBe("x\r\ny\r\nc\r\n");
+  });
+
+  it("LF 文件:oldText 带 CRLF 时按 LF 风格匹配", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "lf.txt"), "a\nb\nc\n", "utf8");
+
+    const r = await run(workdir, {
+      op: "edit",
+      path: "lf.txt",
+      oldText: "a\r\nb",
+      newText: "x\r\ny",
+    });
+
+    expect(r.isError).toBe(false);
+    expect(readFileSync(path.join(workdir, "lf.txt"), "utf8")).toBe("x\ny\nc\n");
+  });
+
   it("newText 可为空(删除)", async () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "note.txt"), "keep drop", "utf8");
@@ -272,5 +345,40 @@ describe("fs edit", () => {
     });
 
     expect(r).toMatchObject({ isError: true, code: "path_outside_workdir" });
+  });
+});
+describe("fs Windows 保留设备名", () => {
+  it.each(["CON", "con.txt", "NUL", "COM1", "lpt9.log", "sub/AUX.txt"])(
+    "write %s → reserved_name 且不落盘",
+    async (target) => {
+      const workdir = makeWorkdir();
+
+      const r = await run(workdir, { op: "write", path: target, content: "x" });
+
+      expect(r).toMatchObject({ isError: true, code: "reserved_name" });
+      expect(readdirSync(workdir)).not.toContain(target.split("/")[0]);
+    },
+  );
+
+  it.each(["CON", "aux", "COM1.txt", "sub/NUL"])("edit %s → reserved_name", async (target) => {
+    const workdir = makeWorkdir();
+
+    const r = await run(workdir, {
+      op: "edit",
+      path: target,
+      oldText: "a",
+      newText: "b",
+    });
+
+    expect(r).toMatchObject({ isError: true, code: "reserved_name" });
+  });
+
+  it("普通文件名仍可写", async () => {
+    const workdir = makeWorkdir();
+
+    const r = await run(workdir, { op: "write", path: "console.txt", content: "ok" });
+
+    expect(r.isError).toBe(false);
+    expect(readFileSync(path.join(workdir, "console.txt"), "utf8")).toBe("ok");
   });
 });
