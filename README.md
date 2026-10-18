@@ -1,6 +1,6 @@
 # Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 内核，附带一个可运行的 Web 诊断工作台。当前交付 P0 内核（主循环与模型接入、会话事实源、工具管线、headless demo）与前端工作台（三栏布局、三态主题、消息流、调试坞、真实会话/知识库/设备状态读取）。
+面向嵌入式调试场景的 agent 内核，附带一个可运行的 Web 诊断工作台。当前交付 P0 内核（主循环与模型接入、会话事实源、内置工具、headless demo）与前端工作台（三栏布局、三态主题、消息流、调试坞、真实会话/知识库/设备状态读取）。
 
 ## 技术栈
 
@@ -43,7 +43,7 @@ src/
 ├── model/        模型协议、OpenAI 兼容适配器、重试、token 估算
 ├── session/      append-only JSONL 会话
 ├── server/       只读 HTTP API（会话 / 知识库 / 设备）与静态资源服务
-├── tools/        工具契约、注册表、echo、五阶段执行管线
+├── tools/        工具契约、注册表、echo/fs/shell/glob/grep、五阶段执行管线
 ├── ui/           前端工作台（Preact 组件、TranscriptView 投影、SSE 抽象）
 └── index.ts      runSession 装配
 web/              Vite 入口 HTML
@@ -71,6 +71,42 @@ docs/             设计、计划与已知问题
 ```
 
 模型引用为 `provider/model`（如 `local-gw/flash`）。`apiKeyEnv` 指向的环境变量存在且非空时发送 `Authorization: Bearer <key>`；否则不发送该头（本地网关可空跑）。`pricePerMillion` 缺省时只统计 token，不启用 `maxCostUsd` 熔断。
+
+## 内置工具
+
+`runSession` 默认注册 `echo` / `fs` / `shell` / `glob` / `grep` 五个工具（`createBuiltinTools()`，顺序固定）。工具根（`ToolCtx.cwd`）为 `opts.cwd ?? header.workdir ?? process.cwd()`：创建会话时 `opts.cwd`（缺省 `process.cwd()`）同时写入 `header.workdir`；resume 未传 `opts.cwd` 时沿用 `header.workdir`，两者都提供且不一致时抛 `SessionResumeError("workdir_mismatch")`，失败不写 header/日志。所有相对路径按工具根解析。
+
+| 工具 | 能力 | 注解 |
+|---|---|---|
+| `echo` | 回显输入，用于连通性验证 | 只读 |
+| `fs` | `read` / `write` / `edit` 文本文件 | 非只读、destructive |
+| `shell` | 执行 shell 命令（非沙箱） | 非只读、destructive |
+| `glob` | 按 glob 模式查找文件 | 只读 |
+| `grep` | 按正则搜索文件内容 | 只读 |
+
+### `fs`
+
+- `read`：`path` + 可选 `offset`（0 起行号）/`limit`（≤2000 行）；单次最多 2000 行、256 KiB，超出以 `[truncated]` 标记；`offset` 越界返回 `(no lines at offset)`。
+- `write`：`path` + `content`，自动创建父目录。
+- `edit`：`path` + 非空 `oldText` + `newText`；`oldText` 必须唯一命中，否则 `edit_not_found` / `edit_not_unique`；按文件现有 CRLF/LF 风格写入。
+- workdir 限制：解析到工具根之外（含 `..`、绝对路径、symlink/junction 逃逸）→ `path_outside_workdir`；Windows 保留设备名 → `reserved_name`；目标不是普通文件 → `not_a_file`。
+- `fs` 不响应 `AbortSignal`（D-071）。
+
+### `shell`
+
+- **非沙箱**：命令交给系统 shell（`spawn(command, { shell: true })`）执行，仅对已知高危命令做黑名单拦截，不限制其余命令的读写范围；`cwd` 必须位于工具根内，越界 / 不存在 / 非目录 → `cwd_invalid`。
+- 拦截：`rm -rf` 打 `/`、`~`、`$HOME`、多级 `..`、盘符根；`mkfs*`、`format <盘符>:`、`diskpart`、`bcdedit`、`shutdown` / `reboot` / `poweroff` / `halt`、`dd of=/dev/*`、`del|erase|rd|rmdir /s` 打盘符根、`reg delete HKLM`、`cipher /w`、fork bomb；命中返回 `dangerous_command` 且不 spawn。
+- 退出语义：命令跑完即 `isError:false`，`text` 首行 `exit=<code>`；**非零退出码不算工具错误**，由模型读 `detail.exitCode` 判断。被信号终止 → `shell_terminated`（`detail.exitCode` 可能为 `null`）；`spawn` 失败 → `shell_spawn_failed`。
+- 取消：`signal` abort 后 Windows 用 `taskkill /T /F`、POSIX 杀 detached 进程组；结果码 `shell_aborted`。stdout / stderr 各截断到 1 MiB 并标记。
+- 黑名单是启发式（`env`、`bash -c`、`xargs` 等可绕过），不能当作安全边界（D-083）。
+
+### `glob` / `grep`
+
+- `glob`：`pattern` 匹配**相对工具根**的 POSIX 路径（不是 `path` 根）；`*` 不跨 `/`、`?` 匹配单字符、`**/` 匹配任意层目录、段尾 `**` 匹配剩余路径，其余字符按字面量；反斜杠按 `/` 处理；大小写敏感。返回字典序路径，最多 200 条，超出 `[truncated]`；扫描上限 5000 个文件，超出 `[scan truncated at 5000 files]`。
+- `grep`：`pattern` 为正则（`ignoreCase` 可选），可加 `glob` 过滤、`maxResults`（1–1000，默认 200）；输出 `<相对路径>:<行号>:<文本>`，按路径与行号排序，超出 `[truncated]`。
+- 两者都只遍历工具根内：跳过 `.git`、`node_modules`、`.harness`、`dist`、`coverage`、`build`、`out`、`target`、`.pio`、`cmake-build-*`；遍历中遇到的 symlink 文件 / 目录都不跟随（显式 `path` 根为 symlink 时仍会跟随，D-079）。
+- `grep` 只读 ≤2 MiB 的文件，含 NUL 视为二进制；跳过文件只给计数 `[skipped N files (binary/too large/unreadable)]`，不列具体路径（D-084）。
+- 两者都不响应 `AbortSignal`（D-077）；`grep` 先收集全部命中再截断，命中集很大时内存占用随结果增长（D-078）。
 
 ## headless demo
 
@@ -221,6 +257,12 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 - 会话 append 无 `fsync`，断电或强杀可能留下半行（D-035）。
 - 4xx 除 429 外均不重试，408/409/425 未细分（D-036）。
 - 工具 JSON Schema 可能携带 `$schema`，严格网关兼容性待 live 验证（D-019）。
+
+内置工具：
+
+- `glob` / `grep` 不响应取消，`grep` 先收集全部命中再截断（D-077、D-078）。
+- `shell` 危险命令拦截是启发式、非沙箱，`env` / `bash -c` / `xargs` 等可绕过（D-083）。
+- 工具根与 resume 的 workdir 只做词法比较，不解析 symlink / 8.3 短名（D-082）。
 
 前端工作台：
 

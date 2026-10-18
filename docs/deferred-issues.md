@@ -642,6 +642,70 @@
 - **触发升级条件**: 跨平台回放需要一致的终止语义,或出现 `code=null` 的实际观测。
 - **修复建议**: 把 `code===null && signal===null` 显式建模为 `shell_terminated`(detail 保持 `exitCode:null`)或新增 `shell_unknown`;统一各平台 detail 契约并补跨平台契约测试。
 
+### D-077 · `glob` / `grep` 不响应 `AbortSignal`
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `globTool.execute` / `grepTool.execute` 签收 `signal` 但从未读取;`walkFiles` 的递归遍历、`grep` 的逐文件 `stat`/`readFile` 与逐行匹配都不检查取消。
+- **影响**: 会话取消或管线超时后,遍历仍会继续扫完 5000 个文件并读盘;大目录或 2 MiB 文件较多时,取消不能缩短实际耗时,只能让上层提前返回。
+- **触发升级条件**: 出现取消后长时间占用磁盘/句柄,或接入工具级强制终止与超时预算。
+- **修复建议**: 给 `walkFiles` 传入 `signal`,在每个条目/每次递归前检查并返回 `aborted`;`grep` 在 `stat`、`readFile` 与行循环内检查;工具返回结构化 `aborted` 而不是伪造空结果。
+
+### D-078 · `grep` 先收集全部命中再排序截断
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `grep` 把所有命中行压入 `matches`,遍历结束后统一排序,再用 `maxResults` 截取输出。`maxResults` 只限制返回条数,不限制收集量。
+- **影响**: 命中密集的大仓库会随命中数线性增长内存与排序耗时;即使只需要 200 条也要读完整个工具根,与“结果上限”的直觉不符。
+- **触发升级条件**: 出现内存峰值、响应超时,或需要在大仓库上稳定低延迟。
+- **修复建议**: 遍历时按文件路径有序处理并维护有界结果集(或命中达到硬上限后提前停止);至少在 `detail` 暴露 `matched` 已收集量并允许调用方设置收集上限。
+
+### D-079 · `glob` / `grep` 显式 `path` 根为 symlink 时跟随
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: 遍历中遇到的 symlink 文件/目录由 `walkFiles` 跳过,但显式 `path` 根本身若为 symlink/junction,`stat` 与 `readdir` 会跟随其目标;`resolveInWorkdir` 只做 realpath 边界校验,不改变返回的 `target`。
+- **影响**: 同一工具对“根”和“内部链接”采用不同语义;根链接指向工具根内另一子树时,结果路径仍相对工具根,但扫描范围与用户直觉不同。
+- **触发升级条件**: 需要统一的“绝不跟随 symlink”语义,或出现根链接导致的范围误判。
+- **修复建议**: 对显式根先 `lstat` 并拒绝 symlink(返回 `path_invalid`/`not_a_directory`),或在 design/README 明确“仅遍历中不跟随”并补根链接用例固化语义。
+
+### D-080 · `scanTruncated` 在恰好达到 5000 文件时保守标记
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `walkFiles` 在处理下一个条目时先判断 `state.scanned >= maxScanned` 并置 `scanTruncated`;因此恰好扫描 5000 个文件、后面没有剩余条目时也会标记截断。
+- **影响**: 用户/模型无法区分“确实还有文件未扫”与“刚好扫满”;保守标记会降低对结果完整性的信任,也可能触发不必要的缩小范围重试。
+- **触发升级条件**: 需要精确判断是否遗漏,或出现因误报截断导致的重复扫描。
+- **修复建议**: 先探测是否还有未处理条目再标记;或在 `detail` 增加 `scanned`/`maxScanned` 与 `possiblyTruncated` 字段,把保守语义显式化。
+
+### D-081 · `glob` 的 `*` 与 `**` 匹配点开头的隐藏文件
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `compilePattern` 把 `*` 编译为 `[^/]*`、`**` 编译为 `.*`,都不排除 `.` 开头的条目;与常见 shell glob 默认跳过隐藏文件的行为相反。`description` 已写明 `*` 也匹配隐藏文件。
+- **影响**: 模型按惯例写 `*` 或 `**/*` 时会额外得到 `.env`、`.gitignore` 等;虽然 `.git`/`.harness` 等目录已被忽略,但根级隐藏文件仍会进入结果,可能干扰判断。
+- **触发升级条件**: 模型反复因隐藏文件产生误判,或需要与 shell glob 语义对齐。
+- **修复建议**: 增加 `dot` 选项或默认排除 `.` 开头条目,并同步 `description`、design 与测试;若保持现状,补一条固化“包含隐藏文件”语义的用例。
+
+### D-082 · 工具根与 resume 的 workdir 仅词法比较,不解析 symlink / 8.3 短名
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `sameWorkdir` 只做 `path.resolve` + win32 `toLowerCase`;`resolveInWorkdir` 虽对最近已存在祖先做 `realpath` 边界校验,但工具根本身保留传入字符串。同一目录经 symlink/junction、Windows 8.3 短名或不同大小写表达时,比较结果可能不一致。
+- **影响**: resume 时 `opts.cwd` 与 `header.workdir` 指向同一物理目录却抛 `workdir_mismatch`;工具输出的相对路径也可能因根形式不同而变化。
+- **触发升级条件**: 真实出现误报,或需要跨工具根/跨会话的一致路径身份。
+- **修复建议**: 比较前对两侧做 `realpath`(存在时)并统一大小写;Windows 短名用 `fs.realpath` 或 `GetLongPathName` 归一;补 symlink/短名用例。
+
+### D-083 · `shell` 危险命令黑名单是启发式,可被 `env` / `bash -c` / `xargs` 绕过
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `isDangerousCommand` 按 `[\n\r;|&()]` 切段、跳过 env 前缀与 `sudo`/`command`,再识别固定命令名;`env rm -rf /`、`bash -c "rm -rf /"`、`sh -c ...`、`xargs rm`、脚本文件、别名/函数、PowerShell `Remove-Item` 等都不会命中。工具本身也明确标注“非沙箱”。
+- **影响**: 黑名单只能降低误操作概率,不能保证危险命令不执行;模型或用户可通过包装命令绕过,与“危险命令绝不执行”的强保证存在差距。
+- **触发升级条件**: 接入不可信输入/多用户权限层,或需要可审计的强制安全边界。
+- **修复建议**: 改为白名单 + 执行前确认,或在受控 shell 中静态解析命令(AST)并按语义判断;保持 `description` 与 README 的“启发式、非沙箱”声明,避免消费者误当安全边界。
+
+### D-084 · 读取/跳过上限只披露布尔标记或总数,不披露规模与具体路径
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `fs read` 触达 2000 行 / 256 KiB 时只追加 `[truncated]`,`detail` 无总行数/总字节/下一次 `offset`;`grep` 对超过 2 MiB、含 NUL、不可读的文件只给 `[skipped N files ...]` 与分类计数,不列具体路径;`glob` 的 `[scan truncated at 5000 files]` 同样只有固定文案。
+- **影响**: 模型无法判断遗漏规模,可能把“截断后未搜到”误当“不存在”;排查时需要人工重跑并猜测范围,与 R3 的“诚实披露”仍有距离。
+- **触发升级条件**: 出现因截断/跳过导致的漏报、误判,或需要可复现的取证报告。
+- **修复建议**: `fs read` 的 `detail` 增加 `totalLines`/`bytesRead`/`nextOffset`;`grep` 在 `detail` 增加受上限约束的 `skippedPaths` 或按类别列出前 N 个路径;`glob` 增加 `scanned`/`maxScanned`,让调用方可判断是否需要缩小范围。
+
 ---
 
 ## 变更记录
@@ -680,3 +744,4 @@
 | 2026-10-18 | 维度4 Task1 收尾:空文件 offset 显式返回、混合换行按 LF 处理并保留未命中行原始字节、保留名先规范化(trim/:stream/尾部点空格)、5MB 用例改名并明确流式仅代码审查、junction 改为真实探测;录入 D-073(上标设备名变体) |
 | 2026-10-18 | 维度4 Task2 审查修复:危险命令补 `$HOME`/`${HOME}`/`..`/盘符根与 `del/rd` 通配、sudo 带值选项、信号终止 `shell_terminated`、abort 杀进程树、message 截断 200 字符;录入 D-074(cwd 校验与 spawn 的 symlink TOCTOU) |
 | 2026-10-18 | 维度4 Task2 复审:危险 execute 用例补前置识别断言(截断用例);design §4.3 同步 shell 非沙箱/自管 abort/`shell_terminated`/`del`/`rd` 通配与错误码表;录入 D-075(abort 无升级兜底)、D-076(`exitSignal`/`code=null` 平台边缘) |
+| 2026-10-18 | 维度4 Task6 收尾:README 补内置工具清单、fs/shell/glob/grep 语义与工具根;补 shell 截断多字节/AbortError 与 grep ENOTDIR/readdir 错误测试,工具行覆盖均 ≥90%;录入 D-077 ~ D-084(glob/grep 不响应取消、grep 先收集后截断、根 symlink 跟随、scanTruncated 保守、隐藏文件匹配、workdir 词法比较、shell 黑名单绕过、上限披露粒度) |
