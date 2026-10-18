@@ -31,4 +31,6 @@ export interface ToolResultPayload {
   ok: boolean;
   text: string;
   artifactPath?: string;
+  code?: string;
+  detail?: unknown;
 }

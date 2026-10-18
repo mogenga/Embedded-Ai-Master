@@ -1,0 +1,566 @@
+import { existsSync } from "node:fs";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { z } from "zod";
+import { buildMessages } from "../src/context/build.js";
+import { computeCostUsd } from "../src/loop/breakers.js";
+import type { LoopEvent } from "../src/loop/events.js";
+import type { LoopCtx } from "../src/loop/query.js";
+import { query } from "../src/loop/query.js";
+import type {
+  CompletionResult,
+  ModelChatMessage,
+  ModelProtocol,
+  ModelToolSchema,
+} from "../src/model/protocol.js";
+import type { SessionHandle } from "../src/session/session.js";
+import { createSession } from "../src/session/session.js";
+import { echoTool } from "../src/tools/echo.js";
+import { ToolRegistry } from "../src/tools/registry.js";
+import type { ToolDef } from "../src/tools/types.js";
+
+const tempDirs: string[] = [];
+const sessions: SessionHandle[] = [];
+
+async function makeSession(systemPrompt?: string): Promise<{ session: SessionHandle; dir: string }> {
+  const dir = await mkdtemp(path.join(tmpdir(), "query-test-"));
+  tempDirs.push(dir);
+  const session = await createSession(dir, systemPrompt === undefined ? {} : { systemPrompt });
+  sessions.push(session);
+  return { session, dir };
+}
+
+afterEach(async () => {
+  for (const session of sessions.splice(0)) await session.close();
+  for (const dir of tempDirs.splice(0)) await rm(dir, { recursive: true, force: true });
+});
+
+interface CompleteCall {
+  messages: ModelChatMessage[];
+  tools: ModelToolSchema[];
+  maxOutputTokens: number;
+  signal: AbortSignal;
+}
+
+function scriptedProvider(
+  sequence: Array<CompletionResult | Error>,
+  onServe?: (index: number) => void,
+): ModelProtocol & { calls: CompleteCall[] } {
+  let index = 0;
+  const calls: CompleteCall[] = [];
+  return {
+    calls,
+    async complete(messages, tools, opts) {
+      const callIndex = index;
+      calls.push({
+        messages,
+        tools,
+        maxOutputTokens: opts.maxOutputTokens,
+        signal: opts.signal,
+      });
+      if (callIndex >= sequence.length) throw new Error("script exhausted");
+      index += 1;
+      onServe?.(callIndex);
+      const item = sequence[callIndex];
+      if (item instanceof Error) throw item;
+      return item;
+    },
+    countTokens() {
+      return 0;
+    },
+  };
+}
+
+function reply(
+  content: string,
+  toolCalls: CompletionResult["toolCalls"] = [],
+  truncatedByMaxTokens = false,
+  usage?: CompletionResult["usage"],
+): CompletionResult {
+  const result: CompletionResult = {
+    content,
+    toolCalls,
+    truncatedByMaxTokens,
+    stopReason: null,
+  };
+  if (usage !== undefined) result.usage = usage;
+  return result;
+}
+
+async function makeCtx(
+  model: ModelProtocol,
+  overrides: Partial<LoopCtx> = {},
+  sessionSystemPrompt?: string,
+): Promise<{ ctx: LoopCtx; session: SessionHandle; dir: string }> {
+  const { session, dir } = await makeSession(sessionSystemPrompt);
+  const ctx: LoopCtx = {
+    session,
+    model,
+    modelCfg: { contextWindow: 8192, maxOutput: 512 },
+    tools: new ToolRegistry([echoTool]),
+    budget: () => ({ over: false, tokens: 0, softLimit: 1 }),
+    signal: new AbortController().signal,
+    artifactDir: path.join(dir, "artifacts"),
+    ...overrides,
+  };
+  return { ctx, session, dir };
+}
+
+async function collect(generator: AsyncGenerator<LoopEvent>): Promise<LoopEvent[]> {
+  const events: LoopEvent[] = [];
+  for await (const event of generator) events.push(event);
+  return events;
+}
+
+const echoCall = (id: string, text = "hi"): CompletionResult["toolCalls"][number] => ({
+  id,
+  name: "echo",
+  arguments: { text },
+});
+
+describe("query 主循环", () => {
+  it("闭环: user→model→tool_use→tool_result→model→done(no_tool_calls)", async () => {
+    const provider = scriptedProvider([reply("用 echo", [echoCall("c1")]), reply("完成")]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "请回应", { maxTurns: 10 }));
+
+    expect(events).toEqual([
+      { kind: "model_message", content: "用 echo" },
+      { kind: "tool_use", id: "c1", name: "echo", input: { text: "hi" } },
+      { kind: "tool_result", id: "c1", ok: true, text: "hi" },
+      { kind: "model_message", content: "完成" },
+      { kind: "done", finishReason: "no_tool_calls" },
+    ]);
+    expect(provider.calls).toHaveLength(2);
+    expect(session.events().map((event) => event.type)).toEqual([
+      "user",
+      "assistant",
+      "tool_result",
+      "assistant",
+      "status",
+    ]);
+    const toolResult = session.events().find((event) => event.type === "tool_result");
+    const assistant = session.events().find((event) => event.type === "assistant");
+    expect(toolResult?.parent).toBe(assistant?.seq);
+    expect(toolResult?.payload).toMatchObject({ id: "c1", ok: true, text: "hi" });
+  });
+
+  it("model-visible means logged: 投影含 tool 消息", async () => {
+    const provider = scriptedProvider([reply("用 echo", [echoCall("c1")]), reply("完成")]);
+    const { ctx, session } = await makeCtx(provider);
+
+    await collect(query(ctx, "请回应", { maxTurns: 10 }));
+
+    const messages = buildMessages(session.events());
+    expect(messages.map((message) => message.role)).toEqual([
+      "user",
+      "assistant",
+      "tool",
+      "assistant",
+    ]);
+    expect(messages[2]).toMatchObject({ role: "tool", tool_call_id: "c1", content: "hi" });
+    expect(messages[1].tool_calls?.[0].function.arguments).toBe('{"text":"hi"}');
+  });
+
+  it("每轮 complete 收到 tools 与 maxOutput", async () => {
+    const provider = scriptedProvider([reply("完成")]);
+    const { ctx } = await makeCtx(provider);
+
+    await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(provider.calls[0].tools.map((tool) => tool.function.name)).toEqual(["echo"]);
+    expect(provider.calls[0].maxOutputTokens).toBe(512);
+    expect(provider.calls[0].signal).toBe(ctx.signal);
+  });
+
+  it("truncatedByMaxTokens=true 且无工具调用 → 再次 complete", async () => {
+    const provider = scriptedProvider([reply("part", [], true), reply("done")]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.map((event) => event.kind)).toEqual([
+      "model_message",
+      "model_message",
+      "done",
+    ]);
+    expect(provider.calls).toHaveLength(2);
+    expect(session.events().filter((event) => event.type === "assistant")).toHaveLength(2);
+  });
+
+  it("truncatedByMaxTokens=true 且有工具调用 → 执行后再次 complete", async () => {
+    const provider = scriptedProvider([
+      reply("part", [echoCall("c1")], true),
+      reply("done"),
+    ]);
+    const { ctx } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.map((event) => event.kind)).toEqual([
+      "model_message",
+      "tool_use",
+      "tool_result",
+      "model_message",
+      "done",
+    ]);
+    expect(provider.calls).toHaveLength(2);
+  });
+
+  it("maxTurns=1 熔断 → interrupted + done(max_turns)", async () => {
+    const provider = scriptedProvider([reply("x", [echoCall("c1")])]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 1 }));
+
+    expect(events.map((event) => event.kind)).toEqual([
+      "model_message",
+      "tool_use",
+      "tool_result",
+      "interrupted",
+      "done",
+    ]);
+    expect(events.at(-2)).toEqual({ kind: "interrupted", reason: "max_turns" });
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "max_turns" });
+    expect(provider.calls).toHaveLength(1);
+    expect(session.events().map((event) => event.type)).toEqual([
+      "user",
+      "assistant",
+      "tool_result",
+      "interrupted",
+    ]);
+  });
+
+  it("maxCostUsd 触发熔断", async () => {
+    const provider = scriptedProvider([
+      reply("x", [echoCall("c1")], false, { promptTokens: 10, completionTokens: 5 }),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      pricePerMillion: { input: 1_000_000, output: 1_000_000 },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10, maxCostUsd: 0.5 }));
+
+    expect(events.at(-2)).toEqual({ kind: "interrupted", reason: "max_cost_usd" });
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "max_cost_usd" });
+    expect(provider.calls).toHaveLength(1);
+    expect(session.events().filter((event) => event.type === "usage")).toHaveLength(1);
+  });
+
+  it("maxCostUsd 未配 → 只计 token 不熔断", async () => {
+    const usage = { promptTokens: 1000, completionTokens: 1000 };
+    const provider = scriptedProvider([
+      reply("a", [echoCall("c1")], false, usage),
+      reply("b", [echoCall("c2")], false, usage),
+      reply("done", [], false, usage),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      pricePerMillion: { input: 1_000_000, output: 1_000_000 },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(provider.calls).toHaveLength(3);
+    expect(session.events().filter((event) => event.type === "usage")).toHaveLength(3);
+  });
+
+  it("price 缺省 → 只计 token 不熔断", async () => {
+    const usage = { promptTokens: 10_000_000, completionTokens: 10_000_000 };
+    const provider = scriptedProvider([
+      reply("a", [echoCall("c1")], false, usage),
+      reply("done", [], false, usage),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10, maxCostUsd: 0 }));
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(session.events().filter((event) => event.type === "usage")).toHaveLength(2);
+  });
+
+  it("计价分支: cachedInput 缺省 vs 已配 结果不同", () => {
+    const usage = { promptTokens: 100, completionTokens: 50, cachedTokens: 40 };
+
+    const withoutCachedPrice = computeCostUsd(usage, { input: 1, output: 2 });
+    const withCachedPrice = computeCostUsd(usage, { input: 1, output: 2, cachedInput: 0.1 });
+
+    expect(withoutCachedPrice).toBeCloseTo(200 / 1_000_000);
+    expect(withCachedPrice).toBeCloseTo(164 / 1_000_000);
+    expect(withoutCachedPrice).toBeGreaterThan(withCachedPrice);
+    expect(computeCostUsd(usage)).toBe(0);
+  });
+
+  it("usage 事件按字段落日志,cachedTokens 缺省时不写该键", async () => {
+    const provider = scriptedProvider([
+      reply("done", [], false, { promptTokens: 12, completionTokens: 3 }),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+
+    await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    const usage = session.events().find((event) => event.type === "usage");
+    expect(usage?.payload).toStrictEqual({ promptTokens: 12, completionTokens: 3 });
+  });
+
+  it("usage 事件含 cachedTokens 时保留该字段", async () => {
+    const provider = scriptedProvider([
+      reply("done", [], false, { promptTokens: 12, completionTokens: 3, cachedTokens: 4 }),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+
+    await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    const usage = session.events().find((event) => event.type === "usage");
+    expect(usage?.payload).toStrictEqual({
+      promptTokens: 12,
+      completionTokens: 3,
+      cachedTokens: 4,
+    });
+  });
+
+  it("abort → interrupted,已收到的 assistant 结果先落日志", async () => {
+    const controller = new AbortController();
+    const provider = scriptedProvider([reply("慢")], () => controller.abort());
+    const { ctx, session } = await makeCtx(provider, { signal: controller.signal });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.map((event) => event.kind)).toEqual([
+      "model_message",
+      "interrupted",
+      "done",
+    ]);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
+    expect(session.events().map((event) => event.type)).toEqual([
+      "user",
+      "assistant",
+      "interrupted",
+    ]);
+  });
+
+  it("模型抛 AbortError → interrupted + done(aborted)", async () => {
+    const provider = scriptedProvider([new DOMException("aborted", "AbortError")]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.map((event) => event.kind)).toEqual(["interrupted", "done"]);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
+    expect(session.events().map((event) => event.type)).toEqual(["user", "interrupted"]);
+  });
+
+  it("signal 已中止 → 不调用模型", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const provider = scriptedProvider([]);
+    const { ctx, session } = await makeCtx(provider, { signal: controller.signal });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.map((event) => event.kind)).toEqual(["interrupted", "done"]);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
+    expect(provider.calls).toHaveLength(0);
+    expect(session.events().map((event) => event.type)).toEqual(["user", "interrupted"]);
+  });
+
+  it("非 AbortError 的模型异常直接上抛,不伪造 done", async () => {
+    const provider = scriptedProvider([new Error("boom")]);
+    const { ctx, session } = await makeCtx(provider);
+
+    await expect(collect(query(ctx, "x", { maxTurns: 10 }))).rejects.toThrow("boom");
+
+    expect(session.events().map((event) => event.type)).toEqual(["user"]);
+  });
+
+  it("未知工具 → tool_result isError,循环继续至 done", async () => {
+    const provider = scriptedProvider([
+      reply("", [{ id: "c1", name: "ghost", arguments: {} }]),
+      reply("done"),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.map((event) => event.kind)).toEqual([
+      "model_message",
+      "tool_use",
+      "tool_result",
+      "model_message",
+      "done",
+    ]);
+    expect(events[0]).toEqual({ kind: "model_message", content: "" });
+    expect(events[2]).toMatchObject({ kind: "tool_result", id: "c1", ok: false });
+    const logged = session.events().find((event) => event.type === "tool_result");
+    expect(logged?.payload).toMatchObject({ id: "c1", ok: false, code: "tool_not_found" });
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+  });
+
+  it("入参 schema 不符 → tool_result isError(schema_validation),循环继续", async () => {
+    const provider = scriptedProvider([
+      reply("", [{ id: "c1", name: "echo", arguments: { wrong: true } }]),
+      reply("done"),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events[2]).toMatchObject({ kind: "tool_result", id: "c1", ok: false });
+    const logged = session.events().find((event) => event.type === "tool_result");
+    expect(logged?.payload).toMatchObject({ id: "c1", ok: false, code: "schema_validation" });
+    expect(Array.isArray(logged?.payload.detail)).toBe(true);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+  });
+
+  it("invalid_json 标记分流: 不进 executeBatch,raw 保留且正常调用仍执行", async () => {
+    const provider = scriptedProvider([
+      reply("", [
+        { id: "m1", name: "echo", arguments: { error: "invalid_json", raw: "{bad" } },
+        echoCall("c2", "ok"),
+      ]),
+      reply("done"),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.map((event) => event.kind)).toEqual([
+      "model_message",
+      "tool_use",
+      "tool_use",
+      "tool_result",
+      "tool_result",
+      "model_message",
+      "done",
+    ]);
+    expect(events[1]).toEqual({
+      kind: "tool_use",
+      id: "m1",
+      name: "echo",
+      input: { error: "invalid_json", raw: "{bad" },
+    });
+    expect(events[3]).toMatchObject({ kind: "tool_result", id: "m1", ok: false });
+    expect(String((events[3] as { text: string }).text)).toContain("{bad");
+    expect(events[4]).toEqual({ kind: "tool_result", id: "c2", ok: true, text: "ok" });
+
+    const logged = session.events().filter((event) => event.type === "tool_result");
+    expect(logged.map((event) => event.payload.id)).toEqual(["m1", "c2"]);
+    expect(logged[0].payload).toMatchObject({
+      id: "m1",
+      ok: false,
+      code: "invalid_json",
+      detail: { raw: "{bad" },
+    });
+    expect(String(logged[0].payload.text)).toContain("{bad");
+    expect(logged[1].payload).toMatchObject({ id: "c2", ok: true, code: "ok" });
+    const assistant = session.events().find((event) => event.type === "assistant");
+    expect(logged[0].parent).toBe(assistant?.seq);
+    expect(logged[1].parent).toBe(assistant?.seq);
+  });
+
+  it("每轮 complete 前预算检查,超限时每轮最多压缩一次", async () => {
+    let compactions = 0;
+    const provider = scriptedProvider([reply("a", [echoCall("c1")]), reply("done")]);
+    const { ctx } = await makeCtx(provider, {
+      budget: () => ({ over: true, tokens: 100, softLimit: 10 }),
+      compactor: async (session) => {
+        compactions += 1;
+        await session.append({ type: "user", payload: { content: `summary-${compactions}` } });
+      },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.filter((event) => event.kind === "compacted")).toHaveLength(2);
+    expect(compactions).toBe(2);
+    expect(provider.calls).toHaveLength(2);
+    expect(provider.calls[0].messages.map((message) => message.content)).toContain("summary-1");
+    expect(provider.calls[1].messages.map((message) => message.content)).toContain("summary-2");
+  });
+
+  it("超限但无 compactor 时继续当前循环", async () => {
+    const provider = scriptedProvider([reply("done")]);
+    const { ctx } = await makeCtx(provider, {
+      budget: () => ({ over: true, tokens: 100, softLimit: 10 }),
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.map((event) => event.kind)).toEqual(["model_message", "done"]);
+    expect(provider.calls).toHaveLength(1);
+  });
+
+  it("cwd/timeoutMs/artifactDir 透传至 executeBatch", async () => {
+    let capturedCwd = "";
+    const whereTool: ToolDef<{}> = {
+      name: "where",
+      description: "记录 cwd",
+      schema: z.object({}),
+      annotations: { readOnly: true },
+      execute: async (_input, toolCtx) => {
+        capturedCwd = toolCtx.cwd;
+        return { isError: false, code: "ok", message: "", text: toolCtx.cwd };
+      },
+    };
+    const slowTool: ToolDef<{}> = {
+      name: "slow",
+      description: "慢工具",
+      schema: z.object({}),
+      annotations: { readOnly: true },
+      execute: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return { isError: false, code: "ok", message: "", text: "late" };
+      },
+    };
+    const bigTool: ToolDef<{}> = {
+      name: "big",
+      description: "大输出",
+      schema: z.object({}),
+      annotations: { readOnly: true },
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "x".repeat(40000) }),
+    };
+    const provider = scriptedProvider([
+      reply("", [{ id: "w1", name: "where", arguments: {} }]),
+      reply("", [{ id: "s1", name: "slow", arguments: {} }]),
+      reply("", [{ id: "b1", name: "big", arguments: {} }]),
+      reply("done"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([whereTool, slowTool, bigTool]),
+      cwd: "C:/workspace-custom",
+      timeoutMs: 5,
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(capturedCwd).toBe("C:/workspace-custom");
+    const results = session.events().filter((event) => event.type === "tool_result");
+    expect(results[0].payload).toMatchObject({ id: "w1", ok: true, text: "C:/workspace-custom" });
+    expect(results[1].payload).toMatchObject({ id: "s1", ok: false, code: "tool_timeout" });
+    expect(results[2].payload.code).toBe("ok");
+    const artifactPath = results[2].payload.artifactPath;
+    expect(typeof artifactPath).toBe("string");
+    expect(existsSync(String(artifactPath))).toBe(true);
+    expect(path.dirname(String(artifactPath))).toBe(ctx.artifactDir);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+  });
+
+  it("ctx.systemPrompt 在会话无 system 时补齐,已有 system 时不重复", async () => {
+    const first = scriptedProvider([reply("done")]);
+    const created = await makeCtx(first, { systemPrompt: "SYS" });
+    await collect(query(created.ctx, "x", { maxTurns: 10 }));
+    expect(created.session.events().filter((event) => event.type === "system")).toHaveLength(1);
+    expect(created.session.events()[0]).toMatchObject({
+      type: "system",
+      payload: { content: "SYS" },
+    });
+
+    const second = scriptedProvider([reply("done")]);
+    const existing = await makeCtx(second, { systemPrompt: "SYS" }, "SYS");
+    await collect(query(existing.ctx, "x", { maxTurns: 10 }));
+    expect(existing.session.events().filter((event) => event.type === "system")).toHaveLength(1);
+  });
+});
