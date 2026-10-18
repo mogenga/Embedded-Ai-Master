@@ -57,7 +57,14 @@ function projectAssistant(
 
 export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage[] {
   const bySeq = new Map<number, SessionEvent>();
+  let previousSeq: number | undefined;
   for (const event of events) {
+    if (previousSeq !== undefined && event.seq <= previousSeq) {
+      throw new TypeError(
+        `session event seq must be strictly increasing: ${event.seq} after ${previousSeq}`,
+      );
+    }
+    previousSeq = event.seq;
     bySeq.set(event.seq, event);
   }
 

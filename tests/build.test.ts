@@ -106,6 +106,21 @@ describe("buildMessages 投影重组", () => {
     expect(buildMessages([mk(0, "tool_call", { id: "c1" })])).toStrictEqual([]);
   });
 
+  it("事件 seq 必须严格递增", () => {
+    expect(() =>
+      buildMessages([
+        mk(2, "user", { content: "b" }),
+        mk(1, "user", { content: "a" }),
+      ]),
+    ).toThrow();
+    expect(() =>
+      buildMessages([
+        mk(1, "user", { content: "a" }),
+        mk(1, "user", { content: "b" }),
+      ]),
+    ).toThrow();
+  });
+
   it("system/user 的 content 非字符串时抛错", () => {
     expect(() => buildMessages([mk(0, "system", { content: 1 })])).toThrow();
     expect(() => buildMessages([mk(0, "user", {})])).toThrow();
@@ -142,6 +157,12 @@ describe("buildMessages 投影重组", () => {
   it("tool_result 的 parent 不存在时抛错", () => {
     expect(() =>
       buildMessages([mk(0, "tool_result", { id: "c1", text: "x" }, 9)]),
+    ).toThrow();
+  });
+
+  it("tool_result 的 parent 更小但不存在时抛错", () => {
+    expect(() =>
+      buildMessages([mk(5, "tool_result", { id: "c1", text: "x" }, 3)]),
     ).toThrow();
   });
 

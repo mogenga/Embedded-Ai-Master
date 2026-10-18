@@ -194,6 +194,7 @@ export async function* query(
           payload: toResultPayload(call.id, result),
           parent: assistantEvent.seq,
         });
+        yield { kind: "tool_result", id: call.id, ok: false, text: result.text };
       }
       yield* emitInterrupted(session, "aborted");
       return;

@@ -415,9 +415,23 @@ describe("query 主循环", () => {
       "model_message",
       "tool_use",
       "tool_use",
+      "tool_result",
+      "tool_result",
       "interrupted",
       "done",
     ]);
+    expect(events[3]).toEqual({
+      kind: "tool_result",
+      id: "c1",
+      ok: false,
+      text: "tool aborted before execution",
+    });
+    expect(events[4]).toEqual({
+      kind: "tool_result",
+      id: "c2",
+      ok: false,
+      text: "tool aborted before execution",
+    });
     expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
 
     const assistant = session.events().find((event) => event.type === "assistant");
