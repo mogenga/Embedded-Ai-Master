@@ -1,5 +1,14 @@
 import * as childProcess from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -35,6 +44,39 @@ function run(workdir: string, command: string, cwd?: string, signal?: AbortSigna
   return shellTool.execute(input, makeCtx(workdir), signal ?? new AbortController().signal);
 }
 
+function fakeChild(): ChildProcess {
+  const child = new EventEmitter() as unknown as ChildProcess;
+  Object.assign(child, { stdout: new EventEmitter(), stderr: new EventEmitter() });
+  return child;
+}
+
+async function waitForPid(file: string, timeoutMs = 10000): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const value = Number(readFileSync(file, "utf8"));
+      if (Number.isInteger(value) && value > 0) return value;
+    } catch {
+      void 0;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`pid file not created: ${file}`);
+}
+
+async function waitForExit(pid: number, timeoutMs = 10000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`process ${pid} still running`);
+}
+
 afterEach(() => {
   spawnMock.mockReset();
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
@@ -62,16 +104,29 @@ describe("isDangerousCommand 正例", () => {
     "rm -rf /*",
     "rm -rf ~",
     "rm -rf ~/",
+    "rm -rf $HOME",
+    "rm -rf ${HOME}",
+    "rm -rf ..",
+    "rm -rf ../",
+    "rm -rf ../..",
+    "rm -rf C:",
+    "rm -rf C:\\",
+    "rm -rf C:\\*",
+    "rm -rf C:\\*.*",
     "rm -fr /",
     "rm -r -f /",
     "rm --recursive --force /",
     "sudo rm -rf /",
+    "sudo -u root rm -rf /",
+    "sudo -g wheel rm -rf ~",
+    "sudo --user=root rm -rf /",
     "cd /tmp && rm -rf /",
     'rm -rf "/"',
     "mkfs /dev/sda",
     "mkfs.ext4 /dev/sda",
     "mkfs -t ext4 /dev/sda",
     "format C:",
+    "format C:\\",
     "format X: /fs:NTFS",
     "diskpart",
     "diskpart /s script.txt",
@@ -84,7 +139,10 @@ describe("isDangerousCommand 正例", () => {
     "dd if=/dev/zero of=/dev/sda bs=1M",
     ":(){ :|:& };:",
     "del /s /q C:\\",
+    "del /s /q C:\\*.*",
+    "del C:\\* /s /q",
     "rd /s /q C:\\",
+    "rd /s /q D:\\*",
     "rmdir /s /q D:\\",
     "reg delete HKLM /f",
     "reg delete HKLM\\Software\\Foo /f",
@@ -102,6 +160,10 @@ describe("isDangerousCommand 反例", () => {
     "rm -rf ./build",
     "rm -rf build",
     "rm -rf /tmp/build",
+    "rm -rf ../build",
+    "rm -rf $HOME/build",
+    "rm -rf ${HOME}/build",
+    "rm -rf C:\\temp",
     "rm file.txt",
     "rm -f file.txt",
     "npm test",
@@ -117,7 +179,10 @@ describe("isDangerousCommand 反例", () => {
     "reg query HKLM\\Software",
     "cipher /d secret.txt",
     "del /s /q build",
+    "del /s /q C:\\Users\\me",
+    "del /s /q *.txt",
     "rd /s /q build",
+    "rd /s /q D:\\temp",
     "mkfslike /dev/sda",
   ])("放行 %s", (command) => {
     expect(isDangerousCommand(command)).toBe(false);
@@ -125,20 +190,44 @@ describe("isDangerousCommand 反例", () => {
 });
 
 describe("shellTool 危险命令", () => {
-  it.each(["rm -rf /", "mkfs.ext4 /dev/sda", "shutdown -h now", "dd if=x of=/dev/sda"])(
-    "不执行 %s",
-    async (command) => {
-      const workdir = makeWorkdir();
-      spawnMock.mockClear();
+  it.each([
+    "rm -rf /",
+    "mkfs.ext4 /dev/sda",
+    "shutdown -h now",
+    "dd if=x of=/dev/sda",
+    "rm -rf $HOME",
+    "rm -rf ..",
+    "rm -rf C:\\",
+    "sudo -u root rm -rf /",
+    "del /s /q C:\\*.*",
+    "format C:\\",
+    "rd /s /q D:\\*",
+  ])("不执行 %s", async (command) => {
+    expect(isDangerousCommand(command)).toBe(true);
+    const workdir = makeWorkdir();
+    spawnMock.mockClear();
 
-      const r = await run(workdir, command);
+    const r = await run(workdir, command);
 
-      expect(r.isError).toBe(true);
-      expect(r.code).toBe("dangerous_command");
-      expect(r.text).toContain("dangerous command blocked");
-      expect(spawnMock).not.toHaveBeenCalled();
-    },
-  );
+    expect(r.isError).toBe(true);
+    expect(r.code).toBe("dangerous_command");
+    expect(r.text).toContain("dangerous command blocked");
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("message 与 text 中的命令截断到 200 字符", async () => {
+    const workdir = makeWorkdir();
+    spawnMock.mockClear();
+    const command = `rm -rf / ${"x".repeat(500)}`;
+
+    const r = await run(workdir, command);
+
+    expect(r.code).toBe("dangerous_command");
+    expect(r.message.length).toBeLessThan(240);
+    expect(r.message).not.toContain("x".repeat(300));
+    expect(r.message.endsWith("...")).toBe(true);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
 });
 
 describe("shellTool 执行", () => {
@@ -267,5 +356,91 @@ describe("shellTool 执行", () => {
 
     expect(r.isError).toBe(true);
     expect(r.code).toBe("shell_aborted");
+  });
+
+  it(
+    "运行中 abort → shell_aborted 且子进程结束",
+    async () => {
+      const workdir = makeWorkdir();
+      const pidFile = path.join(workdir, "pid.txt");
+      const controller = new AbortController();
+      const pending = run(
+        workdir,
+        nodeCommand(
+          "require('node:fs').writeFileSync('pid.txt', String(process.pid)); setTimeout(() => {}, 30000)",
+        ),
+        undefined,
+        controller.signal,
+      );
+      let pid: number | undefined;
+      try {
+        pid = await waitForPid(pidFile);
+        controller.abort();
+        const r = await pending;
+        expect(r.isError).toBe(true);
+        expect(r.code).toBe("shell_aborted");
+        await waitForExit(pid);
+      } finally {
+        controller.abort();
+        await pending;
+        if (pid !== undefined) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            void 0;
+          }
+        }
+      }
+    },
+    25000,
+  );
+
+  it(
+    "stderr 超过 1 MiB 截断并标记",
+    async () => {
+      const workdir = makeWorkdir();
+
+      const r = await run(workdir, nodeCommand("process.stderr.write('e'.repeat(2000000))"));
+
+      const detail = r.detail as { stderr: string; stderrTruncated: boolean };
+      expect(r.isError).toBe(false);
+      expect(detail.stderrTruncated).toBe(true);
+      expect(Buffer.byteLength(detail.stderr, "utf8")).toBeLessThanOrEqual(1024 * 1024);
+      expect(detail.stderr.length).toBeGreaterThan(0);
+      expect(r.text).toContain("stderr truncated");
+    },
+    20000,
+  );
+
+  it("异步 spawn error → shell_spawn_failed", async () => {
+    const workdir = makeWorkdir();
+    const child = fakeChild();
+    spawnMock.mockImplementationOnce(() => {
+      process.nextTick(() => child.emit("error", new Error("async spawn boom")));
+      return child;
+    });
+
+    const r = await run(workdir, "echo hi");
+
+    expect(r.isError).toBe(true);
+    expect(r.code).toBe("shell_spawn_failed");
+    expect(r.text).toContain("async spawn boom");
+  });
+
+  it("被信号终止 → shell_terminated", async () => {
+    const workdir = makeWorkdir();
+    const child = fakeChild();
+    spawnMock.mockImplementationOnce(() => {
+      process.nextTick(() => child.emit("close", null, "SIGTERM"));
+      return child;
+    });
+
+    const r = await run(workdir, "echo hi");
+
+    expect(r.isError).toBe(true);
+    expect(r.code).toBe("shell_terminated");
+    expect(r.detail).toMatchObject({ exitCode: null, signal: "SIGTERM" });
+    expect(r.message).toContain("SIGTERM");
+    expect(r.text).toContain("SIGTERM");
   });
 });

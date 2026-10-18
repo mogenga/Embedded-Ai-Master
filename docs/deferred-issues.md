@@ -618,6 +618,14 @@
 - **触发升级条件**: 出现模型/用户使用上标设备名写文件,或权限层要求 Windows 路径语义完备。
 - **修复建议**: 将保留名匹配扩展为 Unicode 上标数字(`¹²³`)并显式列出 `CONIN$`/`CONOUT$`;补对应测试,保持现有规范化流程不变。
 
+### D-074 · `shell` 的 cwd 校验与 spawn 之间存在 symlink TOCTOU
+
+- **发现**: 2026-10-18,维度4 Task2 审查修复。
+- **现象**: `resolveCwd` 先用 `resolveInWorkdir` 做词法边界与最近已存在祖先的 `realpath` 校验,随后才把字符串路径交给 `spawn` 的 `cwd`。两步之间若 workdir 内目录被替换为指向 workdir 外的 symlink/junction,子进程会在越界目录执行,已有校验不会感知。
+- **影响**: 边界校验不是原子操作;本机并发进程可在窗口内绕过 workdir 限制。P0 单用户场景风险低,但语义上“cwd 在 workdir 内”并不严格成立。
+- **触发升级条件**: 接入多用户/权限层,或工作区可能被不可信进程并发修改;需要给出“cwd 绝不越界”的强保证。
+- **修复建议**: 在支持的平台用已打开目录句柄启动进程(`fchdir`/`posix_spawn`),或在 spawn 前紧邻地再次 `lstat`/`realpath` 并比较;Windows 可结合目录句柄与 job object 校验,失败返回结构化错误。
+
 ---
 
 ## 变更记录
@@ -654,3 +662,4 @@
 | 2026-10-18 | Task 16 审查修复:会话列表改 header-only 读取(id 取目录名,`id_mismatch`/`unreadable`)、静态路径 NUL/穿越 400、Dock 状态点与日志 mark 由真实数据派生、V13 改实跑一致性测试、V14 删除恒真断言;D-053 验证描述修正;录入 D-066(列表不解析事件)、D-067(Host/Origin 未校验)、D-068(Windows 尾随点 id 别名) |
 | 2026-10-18 | 维度4 Task1 审查修复:fs read 改流式读取、edit 按 CRLF/LF 风格映射、拒绝 Windows 保留设备名、offset 越界显式返回;design §4.2 补齐 read_failed/invalid_input/reserved_name/internal_error;拟用 D-051/D-052 与前端冲突,改录 D-071(fs 不响应 AbortSignal)、D-072(edit 非重叠匹配) |
 | 2026-10-18 | 维度4 Task1 收尾:空文件 offset 显式返回、混合换行按 LF 处理并保留未命中行原始字节、保留名先规范化(trim/:stream/尾部点空格)、5MB 用例改名并明确流式仅代码审查、junction 改为真实探测;录入 D-073(上标设备名变体) |
+| 2026-10-18 | 维度4 Task2 审查修复:危险命令补 `$HOME`/`${HOME}`/`..`/盘符根与 `del/rd` 通配、sudo 带值选项、信号终止 `shell_terminated`、abort 杀进程树、message 截断 200 字符;录入 D-074(cwd 校验与 spawn 的 symlink TOCTOU) |

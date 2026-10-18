@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
 import { z } from "zod";
 import { resolveInWorkdir, ToolPathError } from "./path-safety.js";
@@ -12,7 +12,27 @@ export const shellInputSchema = z.object({
 export type ShellInput = z.infer<typeof shellInputSchema>;
 
 const MAX_STREAM_BYTES = 1024 * 1024;
+const MAX_COMMAND_PREVIEW = 200;
 const FORK_BOMB = /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/;
+const SUDO_VALUE_OPTIONS = new Set([
+  "-u",
+  "--user",
+  "-g",
+  "--group",
+  "-p",
+  "--prompt",
+  "-c",
+  "--close-from",
+  "-d",
+  "--chdir",
+  "-h",
+  "--host",
+  "-r",
+  "--role",
+  "-t",
+  "--type",
+  "--other-user",
+]);
 
 function failure(code: string, message: string): ToolResult {
   return { isError: true, code, message, text: message };
@@ -20,6 +40,26 @@ function failure(code: string, message: string): ToolResult {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function previewCommand(command: string): string {
+  return command.length <= MAX_COMMAND_PREVIEW ? command : `${command.slice(0, MAX_COMMAND_PREVIEW)}...`;
+}
+
+function terminateTree(pid: number): void {
+  if (process.platform === "win32") {
+    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    return;
+  }
+  try {
+    process.kill(-pid, "SIGTERM");
+  } catch {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {
+      void 0;
+    }
+  }
 }
 
 function isAbortError(error: unknown): boolean {
@@ -41,7 +81,15 @@ function commandOf(tokens: string[]): { name: string; args: string[] } {
     const head = tokens[index]!.toLowerCase();
     if (head !== "sudo" && head !== "command") break;
     index++;
-    while (index < tokens.length && tokens[index]!.startsWith("-")) index++;
+    while (index < tokens.length && tokens[index]!.startsWith("-")) {
+      const option = tokens[index]!.toLowerCase();
+      const separator = option.indexOf("=");
+      if (separator === -1 && SUDO_VALUE_OPTIONS.has(option)) {
+        index += 2;
+      } else {
+        index += 1;
+      }
+    }
   }
   return { name: leafCommand(tokens[index] ?? ""), args: tokens.slice(index + 1) };
 }
@@ -50,9 +98,19 @@ function unquote(value: string): string {
   return value.replace(/^['"]+/, "").replace(/['"]+$/, "");
 }
 
+function isDriveRoot(value: string): boolean {
+  return /^[a-z]:(?:[\\/](?:\*|\*\.\*)?)?$/i.test(value);
+}
+
 function isRootTarget(value: string): boolean {
   const target = unquote(value);
-  return /^\/+\*?$/.test(target) || /^~\/?\*?$/.test(target);
+  return (
+    /^\/+\**$/.test(target) ||
+    /^~\/?\**$/.test(target) ||
+    /^\$(?:HOME|\{HOME\})\/?\**$/i.test(target) ||
+    /^(?:\.\.[\\/]?)+$/.test(target) ||
+    isDriveRoot(target)
+  );
 }
 
 function isRecursiveForceRm(args: string[]): boolean {
@@ -85,13 +143,13 @@ function isWindowsWipe(name: string, args: string[]): boolean {
   if (name !== "del" && name !== "erase" && name !== "rd" && name !== "rmdir") return false;
   const lower = args.map((arg) => unquote(arg.toLowerCase()));
   const recursive = lower.includes("/s");
-  const rootTarget = lower.some((arg) => /^[a-z]:\\?\*?$/.test(arg));
+  const rootTarget = lower.some(isDriveRoot);
   return recursive && rootTarget;
 }
 
 function isFormatDrive(name: string, args: string[]): boolean {
   if (name !== "format") return false;
-  return args.some((arg) => /^[a-z]:(\/.*)?$/.test(unquote(arg.toLowerCase())));
+  return args.some((arg) => /^[a-z]:([\\/].*)?$/.test(unquote(arg.toLowerCase())));
 }
 
 function isDdToDevice(name: string, args: string[]): boolean {
@@ -197,20 +255,48 @@ function createCollector(): Collector {
   };
 }
 
+function composeText(
+  headers: string[],
+  out: { text: string; truncated: boolean },
+  err: { text: string; truncated: boolean },
+): string {
+  const sections = [...headers];
+  const outText = out.text.replace(/\r?\n$/, "");
+  const errText = err.text.replace(/\r?\n$/, "");
+  if (outText.length > 0) sections.push(outText);
+  if (errText.length > 0) sections.push(`[stderr]\n${errText}`);
+  if (out.truncated) sections.push("[stdout truncated at 1 MiB]");
+  if (err.truncated) sections.push("[stderr truncated at 1 MiB]");
+  return sections.join("\n");
+}
+
 function runCommand(command: string, cwd: string, signal: AbortSignal): Promise<ToolResult> {
   return new Promise((resolvePromise) => {
+    if (signal.aborted) {
+      resolvePromise(failure("shell_aborted", "command aborted"));
+      return;
+    }
     let settled = false;
     const stdout = createCollector();
     const stderr = createCollector();
+    let child: ReturnType<typeof spawn> | undefined;
+    const onAbort = (): void => {
+      if (child?.pid !== undefined) terminateTree(child.pid);
+    };
     const finish = (result: ToolResult): void => {
       if (settled) return;
       settled = true;
+      signal.removeEventListener("abort", onAbort);
       resolvePromise(result);
     };
 
-    let child;
     try {
-      child = spawn(command, { shell: true, cwd, env: process.env, signal });
+      child = spawn(command, {
+        shell: true,
+        cwd,
+        env: process.env,
+        detached: process.platform !== "win32",
+      });
     } catch (error) {
       if (signal.aborted || isAbortError(error)) {
         finish(failure("shell_aborted", `command aborted: ${errorMessage(error)}`));
@@ -219,6 +305,9 @@ function runCommand(command: string, cwd: string, signal: AbortSignal): Promise<
       finish(failure("shell_spawn_failed", `failed to spawn command: ${errorMessage(error)}`));
       return;
     }
+
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
 
     child.stdout?.on("data", (chunk: Buffer) => stdout.push(chunk));
     child.stderr?.on("data", (chunk: Buffer) => stderr.push(chunk));
@@ -231,21 +320,31 @@ function runCommand(command: string, cwd: string, signal: AbortSignal): Promise<
       finish(failure("shell_spawn_failed", `failed to spawn command: ${errorMessage(error)}`));
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code, exitSignal) => {
       if (signal.aborted) {
         finish(failure("shell_aborted", "command aborted"));
         return;
       }
       const out = stdout.value();
       const err = stderr.value();
+      if (exitSignal !== null) {
+        finish({
+          isError: true,
+          code: "shell_terminated",
+          message: `command terminated by signal ${exitSignal}`,
+          detail: {
+            exitCode: code,
+            signal: exitSignal,
+            stdout: out.text,
+            stderr: err.text,
+            stdoutTruncated: out.truncated,
+            stderrTruncated: err.truncated,
+          },
+          text: composeText([`signal=${exitSignal}`, `exit=${code === null ? "null" : code}`], out, err),
+        });
+        return;
+      }
       const exitCode = code ?? 1;
-      const sections = [`exit=${exitCode}`];
-      const outText = out.text.replace(/\r?\n$/, "");
-      const errText = err.text.replace(/\r?\n$/, "");
-      if (outText.length > 0) sections.push(outText);
-      if (errText.length > 0) sections.push(`[stderr]\n${errText}`);
-      if (out.truncated) sections.push("[stdout truncated at 1 MiB]");
-      if (err.truncated) sections.push("[stderr truncated at 1 MiB]");
       finish({
         isError: false,
         code: "ok",
@@ -257,7 +356,7 @@ function runCommand(command: string, cwd: string, signal: AbortSignal): Promise<
           stdoutTruncated: out.truncated,
           stderrTruncated: err.truncated,
         },
-        text: sections.join("\n"),
+        text: composeText([`exit=${exitCode}`], out, err),
       });
     });
   });
@@ -270,7 +369,7 @@ export const shellTool: ToolDef<ShellInput> = {
   annotations: { readOnly: false, destructive: true },
   execute: async (input, ctx, signal) => {
     if (isDangerousCommand(input.command)) {
-      return failure("dangerous_command", `dangerous command blocked: ${input.command}`);
+      return failure("dangerous_command", `dangerous command blocked: ${previewCommand(input.command)}`);
     }
     const cwd = resolveCwd(ctx, input.cwd ?? ".");
     if (typeof cwd !== "string") return cwd;
