@@ -168,7 +168,7 @@
 
 ### D-020 · `ToolCtx.cwd` 尚无来源
 
-- **状态**: 接口已解决(2026-10-18,Task 8 `executeBatch` 增加 `cwd`,默认 `session.dir`);Task 9 装配层透传待验。
+- **状态**: 已解决(2026-10-18;Task 8 `executeBatch` 增加 `cwd`/`timeoutMs`,Task 9 `LoopCtx` 已透传;装配层可选,缺省 `session.dir`)。
 - **发现**: 2026-10-17,Task 7 第二轮整合复审。
 - **现象**: `ToolCtx` 要求 `sessionId` 与 `cwd`,但 `SessionHandle` 只有 `id`/`dir`,Task 8 计划中的 `executeBatch` opts 也只有 `signal`/`artifactDir`;`cwd` 由谁提供、取 `process.cwd()` 还是会话工作目录未定义。
 - **影响**: echo 不受影响;文件类工具在 Task 8 接入时行为不确定,可能出现相对路径解析到错误目录。
@@ -196,6 +196,7 @@
 - **发现**: 2026-10-18,Task 8 交付核验。
 - **现象**: `executeBatch` 的重复检测在 `typeof call.id !== "string"` 时直接判为非重复(`duplicates` 返回 `false`)。运行时探针: `[{id: 42}, {id: 42}]` 两条都执行并都返回 `ok`。`BatchResult.id` 类型声明为 `string`,但运行期不校验。
 - **影响**: 正常路径无影响——`call.id` 来自 Task 6 适配器解析的 tool call `id`,该处已校验为字符串(Task 6 的 `invalid_response` 守卫)。但这是管线里唯一的静默旁路: 若未来有其他调用方(回放、测试脚本、MCP 工具)构造 `BatchCall`,非字符串 id 会同时绕过重复检测与证据文件命名的字符串假设。
+- **Task 9 复核(F9)**: `query` 的 `collectToolUses` 不重复校验 `call.id`,明确信任 Task 6 适配器的字符串保证;若未来出现非适配器构造方,按本条目修复建议把校验前移到 `collectToolUses`。
 - **触发升级条件**: ① 出现字符串以外的 id 构造方;② 重复 id 导致证据被覆盖或结果错位的事故。
 - **修复建议**: 在管线入口统一把非法 `id` 归一为 `tool_protocol_error` 结构化结果(与 `normalizeToolResult` 同一风格),或把 `BatchCall.id` 的运行时校验前置到 `query` 的 `collectToolUses`。
 
@@ -206,6 +207,57 @@
 - **影响**: 行为正确但文案对使用者无指向性;装配层( Task 10 )若把未配置的路径直接透传,排查时不易意识到是配置缺失。
 - **触发升级条件**: Task 10 装配 `artifactDir` 时(建议届时在装配层做非空校验,而不是改管线)。
 - **修复建议**: 在 `runSession` 装配处校验 `artifactDir` 非空且在会话目录下;管线侧保持现状。
+
+### D-025 · assistant 空 `tool_calls` 数组原样投影
+
+- **发现**: 2026-10-18,Task 9 第二轮整合审查(F4)。
+- **现象**: `buildMessages` 对 `AssistantPayload.toolCalls = []` 仍输出 `tool_calls: []`。OpenAI 官方允许 assistant 消息携带该形状(与"同时含 content 与 tool_calls"一致),当前按不变处理。
+- **影响**: 官方 API 无影响;少数严格兼容网关可能拒绝空数组,导致整轮 400。
+- **触发升级条件**: 接入真实网关出现消息 400,且定位到空 `tool_calls`。
+- **修复建议**: 若网关拒绝,在空数组时省略 `tool_calls` 键并补投影断言;否则保留现状并固化。
+
+### D-026 · `maxCostUsd` 熔断延迟一轮
+
+- **发现**: 2026-10-18,Task 9 第二轮整合审查(F8)。
+- **现象**: 费用在每轮 `complete` 后累计,`assertBreakers` 只在下一轮 `turn += 1` 后检查。若本轮无工具调用,会先以 `no_tool_calls` 正常结束(不落 `max_cost_usd`);若有工具调用,本批工具会先执行完,下一轮才熔断。
+- **影响**: 单轮成本可能超过上限一个模型响应加一批工具;若超支轮恰好是最后一轮,则不会落 `max_cost_usd`。
+- **触发升级条件**: 成本上限要求单轮硬实时,或单轮成本可能远超阈值。
+- **修复建议**: 在 usage 累计后立即检查并中断(需决定本批工具是否仍执行),或保留轮首检查并在文档写明延迟语义。
+
+### D-027 · 无 usage 时 `maxCostUsd` 静默失效
+
+- **发现**: 2026-10-18,Task 9 第三轮红队审查(I3)。
+- **现象**: 响应缺失 usage 时 `query` 落 `status {status:"usage_missing"}` 并保持 cost 不变;若 provider 长期不返回 usage,`maxCostUsd` 永不计费、永不触发。
+- **影响**: 成本上限在无 usage 的网关上失效;token 仍可从日志观察,但费用熔断不可用。
+- **触发升级条件**: 接入不返回 usage 的网关并要求成本硬上限。
+- **修复建议**: 无 usage 时按 `countTokens` 或响应字符数估算成本并标记 `estimated:true`,或明确拒绝在该 provider 上配置 `maxCostUsd`。
+
+### D-028 · `invalid_json` marker 的 raw 无长度上限
+
+- **发现**: 2026-10-18,Task 9 第三轮红队审查(Minor)。
+- **现象**: `buildMessages` 将 marker 的 raw 原样回填,`query` 的 markerResult 也将 raw 原样写入 text/detail;模型一次输出超长坏参数会直接放大下一轮上下文与日志。
+- **影响**: 极端情况下可能触发 context 超限或日志膨胀,当前无上限/截断。
+- **触发升级条件**: 真实模型输出超长非法 arguments,或日志/上下文预算被单条 raw 顶爆。
+- **修复建议**: 对 raw 设字符上限(如 8k),超限截断并附 `truncated:true`,同时保留 hash/长度摘要。
+
+### D-029 · assistant 重复 tool call id 的投影未拦截
+
+- **发现**: 2026-10-18,Task 9 第三轮红队审查(Minor)。
+- **现象**: `buildMessages` 登记批次时按 id 列表保留重复项;`tool_result` 侧用 seen 集合拒绝重复结果,但 assistant 自身声明重复 id 时,投影出的 `tool_calls` 仍含重复 id。
+- **影响**: 若模型返回重复 id,批次可能永远缺一个结果并在 `buildMessages` 末尾抛 `missing tool_result`,或产生配对歧义。
+- **触发升级条件**: 模型返回重复 tool call id,或引入非 Task 6 的响应构造方。
+- **修复建议**: 在 `projectAssistant` 登记批次时检测重复 id 并抛错(与 `tool_result` 的 duplicate 语义对齐),或在 `query` 分流前归一化/拒绝重复 id。
+
+### D-030 · query 初始化 append 失败不落 `interrupted(error)`
+
+- **状态**: 已登记(2026-10-18,Task 9 第四轮整合审查 N2);N3/N5 并入本条目跟踪。
+- **发现**: 2026-10-18,Task 9 第四轮整合审查(N2);N3(补偿写失败未测)与 N5(批次交错负例)同轮提出。
+- **现象**: `query` 的 `ctx.systemPrompt` 补写与首次 `user` append 位于主循环 `try` 之前。systemPrompt 与已有会话冲突时会直接 throw;首次 user append 失败(磁盘满、权限、目录被删)时也不进入统一 catch/finally,因此日志可能只有部分事件且没有 `interrupted(error)`。
+- **影响**: 会话回放看不到终止原因,审计链在初始化阶段断裂;Task 10 装配层若把写失败当作普通异常上报,日志与退出状态可能不一致。
+- **触发升级条件**: ① Task 10 装配 `runSession` 并接入真实文件系统;② 会话目录写失败(磁盘满/权限/目录被删);③ 消费者依赖日志还原终止原因。
+- **修复建议**: 把初始化 append 纳入统一错误出口(在 catch 中补 `interrupted(error)` 后 rethrow),或明确"初始化失败不保证日志"契约并在文档与测试中固定。
+- **关联 N3(补偿写失败未测)**: catch/finally 的补偿 append 已用 try/catch 吞错以保留原错误,但现有测试只覆盖单次瞬时 append 失败,未覆盖补偿写本身失败(如 `tool_result_lost` 写失败、`interrupted(error)` 写失败)。影响: 补偿完整性无断言看守。触发: 会话写持续失败。建议补两条负例,断言原错误仍上抛且不抛补偿错误。
+- **关联 N5(批次交错负例)**: `buildMessages` 已实现批次未完成时拒绝 user/system/assistant,但测试只覆盖 user 插批与 system 位置;未覆盖 assistant 插批、system 插批、跨批次 parent、批次完成后的孤立 `tool_result`。影响: 交错回归可能漏网。触发: 引入回放/并发写入方。建议补对应负例。
 
 ---
 
@@ -221,3 +273,6 @@
 | 2026-10-18 | Task 7 交付核验:录入 D-021(MCP 工具名 `.`/`/` 需映射);`ToolRegistry` 补注册期校验(名称/根 object/不可表示类型 fail-fast),io=input 断言补齐 |
 | 2026-10-18 | Task 8 第三轮红队修复:D-020 标注接口已解决、Task 9 透传待验;录入 D-022(超时≠强制终止、串行写可能重叠) |
 | 2026-10-18 | Task 8 交付核验:录入 D-023(非字符串 id 绕过重复检测)、D-024(空 artifactDir 文案);D-020 已随 plan Task 9 补 `cwd`/`timeoutMs` 透传要求 |
+| 2026-10-18 | Task 9 第二轮整合审查:D-020 标记已解决(Task 9 已透传 `cwd`/`timeoutMs`);录入 D-025(空 `tool_calls` 数组)、D-026(`maxCostUsd` 延迟一轮);D-023 合并 F9(`query` 不重复校验 `call.id`,信任 Task 6) |
+| 2026-10-18 | Task 9 第三轮红队审查:录入 D-027(无 usage 时 `maxCostUsd` 静默失效)、D-028(marker raw 无上限)、D-029(assistant 重复 tool call id 投影未拦截) |
+| 2026-10-18 | Task 9 第四轮整合审查:录入 D-030(初始化 append 失败不落 `interrupted(error)`),N3(补偿写失败未测)与 N5(批次交错负例)并入;`pricePerMillion` 在 config schema 增加非负有限校验 |

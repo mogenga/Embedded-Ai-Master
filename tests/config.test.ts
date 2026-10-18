@@ -34,6 +34,80 @@ describe("配置加载", () => {
     expect(parseProviders(text)["local-gw"]?.pricePerMillion).toEqual({ input: 1, output: 2 });
   });
 
+  it("parseProviders 接受含 cachedInput 的正常价格", () => {
+    const text = JSON.stringify({
+      "local-gw": {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        models: { flash: { contextWindow: 128000, maxOutput: 8192 } },
+        pricePerMillion: { input: 1.5, output: 2.5, cachedInput: 0.5 },
+      },
+    });
+    expect(parseProviders(text)["local-gw"]?.pricePerMillion).toEqual({
+      input: 1.5,
+      output: 2.5,
+      cachedInput: 0.5,
+    });
+  });
+
+  it("parseProviders 接受零价格", () => {
+    const text = JSON.stringify({
+      "local-gw": {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        models: { flash: { contextWindow: 128000, maxOutput: 8192 } },
+        pricePerMillion: { input: 0, output: 0, cachedInput: 0 },
+      },
+    });
+    expect(parseProviders(text)["local-gw"]?.pricePerMillion).toEqual({
+      input: 0,
+      output: 0,
+      cachedInput: 0,
+    });
+  });
+
+  it("parseProviders 拒绝负 input 价格", () => {
+    const text = JSON.stringify({
+      "local-gw": {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        models: { flash: { contextWindow: 128000, maxOutput: 8192 } },
+        pricePerMillion: { input: -1, output: 2 },
+      },
+    });
+    expect(() => parseProviders(text)).toThrowError(
+      expect.objectContaining({ code: "providers_invalid" }),
+    );
+  });
+
+  it("parseProviders 拒绝负 output 价格", () => {
+    const text = JSON.stringify({
+      "local-gw": {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        models: { flash: { contextWindow: 128000, maxOutput: 8192 } },
+        pricePerMillion: { input: 1, output: -2 },
+      },
+    });
+    expect(() => parseProviders(text)).toThrowError(
+      expect.objectContaining({ code: "providers_invalid" }),
+    );
+  });
+
+  it("parseProviders 拒绝负 cachedInput 价格", () => {
+    const text = JSON.stringify({
+      "local-gw": {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        models: { flash: { contextWindow: 128000, maxOutput: 8192 } },
+        pricePerMillion: { input: 1, output: 2, cachedInput: -0.5 },
+      },
+    });
+    expect(() => parseProviders(text)).toThrowError(
+      expect.objectContaining({ code: "providers_invalid" }),
+    );
+  });
+
   it("parseProviders 拒绝缺少 contextWindow", () => {
     expect(() => parseProviders(JSON.stringify({
       p: { protocol: "openai-chat-completions", baseUrl: "http://x/v1", models: { m: { maxOutput: 1 } } },
