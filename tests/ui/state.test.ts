@@ -123,6 +123,28 @@ describe("workbench state", () => {
     expect(applyStreamEvent(replay, live)).toBe(replay);
   });
 
+  it("初始加载成功后实时事件仍可接管视图", () => {
+    const loaded = applyLoadSuccess(baseState(), LOADED);
+    expect(loaded.viewSource).toBeUndefined();
+    const live = { ...makeTranscriptView(), sessionId: "live" };
+    const state = applyStreamEvent(loaded, live);
+    expect(state.view).toBe(live);
+    expect(state.viewSource).toBe("live");
+  });
+
+  it("实时事件不清除会话详情错误", () => {
+    const state = applyStreamEvent(
+      { ...baseState(), viewSource: "live", detailError: "会话读取失败" },
+      makeTranscriptView(),
+    );
+    expect(state.detailError).toBe("会话读取失败");
+  });
+
+  it("回放模式忽略事件流错误提示", () => {
+    const replay = applySessionLoaded(baseState(), "s1", makeTranscriptView());
+    expect(applyStreamError(replay, "事件流中断")).toBe(replay);
+  });
+
   it("实时模式下事件写入视图并清事件流错误", () => {
     const state = applyStreamEvent({ ...baseState(), viewSource: "live", streamError: "断线" }, makeTranscriptView());
     expect(state.viewSource).toBe("live");

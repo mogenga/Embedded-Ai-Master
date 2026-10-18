@@ -58,7 +58,7 @@ export function applyLoadSuccess(
     ...state,
     connection: "ready",
     view: liveView ?? loaded.view,
-    viewSource: liveView === undefined ? "replay" : "live",
+    viewSource: liveView === undefined ? undefined : "live",
     sessions: loaded.sessions,
     ...(loaded.activeSessionId === undefined ? { activeSessionId: undefined } : { activeSessionId: loaded.activeSessionId }),
     kbTree: loaded.kbTree,
@@ -95,6 +95,7 @@ export function applySessionLoaded(
     ...state,
     activeSessionId: id,
     view,
+    connection: "ready",
     viewSource: "replay",
     switching: false,
     detailError: undefined,
@@ -123,5 +124,6 @@ export function applyStreamEvent(state: WorkbenchState, view: TranscriptView): W
 }
 
 export function applyStreamError(state: WorkbenchState, message: string): WorkbenchState {
+  if (state.viewSource === "replay") return state;
   return { ...state, streamError: message };
 }

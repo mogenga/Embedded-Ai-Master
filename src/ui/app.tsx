@@ -137,11 +137,13 @@ export function App({
             onSend={onSend}
             canSend={onSend !== undefined && canSend && connection === "ready" && !switching && !failed}
             disabledReason={
-              connection === "ready"
-                ? switching
+              connection !== "ready"
+                ? "会话尚未就绪，暂不能发送"
+                : switching
                   ? "会话切换中，暂不能发送"
-                  : "未配置提交端点，输入不会发送"
-                : "会话尚未就绪，暂不能发送"
+                  : failed
+                    ? "会话读取失败，暂不能发送"
+                    : "未配置提交端点，输入不会发送"
             }
           />
         </main>
