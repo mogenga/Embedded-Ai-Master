@@ -607,16 +607,16 @@ interface ToolAnnotations {
 | # | 检查项 | 通过标准 |
 |---|---|---|
 | V1 | 三栏头部对齐 | 左/中/右栏头 `y=48`、`height=40`，三者一致 |
-| V2 | 栏宽 | 左 264、右 404；主区 = 视口 − 664 |
-| V3 | 内容对齐 | 主区内容宽 = 主区宽 − 40，与会话头内边距同边界 |
+| V2 | 栏宽 | 左 264、右 404；主区 = 视口 − 668（264 + 404） |
+| V3 | 内容对齐 | 主区内容可用宽 = 主区宽 − 40 − 滚动条占位（V8），与会话头内边距同边界 |
 | V4 | 无横向溢出 | `document.scrollWidth === window.innerWidth` |
 | V5 | 无文本截断 | 关键文本元素 `scrollWidth ≤ clientWidth + 1` |
-| V6 | 知识库树完整 | 在 717px 高工作区下，默认展开的树不裁剪（实测 334px） |
+| V6 | 知识库树完整 | 在 717px 高工作区下，默认展开的厂商分流子树完整可见（树内容 334px，整树超出时知识库区内部滚动） |
 | V7 | 滚动条配色 | 夜间 thumb `rgb(47,61,75)`、日间 `rgb(198,208,217)`，track 透明，宽度 `thin` |
 | V8 | 滚动条占位 | 出现滚动条时实占 10px，不产生横向溢出 |
 | V9 | 三主题解析 | `light` / `dark` / `system` 的 canvas 与 accent 计算值符合 §5.1 |
 | V10 | 无 emoji | 页面文本与图标中不存在 emoji 字符 |
-| V11 | 焦点可见 | Tab 遍历所有控件，均有可见焦点环 |
+| V11 | 焦点可见 | Tab 遍历所有页面内控件（含原生 input/select/textarea），均有可见焦点环 |
 | V12 | 减少动效 | 开启 reduce 后无过渡与平滑滚动 |
 | V13 | 回放一致性 | 同一会话实时渲染与回放渲染的组件序列一致 |
 | V14 | 写操作确认 | 复位/写内存未确认时，界面不显示"已执行" |
@@ -642,4 +642,6 @@ interface ToolAnnotations {
 
 | 版本 | 日期 | 说明 |
 |---|---|---|
-| v1.0 | 2026-10-18 | 首版：从 `prototypes/index.html` 提取令牌、栅格、组件与验收口径；对齐 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations` 实际类型；登记 6 项前端待决策 || v1.1 | 2026-10-18 | 关闭 6 项决策：前端定为 Preact + Vite；实时通道定为 SSE + HTTP POST；决定扩展 `LoopEvent.tool_result`；波形与仪器联锁列为不做；虚拟滚动设触发条件；fork 仅做派生入口 |
+| v1.0 | 2026-10-18 | 首版：从 `prototypes/index.html` 提取令牌、栅格、组件与验收口径；对齐 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations` 实际类型；登记 6 项前端待决策 |
+| v1.1 | 2026-10-18 | 关闭 6 项决策：前端定为 Preact + Vite；实时通道定为 SSE + HTTP POST；决定扩展 `LoopEvent.tool_result`；波形与仪器联锁列为不做；虚拟滚动设触发条件；fork 仅做派生入口 |
+| v1.2 | 2026-10-18 | Task 10 视觉验收落地：V2 主区公式由笔误 `−664` 修正为 `−668`（264 + 404）；V3 明确滚动条占位从内容宽中扣除；V6 明确验收对象为厂商分流子树、整树超出走知识库区内部滚动；V11 明确覆盖原生表单控件；`applyTheme` 保留 `data-theme="system"` 交由 CSS 媒体查询解析 |

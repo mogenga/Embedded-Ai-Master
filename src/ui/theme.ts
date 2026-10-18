@@ -16,9 +16,9 @@ export function readStoredTheme(): ThemeChoice {
   }
 }
 
-export function applyTheme(choice: ThemeChoice, media: ResolvedTheme): void {
+export function applyTheme(choice: ThemeChoice, _media: ResolvedTheme): void {
   if (typeof document === "undefined") return;
-  document.documentElement.dataset.theme = resolveTheme(choice, media);
+  document.documentElement.dataset.theme = choice;
 }
 
 export function persistTheme(choice: ThemeChoice): void {

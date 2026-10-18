@@ -145,6 +145,7 @@ ul{margin:0;padding:0;list-style:none}
 ::selection{background:var(--accent-line)}
 :focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
 
+
 *{scrollbar-color:var(--scroll-thumb) var(--scroll-track);scrollbar-width:thin}
 ::-webkit-scrollbar{width:11px;height:11px}
 ::-webkit-scrollbar-track{background:var(--scroll-track)}
@@ -465,4 +466,11 @@ ul{margin:0;padding:0;list-style:none}
 .log-pause{margin:0;color:var(--warn);font-size:11px}
 @media (max-width:819.98px){
   .dock{display:none}
+}
+.kb-search input:focus-visible,
+.composer-box textarea:focus-visible,
+.port-grid select:focus-visible,
+.port-grid input:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+@media (prefers-reduced-motion: reduce){
+  *,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}
 }

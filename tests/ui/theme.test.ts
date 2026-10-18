@@ -29,6 +29,10 @@ describe("theme", () => {
     applyTheme("light", "dark");
     expect(document.documentElement.dataset.theme).toBe("light");
   });
+  it("applyTheme 保留 system 交由 CSS 媒体查询解析", () => {
+    applyTheme("system", "dark");
+    expect(document.documentElement.dataset.theme).toBe("system");
+  });
   it("onChangeMedia 映射 matches", () => {
     expect(onChangeMedia({ matches: true })).toBe("light");
     expect(onChangeMedia({ matches: false })).toBe("dark");

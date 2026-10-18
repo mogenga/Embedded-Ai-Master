@@ -37,3 +37,17 @@
 - **关键决策**：前端框架尚未定案（UI 形态决策点仍开放），文档按**框架无关契约**书写，令牌与组件规格与实现框架解耦；核对真实类型 `SessionEvent` / `AssistantPayload` / `ToolResultPayload` / `ToolAnnotations` / `LoopEvent` 后落数据投影表，发现 `LoopEvent.tool_result` 仅含 `{id, ok, text}`、缺 `code`/`detail`/`artifactPath`，登记为 OPEN-UI-02（实时渲染无法复用回放投影）。
 - **被拒绝或纠偏**：无。
 - **翻车与返工**：无。
+## 2026-10-18 · Task 9：SSE 客户端抽象与回放接线
+
+- **用户关键原话**：按 `task-9-brief.md` 实现；"严格 TDD：先写测试 → RED → 实现 → GREEN → 提交"；"无 SSE 环境时以 fixture 回放渲染；不得在无后端时把用户输入静默丢弃"。
+- **关键产出**：`src/ui/view/sse.ts`（可注入 `EventSourceCtor`/`retryMs`/`fetchImpl`，非法 JSON 不中断，close 幂等停止重连，非 2xx 抛结构化错误）；`src/ui/main.tsx` 接入 `VITE_EVENT_STREAM_URL` 累积归约与 `VITE_ACTION_URL` 发送；`tests/ui/sse.test.ts` 4 用例。提交 `454afd9`。
+- **被拒绝或纠偏**：无用户纠偏。brief 测试的 `FakeES.instances` 未跨用例清理，导致 close 用例期望值错误（实测 3）；补 `beforeEach` 清空并把 close 用例改为等待 10ms 后才断言，未改被测语义。
+- **翻车与返工**：首轮 GREEN 未一次达成（3/4），按上述测试隔离与时序问题修正后 4/4；实现本身无需返工。
+- **验证**：`tests/ui/sse.test.ts` 4 passed；`tsc -p tsconfig.web.json --noEmit` 0 error；全量 482 passed / 1 skipped；内核 `tsc --noEmit` 0 error；`vite build` 成功。
+## 2026-10-18 · Task 10：视觉验收脚本与收尾
+
+- **用户关键原话**：按 `task-10-brief.md` 实现，"它是你的唯一需求来源"；"验收脚本必须用 CDP：静态服务 dist-web → chrome --headless=new … → /json/version 取 webSocketDebuggerUrl → 内置 WebSocket 连 CDP → Page.navigate → Page.loadEventFired → Runtime.evaluate 注入探针 → 逐项断言 V1-V14（V13 由 vitest 覆盖，脚本打印引用）"；"断言 V1-V12、V14 全部输出 PASS 才 exit 0；任一 FAIL exit 1"；"若发现组件/样式几何问题，直接修复 src/ui/styles.css 或组件"；"零新增依赖…不运行 npm install/npx"。
+- **关键产出**：`scripts/verify-ui.mjs`（零依赖静态服务 + Chromium 探测 + CDP browser target/session + `Emulation.setDeviceMetricsOverride` 1600×1000 与 717px 工作区 + `Runtime.evaluate` 探针 + Tab 焦点遍历 + 主题媒体模拟；V1-V12/V14 逐项 PASS/FAIL，V13 打印 vitest 引用；找不到浏览器或 `CHROME_PATH` 无效 exit 2）；`theme.ts` 的 `applyTheme` 改为保留 `data-theme="system"` 交由 CSS 媒体查询解析；`styles.css` 补原生表单控件 `:focus-visible` 与 `prefers-reduced-motion` 规则；`tests/ui/theme.test.ts` 增 system 保留用例；设计 v1.2 修正 V2 公式与 V3/V6/V11 口径；`deferred-issues.md` 登记 D-051 ~ D-057。
+- **被拒绝或纠偏**：初版 V2 依设计原文"视口 − 664"期望主区 936，实测 932；核实 264 + 404 = 668，判定设计公式为笔误，改文档与断言而非改布局。V6 初版探针取到未展开子树的 `bottom=0`，属假阳性，改为只取厂商分流展开子树的 4 项。V7 的 track 计算值为 `rgba(0, 0, 0, 0)` 而非字面 `transparent`，按透明接受。V3 主区内容宽按滚动条占位扣除后判定（882 = 932 − 40 − 10），已在设计 v1.2 明确口径。
+- **翻车与返工**：首轮 5 项 FAIL（V2 口径、V7 透明值、V9 system 态、V11 原生控件焦点、V12 减少动效）。V11 首次只修好 textarea：`.port-grid select:focus` 与新增 `:focus-visible` 规则特异性相同且后置，覆盖了焦点环；把规则移到文件末尾后 41 个控件 0 无环。未改任何布局几何，仅补样式、主题语义与脚本口径。
+- **验证**：`npm run typecheck:web` 0 error；`npm run test:ui` 55 passed；`npm run build:web` 成功；`npm run verify:ui` V1-V12/V14 全 PASS；`npm run lint` 0 error；`npm test` 483 passed / 1 skipped；`npm run build` 成功。
