@@ -1,6 +1,6 @@
 # Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 内核。当前交付 P0 维度 1+2：Agent 主循环与模型接入层，自带最小会话、工具管线与 headless demo。
+面向嵌入式调试场景的 agent 内核。当前交付 P0 维度 1+2+6：Agent 主循环与模型接入层，带来可恢复/可分代的会话事实源、工具管线与 headless demo。
 
 ## 技术栈
 
@@ -87,7 +87,63 @@ demo 不读取 `HARNESS_COMPAT_API_KEY`（该变量仅 live 测试使用）；de
 | 130 | 取消（SIGINT/SIGTERM） |
 | 2 | 用法或装配错误（含运行期未恢复错误：模型 4xx/网络/响应非法/会话写入失败） |
 
-会话写入 `$HARNESS_HOME/sessions/<id>/`：`header.json`、`session.v1.jsonl`、按需生成 `artifacts/`。
+会话写入 `$HARNESS_HOME/sessions/<id>/`：`header.json`、`session.v1.jsonl`、按需生成 `session.vN.jsonl` 与 `artifacts/`。
+
+## 会话管理
+
+```text
+<sessionDir>/
+├── header.json          # id、createdAt、status、provider、model、workdir、forkedFrom
+├── session.v1.jsonl     # 首代事件日志
+├── session.vN.jsonl     # 单代超过阈值（默认 50 MiB）后按需生成
+└── artifacts/           # 工具产物（按需）
+```
+
+- `header.status` 取 `open` / `closed`：create/resume 后为 `open`，`close()` 用临时文件 + rename 原子写 `closed`，重复 close 幂等。
+- create 把 `provider` / `model` / `workdir` 写入 header；`workdir` 记录创建时的进程 cwd。
+- 分代：append 前按字节判断，仅当当前代非空且追加后会越过阈值才新建 `session.v(N+1).jsonl`；读取按代数字升序合并，seq 跨代连续。
+- 每轮模型请求前由 `query` 追加 `checkpoint` 事件（`payload.turn`），只落会话日志，不进入 `LoopEvent` 流。
+
+### resume
+
+`runSession` 的 `RunOptions` 支持 `resume: true`，必须显式提供 `sessionDir`：
+
+```ts
+for await (const event of runSession({
+  input: "继续排查",
+  model: "local-gw/flash",
+  resume: true,
+  sessionDir: "C:/Users/me/.harness/sessions/<id>",
+})) {
+  // ...
+}
+```
+
+前置与校验（均在首个 `next()` 前抛 `SessionResumeError`，失败不写 header/日志）：
+
+- `sessionDir` 缺省、目录或 header 不存在 → `missing_session_dir`。
+- `model` 与 `header.model`（存在时）不一致 → `model_mismatch`。
+- 显式传入的 `sessionId` 与 `header.id` 不一致 → `session_id_mismatch`。
+- 提供 `systemPrompt` 且已有 system 事件内容不同 → `system_prompt_mismatch`；非空会话无 system 事件时不允许补写，空会话可补写。
+- 不重复写已有 system/user 事件；resume 后 `header.status` 改回 `open`。
+
+### fork（仅库 API）
+
+`forkSession` 位于 `src/session/persistence.ts`（构建后 `dist/session/persistence.js`），**尚未接入 CLI / `runSession`**：
+
+```ts
+import { forkSession } from "./dist/session/persistence.js";
+
+const child = await forkSession(sourceDir, atSeq, {
+  id: "branch-1",          // 可选，缺省随机
+  targetDir: "…/branch-1", // 可选，缺省 $HARNESS_HOME/sessions/<id>
+});
+```
+
+- `atSeq` 必须是 turn 边界：该事件类型为 `tool_result` 或 `usage`，否则 `not_turn_boundary`；前缀含 `atSeq` 并保留原 `seq` / `parent`，新 header 写 `forkedFrom: { sessionId, seq }`。
+- artifact 自包含：前缀中 `tool_result.payload.artifactPath` 指向的文件复制到新会话 `artifacts/` 并重写路径；源文件缺失或越界时保留原路径并标 `detail.artifactMissing = true`，不阻塞 fork。
+- target 目录已存在（含空目录）→ `target_not_empty`；`targetDir` 或其父路径为文件 → `invalid_target`；失败时回滚本次写入。
+- 两个会话可并发追加、互不影响；同一目录的跨进程锁尚未实现（D-039）。
 
 ## live 测试
 

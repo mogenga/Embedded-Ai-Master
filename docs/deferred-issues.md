@@ -378,6 +378,22 @@
 - **触发升级条件**: 引入多 system 事件;compaction 或运行时修改 system prompt;多段提示拼接。
 - **修复建议**: 明确 `systemPrompt` 与多 system 的映射策略(拼接、比较全部、或只允许首条),校验所有相关事件并给出确定性规则。
 
+### D-045 · `checkpoint.turn` 每次 query 从 1 重新编号,resume 后与历史重复
+
+- **发现**: 2026-10-18,维度6 Task8 收尾。
+- **现象**: `src/loop/query.ts` 在每次 `query` 调用内以 `let turn = 0` 起算,每轮 `turn += 1` 后写入 `checkpoint { turn }`。resume 后再次调用 `query` 会重新从 1 编号,生成的 checkpoint 与同目录历史 checkpoint 的 `turn` 重复;当前 checkpoint 只被写入,没有恢复/重放消费方。
+- **影响**: 当前仅影响日志审计可读性,不影响执行;若未来按 `turn` 定位断点、去重或恢复,重复编号会产生歧义。
+- **触发升级条件**: 出现 checkpoint 消费方(断点续跑、回合定位、恢复投影);需要按 `turn` 唯一定位。
+- **修复建议**: 由 `query` 从会话日志最后一个 checkpoint 的 `turn` 续编,或改用全局 `seq`/事件序号作为唯一标识,并在 design 中明确语义。
+
+### D-046 · 无主错误时 close 异常上抛分支缺真实路径测试
+
+- **发现**: 2026-10-18,维度6 Task8 收尾。
+- **现象**: `runSession` 的 `finally` 中,`session.close()` 异常仅在 `hasPrimaryError === false` 时上抛(`src/index.ts:179-185`)。现有集成测试只覆盖「运行期主错误 + close 异常不覆盖原错误」;`tests/integration.test.ts` 已有 `resumeCloseFailure` mock 可让 resume 返回的 handle `close` 抛出,但未构造「无主错误且 close 抛出」的用例,该上抛分支未被看守。
+- **影响**: 当前行为正确但无回归保护;若重排 `finally` 或调整错误优先级,可能静默吞掉 close 失败而不被测试发现。
+- **触发升级条件**: 重构 `runSession` 装配/关闭流程;引入可注入的 handle 工厂;审计关闭错误可观测性。
+- **修复建议**: 复用现有 `resumeCloseFailure` mock(或抽 handle 工厂),补一条「resume 正常完成、close 抛错 → 调用方收到 close 错误」的集成测试。
+
 ---
 
 ## 变更记录
@@ -402,3 +418,4 @@
 | 2026-10-18 | 维度6 Task4 审查修复:fork 增加 artifact 词法越界拒绝、失败回滚、非递归 `mkdir` 原子占位、同名 artifact 后缀、targetDir 为文件拒绝;D-039 扩展记录 fork 后 append 仍无跨进程锁,录入 D-040(artifact 路径仅词法校验,未解析链接/短名) |
 | 2026-10-18 | 维度6 Task5:rollover 接线 `create/resume/fork`(默认 50 MiB、非法阈值 `TypeError`、resume/fork 字节校准);补已存在空目录与父路径为文件的 fork 用例;录入 D-041(fork 回滚父目录残留/静默)、D-042(artifact 缺失原因不可区分/目录 artifact 未定义) |
 | 2026-10-18 | 维度6 Task6 审查修复:resume 改为「先读取校验、后 `resumeSession`」,失败不写 header/日志;新增 `session_id_mismatch`;`finally` 的 close 异常不再覆盖主错误;录入 D-043(`header.workdir` 与工具 cwd 来源不一致)、D-044(多 system 只校验首个) |
+| 2026-10-18 | 维度6 Task8 收尾:复核 D-039 ~ D-044 均仍为未解决,描述与当前实现一致;录入 D-045(checkpoint.turn 每次 query 从 1 重编号、resume 后与历史重复)、D-046(无主错误时 close 异常上抛分支缺真实路径测试) |
