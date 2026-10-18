@@ -216,9 +216,10 @@ describe("shellTool 危险命令", () => {
   });
 
   it("message 与 text 中的命令截断到 200 字符", async () => {
+    const command = `rm -rf / ${"x".repeat(500)}`;
+    expect(isDangerousCommand(command)).toBe(true);
     const workdir = makeWorkdir();
     spawnMock.mockClear();
-    const command = `rm -rf / ${"x".repeat(500)}`;
 
     const r = await run(workdir, command);
 
