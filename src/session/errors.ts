@@ -34,6 +34,7 @@ export type SessionResumeCode =
   | "model_mismatch"
   | "system_prompt_mismatch"
   | "session_id_mismatch"
+  | "workdir_mismatch"
   | "missing_session_dir"
   | "invalid_target";
 

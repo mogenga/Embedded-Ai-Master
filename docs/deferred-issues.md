@@ -594,6 +594,171 @@
 - **触发升级条件**: 真实环境出现 ACL / 只读介质拒绝;或需要区分错误类型。
 - **修复建议**: 显式把 `EACCES` / `EPERM` 映射为 403 `session_forbidden`;在 Windows 上用 `icacls` 构造拒绝访问并补集成测试。
 
+### D-071 · `fs` 不响应 `AbortSignal`,取消后大文件 IO 仍继续
+
+- **发现**: 2026-10-18,维度4 Task1 审查修复。(注: 原拟编号 D-051/D-052 已被前端任务占用,顺延为 D-071/D-072。)
+- **现象**: `fsTool.execute` 签收 `signal` 但从未读取;`read` 的 `createReadStream`、`edit` 的 `readFile`/`writeFile`、`write` 的 `writeFile` 均未接取消。管线超时/abort 只影响结果返回,不会终止已发起的文件 IO。
+- **影响**: 会话取消或工具超时后,超大文件的读/写仍可能继续占用句柄与磁盘带宽;`read` 在启动后到首次命中截断前不会主动停止。
+- **触发升级条件**: 取消后出现长时间 IO 占用、句柄泄漏,或接入 P1 权限层需要强制终止工具。
+- **修复建议**: 把 `signal` 传给流并在 abort 时 `destroy()`,读循环内检查 `signal.aborted` 并关闭 `readline`;`readFile`/`writeFile` 前先快速检查 abort,失败返回结构化 `aborted`。
+
+### D-072 · `edit` 唯一性按非重叠匹配计数
+
+- **发现**: 2026-10-18,维度4 Task1 审查修复。
+- **现象**: `edit` 从 `first + needle.length` 继续查找第二处,重叠出现不计。例如内容 `aaa`、`oldText: "aa"` 被视为唯一匹配并替换为 `ba`。
+- **影响**: 与“出现次数”的直觉不同;模型可能预期重叠匹配报 `edit_not_unique`。当前行为已在 design §4.2 明确为非重叠。
+- **触发升级条件**: 实测需要重叠匹配语义,或模型反复因该差异产生错误编辑。
+- **修复建议**: 若需重叠计数,用滑动窗口统计所有起点并在 `>1` 时返回 `edit_not_unique`;否则保持并补一条固化非重叠语义的测试。
+
+### D-073 · 保留设备名未覆盖上标数字变体(`COM¹`/`LPT¹` 等)
+
+- **发现**: 2026-10-18,维度4 Task1 收尾修复。
+- **现象**: Windows 同时把 `COM¹`/`COM²`/`COM³`、`LPT¹`/`LPT²`/`LPT³` 等上标数字形式视为保留设备名,当前 `WINDOWS_RESERVED` 仅匹配 ASCII `1-9`,这类路径会放行到 `writeFile`/`edit`。`CONIN$`/`CONOUT$` 等控制台别名也未覆盖。
+- **影响**: 在 Windows 上写入这些名称可能落到设备而非工作区文件;行为依赖系统,跨平台一致性差。
+- **触发升级条件**: 出现模型/用户使用上标设备名写文件,或权限层要求 Windows 路径语义完备。
+- **修复建议**: 将保留名匹配扩展为 Unicode 上标数字(`¹²³`)并显式列出 `CONIN$`/`CONOUT$`;补对应测试,保持现有规范化流程不变。
+
+### D-074 · `shell` 的 cwd 校验与 spawn 之间存在 symlink TOCTOU
+
+- **发现**: 2026-10-18,维度4 Task2 审查修复。
+- **现象**: `resolveCwd` 先用 `resolveInWorkdir` 做词法边界与最近已存在祖先的 `realpath` 校验,随后才把字符串路径交给 `spawn` 的 `cwd`。两步之间若 workdir 内目录被替换为指向 workdir 外的 symlink/junction,子进程会在越界目录执行,已有校验不会感知。
+- **影响**: 边界校验不是原子操作;本机并发进程可在窗口内绕过 workdir 限制。P0 单用户场景风险低,但语义上“cwd 在 workdir 内”并不严格成立。
+- **触发升级条件**: 接入多用户/权限层,或工作区可能被不可信进程并发修改;需要给出“cwd 绝不越界”的强保证。
+- **修复建议**: 在支持的平台用已打开目录句柄启动进程(`fchdir`/`posix_spawn`),或在 spawn 前紧邻地再次 `lstat`/`realpath` 并比较;Windows 可结合目录句柄与 job object 校验,失败返回结构化错误。
+
+### D-075 · `shell` abort 只发一次且无升级/兜底,Promise 可能不 settle
+
+- **发现**: 2026-10-18,维度4 Task2 复审。
+- **现象**: `runCommand` 在 abort 事件里只调用一次 `terminateTree`(Windows `taskkill /T /F`、POSIX `kill(-pid)`),没有检查失败、重试或升级为 SIGKILL;`Promise` 只在子进程 `close`/`error` 事件到达时 settle。若 kill 因权限、PID 回收或进程忽略信号而失败,且两个事件都不到达,`execute` 会长期 pending。
+- **影响**: 取消不保证“进程结束 + 结果返回”两件事同时成立;上层若未设置超时,会话可能挂住;进程残留会占用串口/OpenOCD 句柄,与嵌入式场景的清理要求冲突。
+- **触发升级条件**: 实现工具级超时或出现 abort 后不返回/进程残留的真实现象。
+- **修复建议**: abort 后启动短定时器兜底 `finish(shell_aborted)` 并记录 kill 失败;POSIX 在宽限期后升级 `SIGKILL`,Windows 失败时二次 `taskkill` 或改用 job object;把 kill 失败原因写入 `detail`。
+
+### D-076 · `shell` 的 `exitSignal` 与 `code=null` 语义存在平台边缘
+
+- **发现**: 2026-10-18,维度4 Task2 复审。
+- **现象**: Node `close(code, signal)` 在 POSIX 被信号杀死时通常 `code=null, signal=<sig>`;Windows 上 `taskkill` 后常见 `code=1, signal=null`。当前实现只在 `signal !== null` 时返回 `shell_terminated`,若出现 `code===null && signal===null` 的异常组合,会落入正常分支并用 `code ?? 1` 把 null 伪装成退出码 1。同一次 abort 在不同平台的 `detail` 形状不一致。
+- **影响**: 依赖 `exitCode`/`signal` 的消费者(日志回放、前端展示、模型决策)需要理解平台差异;极端情况下 null 被误报为 1,违反“不伪造事实”的诚实原则。
+- **触发升级条件**: 跨平台回放需要一致的终止语义,或出现 `code=null` 的实际观测。
+- **修复建议**: 把 `code===null && signal===null` 显式建模为 `shell_terminated`(detail 保持 `exitCode:null`)或新增 `shell_unknown`;统一各平台 detail 契约并补跨平台契约测试。
+
+### D-077 · `glob` / `grep` 不响应 `AbortSignal`
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `globTool.execute` / `grepTool.execute` 签收 `signal` 但从未读取;`walkFiles` 的递归遍历、`grep` 的逐文件 `stat`/`readFile` 与逐行匹配都不检查取消。
+- **影响**: 会话取消或管线超时后,遍历仍会继续扫完 5000 个文件并读盘;大目录或 2 MiB 文件较多时,取消不能缩短实际耗时,只能让上层提前返回。
+- **触发升级条件**: 出现取消后长时间占用磁盘/句柄,或接入工具级强制终止与超时预算。
+- **修复建议**: 给 `walkFiles` 传入 `signal`,在每个条目/每次递归前检查并返回 `aborted`;`grep` 在 `stat`、`readFile` 与行循环内检查;工具返回结构化 `aborted` 而不是伪造空结果。
+
+### D-078 · `grep` 先收集全部命中再排序截断
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `grep` 把所有命中行压入 `matches`,遍历结束后统一排序,再用 `maxResults` 截取输出。`maxResults` 只限制返回条数,不限制收集量。
+- **影响**: 命中密集的大仓库会随命中数线性增长内存与排序耗时;即使只需要 200 条也要读完整个工具根,与“结果上限”的直觉不符。
+- **触发升级条件**: 出现内存峰值、响应超时,或需要在大仓库上稳定低延迟。
+- **修复建议**: 遍历时按文件路径有序处理并维护有界结果集(或命中达到硬上限后提前停止);至少在 `detail` 暴露 `matched` 已收集量并允许调用方设置收集上限。
+
+### D-079 · `glob` / `grep` 显式 `path` 根为 symlink 时跟随
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: 遍历中遇到的 symlink 文件/目录由 `walkFiles` 跳过,但显式 `path` 根本身若为 symlink/junction,`stat` 与 `readdir` 会跟随其目标;`resolveInWorkdir` 只做 realpath 边界校验,不改变返回的 `target`。
+- **影响**: 同一工具对“根”和“内部链接”采用不同语义;根链接指向工具根内另一子树时,结果路径仍相对工具根,但扫描范围与用户直觉不同。
+- **触发升级条件**: 需要统一的“绝不跟随 symlink”语义,或出现根链接导致的范围误判。
+- **修复建议**: 对显式根先 `lstat` 并拒绝 symlink(返回 `path_invalid`/`not_a_directory`),或在 design/README 明确“仅遍历中不跟随”并补根链接用例固化语义。
+
+### D-080 · `scanTruncated` 在达到 5000 文件后遇到任意后续条目即标记
+
+- **发现**: 2026-10-18,维度4 Task6 收尾;2026-10-19 按实测修正描述。
+- **实测**: `walkFiles` 在循环顶部判断 `state.scanned >= maxScanned`;恰好扫描 5000 个文件且之后没有剩余条目时不标记(`glob`/`grep` 均有「恰好 5000 个文件不标记」用例);达到上限后只要还有任意后续条目——包括目录、将被忽略的目录或 symlink——就会标记截断。
+- **影响**: 标记本身不再误报「刚好扫满」;但仍无法区分后续条目里是否真有可扫描文件,例如 5000 个文件后跟一个空目录或被忽略目录也会标记,可能触发不必要的缩小范围重试。
+- **触发升级条件**: 需要精确判断是否遗漏文件,或出现因误报截断导致的重复扫描。
+- **修复建议**: 仅当后续存在可扫描文件时标记;或在 `detail` 增加 `scanned`/`maxScanned` 与 `possiblyTruncated` 字段,把保守语义显式化。
+
+### D-081 · `glob` 的 `*` 与 `**` 匹配点开头的隐藏文件
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `compilePattern` 把 `*` 编译为 `[^/]*`、`**` 编译为 `.*`,都不排除 `.` 开头的条目;与常见 shell glob 默认跳过隐藏文件的行为相反。`description` 已写明 `*` 也匹配隐藏文件。
+- **影响**: 模型按惯例写 `*` 或 `**/*` 时会额外得到 `.env`、`.gitignore` 等;虽然 `.git`/`.harness` 等目录已被忽略,但根级隐藏文件仍会进入结果,可能干扰判断。
+- **触发升级条件**: 模型反复因隐藏文件产生误判,或需要与 shell glob 语义对齐。
+- **修复建议**: 增加 `dot` 选项或默认排除 `.` 开头条目,并同步 `description`、design 与测试;若保持现状,补一条固化“包含隐藏文件”语义的用例。
+
+### D-082 · 工具根与 resume 的 workdir 仅词法比较,不解析 symlink / 8.3 短名
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `sameWorkdir` 只做 `path.resolve` + win32 `toLowerCase`;`resolveInWorkdir` 虽对最近已存在祖先做 `realpath` 边界校验,但工具根本身保留传入字符串。同一目录经 symlink/junction、Windows 8.3 短名或不同大小写表达时,比较结果可能不一致。
+- **影响**: resume 时 `opts.cwd` 与 `header.workdir` 指向同一物理目录却抛 `workdir_mismatch`;工具输出的相对路径也可能因根形式不同而变化。
+- **触发升级条件**: 真实出现误报,或需要跨工具根/跨会话的一致路径身份。
+- **修复建议**: 比较前对两侧做 `realpath`(存在时)并统一大小写;Windows 短名用 `fs.realpath` 或 `GetLongPathName` 归一;补 symlink/短名用例。
+
+### D-083 · `shell` 危险命令黑名单是启发式,可被 `env` / `bash -c` / `xargs` 绕过
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `isDangerousCommand` 按 `[\n\r;|&()]` 切段、跳过 env 前缀与 `sudo`/`command`,再识别固定命令名;`env rm -rf /`、`bash -c "rm -rf /"`、`sh -c ...`、`xargs rm`、脚本文件、别名/函数、PowerShell `Remove-Item` 等都不会命中。工具本身也明确标注“非沙箱”。
+- **影响**: 黑名单只能降低误操作概率,不能保证危险命令不执行;模型或用户可通过包装命令绕过,与“危险命令绝不执行”的强保证存在差距。
+- **触发升级条件**: 接入不可信输入/多用户权限层,或需要可审计的强制安全边界。
+- **修复建议**: 改为白名单 + 执行前确认,或在受控 shell 中静态解析命令(AST)并按语义判断;保持 `description` 与 README 的“启发式、非沙箱”声明,避免消费者误当安全边界。
+
+### D-084 · 读取/跳过上限只披露布尔标记或总数,不披露规模与具体路径
+
+- **发现**: 2026-10-18,维度4 Task6 收尾。
+- **现象**: `fs read` 触达 2000 行 / 256 KiB 时只追加 `[truncated]`,`detail` 无总行数/总字节/下一次 `offset`;`grep` 对超过 2 MiB、含 NUL、不可读的文件只给 `[skipped N files ...]` 与分类计数,不列具体路径;`glob` 的 `[scan truncated at 5000 files]` 同样只有固定文案。
+- **影响**: 模型无法判断遗漏规模,可能把“截断后未搜到”误当“不存在”;排查时需要人工重跑并猜测范围,与 R3 的“诚实披露”仍有距离。
+- **触发升级条件**: 出现因截断/跳过导致的漏报、误判,或需要可复现的取证报告。
+- **修复建议**: `fs read` 的 `detail` 增加 `totalLines`/`bytesRead`/`nextOffset`;`grep` 在 `detail` 增加受上限约束的 `skippedPaths` 或按类别列出前 N 个路径;`glob` 增加 `scanned`/`maxScanned`,让调用方可判断是否需要缩小范围。
+
+### D-085 · `grep` 正则同步执行,ReDoS 会阻塞事件循环且不可中断
+
+- **发现**: 2026-10-19,第一轮整体审查修复(I3)。
+- **现象**: `grep` 对每行用 `new RegExp(...).test()` 同步匹配;恶意或失控正则(如 `(a+)+$`)在长行上可触发灾难性回溯,阻塞 Node 事件循环。1 MiB 单行上限与 2 MiB 文件上限降低但不消除风险;匹配期间不检查 `AbortSignal`,取消/超时只能等当前正则返回。
+- **影响**: 单个文件即可让会话卡死;工具超时只能让管线提前返回,无法停止正在执行的正则,与 D-077「不响应取消」叠加。
+- **触发升级条件**: 接入不可信 pattern/仓库;出现 grep 期间事件循环长时间无响应;需要硬性匹配超时。
+- **修复建议**: 用 `worker_threads`/子进程隔离正则并支持终止,或引入线性时间正则引擎;至少在 `description` 与 README 标注「正则同步执行、ReDoS 不可中断」,并限制单次匹配时间或行数。
+
+### D-086 · `glob` 编译仍可能触发正则回溯(ReDoS)
+
+- **发现**: 2026-10-19,第二轮红队审查(I-1)。
+- **现象**: `compilePattern` 把 `**/` 编译为 `(?:.*/)?`;本轮已限制 pattern 长度 ≤256、段数 ≤64,并把连续 `**/` 折叠为一个,但含多个可选 `.*` 段的模式在长路径失败匹配时仍可能多项式/指数回溯;`matchesGlob` 同步执行且不可中断,`grep` 的 `glob` 过滤对每个候选文件调用一次。
+- **影响**: 恶意或失控 glob 可长时间占用 CPU、阻塞事件循环;`glob` 与带 `glob` 的 `grep` 均受影响,与 D-085(正则 ReDoS)、D-077(不响应取消)叠加。
+- **触发升级条件**: 接入不可信 pattern/超深目录;出现 glob 匹配长时间无响应;需要硬性匹配超时。
+- **修复建议**: 改用非回溯 glob 匹配器(按段 DP/贪心),或在 worker 中执行并限时;缓存/预编译 `grep` 的 glob。
+- **状态**: 未解决;本轮仅做长度/段数上限与连续 `**/` 折叠。
+
+### D-087 · `shell` 的 `atRoot` 只跟踪显式目录切换命令
+
+- **发现**: 2026-10-19,第二轮红队审查(Minor 项)。
+- **现象**: `isDangerousCommand` 只根据 `cd`/`pushd`/`chdir`/`Set-Location` 更新 `atRoot`;初始 `cwd` 若为根、或通过 `env -C /`、`sudo -D /`、`git -C /` 等改变目录时,后续 `rm -r *`/`rm -f *` 不会被判为根目标。`cd / && rm -rf .` 已按当前目录目标拦截,但其他改目录方式未覆盖。
+- **影响**: 组合命令可能漏判根目标,拦截结果依赖命令书写形式;属启发式黑名单的已知边界。
+- **触发升级条件**: 出现实际绕过;P1 权限层接入;需要把 shell 拦截当作安全边界。
+- **修复建议**: 维护更完整的 cwd 语义,或在真实 cwd 上解析目标(需文件系统访问);最终由 P1 权限层兜底。
+- **状态**: 未解决。
+
+### D-088 · `shell` 引号归一不解析 shell 展开
+
+- **发现**: 2026-10-19,第二轮红队审查(Minor 项)。
+- **现象**: 危险判定前会移除 token 内所有 `'`/`"`,但不展开 `$'/'`、`${HOME:?}`、`$(...)`、`~user` 或变量拼接;例如 `rm -rf $'/'`、`rm -rf ${HOME:?}/*` 仍可绕过根目标判断。该缺口与 D-083(`env`/`bash -c`/`xargs` 包装)不同,属 shell 自身展开语义。此外,先按分隔符/空白切分再移除引号会改变 token 结构:引号内分隔符(如 `echo "safe; shutdown"`)会被误当真实命令边界(保守误拦);带空格的环境变量赋值(如 `FOO="a b" rm -rf /`)会被拆成多个 token,使首词不再是 `rm`,造成漏判。
+- **影响**: 引号拼接类绕过已封堵,但展开类绕过仍在;黑名单不能作为安全边界。
+- **触发升级条件**: 接入不可信输入;P1 权限层接入;出现实际绕过事故。
+- **修复建议**: 不做完整 shell 解析则无法闭合;可引入 shell AST/静态分析,或在 P1 权限层按真实解析结果判定。
+- **状态**: 未解决。
+
+### D-089 · `grep` 跳过披露把目录计为 files 且不区分来源
+
+- **发现**: 2026-10-19,第二轮红队审查(I-2)。
+- **现象**: `walkFiles` 的 `state.skipped`(不可读目录)已并入 `detail.skipped.unreadable` 与总数披露,但 `text` 仍写 `[skipped N files (binary/too large/unreadable)]`,无法区分文件与目录;根/嵌套不可读只给总数,不列路径。
+- **影响**: 模型可能把不可读目录误判为文件;排障时无法定位具体不可读位置,与 D-084(披露粒度不足)叠加。
+- **触发升级条件**: 需要精确定位不可读路径;权限问题频发;调用方依赖跳过分类做决策。
+- **修复建议**: 拆分 `skippedFiles`/`skippedDirectories`,文案改为 entries 或分别披露;在受上限约束下记录前 N 个路径。
+- **状态**: 未解决;本轮已完成目录跳过计入总数与 `detail.skipped`。
+
+### D-090 · `grep` 的 `glob` 过滤每个文件重新编译正则
+
+- **发现**: 2026-10-19,第二轮红队审查(Minor 项)。
+- **现象**: `grep` 在遍历回调中对每个候选文件调用 `matchesGlob(relative, input.glob)`,而 `matchesGlob` 每次都会执行 `compilePattern`;`glob` 工具本身已在 `execute` 中编译一次后复用。
+- **影响**: 大仓带 `glob` 过滤时产生重复编译开销;与 D-086 的回溯风险叠加,放大 CPU 占用。
+- **触发升级条件**: 大仓/频繁 glob 过滤导致可观测性能下降;需要降低单次 grep 成本。
+- **修复建议**: 预编译一次并把 `RegExp` 传入遍历回调,或导出编译函数/增加缓存。
+- **状态**: 未解决;本轮仅保证非法 glob 返回 `invalid_pattern`。
+
 ---
 
 ## 变更记录
@@ -628,3 +793,11 @@
 | 2026-10-18 | P0 前端 Task 12 第二轮红队审查修复:修正空 text + artifact 投影、SSE 单 timer 重连/close 后静默/构造抛错收敛、折叠摘要截断、costUsd 有限非负校验;清理 `styles.css` 重复 `.dock` 与 media 查询;录入 D-062(usage 缺字段补 0) |
 | 2026-10-18 | P0 前端 Task 15 真实数据验收:验收脚本改为启动 `dist/server/serve.js`(临时 `HARNESS_HOME` 写入真实会话与 KB),V14 断言真实 guard 文案并新增 V0 空态附加检查;修复 V11 以坐标区分同文案控件(设备 unknown 下三个「未接入」chip 曾导致遍历提前终止);README 改为真实数据流程与 API 表;D-053/D-060 标记已解决,D-058 标记数据来源已解决,D-051 补 501 现状;录入 D-063(API 只读、actions/events 未实现)、D-064(KB 深度/条目上限)、D-065(坏目录 errors 未展示) |
 | 2026-10-18 | Task 16 审查修复:会话列表改 header-only 读取(id 取目录名,`id_mismatch`/`unreadable`)、静态路径 NUL/穿越 400、Dock 状态点与日志 mark 由真实数据派生、V13 改实跑一致性测试、V14 删除恒真断言;D-053 验证描述修正;录入 D-066(列表不解析事件)、D-067(Host/Origin 未校验)、D-068(Windows 尾随点 id 别名) |
+| 2026-10-18 | 维度4 Task1 审查修复:fs read 改流式读取、edit 按 CRLF/LF 风格映射、拒绝 Windows 保留设备名、offset 越界显式返回;design §4.2 补齐 read_failed/invalid_input/reserved_name/internal_error;拟用 D-051/D-052 与前端冲突,改录 D-071(fs 不响应 AbortSignal)、D-072(edit 非重叠匹配) |
+| 2026-10-18 | 维度4 Task1 收尾:空文件 offset 显式返回、混合换行按 LF 处理并保留未命中行原始字节、保留名先规范化(trim/:stream/尾部点空格)、5MB 用例改名并明确流式仅代码审查、junction 改为真实探测;录入 D-073(上标设备名变体) |
+| 2026-10-18 | 维度4 Task2 审查修复:危险命令补 `$HOME`/`${HOME}`/`..`/盘符根与 `del/rd` 通配、sudo 带值选项、信号终止 `shell_terminated`、abort 杀进程树、message 截断 200 字符;录入 D-074(cwd 校验与 spawn 的 symlink TOCTOU) |
+| 2026-10-18 | 维度4 Task2 复审:危险 execute 用例补前置识别断言(截断用例);design §4.3 同步 shell 非沙箱/自管 abort/`shell_terminated`/`del`/`rd` 通配与错误码表;录入 D-075(abort 无升级兜底)、D-076(`exitSignal`/`code=null` 平台边缘) |
+| 2026-10-18 | 维度4 Task6 收尾:README 补内置工具清单、fs/shell/glob/grep 语义与工具根;补 shell 截断多字节/AbortError 与 grep ENOTDIR/readdir 错误测试,工具行覆盖均 ≥90%;录入 D-077 ~ D-084(glob/grep 不响应取消、grep 先收集后截断、根 symlink 跟随、scanTruncated 保守、隐藏文件匹配、workdir 词法比较、shell 黑名单绕过、上限披露粒度) |
+| 2026-10-19 | 维度4 第一轮整体审查修复:shell 归一化根目标并跟踪 `cd`/`pushd`/`Set-Location`;grep 补 scanTruncated 披露与 1 MiB 单行上限;shell `detail.stdout/stderr` 改为 4096 字符摘要 + 字节数;补 fs write/read 失败、grep 扫描上限、path-safety 每测试 workdir、win32 忽略目录大小写与相对 cwd 归一测试;按实测修正 D-080,录入 D-085(正则 ReDoS/不可中断) |
+| 2026-10-19 | 维度4 第二轮红队修复:shell `rm` 任一 `-r/-f` + 根目标即危险、`--no-preserve-root` 一律危险、token 引号全移除、`chdir` 纳入跟踪、无参 `pushd` 保守、detail 摘要不切断代理对;glob 限制 pattern 长度/段数并折叠连续 `**/`;grep 校验 `glob` 非法、合并不可读目录披露;录入 D-086(glob ReDoS 未完全消除)与 D-087 ~ D-090(改目录方式未跟踪、shell 展开绕过、跳过披露分类、grep glob 重复编译) |
+| 2026-10-19 | 维度4 复审 minor:glob 连续 `**/` 折叠改为只从完整段边界开始(避免 `a**/**/x` 被误折叠),补回归测试;文档补齐无参 `cd`/`chdir`/`pushd` 保守语义;D-088 现象扩充引号内分隔符与带空格环境变量赋值绕过 |

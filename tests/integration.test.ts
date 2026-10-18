@@ -143,12 +143,20 @@ describe("runSession 端到端装配", () => {
     expect(calls[0].body.model).toBe("flash");
     expect(calls[0].body.max_tokens).toBe(512);
     expect(calls[0].body.stream).toBe(false);
-    expect(calls[0].body.tools).toEqual([
-      expect.objectContaining({
-        type: "function",
-        function: expect.objectContaining({ name: "echo" }),
-      }),
-    ]);
+    expect(calls[0].body.tools).toHaveLength(5);
+    expect(
+      (calls[0].body.tools as Array<{ type: string; function: { name: string } }>).map(
+        (tool) => tool.function.name,
+      ),
+    ).toEqual(["echo", "fs", "shell", "glob", "grep"]);
+    expect(calls[0].body.tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "function",
+          function: expect.objectContaining({ name: "echo" }),
+        }),
+      ]),
+    );
     expect(calls[0].body.messages).toEqual([{ role: "user", content: "hi" }]);
     expect(calls[1].body.messages).toEqual([
       { role: "user", content: "hi" },
@@ -830,6 +838,242 @@ describe("runSession resume", () => {
     expect(Object.keys(await readHeader(sessionDir))).not.toContain("apiKey");
   });
 });
+
+function toolCallResponse(id: string, name: string, args: unknown): unknown {
+  return {
+    choices: [
+      {
+        message: {
+          content: "",
+          tool_calls: [
+            {
+              id,
+              type: "function",
+              function: { name, arguments: JSON.stringify(args) },
+            },
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+    usage: { prompt_tokens: 10, completion_tokens: 5 },
+  };
+}
+
+describe("runSession 内置工具装配", () => {
+  it("模型返回 fs read 调用时在临时 workdir 内闭环执行", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const workdir = await tempDir();
+    const sessionDir = path.join(home, "fs-closed-loop");
+    await writeFile(path.join(workdir, "note.txt"), "hello fs\n", "utf8");
+    const { impl, calls } = mockFetch([
+      toolCallResponse("call-fs", "fs", { op: "read", path: "note.txt" }),
+      EMPTY_RESPONSE,
+    ]);
+
+    const events = await collect(
+      runSession({
+        input: "read",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        cwd: workdir,
+        fetchImpl: impl,
+      }),
+    );
+
+    const result = events.find((event) => event.kind === "tool_result");
+    expect(result).toMatchObject({ kind: "tool_result", id: "call-fs", ok: true, code: "ok" });
+    expect((result as { text: string }).text).toContain("hello fs");
+    expect((await readHeader(sessionDir)).workdir).toBe(workdir);
+    expect(calls[1].body.messages).toEqual([
+      { role: "user", content: "read" },
+      expect.objectContaining({ role: "assistant" }),
+      { role: "tool", tool_call_id: "call-fs", content: expect.stringContaining("hello fs") },
+    ]);
+  });
+
+  it("缺省 cwd 时 header.workdir 用 process.cwd()", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "default-cwd-tools");
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+      }),
+    );
+
+    expect((await readHeader(sessionDir)).workdir).toBe(process.cwd());
+  });
+
+  it("相对 cwd 以 path.resolve 后的绝对路径写入 header", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "relative-cwd");
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        cwd: ".",
+        fetchImpl: impl,
+      }),
+    );
+
+    expect((await readHeader(sessionDir)).workdir).toBe(path.resolve("."));
+  });
+
+  it("resume 旧会话无 workdir 时运行 workdir 回退 process.cwd()", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "legacy-no-workdir");
+    await createSession(sessionDir, { id: "legacy-no-workdir", model: "gw/flash" });
+    const { impl } = mockFetch([
+      toolCallResponse("call-cwd", "shell", { command: 'node -e "console.log(process.cwd())"' }),
+      EMPTY_RESPONSE,
+    ]);
+
+    const events = await collect(
+      runSession({
+        input: "where",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        fetchImpl: impl,
+      }),
+    );
+
+    const result = events.find((event) => event.kind === "tool_result");
+    expect(result).toMatchObject({ kind: "tool_result", id: "call-cwd", ok: true, code: "ok" });
+    expect((result as { text: string }).text.toLowerCase()).toContain(process.cwd().toLowerCase());
+  });
+
+  it.skipIf(process.platform !== "win32")("win32 下 cwd 大小写差异不触发 workdir_mismatch", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "workdir-case");
+    const workdir = await tempDir();
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        cwd: workdir,
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    const secondFetch = mockFetch([EMPTY_RESPONSE]);
+    const events = await collect(
+      runSession({
+        input: "again",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        cwd: workdir.toUpperCase(),
+        fetchImpl: secondFetch.impl,
+      }),
+    );
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect((await readHeader(sessionDir)).workdir).toBe(workdir);
+  });
+
+  it("resume 时 opts.cwd 与 header.workdir 冲突 → workdir_mismatch 且不改变会话", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "workdir-mismatch");
+    const workdirA = await tempDir();
+    const workdirB = await tempDir();
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        cwd: workdirA,
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+    const beforeHeader = await readHeaderText(sessionDir);
+    const beforeLines = await logLineCount(sessionDir);
+
+    const error = await runSession({
+      input: "again",
+      model: "gw/flash",
+      providersText: providersText(),
+      sessionDir,
+      resume: true,
+      cwd: workdirB,
+      fetchImpl: mockFetch([EMPTY_RESPONSE]).impl,
+    })
+      .next()
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(SessionResumeError);
+    expect((error as SessionResumeError).code).toBe("workdir_mismatch");
+    expect(resumeCallCounter.count).toBe(0);
+    expect(await readHeaderText(sessionDir)).toBe(beforeHeader);
+    expect(await logLineCount(sessionDir)).toBe(beforeLines);
+  });
+
+  it("resume 不传 cwd 时使用 header.workdir 作为工具根", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const workdir = await tempDir();
+    const sessionDir = path.join(home, "resume-workdir");
+    await writeFile(path.join(workdir, "resume-note.txt"), "resumed ok\n", "utf8");
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        cwd: workdir,
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    const secondFetch = mockFetch([
+      toolCallResponse("call-resume", "fs", { op: "read", path: "resume-note.txt" }),
+      EMPTY_RESPONSE,
+    ]);
+    const events = await collect(
+      runSession({
+        input: "again",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        fetchImpl: secondFetch.impl,
+      }),
+    );
+
+    const result = events.find((event) => event.kind === "tool_result");
+    expect(result).toMatchObject({ kind: "tool_result", id: "call-resume", ok: true, code: "ok" });
+    expect((result as { text: string }).text).toContain("resumed ok");
+  });
+});
+
 async function readHeaderText(sessionDir: string): Promise<string> {
   return readFile(path.join(sessionDir, "header.json"), "utf8");
 }
