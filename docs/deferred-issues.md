@@ -666,13 +666,13 @@
 - **触发升级条件**: 需要统一的“绝不跟随 symlink”语义,或出现根链接导致的范围误判。
 - **修复建议**: 对显式根先 `lstat` 并拒绝 symlink(返回 `path_invalid`/`not_a_directory`),或在 design/README 明确“仅遍历中不跟随”并补根链接用例固化语义。
 
-### D-080 · `scanTruncated` 在恰好达到 5000 文件时保守标记
+### D-080 · `scanTruncated` 在达到 5000 文件后遇到任意后续条目即标记
 
-- **发现**: 2026-10-18,维度4 Task6 收尾。
-- **现象**: `walkFiles` 在处理下一个条目时先判断 `state.scanned >= maxScanned` 并置 `scanTruncated`;因此恰好扫描 5000 个文件、后面没有剩余条目时也会标记截断。
-- **影响**: 用户/模型无法区分“确实还有文件未扫”与“刚好扫满”;保守标记会降低对结果完整性的信任,也可能触发不必要的缩小范围重试。
-- **触发升级条件**: 需要精确判断是否遗漏,或出现因误报截断导致的重复扫描。
-- **修复建议**: 先探测是否还有未处理条目再标记;或在 `detail` 增加 `scanned`/`maxScanned` 与 `possiblyTruncated` 字段,把保守语义显式化。
+- **发现**: 2026-10-18,维度4 Task6 收尾;2026-10-19 按实测修正描述。
+- **实测**: `walkFiles` 在循环顶部判断 `state.scanned >= maxScanned`;恰好扫描 5000 个文件且之后没有剩余条目时不标记(`glob`/`grep` 均有「恰好 5000 个文件不标记」用例);达到上限后只要还有任意后续条目——包括目录、将被忽略的目录或 symlink——就会标记截断。
+- **影响**: 标记本身不再误报「刚好扫满」;但仍无法区分后续条目里是否真有可扫描文件,例如 5000 个文件后跟一个空目录或被忽略目录也会标记,可能触发不必要的缩小范围重试。
+- **触发升级条件**: 需要精确判断是否遗漏文件,或出现因误报截断导致的重复扫描。
+- **修复建议**: 仅当后续存在可扫描文件时标记;或在 `detail` 增加 `scanned`/`maxScanned` 与 `possiblyTruncated` 字段,把保守语义显式化。
 
 ### D-081 · `glob` 的 `*` 与 `**` 匹配点开头的隐藏文件
 
@@ -705,6 +705,14 @@
 - **影响**: 模型无法判断遗漏规模,可能把“截断后未搜到”误当“不存在”;排查时需要人工重跑并猜测范围,与 R3 的“诚实披露”仍有距离。
 - **触发升级条件**: 出现因截断/跳过导致的漏报、误判,或需要可复现的取证报告。
 - **修复建议**: `fs read` 的 `detail` 增加 `totalLines`/`bytesRead`/`nextOffset`;`grep` 在 `detail` 增加受上限约束的 `skippedPaths` 或按类别列出前 N 个路径;`glob` 增加 `scanned`/`maxScanned`,让调用方可判断是否需要缩小范围。
+
+### D-085 · `grep` 正则同步执行,ReDoS 会阻塞事件循环且不可中断
+
+- **发现**: 2026-10-19,第一轮整体审查修复(I3)。
+- **现象**: `grep` 对每行用 `new RegExp(...).test()` 同步匹配;恶意或失控正则(如 `(a+)+$`)在长行上可触发灾难性回溯,阻塞 Node 事件循环。1 MiB 单行上限与 2 MiB 文件上限降低但不消除风险;匹配期间不检查 `AbortSignal`,取消/超时只能等当前正则返回。
+- **影响**: 单个文件即可让会话卡死;工具超时只能让管线提前返回,无法停止正在执行的正则,与 D-077「不响应取消」叠加。
+- **触发升级条件**: 接入不可信 pattern/仓库;出现 grep 期间事件循环长时间无响应;需要硬性匹配超时。
+- **修复建议**: 用 `worker_threads`/子进程隔离正则并支持终止,或引入线性时间正则引擎;至少在 `description` 与 README 标注「正则同步执行、ReDoS 不可中断」,并限制单次匹配时间或行数。
 
 ---
 
@@ -745,3 +753,4 @@
 | 2026-10-18 | 维度4 Task2 审查修复:危险命令补 `$HOME`/`${HOME}`/`..`/盘符根与 `del/rd` 通配、sudo 带值选项、信号终止 `shell_terminated`、abort 杀进程树、message 截断 200 字符;录入 D-074(cwd 校验与 spawn 的 symlink TOCTOU) |
 | 2026-10-18 | 维度4 Task2 复审:危险 execute 用例补前置识别断言(截断用例);design §4.3 同步 shell 非沙箱/自管 abort/`shell_terminated`/`del`/`rd` 通配与错误码表;录入 D-075(abort 无升级兜底)、D-076(`exitSignal`/`code=null` 平台边缘) |
 | 2026-10-18 | 维度4 Task6 收尾:README 补内置工具清单、fs/shell/glob/grep 语义与工具根;补 shell 截断多字节/AbortError 与 grep ENOTDIR/readdir 错误测试,工具行覆盖均 ≥90%;录入 D-077 ~ D-084(glob/grep 不响应取消、grep 先收集后截断、根 symlink 跟随、scanTruncated 保守、隐藏文件匹配、workdir 词法比较、shell 黑名单绕过、上限披露粒度) |
+| 2026-10-19 | 维度4 第一轮整体审查修复:shell 归一化根目标并跟踪 `cd`/`pushd`/`Set-Location`;grep 补 scanTruncated 披露与 1 MiB 单行上限;shell `detail.stdout/stderr` 改为 4096 字符摘要 + 字节数;补 fs write/read 失败、grep 扫描上限、path-safety 每测试 workdir、win32 忽略目录大小写与相对 cwd 归一测试;按实测修正 D-080,录入 D-085(正则 ReDoS/不可中断) |

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { globTool, matchesGlob } from "../src/tools/glob.js";
+import { MAX_SCANNED_FILES } from "../src/tools/fs-walk.js";
 import type { ToolCtx } from "../src/tools/types.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -194,6 +195,18 @@ describe("glob 执行", () => {
     expect(r.text).toBe("src/keep.ts");
   });
 
+  it.skipIf(process.platform !== "win32")("win32 忽略目录名大小写归一", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "NODE_MODULES/x.ts");
+    writeAt(workdir, "BUILD/y.ts");
+    writeAt(workdir, "CMAKE-BUILD-Debug/z.ts");
+    writeAt(workdir, "src/keep.ts");
+
+    const r = await run(workdir, { pattern: "**/*.ts" });
+
+    expect(r.text).toBe("src/keep.ts");
+  });
+
   it("不跟随 symlink 目录与文件", async (ctx) => {
     const workdir = makeWorkdir();
     writeAt(workdir, "real/a.ts");
@@ -252,7 +265,7 @@ describe("glob 执行", () => {
     const r = await run(workdir, { pattern: "*.ts" });
 
     expect(r.text).toContain("(no matches)");
-    expect(r.text).toContain("[scan truncated at 5000 files]");
+    expect(r.text).toContain(`[scan truncated at ${MAX_SCANNED_FILES} files]`);
     expect(r.detail).toMatchObject({ scanned: 5000, scanTruncated: true });
   });
 

@@ -36,8 +36,9 @@ export function toPosix(value: string): string {
 }
 
 export function isIgnoredDirectory(name: string): boolean {
-  if (IGNORED_DIRS.has(name)) return true;
-  return IGNORED_DIR_PREFIXES.some((prefix) => name.startsWith(prefix));
+  const normalized = process.platform === "win32" ? name.toLowerCase() : name;
+  if (IGNORED_DIRS.has(normalized)) return true;
+  return IGNORED_DIR_PREFIXES.some((prefix) => normalized.startsWith(prefix));
 }
 
 export function isUnreadable(error: unknown): boolean {

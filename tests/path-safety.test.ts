@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveInWorkdir, ToolPathError } from "../src/tools/path-safety.js";
 
 const tempDirs: string[] = [];
@@ -71,7 +71,11 @@ afterEach(() => {
 });
 
 describe("resolveInWorkdir 合法路径", () => {
-  const workdir = makeTempDir();
+  let workdir: string;
+
+  beforeEach(() => {
+    workdir = makeTempDir();
+  });
 
   it.each([
     ["a.txt"],
@@ -98,7 +102,11 @@ describe("resolveInWorkdir 合法路径", () => {
 });
 
 describe("resolveInWorkdir 拒绝越界", () => {
-  const workdir = makeTempDir();
+  let workdir: string;
+
+  beforeEach(() => {
+    workdir = makeTempDir();
+  });
 
   it.each([
     ["../x", "path_outside_workdir"],

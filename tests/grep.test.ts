@@ -48,6 +48,17 @@ function writeAt(workdir: string, relative: string, content: string | Buffer = "
   writeFileSync(absolute, content);
 }
 
+function fakeFile(name: string): Dirent {
+  return {
+    name,
+    parentPath: "",
+    path: "",
+    isFile: () => true,
+    isDirectory: () => false,
+    isSymbolicLink: () => false,
+  } as unknown as Dirent;
+}
+
 function run(workdir: string, input: Parameters<typeof grepTool.execute>[0]) {
   return grepTool.execute(input, makeCtx(workdir), signal);
 }
@@ -201,6 +212,7 @@ describe("grep 执行", () => {
     const workdir = makeWorkdir();
     const content = Buffer.alloc(2 * MIB, 0x20);
     content.write("needle\n", 0, "utf8");
+    for (let offset = 1024; offset < content.length; offset += 1024) content[offset] = 0x0a;
     writeAt(workdir, "limit.txt", content);
 
     const r = await run(workdir, { pattern: "needle" });
@@ -209,6 +221,39 @@ describe("grep 执行", () => {
     expect(r.detail).toMatchObject({
       skipped: { binary: 0, tooLarge: 0, unreadable: 0 },
     });
+  });
+
+  it("超过 1 MiB 的单行跳过并披露", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "long.txt", `needle${"a".repeat(MIB)}`);
+
+    const r = await run(workdir, { pattern: "needle" });
+
+    expect(r.isError).toBe(false);
+    expect(r.text).toBe("(no matches)\n[skipped 1 lines longer than 1 MiB]");
+    expect(r.detail).toMatchObject({ matched: 0, skippedLongLines: 1 });
+  });
+
+  it("扫描 5001 个文件时追加 scan truncated 披露", async () => {
+    const workdir = makeWorkdir();
+    const files = Array.from({ length: 5001 }, (_, index) => fakeFile(`f${index}.txt`));
+    readdirMock.mockImplementation(async (dir) => {
+      if (path.resolve(dir) === path.resolve(workdir)) return files;
+      return [];
+    });
+    statMock.mockImplementation(async (target) => {
+      if (path.resolve(target) === path.resolve(workdir)) {
+        return passthroughStat ? passthroughStat(target) : ({ isDirectory: () => true } as Stats);
+      }
+      return { isFile: () => true, size: 0 } as Stats;
+    });
+    readFileMock.mockImplementation(async () => Buffer.from(""));
+
+    const r = await run(workdir, { pattern: "needle" });
+
+    expect(r.isError).toBe(false);
+    expect(r.text).toBe("(no matches)\n[scan truncated at 5000 files]");
+    expect(r.detail).toMatchObject({ scanned: 5000, scanTruncated: true });
   });
 
   it("不可读文件跳过并披露", async () => {

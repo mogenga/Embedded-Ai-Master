@@ -1,7 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { walkFiles } from "./fs-walk.js";
+import { walkFiles, MAX_SCANNED_FILES } from "./fs-walk.js";
 import { matchesGlob } from "./glob.js";
 import { resolveInWorkdir, ToolPathError } from "./path-safety.js";
 import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
@@ -18,6 +18,7 @@ export type GrepInput = z.infer<typeof grepInputSchema>;
 
 const DEFAULT_MAX_RESULTS = 200;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_LINE_BYTES = 1024 * 1024;
 
 interface MatchLine {
   file: string;
@@ -93,6 +94,7 @@ export const grepTool: ToolDef<GrepInput> = {
 
     const matches: MatchLine[] = [];
     const skipped: SkippedCounts = { binary: 0, tooLarge: 0, unreadable: 0 };
+    let skippedLongLines = 0;
 
     const outcome = await walkFiles(root, workdir, async (absolute, relative) => {
       if (input.glob !== undefined && !matchesGlob(relative, input.glob)) return;
@@ -125,6 +127,10 @@ export const grepTool: ToolDef<GrepInput> = {
       const lines = splitLines(buffer.toString("utf8"));
       for (let index = 0; index < lines.length; index++) {
         const text = lines[index]!;
+        if (Buffer.byteLength(text, "utf8") > MAX_LINE_BYTES) {
+          skippedLongLines += 1;
+          continue;
+        }
         if (regex.test(text)) matches.push({ file: relative, line: index + 1, text });
       }
     });
@@ -149,6 +155,12 @@ export const grepTool: ToolDef<GrepInput> = {
     if (skippedTotal > 0) {
       lines.push(`[skipped ${skippedTotal} files (binary/too large/unreadable)]`);
     }
+    if (skippedLongLines > 0) {
+      lines.push(`[skipped ${skippedLongLines} lines longer than 1 MiB]`);
+    }
+    if (outcome.state.scanTruncated) {
+      lines.push(`[scan truncated at ${MAX_SCANNED_FILES} files]`);
+    }
 
     return {
       isError: false,
@@ -159,6 +171,7 @@ export const grepTool: ToolDef<GrepInput> = {
         matched: matches.length,
         returned: returned.length,
         skipped: { ...skipped },
+        skippedLongLines,
         truncated: matches.length > limit,
         scanTruncated: outcome.state.scanTruncated,
       },

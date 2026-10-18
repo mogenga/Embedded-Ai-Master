@@ -109,10 +109,21 @@ describe("isDangerousCommand 正例", () => {
     "rm -rf ..",
     "rm -rf ../",
     "rm -rf ../..",
+    "rm -rf ../*",
+    "rm -rf ../../*",
+    "rm -rf ~/..",
+    "rm -rf $HOME/..",
+    "rm -rf ${HOME}/..",
+    "rm -rf /..",
+    "rm -rf /.",
+    "rm -rf /tmp/../*",
     "rm -rf C:",
     "rm -rf C:\\",
     "rm -rf C:\\*",
     "rm -rf C:\\*.*",
+    "rm -rf C:/..",
+    "rm -rf C:/*",
+    "rm -rf C:\\..\\*",
     "rm -fr /",
     "rm -r -f /",
     "rm --recursive --force /",
@@ -123,6 +134,17 @@ describe("isDangerousCommand 正例", () => {
     "sudo -g wheel rm -rf ~",
     "sudo --user=root rm -rf /",
     "cd /tmp && rm -rf /",
+    "cd / && rm -rf *",
+    "cd / && rm -rf ./*",
+    "cd ~ && rm -rf *",
+    "cd $HOME && rm -rf *",
+    "cd ${HOME} && rm -rf *",
+    "cd .. && rm -rf *",
+    "cd /tmp/.. && rm -rf *",
+    "pushd / && rm -rf *",
+    "cd C:\\ && del /s /q *",
+    "cd C:\\ && rd /s /q *",
+    "Set-Location C:\\ && del /s /q *",
     'rm -rf "/"',
     "mkfs /dev/sda",
     "mkfs.ext4 /dev/sda",
@@ -163,6 +185,19 @@ describe("isDangerousCommand 反例", () => {
     "rm -rf build",
     "rm -rf /tmp/build",
     "rm -rf ../build",
+    "rm -rf ../../build",
+    "rm -rf $HOME/build",
+    "rm -rf C:/temp",
+    "rm -rf C:/temp/*",
+    "rm -rf *",
+    "cd /tmp && rm -rf *",
+    "cd build && rm -rf *",
+    "cd ~/project && rm -rf *",
+    "cd $HOME/build && rm -rf *",
+    "pushd src && rm -rf *",
+    "del /s /q *",
+    "del /s /q *.txt",
+    "cd /tmp && del /s /q *",
     "rm -rf $HOME/build",
     "rm -rf ${HOME}/build",
     "rm -rf C:\\temp",
@@ -201,7 +236,13 @@ describe("shellTool 危险命令", () => {
     "rm -rf $HOME",
     "rm -rf ..",
     "rm -rf C:\\",
+    "rm -rf ../*",
+    "rm -rf C:/*",
     "sudo -u root rm -rf /",
+    "cd / && rm -rf *",
+    "cd ~ && rm -rf *",
+    "cd C:\\ && del /s /q *",
+    "pushd / && rm -rf *",
     "del /s /q C:\\*.*",
     "format C:\\",
     "rd /s /q D:\\*",
@@ -242,13 +283,17 @@ describe("shellTool 执行", () => {
 
     expect(r.isError).toBe(false);
     expect(r.code).toBe("ok");
-    expect(r.detail).toEqual({
+    expect(r.detail).toMatchObject({
       exitCode: 0,
+      signal: null,
       stdout: expect.stringContaining("42"),
       stderr: "",
       stdoutTruncated: false,
       stderrTruncated: false,
     });
+    const detail = r.detail as { stdout: string; stderr: string; stdoutBytes: number; stderrBytes: number };
+    expect(detail.stdoutBytes).toBe(Buffer.byteLength(detail.stdout, "utf8"));
+    expect(detail.stderrBytes).toBe(0);
     expect(r.text).toContain("exit=0");
     expect(r.text).toContain("42");
   });
@@ -271,6 +316,18 @@ describe("shellTool 执行", () => {
     expect(r.isError).toBe(false);
     expect((r.detail as { stderr: string }).stderr).toContain("boom");
     expect(r.text).toContain("boom");
+  });
+
+  it("detail 只保留 4096 字符摘要，text 保留完整输出", async () => {
+    const workdir = makeWorkdir();
+
+    const r = await run(workdir, nodeCommand("process.stdout.write('y'.repeat(10000))"));
+
+    const detail = r.detail as { stdout: string; stdoutBytes: number };
+    expect(r.isError).toBe(false);
+    expect(detail.stdout).toHaveLength(4096);
+    expect(detail.stdoutBytes).toBe(10000);
+    expect(r.text).toContain("y".repeat(10000));
   });
 
   it("cwd 生效", async () => {
@@ -319,11 +376,11 @@ describe("shellTool 执行", () => {
 
       const r = await run(workdir, nodeCommand("process.stdout.write('x'.repeat(2000000))"));
 
-      const detail = r.detail as { stdout: string; stdoutTruncated: boolean };
+      const detail = r.detail as { stdout: string; stdoutBytes: number; stdoutTruncated: boolean };
       expect(r.isError).toBe(false);
       expect(detail.stdoutTruncated).toBe(true);
-      expect(Buffer.byteLength(detail.stdout, "utf8")).toBeLessThanOrEqual(1024 * 1024);
-      expect(detail.stdout.length).toBeGreaterThan(0);
+      expect(detail.stdout).toHaveLength(4096);
+      expect(detail.stdoutBytes).toBe(1024 * 1024);
       expect(r.text).toContain("stdout truncated");
     },
     20000,
@@ -406,11 +463,11 @@ describe("shellTool 执行", () => {
 
       const r = await run(workdir, nodeCommand("process.stderr.write('e'.repeat(2000000))"));
 
-      const detail = r.detail as { stderr: string; stderrTruncated: boolean };
+      const detail = r.detail as { stderr: string; stderrBytes: number; stderrTruncated: boolean };
       expect(r.isError).toBe(false);
       expect(detail.stderrTruncated).toBe(true);
-      expect(Buffer.byteLength(detail.stderr, "utf8")).toBeLessThanOrEqual(1024 * 1024);
-      expect(detail.stderr.length).toBeGreaterThan(0);
+      expect(detail.stderr).toHaveLength(4096);
+      expect(detail.stderrBytes).toBe(1024 * 1024);
       expect(r.text).toContain("stderr truncated");
     },
     20000,
@@ -462,12 +519,14 @@ describe("shellTool 执行", () => {
 
     const r = await run(workdir, "echo hi");
 
-    const detail = r.detail as { stdout: string; stdoutTruncated: boolean };
+    const detail = r.detail as { stdout: string; stdoutBytes: number; stdoutTruncated: boolean };
     expect(r.isError).toBe(false);
     expect(detail.stdoutTruncated).toBe(true);
-    expect(detail.stdout.length).toBe(1024 * 1024 - 2);
-    expect(detail.stdout.endsWith("a")).toBe(true);
+    expect(detail.stdout).toHaveLength(4096);
     expect(detail.stdout).not.toContain("\uFFFD");
+    expect(detail.stdoutBytes).toBe(1024 * 1024);
+    expect(r.text).not.toContain("\uFFFD");
+    expect(r.text).toContain("a".repeat(1024 * 1024 - 2));
     expect(r.text).toContain("[stdout truncated at 1 MiB]");
   });
 

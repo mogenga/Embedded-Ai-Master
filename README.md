@@ -89,21 +89,21 @@ docs/             设计、计划与已知问题
 - `read`：`path` + 可选 `offset`（0 起行号）/`limit`（≤2000 行）；单次最多 2000 行、256 KiB，超出以 `[truncated]` 标记；`offset` 越界返回 `(no lines at offset)`。
 - `write`：`path` + `content`，自动创建父目录。
 - `edit`：`path` + 非空 `oldText` + `newText`；`oldText` 必须唯一命中，否则 `edit_not_found` / `edit_not_unique`；按文件现有 CRLF/LF 风格写入。
-- workdir 限制：解析到工具根之外（含 `..`、绝对路径、symlink/junction 逃逸）→ `path_outside_workdir`；Windows 保留设备名 → `reserved_name`；目标不是普通文件 → `not_a_file`。
+- workdir 限制：解析到工具根之外（含 `..`、绝对路径、symlink/junction 逃逸）→ `path_outside_workdir`；Windows 保留设备名 → `reserved_name`；`read` / `edit` 目标不是普通文件 → `not_a_file`；`write` 目标为目录或底层写入失败 → `write_failed`。
 - `fs` 不响应 `AbortSignal`（D-071）。
 
 ### `shell`
 
 - **非沙箱**：命令交给系统 shell（`spawn(command, { shell: true })`）执行，仅对已知高危命令做黑名单拦截，不限制其余命令的读写范围；`cwd` 必须位于工具根内，越界 / 不存在 / 非目录 → `cwd_invalid`。
-- 拦截：`rm -rf` 打 `/`、`~`、`$HOME`、多级 `..`、盘符根；`mkfs*`、`format <盘符>:`、`diskpart`、`bcdedit`、`shutdown` / `reboot` / `poweroff` / `halt`、`dd of=/dev/*`、`del|erase|rd|rmdir /s` 打盘符根、`reg delete HKLM`、`cipher /w`、fork bomb；命中返回 `dangerous_command` 且不 spawn。
+- 拦截：`rm -rf` 打 `/`、`~`、`$HOME`、多级 `..`、盘符根及其归一化变体（如 `../*`、`~/..`、`/tmp/../*`、`C:/..`）；跟踪 `cd` / `pushd` / `Set-Location` 的根目标，后续 `rm -rf *` / `del /s /q *` 一并拦截；`mkfs*`、`format <盘符>:`、`diskpart`、`bcdedit`、`shutdown` / `reboot` / `poweroff` / `halt`、`dd of=/dev/*`、`del|erase|rd|rmdir /s` 打盘符根、`reg delete HKLM`、`cipher /w`、fork bomb；命中返回 `dangerous_command` 且不 spawn。
 - 退出语义：命令跑完即 `isError:false`，`text` 首行 `exit=<code>`；**非零退出码不算工具错误**，由模型读 `detail.exitCode` 判断。被信号终止 → `shell_terminated`（`detail.exitCode` 可能为 `null`）；`spawn` 失败 → `shell_spawn_failed`。
-- 取消：`signal` abort 后 Windows 用 `taskkill /T /F`、POSIX 杀 detached 进程组；结果码 `shell_aborted`。stdout / stderr 各截断到 1 MiB 并标记。
+- 取消：`signal` abort 后 Windows 用 `taskkill /T /F`、POSIX 杀 detached 进程组；结果码 `shell_aborted`。stdout / stderr 各截断到 1 MiB 并标记；`detail.stdout` / `detail.stderr` 只保留前 4096 字符摘要，完整输出在 `text`，由管线按需截断或落盘；`detail` 另含 `stdoutBytes` / `stderrBytes` 与截断标记。
 - 黑名单是启发式（`env`、`bash -c`、`xargs` 等可绕过），不能当作安全边界（D-083）。
 
 ### `glob` / `grep`
 
 - `glob`：`pattern` 匹配**相对工具根**的 POSIX 路径（不是 `path` 根）；`*` 不跨 `/`、`?` 匹配单字符、`**/` 匹配任意层目录、段尾 `**` 匹配剩余路径，其余字符按字面量；反斜杠按 `/` 处理；大小写敏感。返回字典序路径，最多 200 条，超出 `[truncated]`；扫描上限 5000 个文件，超出 `[scan truncated at 5000 files]`。
-- `grep`：`pattern` 为正则（`ignoreCase` 可选），可加 `glob` 过滤、`maxResults`（1–1000，默认 200）；输出 `<相对路径>:<行号>:<文本>`，按路径与行号排序，超出 `[truncated]`。
+- `grep`：`pattern` 为正则（`ignoreCase` 可选），可加 `glob` 过滤、`maxResults`（1–1000，默认 200）；输出 `<相对路径>:<行号>:<文本>`，按路径与行号排序，超出 `[truncated]`。扫描达到 5000 个文件时追加 `[scan truncated at 5000 files]`；单行超过 1 MiB 时跳过并追加 `[skipped N lines longer than 1 MiB]`。
 - 两者都只遍历工具根内：跳过 `.git`、`node_modules`、`.harness`、`dist`、`coverage`、`build`、`out`、`target`、`.pio`、`cmake-build-*`；遍历中遇到的 symlink 文件 / 目录都不跟随（显式 `path` 根为 symlink 时仍会跟随，D-079）。
 - `grep` 只读 ≤2 MiB 的文件，含 NUL 视为二进制；跳过文件只给计数 `[skipped N files (binary/too large/unreadable)]`，不列具体路径（D-084）。
 - 两者都不响应 `AbortSignal`（D-077）；`grep` 先收集全部命中再截断，命中集很大时内存占用随结果增长（D-078）。

@@ -1,9 +1,27 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { fsTool } from "../src/tools/fs.js";
 import type { ToolCtx } from "../src/tools/types.js";
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    readFile: vi.fn(actual.readFile),
+    writeFile: vi.fn(actual.writeFile),
+  };
+});
+
+type ReadFileFn = (target: string, encoding?: BufferEncoding) => Promise<string | Buffer>;
+type WriteFileFn = (target: string, data: string, encoding?: BufferEncoding) => Promise<void>;
+
+const readFileMock = vi.mocked(readFile as unknown as ReadFileFn);
+const passthroughReadFile = readFileMock.getMockImplementation();
+const writeFileMock = vi.mocked(writeFile as unknown as WriteFileFn);
+const passthroughWriteFile = writeFileMock.getMockImplementation();
 
 const tempDirs: string[] = [];
 const signal = new AbortController().signal;
@@ -20,6 +38,8 @@ function run(workdir: string, input: Parameters<typeof fsTool.execute>[0]) {
 }
 
 afterEach(() => {
+  if (passthroughReadFile) readFileMock.mockImplementation(passthroughReadFile);
+  if (passthroughWriteFile) writeFileMock.mockImplementation(passthroughWriteFile);
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -217,6 +237,16 @@ describe("fs write", () => {
     expect(r).toMatchObject({ isError: true, code: "path_outside_workdir" });
     expect(existsSync(path.join(path.dirname(workdir), "escape.txt"))).toBe(false);
   });
+
+  it("writeFile 抛错 → write_failed", async () => {
+    const workdir = makeWorkdir();
+    writeFileMock.mockRejectedValueOnce(new Error("disk full"));
+
+    const r = await run(workdir, { op: "write", path: "x.txt", content: "x" });
+
+    expect(r).toMatchObject({ isError: true, code: "write_failed" });
+    expect(r.text).toContain("disk full");
+  });
 });
 
 describe("fs edit", () => {
@@ -413,6 +443,22 @@ describe("fs edit", () => {
     });
 
     expect(r).toMatchObject({ isError: true, code: "not_found" });
+  });
+
+  it("readFile 抛错 → read_failed", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "note.txt"), "alpha", "utf8");
+    readFileMock.mockRejectedValueOnce(new Error("EACCES: permission denied"));
+
+    const r = await run(workdir, {
+      op: "edit",
+      path: "note.txt",
+      oldText: "alpha",
+      newText: "beta",
+    });
+
+    expect(r).toMatchObject({ isError: true, code: "read_failed" });
+    expect(r.text).toContain("EACCES");
   });
 
   it("越界 → path_outside_workdir", async () => {

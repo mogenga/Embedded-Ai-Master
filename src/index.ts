@@ -101,7 +101,7 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
     );
   }
 
-  const cwd = opts.cwd ?? header.workdir ?? process.cwd();
+  const cwd = path.resolve(opts.cwd ?? header.workdir ?? process.cwd());
 
   let systemPromptToAppend: string | undefined;
   if (opts.systemPrompt !== undefined) {
@@ -187,7 +187,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     runCwd = plan.cwd;
   } else {
     const sessionDir = resumeDir ?? path.join(home, "sessions", id);
-    runCwd = opts.cwd ?? process.cwd();
+    runCwd = path.resolve(opts.cwd ?? process.cwd());
     session = await createSession(sessionDir, {
       id,
       systemPrompt: opts.systemPrompt,

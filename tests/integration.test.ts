@@ -913,6 +913,26 @@ describe("runSession 内置工具装配", () => {
     expect((await readHeader(sessionDir)).workdir).toBe(process.cwd());
   });
 
+  it("相对 cwd 以 path.resolve 后的绝对路径写入 header", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "relative-cwd");
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        cwd: ".",
+        fetchImpl: impl,
+      }),
+    );
+
+    expect((await readHeader(sessionDir)).workdir).toBe(path.resolve("."));
+  });
+
   it("resume 旧会话无 workdir 时运行 workdir 回退 process.cwd()", async () => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);

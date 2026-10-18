@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { statSync } from "node:fs";
+import path from "node:path";
 import { z } from "zod";
 import { resolveInWorkdir, ToolPathError } from "./path-safety.js";
 import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
@@ -13,6 +14,7 @@ export type ShellInput = z.infer<typeof shellInputSchema>;
 
 const MAX_STREAM_BYTES = 1024 * 1024;
 const MAX_COMMAND_PREVIEW = 200;
+const DETAIL_TEXT_CHARS = 4096;
 const FORK_BOMB = /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/;
 const SUDO_VALUE_OPTIONS = new Set([
   "-u",
@@ -98,22 +100,53 @@ function unquote(value: string): string {
   return value.replace(/^['"]+/, "").replace(/['"]+$/, "");
 }
 
-function isDriveRoot(value: string): boolean {
-  return /^[a-z]:(?:[\\/](?:\*|\*\.\*)?)?$/i.test(value);
+function normalizeTarget(value: string): string | undefined {
+  const target = unquote(value).trim();
+  if (target.length === 0) return undefined;
+  const posix = target.replace(/\\/g, "/");
+  const home = /^(~|\$HOME|\$\{HOME\})(?:\/|$)/i.exec(posix);
+  if (home) {
+    const prefix = home[1]!;
+    const rest = posix.slice(home[0].length).replace(/^\/+/, "");
+    if (rest.length === 0) return prefix;
+    const normalized = path.posix.normalize(`/${rest}`);
+    return normalized === "/" ? prefix : `${prefix}${normalized}`;
+  }
+  const drive = /^[a-z]:/i.exec(posix);
+  if (drive) {
+    const rest = posix.slice(2);
+    const normalized = path.posix.normalize(rest.length === 0 ? "/" : rest);
+    if (normalized === "/" || /^\/\*+(?:\.\*+)?$/.test(normalized)) return "/";
+    return normalized;
+  }
+  const normalized = path.posix.normalize(posix);
+  return normalized.length > 1 ? normalized.replace(/\/+$/, "") : normalized;
 }
 
 function isRootTarget(value: string): boolean {
-  const target = unquote(value);
+  const target = normalizeTarget(value);
+  if (target === undefined) return false;
+  if (target === "/" || target === "~") return true;
+  if (/^\/\*+(?:\.\*+)?$/.test(target)) return true;
+  if (/^~\/\*+(?:\.\*+)?$/.test(target)) return true;
+  if (/^\$(?:HOME|\{HOME\})(?:\/\*+(?:\.\*+)?)?$/i.test(target)) return true;
+  const segments = target.split("/").filter((segment) => segment !== "" && segment !== ".");
+  if (segments.length === 0) return false;
+  if (segments.every((segment) => segment === "..")) return true;
+  const last = segments[segments.length - 1]!;
   return (
-    /^\/+\**$/.test(target) ||
-    /^~\/?\**$/.test(target) ||
-    /^\$(?:HOME|\{HOME\})\/?\**$/i.test(target) ||
-    /^(?:\.\.[\\/]?)+$/.test(target) ||
-    isDriveRoot(target)
+    segments.length > 1
+    && segments.slice(0, -1).every((segment) => segment === "..")
+    && /^\*+(?:\.\*+)?$/.test(last)
   );
 }
 
-function isRecursiveForceRm(args: string[]): boolean {
+function isWildcardTarget(value: string): boolean {
+  const target = normalizeTarget(value);
+  return target !== undefined && /^\*+(?:\.\*+)?$/.test(target);
+}
+
+function isRecursiveForceRm(args: string[], atRoot: boolean): boolean {
   let recursive = false;
   let force = false;
   const targets: string[] = [];
@@ -136,15 +169,20 @@ function isRecursiveForceRm(args: string[]): boolean {
     }
     targets.push(value);
   }
-  return recursive && force && targets.some(isRootTarget);
+  return (
+    recursive
+    && force
+    && targets.some((target) => isRootTarget(target) || (atRoot && isWildcardTarget(target)))
+  );
 }
 
-function isWindowsWipe(name: string, args: string[]): boolean {
+function isWindowsWipe(name: string, args: string[], atRoot: boolean): boolean {
   if (name !== "del" && name !== "erase" && name !== "rd" && name !== "rmdir") return false;
   const lower = args.map((arg) => unquote(arg.toLowerCase()));
   const recursive = lower.includes("/s");
-  const rootTarget = lower.some(isDriveRoot);
-  return recursive && rootTarget;
+  const rootTarget = lower.some(isRootTarget);
+  const wildcardTarget = atRoot && lower.some(isWildcardTarget);
+  return recursive && (rootTarget || wildcardTarget);
 }
 
 function isFormatDrive(name: string, args: string[]): boolean {
@@ -171,17 +209,35 @@ function isCipherWipe(name: string, args: string[]): boolean {
   return args.some((arg) => /^\/w(:|$)/.test(unquote(arg.toLowerCase())));
 }
 
+const CD_COMMANDS = new Set(["cd", "pushd", "set-location"]);
+
+function cdTarget(args: string[]): string | undefined {
+  for (const arg of args) {
+    const value = unquote(arg);
+    if (value === "--") continue;
+    if (/^-{1,2}[a-z][\w-]*$/i.test(value) || /^\/[a-z]$/i.test(value)) continue;
+    return value;
+  }
+  return undefined;
+}
+
 export function isDangerousCommand(command: string): boolean {
   if (FORK_BOMB.test(command)) return true;
+  let atRoot = false;
   for (const segment of command.split(/[\n\r;|&()]+/)) {
     const tokens = segment.trim().split(/\s+/).filter(Boolean);
     if (tokens.length === 0) continue;
     const { name, args } = commandOf(tokens);
+    if (CD_COMMANDS.has(name)) {
+      const target = cdTarget(args);
+      atRoot = target === undefined ? name !== "pushd" : isRootTarget(target);
+      continue;
+    }
     if (name === "mkfs" || name.startsWith("mkfs.")) return true;
     if (name === "diskpart" || name === "bcdedit") return true;
     if (name === "shutdown" || name === "reboot" || name === "poweroff" || name === "halt") return true;
-    if (name === "rm" && isRecursiveForceRm(args)) return true;
-    if (isWindowsWipe(name, args)) return true;
+    if (name === "rm" && isRecursiveForceRm(args, atRoot)) return true;
+    if (isWindowsWipe(name, args, atRoot)) return true;
     if (isFormatDrive(name, args)) return true;
     if (isDdToDevice(name, args)) return true;
     if (isRegDeleteHklm(name, args)) return true;
@@ -208,9 +264,15 @@ function resolveCwd(ctx: ToolCtx, input: string): string | ToolResult {
   return absolute;
 }
 
+interface Collected {
+  text: string;
+  truncated: boolean;
+  bytes: number;
+}
+
 interface Collector {
   push(chunk: Buffer): void;
-  value(): { text: string; truncated: boolean };
+  value(): Collected;
 }
 
 function decode(buffer: Buffer, truncated: boolean): string {
@@ -250,7 +312,7 @@ function createCollector(): Collector {
       bytes += chunk.length;
     },
     value() {
-      return { text: decode(Buffer.concat(parts), truncated), truncated };
+      return { text: decode(Buffer.concat(parts), truncated), truncated, bytes };
     },
   };
 }
@@ -268,6 +330,28 @@ function composeText(
   if (out.truncated) sections.push("[stdout truncated at 1 MiB]");
   if (err.truncated) sections.push("[stderr truncated at 1 MiB]");
   return sections.join("\n");
+}
+
+function summarize(text: string): string {
+  return text.length <= DETAIL_TEXT_CHARS ? text : text.slice(0, DETAIL_TEXT_CHARS);
+}
+
+function streamDetail(
+  exitCode: number | null,
+  signal: NodeJS.Signals | null,
+  out: Collected,
+  err: Collected,
+): Record<string, unknown> {
+  return {
+    exitCode,
+    signal,
+    stdout: summarize(out.text),
+    stderr: summarize(err.text),
+    stdoutBytes: out.bytes,
+    stderrBytes: err.bytes,
+    stdoutTruncated: out.truncated,
+    stderrTruncated: err.truncated,
+  };
 }
 
 function runCommand(command: string, cwd: string, signal: AbortSignal): Promise<ToolResult> {
@@ -332,14 +416,7 @@ function runCommand(command: string, cwd: string, signal: AbortSignal): Promise<
           isError: true,
           code: "shell_terminated",
           message: `command terminated by signal ${exitSignal}`,
-          detail: {
-            exitCode: code,
-            signal: exitSignal,
-            stdout: out.text,
-            stderr: err.text,
-            stdoutTruncated: out.truncated,
-            stderrTruncated: err.truncated,
-          },
+          detail: streamDetail(code, exitSignal, out, err),
           text: composeText([`signal=${exitSignal}`, `exit=${code === null ? "null" : code}`], out, err),
         });
         return;
@@ -349,13 +426,7 @@ function runCommand(command: string, cwd: string, signal: AbortSignal): Promise<
         isError: false,
         code: "ok",
         message: "",
-        detail: {
-          exitCode,
-          stdout: out.text,
-          stderr: err.text,
-          stdoutTruncated: out.truncated,
-          stderrTruncated: err.truncated,
-        },
+        detail: streamDetail(exitCode, null, out, err),
         text: composeText([`exit=${exitCode}`], out, err),
       });
     });
