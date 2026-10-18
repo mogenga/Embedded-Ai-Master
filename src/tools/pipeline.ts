@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { heuristicCountTokens } from "../model/count.js";
@@ -55,6 +56,11 @@ function safeArtifactId(id: string): string {
   return WINDOWS_RESERVED_NAME.test(safe) ? `_${safe}` : safe;
 }
 
+function artifactFileName(callId: string): string {
+  const hash8 = createHash("sha256").update(callId).digest("hex").slice(0, 8);
+  return `${safeArtifactId(callId)}-${hash8}.txt`;
+}
+
 function resolveTimeoutMs(timeoutMs: number | undefined): number {
   if (timeoutMs === undefined) return DEFAULT_TIMEOUT_MS;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return DEFAULT_TIMEOUT_MS;
@@ -69,13 +75,12 @@ async function persistIfLarge(
   const tokens = heuristicCountTokens([{ role: "tool", content: result.text }]);
   if (tokens <= ARTIFACT_TOKEN_THRESHOLD) return result;
 
-  const artifactPath = path.join(artifactDir, `${safeArtifactId(callId)}.txt`);
+  const artifactPath = path.join(artifactDir, artifactFileName(callId));
   await mkdir(artifactDir, { recursive: true });
   await writeFile(artifactPath, result.text, "utf8");
   const text = result.text.length > MAX_TEXT_CHARS ? result.text.slice(0, MAX_TEXT_CHARS) : result.text;
   return { ...result, text, artifactPath };
 }
-
 
 async function runOne(
   session: SessionHandle,

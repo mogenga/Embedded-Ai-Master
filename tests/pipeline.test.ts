@@ -98,6 +98,20 @@ function artifactDir(): string {
   return path.join(tmp, "artifacts");
 }
 
+function artifactPathOf(
+  artifactPath: string | undefined,
+  dir: string,
+  safeId: string,
+): string {
+  expect(artifactPath).toBeDefined();
+  if (artifactPath === undefined) throw new Error("missing artifactPath");
+  expect(path.dirname(artifactPath)).toBe(dir);
+  expect(path.basename(artifactPath)).toMatch(
+    new RegExp(`^${safeId}-[0-9a-f]{8}\\.txt$`),
+  );
+  return artifactPath;
+}
+
 describe("executeBatch 管线阶段", () => {
   it("未知工具 → tool_not_found 结构化错", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
@@ -299,20 +313,22 @@ describe("executeBatch 错误与取消", () => {
     expect(results[0].result.code).toBe("tool_timeout");
   });
 
-  it.each([0, Number.NaN])("timeoutMs=%s 回退默认值且不抛错", async (timeoutMs) => {
-    const { session } = makeSession(path.join(tmp, "session"));
-    const reg = new ToolRegistry([
-      makeTool<{}>("instant", async () => ok("instant"), true),
-    ]);
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "timeoutMs=%s 回退默认值且不抛错",
+    async (timeoutMs) => {
+      const { session } = makeSession(path.join(tmp, "session"));
+      const spans: Span[] = [];
+      const reg = new ToolRegistry([delayedTool("slow", 50, true, spans)]);
 
-    const results = await executeBatch(session, reg, [call("1", "instant")], {
-      signal: new AbortController().signal,
-      artifactDir: artifactDir(),
-      timeoutMs,
-    });
+      const results = await executeBatch(session, reg, [call("1", "slow")], {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        timeoutMs,
+      });
 
-    expect(results[0].result).toMatchObject({ isError: false, code: "ok", text: "instant" });
-  });
+      expect(results[0].result).toMatchObject({ isError: false, code: "ok", text: "slow" });
+    },
+  );
 
   it("批次 signal 已取消 → tool_aborted 且不执行工具", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
@@ -334,7 +350,7 @@ describe("executeBatch 错误与取消", () => {
   it("执行中批次 signal 取消 → tool_aborted", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const spans: Span[] = [];
-    const reg = new ToolRegistry([delayedTool("slow", 50, true, spans)]);
+    const reg = new ToolRegistry([delayedTool("slow", 200, true, spans)]);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10);
     const started = performance.now();
@@ -347,7 +363,7 @@ describe("executeBatch 错误与取消", () => {
       const elapsed = performance.now() - started;
 
       expect(results[0].result.code).toBe("tool_aborted");
-      expect(elapsed).toBeLessThan(45);
+      expect(elapsed).toBeLessThan(100);
     } finally {
       clearTimeout(timer);
     }
@@ -406,9 +422,8 @@ describe("executeBatch 证据落盘", () => {
     const result = results[0].result;
     expect(result.isError).toBe(false);
     expect(result.text).toBe(text);
-    expect(result.artifactPath).toBe(path.join(dir, "big-1.txt"));
-    if (result.artifactPath === undefined) throw new Error("missing artifactPath");
-    expect(await readFile(result.artifactPath, "utf8")).toBe(text);
+    const artifactPath = artifactPathOf(result.artifactPath, dir, "big-1");
+    expect(await readFile(artifactPath, "utf8")).toBe(text);
     expect(append).not.toHaveBeenCalled();
   });
 
@@ -416,17 +431,18 @@ describe("executeBatch 证据落盘", () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "y".repeat(120000);
     const reg = new ToolRegistry([outputTool("huge", text)]);
+    const dir = artifactDir();
 
     const results = await executeBatch(session, reg, [call("huge-1", "huge")], {
       signal: new AbortController().signal,
-      artifactDir: artifactDir(),
+      artifactDir: dir,
     });
 
     const result = results[0].result;
     expect(result.text.length).toBe(100000);
     expect(result.text).toBe(text.slice(0, 100000));
-    if (result.artifactPath === undefined) throw new Error("missing artifactPath");
-    expect(await readFile(result.artifactPath, "utf8")).toBe(text);
+    const artifactPath = artifactPathOf(result.artifactPath, dir, "huge-1");
+    expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
 
   it("恰好 8000 token（32000 字符）不落盘", async () => {
@@ -457,62 +473,61 @@ describe("executeBatch 证据落盘", () => {
     });
 
     const result = results[0].result;
-    expect(result.artifactPath).toBe(path.join(dir, "edge-8001.txt"));
-    if (result.artifactPath === undefined) throw new Error("missing artifactPath");
-    expect(await readFile(result.artifactPath, "utf8")).toBe(text);
+    const artifactPath = artifactPathOf(result.artifactPath, dir, "edge-8001");
+    expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
 
   it("恰好 100000 字符落盘但不截断", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "g".repeat(100000);
     const reg = new ToolRegistry([outputTool("edge", text)]);
+    const dir = artifactDir();
 
     const results = await executeBatch(session, reg, [call("edge-100000", "edge")], {
       signal: new AbortController().signal,
-      artifactDir: artifactDir(),
+      artifactDir: dir,
     });
 
     const result = results[0].result;
     expect(result.text).toBe(text);
     expect(result.text).toHaveLength(100000);
-    if (result.artifactPath === undefined) throw new Error("missing artifactPath");
-    expect(await readFile(result.artifactPath, "utf8")).toBe(text);
+    const artifactPath = artifactPathOf(result.artifactPath, dir, "edge-100000");
+    expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
 
   it("100001 字符截断为前 100000", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "h".repeat(100001);
     const reg = new ToolRegistry([outputTool("edge", text)]);
+    const dir = artifactDir();
 
     const results = await executeBatch(session, reg, [call("edge-100001", "edge")], {
       signal: new AbortController().signal,
-      artifactDir: artifactDir(),
+      artifactDir: dir,
     });
 
     const result = results[0].result;
     expect(result.text).toHaveLength(100000);
     expect(result.text).toBe(text.slice(0, 100000));
-    if (result.artifactPath === undefined) throw new Error("missing artifactPath");
-    expect(await readFile(result.artifactPath, "utf8")).toBe(text);
+    const artifactPath = artifactPathOf(result.artifactPath, dir, "edge-100001");
+    expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
 
-  it("Windows 保留名 CON 加前缀 _", async () => {
+  it.each(["CON", "COM1", "NUL", "con"])("Windows 保留名 %s 加前缀 _", async (reserved) => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "i".repeat(40000);
     const reg = new ToolRegistry([outputTool("big", text)]);
     const dir = artifactDir();
 
-    const results = await executeBatch(session, reg, [call("CON", "big")], {
+    const results = await executeBatch(session, reg, [call(reserved, "big")], {
       signal: new AbortController().signal,
       artifactDir: dir,
     });
 
     const result = results[0].result;
     expect(result.isError).toBe(false);
-    expect(result.artifactPath).toBe(path.join(dir, "_CON.txt"));
-    if (result.artifactPath === undefined) throw new Error("missing artifactPath");
-    expect(path.dirname(result.artifactPath)).toBe(dir);
-    expect(await readFile(result.artifactPath, "utf8")).toBe(text);
+    const artifactPath = artifactPathOf(result.artifactPath, dir, `_${reserved}`);
+    expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
 
   it("超长 call.id 截断为 100 字符", async () => {
@@ -527,9 +542,32 @@ describe("executeBatch 证据落盘", () => {
     });
 
     const result = results[0].result;
-    expect(result.artifactPath).toBe(path.join(dir, `${"a".repeat(100)}.txt`));
-    if (result.artifactPath === undefined) throw new Error("missing artifactPath");
-    expect(await readFile(result.artifactPath, "utf8")).toBe(text);
+    const artifactPath = artifactPathOf(result.artifactPath, dir, "a".repeat(100));
+    expect(await readFile(artifactPath, "utf8")).toBe(text);
+  });
+
+  it("清洗后同名但原始 id 不同 → 两个证据文件均存在", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const textA = "k".repeat(40000);
+    const textB = "m".repeat(40000);
+    const reg = new ToolRegistry([
+      outputTool("big-a", textA),
+      outputTool("big-b", textB),
+    ]);
+    const dir = artifactDir();
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("a/b", "big-a"), call("a?b", "big-b")],
+      { signal: new AbortController().signal, artifactDir: dir },
+    );
+
+    const first = artifactPathOf(results[0].result.artifactPath, dir, "a_b");
+    const second = artifactPathOf(results[1].result.artifactPath, dir, "a_b");
+    expect(first).not.toBe(second);
+    expect(await readFile(first, "utf8")).toBe(textA);
+    expect(await readFile(second, "utf8")).toBe(textB);
   });
 
   it("模型控制的 call.id 无法路径穿越", async () => {
@@ -550,6 +588,7 @@ describe("executeBatch 证据落盘", () => {
     expect(fileName).not.toContain("..");
     expect(fileName).not.toContain("/");
     expect(fileName).not.toContain("\\");
+    expect(fileName).toMatch(/^___evil-[0-9a-f]{8}\.txt$/);
     expect(path.dirname(artifactPath)).toBe(dir);
     expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
