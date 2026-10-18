@@ -39,6 +39,12 @@ const MAX_ISSUE_MESSAGE_CHARS = 500;
 const MAX_ISSUE_CODE_CHARS = 100;
 const MAX_ISSUE_PATH_SEGMENTS = 20;
 const MAX_ISSUE_PATH_SEGMENT_CHARS = 100;
+const MAX_DETAIL_JSON_BYTES = 10_000;
+const MAX_UNION_ERRORS = 5;
+const MAX_UNION_DEPTH = 5;
+const COMPRESSED_ISSUE_MESSAGE_CHARS = 100;
+const COMPRESSED_ISSUE_PATH_SEGMENTS = 5;
+const COMPRESSED_ISSUE_PATH_SEGMENT_CHARS = 50;
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
 class ToolTimeoutError extends Error {
@@ -135,6 +141,99 @@ function mergeArtifactError(detail: unknown, artifactError: string): unknown {
   return { originalDetail: detail, artifactError };
 }
 
+interface SanitizedIssue {
+  code?: string;
+  path: string[];
+  message: string;
+  errors?: SanitizedIssue[];
+}
+
+function sanitizePath(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, MAX_ISSUE_PATH_SEGMENTS)
+    .map((segment) => String(segment))
+    .map((segment) => segment.slice(0, MAX_ISSUE_PATH_SEGMENT_CHARS));
+}
+
+function sanitizeIssue(value: unknown, depth: number): SanitizedIssue | undefined {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const issue: SanitizedIssue = {
+    path: sanitizePath(record.path),
+    message: String(record.message ?? "").slice(0, MAX_ISSUE_MESSAGE_CHARS),
+  };
+  if (typeof record.code === "string") {
+    issue.code = record.code.slice(0, MAX_ISSUE_CODE_CHARS);
+  }
+  if (Array.isArray(record.errors) && depth < MAX_UNION_DEPTH) {
+    const children: SanitizedIssue[] = [];
+    for (const entry of record.errors.slice(0, MAX_UNION_ERRORS)) {
+      children.push(...flattenUnionEntry(entry, depth + 1));
+      if (children.length >= MAX_UNION_ERRORS) break;
+    }
+    if (children.length > 0) issue.errors = children.slice(0, MAX_UNION_ERRORS);
+  }
+  return issue;
+}
+
+function flattenUnionEntry(value: unknown, depth: number): SanitizedIssue[] {
+  if (Array.isArray(value)) {
+    const flattened: SanitizedIssue[] = [];
+    for (const entry of value) {
+      flattened.push(...flattenUnionEntry(entry, depth));
+      if (flattened.length >= MAX_UNION_ERRORS) break;
+    }
+    return flattened.slice(0, MAX_UNION_ERRORS);
+  }
+  const issue = sanitizeIssue(value, depth);
+  return issue === undefined ? [] : [issue];
+}
+
+function fitsBudget(value: unknown, maxJsonBytes: number): boolean {
+  return JSON.stringify(value).length <= maxJsonBytes;
+}
+
+function compressIssue(issue: SanitizedIssue): SanitizedIssue {
+  const compressed: SanitizedIssue = {
+    path: issue.path
+      .slice(0, COMPRESSED_ISSUE_PATH_SEGMENTS)
+      .map((segment) => segment.slice(0, COMPRESSED_ISSUE_PATH_SEGMENT_CHARS)),
+    message: issue.message.slice(0, COMPRESSED_ISSUE_MESSAGE_CHARS),
+  };
+  if (issue.code !== undefined) compressed.code = issue.code;
+  if (issue.errors !== undefined) {
+    compressed.errors = issue.errors.slice(0, MAX_UNION_ERRORS).map(compressIssue);
+  }
+  return compressed;
+}
+
+export function sanitizeIssues(issues: unknown, maxJsonBytes = MAX_DETAIL_JSON_BYTES): unknown {
+  if (!Array.isArray(issues)) return [];
+
+  const sanitized: SanitizedIssue[] = [];
+  for (const value of issues) {
+    if (sanitized.length >= MAX_ISSUES) break;
+    const issue = sanitizeIssue(value, 0);
+    if (issue !== undefined) sanitized.push(issue);
+  }
+  if (fitsBudget(sanitized, maxJsonBytes)) return sanitized;
+
+  const reduced = [...sanitized];
+  while (reduced.length > 1 && !fitsBudget(reduced, maxJsonBytes)) {
+    reduced.pop();
+  }
+  if (fitsBudget(reduced, maxJsonBytes)) return reduced;
+
+  const compressed = reduced.map(compressIssue);
+  while (compressed.length > 0 && !fitsBudget(compressed, maxJsonBytes)) {
+    compressed.pop();
+  }
+  if (compressed.length > 0 && fitsBudget(compressed, maxJsonBytes)) return compressed;
+
+  return { issues: [], truncated: true };
+}
+
 async function finalizeResult(
   value: unknown,
   callId: string,
@@ -192,17 +291,7 @@ async function executeOne(
         .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
         .join("; ") || "schema validation failed";
     const message = truncateText(rawMessage, MAX_SCHEMA_MESSAGE_CHARS);
-    const issues = parsed.error.issues.slice(0, MAX_ISSUES).map((issue) => ({
-      code: typeof issue.code === "string" ? issue.code.slice(0, MAX_ISSUE_CODE_CHARS) : undefined,
-      path: Array.isArray(issue.path)
-        ? issue.path
-            .slice(0, MAX_ISSUE_PATH_SEGMENTS)
-            .map(String)
-            .map((segment) => segment.slice(0, MAX_ISSUE_PATH_SEGMENT_CHARS))
-        : [],
-      message: String(issue.message).slice(0, MAX_ISSUE_MESSAGE_CHARS),
-    }));
-    return failure("schema_validation", message, issues);
+    return failure("schema_validation", message, sanitizeIssues(parsed.error.issues));
   }
 
   if (opts.signal.aborted) {

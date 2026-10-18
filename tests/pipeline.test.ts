@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { SessionHandle } from "../src/session/session.js";
 import { echoTool } from "../src/tools/echo.js";
-import { executeBatch } from "../src/tools/pipeline.js";
+import { executeBatch, sanitizeIssues } from "../src/tools/pipeline.js";
 import type { BatchCall } from "../src/tools/pipeline.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import type { ToolCtx, ToolDef, ToolResult } from "../src/tools/types.js";
@@ -1005,6 +1005,70 @@ describe("executeBatch 出口限长", () => {
     const issues = results[0].result.detail as Array<{ message: string }>;
     expect(issues).toHaveLength(20);
     for (const issue of issues) expect(issue.message.length).toBeLessThanOrEqual(500);
+  });
+
+  it("20 条 issue × 20 段 × 100 字符 path → JSON ≤10000", () => {
+    const raw = Array.from({ length: 20 }, () => ({
+      code: "c".repeat(100),
+      path: Array.from({ length: 20 }, () => "p".repeat(100)),
+      message: "m".repeat(500),
+    }));
+
+    const sanitized = sanitizeIssues(raw);
+
+    expect(JSON.stringify(sanitized).length).toBeLessThanOrEqual(10000);
+    expect(Array.isArray(sanitized)).toBe(true);
+  });
+
+  it("invalid_union 保留子错误摘要", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const reg = new ToolRegistry([
+      {
+        name: "union-schema",
+        description: "union schema",
+        schema: z.object({
+          value: z.union([z.object({ a: z.string() }), z.object({ b: z.number() })]),
+        }),
+        annotations: { readOnly: true },
+        execute: async () => ok("never"),
+      },
+    ]);
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("1", "union-schema", { value: {} })],
+      { signal: new AbortController().signal, artifactDir: artifactDir() },
+    );
+
+    const issues = results[0].result.detail as Array<{
+      errors?: Array<{ code?: string; message?: string }>;
+    }>;
+    expect(issues[0].errors).toBeDefined();
+    expect(issues[0].errors?.length).toBeGreaterThan(0);
+    expect(typeof issues[0].errors?.[0].code).toBe("string");
+    expect(typeof issues[0].errors?.[0].message).toBe("string");
+  });
+
+  it("畸形 code 不产生 undefined 键", () => {
+    const sanitized = sanitizeIssues([
+      { code: 123, path: ["x"], message: "m" },
+      { path: [], message: "missing-code" },
+    ]) as Array<Record<string, unknown>>;
+
+    for (const issue of sanitized) {
+      expect(Object.prototype.hasOwnProperty.call(issue, "code")).toBe(false);
+      expect(Object.keys(issue)).not.toContain("undefined");
+    }
+  });
+
+  it("超出预算且压缩无效时返回 truncated 兜底", () => {
+    const sanitized = sanitizeIssues(
+      [{ code: "custom", path: ["a".repeat(100)], message: "m".repeat(500) }],
+      10,
+    );
+
+    expect(sanitized).toStrictEqual({ issues: [], truncated: true });
   });
 });
 
