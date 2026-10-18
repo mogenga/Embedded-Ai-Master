@@ -138,6 +138,22 @@ function toResultPayload(id: string, result: ToolResult): Record<string, unknown
   return { ...payload };
 }
 
+function toLoopToolResult(
+  id: string,
+  result: ToolResult,
+): Extract<LoopEvent, { kind: "tool_result" }> {
+  const event: Extract<LoopEvent, { kind: "tool_result" }> = {
+    kind: "tool_result",
+    id,
+    ok: !result.isError,
+    text: result.text,
+    code: result.code,
+  };
+  if (result.artifactPath !== undefined) event.artifactPath = result.artifactPath;
+  if (result.detail !== undefined) event.detail = result.detail;
+  return event;
+}
+
 async function* emitInterrupted(
   session: SessionHandle,
   reason: InterruptReason,
@@ -259,7 +275,7 @@ export async function* query(
             parent: assistantEvent.seq,
           });
           pending = consumePending(pending);
-          yield { kind: "tool_result", id: call.id, ok: false, text: result.text };
+          yield toLoopToolResult(call.id, result);
         }
         pending = undefined;
         exitReason = "normal";
@@ -299,7 +315,7 @@ export async function* query(
           parent: assistantEvent.seq,
         });
         pending = consumePending(pending);
-        yield { kind: "tool_result", id: call.id, ok: !result.isError, text: result.text };
+        yield toLoopToolResult(call.id, result);
       }
       pending = undefined;
 

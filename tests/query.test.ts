@@ -130,7 +130,7 @@ describe("query 主循环", () => {
     expect(events).toEqual([
       { kind: "model_message", content: "用 echo" },
       { kind: "tool_use", id: "c1", name: "echo", input: { text: "hi" } },
-      { kind: "tool_result", id: "c1", ok: true, text: "hi" },
+      { kind: "tool_result", id: "c1", ok: true, text: "hi", code: "ok" },
       { kind: "model_message", content: "完成" },
       { kind: "done", finishReason: "no_tool_calls" },
     ]);
@@ -148,6 +148,39 @@ describe("query 主循环", () => {
     const assistant = session.events().find((event) => event.type === "assistant");
     expect(toolResult?.parent).toBe(assistant?.seq);
     expect(toolResult?.payload).toMatchObject({ id: "c1", ok: true, text: "hi" });
+  });
+
+  it("tool_result 事件透传结构化 detail 与 artifactPath", async () => {
+    const richTool: ToolDef<{ text: string }> = {
+      name: "rich",
+      description: "返回结构化取证详情",
+      schema: z.object({ text: z.string() }),
+      execute: async (input) => ({
+        isError: false,
+        code: "ok",
+        message: "",
+        text: input.text,
+        detail: { address: "0x40023808", value: "0x00000000" },
+        artifactPath: "artifacts/rich.txt",
+      }),
+    };
+    const provider = scriptedProvider([
+      reply("调用", [{ id: "r1", name: "rich", arguments: { text: "read" } }]),
+      reply("完成"),
+    ]);
+    const { ctx } = await makeCtx(provider, { tools: new ToolRegistry([richTool]) });
+
+    const events = await collect(query(ctx, "取证", { maxTurns: 10 }));
+    const result = events.find((event) => event.kind === "tool_result");
+
+    expect(result).toMatchObject({
+      kind: "tool_result",
+      id: "r1",
+      ok: true,
+      code: "ok",
+      detail: { address: "0x40023808", value: "0x00000000" },
+      artifactPath: "artifacts/rich.txt",
+    });
   });
 
   it("model-visible means logged: 投影含 tool 消息", async () => {
@@ -515,12 +548,14 @@ describe("query 主循环", () => {
       id: "c1",
       ok: false,
       text: "tool aborted before execution",
+      code: "tool_aborted",
     });
     expect(events[4]).toEqual({
       kind: "tool_result",
       id: "c2",
       ok: false,
       text: "tool aborted before execution",
+      code: "tool_aborted",
     });
     expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
 
@@ -912,7 +947,7 @@ describe("query 主循环", () => {
     });
     expect(events[3]).toMatchObject({ kind: "tool_result", id: "m1", ok: false });
     expect(String((events[3] as { text: string }).text)).toContain("{bad");
-    expect(events[4]).toEqual({ kind: "tool_result", id: "c2", ok: true, text: "ok" });
+    expect(events[4]).toEqual({ kind: "tool_result", id: "c2", ok: true, text: "ok", code: "ok" });
 
     const logged = session.events().filter((event) => event.type === "tool_result");
     expect(logged.map((event) => event.payload.id)).toEqual(["m1", "c2"]);
