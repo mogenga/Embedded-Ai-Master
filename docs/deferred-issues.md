@@ -626,6 +626,22 @@
 - **触发升级条件**: 接入多用户/权限层,或工作区可能被不可信进程并发修改;需要给出“cwd 绝不越界”的强保证。
 - **修复建议**: 在支持的平台用已打开目录句柄启动进程(`fchdir`/`posix_spawn`),或在 spawn 前紧邻地再次 `lstat`/`realpath` 并比较;Windows 可结合目录句柄与 job object 校验,失败返回结构化错误。
 
+### D-075 · `shell` abort 只发一次且无升级/兜底,Promise 可能不 settle
+
+- **发现**: 2026-10-18,维度4 Task2 复审。
+- **现象**: `runCommand` 在 abort 事件里只调用一次 `terminateTree`(Windows `taskkill /T /F`、POSIX `kill(-pid)`),没有检查失败、重试或升级为 SIGKILL;`Promise` 只在子进程 `close`/`error` 事件到达时 settle。若 kill 因权限、PID 回收或进程忽略信号而失败,且两个事件都不到达,`execute` 会长期 pending。
+- **影响**: 取消不保证“进程结束 + 结果返回”两件事同时成立;上层若未设置超时,会话可能挂住;进程残留会占用串口/OpenOCD 句柄,与嵌入式场景的清理要求冲突。
+- **触发升级条件**: 实现工具级超时或出现 abort 后不返回/进程残留的真实现象。
+- **修复建议**: abort 后启动短定时器兜底 `finish(shell_aborted)` 并记录 kill 失败;POSIX 在宽限期后升级 `SIGKILL`,Windows 失败时二次 `taskkill` 或改用 job object;把 kill 失败原因写入 `detail`。
+
+### D-076 · `shell` 的 `exitSignal` 与 `code=null` 语义存在平台边缘
+
+- **发现**: 2026-10-18,维度4 Task2 复审。
+- **现象**: Node `close(code, signal)` 在 POSIX 被信号杀死时通常 `code=null, signal=<sig>`;Windows 上 `taskkill` 后常见 `code=1, signal=null`。当前实现只在 `signal !== null` 时返回 `shell_terminated`,若出现 `code===null && signal===null` 的异常组合,会落入正常分支并用 `code ?? 1` 把 null 伪装成退出码 1。同一次 abort 在不同平台的 `detail` 形状不一致。
+- **影响**: 依赖 `exitCode`/`signal` 的消费者(日志回放、前端展示、模型决策)需要理解平台差异;极端情况下 null 被误报为 1,违反“不伪造事实”的诚实原则。
+- **触发升级条件**: 跨平台回放需要一致的终止语义,或出现 `code=null` 的实际观测。
+- **修复建议**: 把 `code===null && signal===null` 显式建模为 `shell_terminated`(detail 保持 `exitCode:null`)或新增 `shell_unknown`;统一各平台 detail 契约并补跨平台契约测试。
+
 ---
 
 ## 变更记录
@@ -663,3 +679,4 @@
 | 2026-10-18 | 维度4 Task1 审查修复:fs read 改流式读取、edit 按 CRLF/LF 风格映射、拒绝 Windows 保留设备名、offset 越界显式返回;design §4.2 补齐 read_failed/invalid_input/reserved_name/internal_error;拟用 D-051/D-052 与前端冲突,改录 D-071(fs 不响应 AbortSignal)、D-072(edit 非重叠匹配) |
 | 2026-10-18 | 维度4 Task1 收尾:空文件 offset 显式返回、混合换行按 LF 处理并保留未命中行原始字节、保留名先规范化(trim/:stream/尾部点空格)、5MB 用例改名并明确流式仅代码审查、junction 改为真实探测;录入 D-073(上标设备名变体) |
 | 2026-10-18 | 维度4 Task2 审查修复:危险命令补 `$HOME`/`${HOME}`/`..`/盘符根与 `del/rd` 通配、sudo 带值选项、信号终止 `shell_terminated`、abort 杀进程树、message 截断 200 字符;录入 D-074(cwd 校验与 spawn 的 symlink TOCTOU) |
+| 2026-10-18 | 维度4 Task2 复审:危险 execute 用例补前置识别断言(截断用例);design §4.3 同步 shell 非沙箱/自管 abort/`shell_terminated`/`del`/`rd` 通配与错误码表;录入 D-075(abort 无升级兜底)、D-076(`exitSignal`/`code=null` 平台边缘) |

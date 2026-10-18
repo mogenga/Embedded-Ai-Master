@@ -92,15 +92,17 @@ annotations = { readOnly: false, destructive: true };
 
 - `cwd = resolveInWorkdir(ctx.cwd, cwd ?? ".")`; 不存在/非目录 → `cwd_invalid`。
 - 危险命令拦截(大小写不敏感, 仅明显破坏性; **不是沙箱**):
-  - `rm` 带 `-r`/`-f` 且目标为 `/`、`~`、`$HOME`、`..`、盘符根;
+  - `rm` 带 `-r`/`-f` 且目标为 `/`、`~`、`$HOME`/`${HOME}`、多级 `..`、盘符根(`C:`/`C:\`/`C:\*`);
   - `mkfs`、`format <drive>:`、`diskpart`、`shutdown`、`reboot`、`poweroff`、`halt`;
   - `dd ... of=/dev/...`;
   - `:(){ :|:& };:`(fork bomb);
-  - `del /s /q <drive>:\`、`rd /s /q <drive>:\`、`reg delete HKLM`、`bcdedit`、`cipher /w`.
+  - `del`/`erase`/`rd`/`rmdir /s` 打 `<drive>:\`、`<drive>:\*`、`<drive>:\*.*`、`reg delete HKLM`、`bcdedit`、`cipher /w`.
   - 命中 → `{isError:true, code:"dangerous_command", message, text}`，**不 spawn**。
-- 执行: `spawn(command, { shell: true, cwd, env: process.env, signal })`; 收集 stdout/stderr 各最多 1 MiB(超出截断并标记); 等待 close。
-- 返回 `isError:false` + `detail: { exitCode, stdout, stderr, stdoutTruncated, stderrTruncated }`; `text` 包含 `exit=<n>`、stdout、stderr(便于模型直接读)。
-- 非零退出码不算工具错误; spawn 失败/信号中止 → `isError:true` (`shell_spawn_failed` / `shell_aborted`)。
+- 执行: `spawn(command, { shell: true, cwd, env: process.env })`; 收集 stdout/stderr 各最多 1 MiB(超出截断并标记); 等待 close。
+- 取消: `execute` 自管 abort——Windows 用 `taskkill /T /F` 杀进程树, POSIX 杀 `detached` 进程组; 不传 Node 内置 `signal`(避免只杀 shell 留下孙进程); 调用方中止返回 `shell_aborted`。
+- 返回 `isError:false` + `detail: { exitCode, signal, stdout, stderr, stdoutTruncated, stderrTruncated }`; `text` 包含 `exit=<n>`、stdout、stderr(便于模型直接读)。
+- 非零退出码不算工具错误; spawn 失败 `shell_spawn_failed`; 子进程被系统信号终止 → `isError:true`, `code:"shell_terminated"`, `detail.exitCode:null` + 实际 `signal`(不把 null 伪装成 1)。
+- 错误码: `ok`、`dangerous_command`、`cwd_invalid`、`shell_spawn_failed`、`shell_aborted`、`shell_terminated`。
 - 明确文档: 拦截列表不完备; P1 权限层再收紧。
 
 ### 4.4 `glob` 工具

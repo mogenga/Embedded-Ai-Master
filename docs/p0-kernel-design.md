@@ -198,6 +198,23 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
 
 工具系统是一个泛型接口加一条五阶段管线:每个工具用 Zod 声明输入、用 annotations 声明读写/证据/破坏性三类语义标注,执行统一走"查找 → 验证 → 权限(P0 占位)→ 执行 → 后处理"。三个设计决定值得强调:错误是结构化数据而非异常文本(R3 的类型化落点,模型拿到 `code/detail` 才能决策重试还是绕行);超时分级且超时本身是结构化回传(Phase 0 教训:防 hang 必须做到工具级);大输出出口统一截断并接落盘。母本 Claude Code 的八阶段流水线与 60+ 工具生态被收缩为五阶段 + 4 个内置工具(fs/shell/glob/grep),嵌入式取证完全外置给 MCP——领域不入内核的边界在这里被物理保证。
 
+**`shell` 工具语义(P0 实现)**:
+
+- **非沙箱**:只做危险命令启发式拦截,不是沙箱;拦截列表不完备,按 shell 分隔符切段后取首词判断命令名,引号/命令替换等复杂语法可能保守误拦或漏判。
+- **危险命令**:`rm` 递归 + force 打 `/`、`~`、`$HOME`/`${HOME}`、多级 `..`、盘符根(`C:`/`C:\`/`C:\*`);`mkfs*`、`format <drive>:`、`diskpart`、`bcdedit`、`shutdown`/`reboot`/`poweroff`/`halt`、`dd of=/dev/*`、fork bomb、`del`/`rd` 的 `<drive>:\*` 与 `<drive>:\*.*` 通配、`reg delete HKLM`、`cipher /w`;命中返回 `dangerous_command`,不 spawn。
+- **cwd**:`resolveInWorkdir` 后校验存在且为目录,失败 `cwd_invalid`。
+- **输出与退出**:stdout/stderr 各 1 MiB 截断并标记;非零退出仍 `isError:false`;子进程被系统信号终止返回 `isError:true`、`code:"shell_terminated"`,detail 保留 `exitCode:null` 与实际 `signal`(不把 null 伪装成 1);spawn 失败 `shell_spawn_failed`。
+- **取消**:`execute` 自管 abort——Windows 用 `taskkill /T /F` 杀进程树,POSIX 杀 `detached` 进程组;避免 Node 内置 signal 只杀 shell 导致孙进程残留;调用方中止返回 `shell_aborted`。
+
+| 错误码 | 含义 |
+|---|---|
+| `ok` | 正常执行(含非零退出) |
+| `dangerous_command` | 命中危险命令拦截,未 spawn |
+| `cwd_invalid` | cwd 越界、不存在或非目录 |
+| `shell_spawn_failed` | spawn 同步/异步失败 |
+| `shell_aborted` | 调用方 signal 中止 |
+| `shell_terminated` | 子进程被信号终止(`exitCode: null` + `signal`) |
+
 ### 4.4 简化对照
 
 | Claude Code | 本方案 | 理由 |
