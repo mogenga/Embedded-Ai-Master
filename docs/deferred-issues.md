@@ -345,6 +345,7 @@
 - **影响**: 当前工具产物由 harness 直接写入 sourceDir/artifacts,不会产生链接,风险低;但若未来 artifact 来源扩展到用户指定路径或外部工具输出,可能复制 sourceDir 之外的文件。
 - **触发升级条件**: artifact 路径可由用户/外部工具控制;出现链接目录、junction 或大小写/短名绕过;安全审查要求严格边界。
 - **修复建议**: 对 sourceDir 与 artifact 路径分别 `realpath` 后比较,拒绝非普通文件与跨根路径;或在写入 artifact 时记录规范化后的相对路径,读取时只接受该相对路径。
+- **2026-10-18 扩展**: 第二轮红队修复已对源根与 artifact 路径追加 `realpath` 越界检查,链接越界按 `artifactMissing` 处理;但词法检查仍保留在前,`lstat`/`realpath` 与 `copyFile` 之间的 TOCTOU、junction 与 8.3 短名仍未覆盖,详见 D-047。非普通文件(含目录 artifact)仍按 D-042 处理。
 
 ### D-041 · fork 失败回滚只删 targetDir,父目录链残留且回滚失败静默
 
@@ -396,6 +397,22 @@
 - **修复建议**: 复用现有 `resumeCloseFailure` mock(或抽 handle 工厂),补一条「resume 正常完成、close 抛错 → 调用方收到 close 错误」的集成测试。
 - **2026-10-18 补充(close 失败重试语义)**: `createHandle.close()` 一旦失败,`accepting` 已置为 `false` 且 `closePromise` 缓存的是 rejected Promise;后续 `close()` 返回同一 rejected Promise,handle 也不能再 `append`。当前**不实现重试**,调用方需重建 handle 或重新 resume;该语义与「close 失败却标记 closed」的反目标一致。
 
+### D-047 · lstat 校验与打开之间的 TOCTOU,junction/8.3 短名未专项覆盖
+
+- **发现**: 2026-10-18,第二轮红队审查 C-1 修复。
+- **现象**: 读取与 append 前用 `lstat` 拒绝符号链接/非普通文件,但检查与随后的 `readFileSync`/`appendFile` 不是同一文件描述符,存在被替换的窗口;Windows junction 的 `isSymbolicLink()` 表现依赖 Node/平台版本,8.3 短名也未纳入路径比较的专项测试。fork 的 source/target/artifact 已用 `realpath` 缓解路径等价问题,但不等于关闭 TOCTOU。
+- **影响**: 会话目录可被非可信进程写时,理论上仍可能被诱导读写会话目录外的文件;当前单用户本机 harness、目录由 harness 独占,风险低。
+- **触发升级条件**: 会话目录可被其他用户/进程写;多用户或共享目录部署;安全审查要求消除 TOCTOU 或明确覆盖 Windows reparse point/短名。
+- **修复建议**: 用 `O_NOFOLLOW`(或平台等价语义)打开并以同一 fd 完成 `fstat` + 读写;Windows 侧明确 `FILE_FLAG_OPEN_REPARSE_POINT` 策略;补 junction、8.3 短名与「检查后替换」的对抗性测试。
+
+### D-048 · 代文件不连续(只有 v2 无 v1)仍被接受
+
+- **发现**: 2026-10-18,第二轮红队审查修复。
+- **现象**: `readSessionDir` 只按现存 `session.vN.jsonl` 的数字升序合并,不校验代编号从 1 连续到最大代;目录中只有 `session.v2.jsonl` 时,只要 seq 从 0 开始即可正常读取,缺失的 `v1` 不产生任何错误。
+- **影响**: 代文件缺失可能是日志被删除、截断或同步失败的信号,当前被静默接受,审计链完整性无法保证;未来若按代定位断点或做增量同步,缺档会导致语义偏差。
+- **触发升级条件**: 需要严格的日志完整性/审计证明;出现跨代缺档导致的断点续跑或定位错误;引入日志同步/备份。
+- **修复建议**: 读取时校验代编号从 1 连续到最大代,缺档抛 `SessionCorruptionError`(新增专用 code 或复用 `invalid_event_line`),并补「只有 v2」「v1+v3」等缺档测试。
+
 ---
 
 ## 变更记录
@@ -422,3 +439,4 @@
 | 2026-10-18 | 维度6 Task6 审查修复:resume 改为「先读取校验、后 `resumeSession`」,失败不写 header/日志;新增 `session_id_mismatch`;`finally` 的 close 异常不再覆盖主错误;录入 D-043(`header.workdir` 与工具 cwd 来源不一致)、D-044(多 system 只校验首个) |
 | 2026-10-18 | 维度6 Task8 收尾:复核 D-039 ~ D-044 均仍为未解决,描述与当前实现一致;录入 D-045(checkpoint.turn 每次 query 从 1 重编号、resume 后与历史重复)、D-046(无主错误时 close 异常上抛分支缺真实路径测试) |
 | 2026-10-18 | 第一轮整体审查修复:fork 边界改为前缀可投影;resume 增加崩溃尾部恢复;统一 header 校验;D-042 扩展记录越界/缺失共用 artifactMissing;D-046 补充 close 失败不重试语义 |
+| 2026-10-18 | 第二轮红队修复 C-1/I-1:读取与 append 增加 lstat 普通文件/非链接校验;resume 崩溃恢复改为先 append 后写 header open 并支持失败回滚与幂等补 interrupted;fork source/target/artifact 增加 realpath 边界;录入 D-047(TOCTOU/junction/短名)、D-048(代文件不连续仍被接受);D-040 扩展记录 realpath 接线与残余缺口 |

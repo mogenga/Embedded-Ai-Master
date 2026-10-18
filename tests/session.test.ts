@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -25,7 +26,10 @@ import {
 } from "../src/session/errors.js";
 import type { SessionEvent, SessionHeader } from "../src/session/types.js";
 
-const fsFaults = vi.hoisted(() => ({ rename: null as Error | null }));
+const fsFaults = vi.hoisted(() => ({
+  rename: null as Error | null,
+  appendFile: null as ((file: string, data: string) => boolean) | null,
+}));
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -34,6 +38,16 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     rename: async (oldPath: string, newPath: string): Promise<void> => {
       if (fsFaults.rename !== null) throw fsFaults.rename;
       return actual.rename(oldPath, newPath);
+    },
+    appendFile: async (
+      file: Parameters<typeof actual.appendFile>[0],
+      data: Parameters<typeof actual.appendFile>[1],
+      options?: Parameters<typeof actual.appendFile>[2],
+    ): Promise<void> => {
+      if (fsFaults.appendFile?.(String(file), String(data)) === true) {
+        throw new Error("append boom");
+      }
+      return actual.appendFile(file, data, options);
     },
   };
 });
@@ -47,8 +61,62 @@ function makeTempDir(): string {
 }
 
 afterEach(() => {
+  fsFaults.rename = null;
+  fsFaults.appendFile = null;
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+function writeCrashSession(dir: string): SessionEvent[] {
+  const events: SessionEvent[] = [
+    { seq: 0, ts: "2026-10-18T00:00:00.000Z", type: "user", payload: { content: "u" } },
+    {
+      seq: 1,
+      ts: "2026-10-18T00:00:01.000Z",
+      type: "checkpoint",
+      payload: { turn: 1 },
+    },
+    {
+      seq: 2,
+      ts: "2026-10-18T00:00:02.000Z",
+      type: "assistant",
+      payload: {
+        content: "a",
+        toolCalls: [
+          { id: "c1", name: "echo", arguments: {} },
+          { id: "c2", name: "echo", arguments: {} },
+        ],
+      },
+    },
+    {
+      seq: 3,
+      ts: "2026-10-18T00:00:03.000Z",
+      type: "usage",
+      payload: { promptTokens: 1, completionTokens: 1 },
+    },
+    {
+      seq: 4,
+      ts: "2026-10-18T00:00:04.000Z",
+      type: "tool_result",
+      payload: { id: "c1", ok: true, text: "ok" },
+      parent: 2,
+    },
+  ];
+  writeFileSync(
+    path.join(dir, "header.json"),
+    `${JSON.stringify({
+      id: "crash",
+      createdAt: "2026-10-18T00:00:00.000Z",
+      status: "closed",
+    })}\n`,
+    "utf8",
+  );
+  writeFileSync(
+    path.join(dir, "session.v1.jsonl"),
+    `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    "utf8",
+  );
+  return events;
+}
 
 describe("会话持久化", () => {
   it("有 systemPrompt 时以 system 事件为首条", async () => {
@@ -113,6 +181,21 @@ describe("会话持久化", () => {
       createSession(dir, { provider: 1 as unknown as string }),
     ).rejects.toBeInstanceOf(TypeError);
     expect(existsSync(dir)).toBe(false);
+  });
+
+  it("createSession 拒绝空串或非目录 sessionDir", async () => {
+    await expect(createSession("")).rejects.toMatchObject({
+      name: "SessionResumeError",
+      code: "invalid_target",
+    });
+
+    const file = path.join(makeTempDir(), "session-file");
+    writeFileSync(file, "keep", "utf8");
+    await expect(createSession(file)).rejects.toMatchObject({
+      name: "SessionResumeError",
+      code: "invalid_target",
+    });
+    expect(readFileSync(file, "utf8")).toBe("keep");
   });
 
   it("Promise.all 追加顺序与 JSONL 持久化顺序一致", async () => {
@@ -196,6 +279,26 @@ describe("会话持久化", () => {
     expect(event.type).toBe("user");
     expect(event.payload).toEqual({ content: "before" });
     expect(readSessionFile(path.join(dir, "session.v1.jsonl"))).toEqual([event]);
+  });
+
+  it("append 当前日志为符号链接 → SessionCorruptionError 且不写外部文件", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    const logPath = path.join(dir, "session.v1.jsonl");
+    const external = path.join(makeTempDir(), "external.jsonl");
+    writeFileSync(external, "external\n", "utf8");
+    rmSync(logPath, { force: true });
+    symlinkSync(external, logPath, "file");
+
+    await expect(
+      session.append({ type: "user", payload: { content: "should-not-write" } }),
+    ).rejects.toMatchObject({
+      name: "SessionCorruptionError",
+      code: "invalid_event_line",
+    });
+
+    expect(readFileSync(external, "utf8")).toBe("external\n");
+    expect(session.events()).toHaveLength(0);
   });
 
   it("events() 返回只读视图,外部 push 会抛错", async () => {
@@ -555,39 +658,31 @@ describe("会话持久化", () => {
     });
   });
 
-  it("usageTotals 跳过 payload 为 null 或缺失的 usage 事件", async () => {
-    const dir = makeTempDir();
-    writeFileSync(
-      path.join(dir, "header.json"),
-      `${JSON.stringify({
-        id: "sess-null-usage",
-        createdAt: "2026-10-18T00:00:00.000Z",
-        status: "closed",
-      })}\n`,
-      "utf8",
-    );
-    writeFileSync(
-      path.join(dir, "session.v1.jsonl"),
-      `${JSON.stringify({
+  it("usageTotals 跳过 payload 为 null 或缺失的内部 usage 事件", () => {
+    const header: SessionHeader = {
+      id: "sess-null-usage",
+      createdAt: "2026-10-18T00:00:00.000Z",
+      status: "open",
+    };
+    const events = [
+      {
         seq: 0,
         ts: "2026-10-18T00:00:00.000Z",
         type: "usage",
         payload: null,
-      })}\n${JSON.stringify({
+      },
+      {
         seq: 1,
         ts: "2026-10-18T00:00:00.000Z",
         type: "usage",
-      })}\n`,
-      "utf8",
-    );
+      },
+    ] as unknown as SessionEvent[];
 
-    const read = readSessionDir(dir);
-    expect(read.events).toHaveLength(2);
+    const handle = openSessionHandle(makeTempDir(), header, events);
 
-    const resumed = await resumeSession(dir);
-    expect(resumed.events()).toHaveLength(2);
-    expect(() => resumed.usageTotals()).not.toThrow();
-    expect(resumed.usageTotals()).toEqual({
+    expect(handle.events()).toHaveLength(2);
+    expect(() => handle.usageTotals()).not.toThrow();
+    expect(handle.usageTotals()).toEqual({
       promptTokens: 0,
       completionTokens: 0,
       cachedTokens: 0,
@@ -613,54 +708,7 @@ describe("会话持久化", () => {
 
   it("resume 补齐崩溃尾部的缺失 tool_result 并追加 interrupted", async () => {
     const dir = makeTempDir();
-    const events: SessionEvent[] = [
-      { seq: 0, ts: "2026-10-18T00:00:00.000Z", type: "user", payload: { content: "u" } },
-      {
-        seq: 1,
-        ts: "2026-10-18T00:00:01.000Z",
-        type: "checkpoint",
-        payload: { turn: 1 },
-      },
-      {
-        seq: 2,
-        ts: "2026-10-18T00:00:02.000Z",
-        type: "assistant",
-        payload: {
-          content: "a",
-          toolCalls: [
-            { id: "c1", name: "echo", arguments: {} },
-            { id: "c2", name: "echo", arguments: {} },
-          ],
-        },
-      },
-      {
-        seq: 3,
-        ts: "2026-10-18T00:00:03.000Z",
-        type: "usage",
-        payload: { promptTokens: 1, completionTokens: 1 },
-      },
-      {
-        seq: 4,
-        ts: "2026-10-18T00:00:04.000Z",
-        type: "tool_result",
-        payload: { id: "c1", ok: true, text: "ok" },
-        parent: 2,
-      },
-    ];
-    writeFileSync(
-      path.join(dir, "header.json"),
-      `${JSON.stringify({
-        id: "crash",
-        createdAt: "2026-10-18T00:00:00.000Z",
-        status: "closed",
-      })}\n`,
-      "utf8",
-    );
-    writeFileSync(
-      path.join(dir, "session.v1.jsonl"),
-      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
-      "utf8",
-    );
+    const events = writeCrashSession(dir);
 
     const resumed = await resumeSession(dir);
     const recovered = resumed.events();
@@ -687,6 +735,106 @@ describe("会话持久化", () => {
     expect(() => buildMessages(recovered)).not.toThrow();
     expect(readSessionDir(dir).events).toEqual(recovered);
     expect(resumed.header.status).toBe("open");
+  });
+
+  it("resume 补偿写 interrupted 失败时 header 回原状态且后续 resume 幂等补齐", async () => {
+    const dir = makeTempDir();
+    const events = writeCrashSession(dir);
+    fsFaults.appendFile = (_file, data) =>
+      data.includes('"type":"interrupted"') && data.includes("crash_recovery");
+    try {
+      await expect(resumeSession(dir)).rejects.toThrow("append boom");
+    } finally {
+      fsFaults.appendFile = null;
+    }
+
+    const afterFailure = readSessionDir(dir);
+    expect(afterFailure.header.status).toBe("closed");
+    expect(afterFailure.events).toHaveLength(events.length + 1);
+    expect(afterFailure.events.filter((event) => event.type === "interrupted")).toHaveLength(0);
+    expect(() => buildMessages(afterFailure.events)).not.toThrow();
+    expect(
+      (JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as { status: string }).status,
+    ).toBe("closed");
+
+    const resumed = await resumeSession(dir);
+    const recovered = resumed.events();
+    expect(
+      recovered.filter(
+        (event) =>
+          event.type === "interrupted" &&
+          (event.payload as { reason?: unknown }).reason === "crash_recovery",
+      ),
+    ).toHaveLength(1);
+    expect(recovered).toHaveLength(events.length + 2);
+    expect(resumed.header.status).toBe("open");
+    expect(() => buildMessages(recovered)).not.toThrow();
+    expect(
+      (JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as { status: string }).status,
+    ).toBe("open");
+
+    const again = await resumeSession(dir);
+    expect(again.events()).toHaveLength(events.length + 2);
+    expect(
+      again
+        .events()
+        .filter(
+          (event) =>
+            event.type === "interrupted" &&
+            (event.payload as { reason?: unknown }).reason === "crash_recovery",
+        ),
+    ).toHaveLength(1);
+  });
+
+  it("最后批次可补但前缀仍坏时 fail-closed 且不写恢复事件", async () => {
+    const dir = makeTempDir();
+    const events: SessionEvent[] = [
+      { seq: 0, ts: "2026-10-18T00:00:00.000Z", type: "user", payload: { content: "u" } },
+      {
+        seq: 1,
+        ts: "2026-10-18T00:00:01.000Z",
+        type: "assistant",
+        payload: {
+          content: "a1",
+          toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+        },
+      },
+      { seq: 2, ts: "2026-10-18T00:00:02.000Z", type: "user", payload: { content: "u2" } },
+      {
+        seq: 3,
+        ts: "2026-10-18T00:00:03.000Z",
+        type: "checkpoint",
+        payload: { turn: 1 },
+      },
+      {
+        seq: 4,
+        ts: "2026-10-18T00:00:04.000Z",
+        type: "assistant",
+        payload: {
+          content: "a2",
+          toolCalls: [{ id: "c2", name: "echo", arguments: {} }],
+        },
+      },
+    ];
+    writeFileSync(
+      path.join(dir, "header.json"),
+      `${JSON.stringify({
+        id: "broken-prefix",
+        createdAt: "2026-10-18T00:00:00.000Z",
+        status: "closed",
+      })}\n`,
+      "utf8",
+    );
+    const logPath = path.join(dir, "session.v1.jsonl");
+    const before = `${events.map((event) => JSON.stringify(event)).join("\n")}\n`;
+    writeFileSync(logPath, before, "utf8");
+
+    await expect(resumeSession(dir)).rejects.toBeInstanceOf(TypeError);
+
+    expect(readFileSync(logPath, "utf8")).toBe(before);
+    expect(
+      (JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as { status: string }).status,
+    ).toBe("closed");
   });
 
   it("resume 无未闭合批次时不追加修复事件", async () => {

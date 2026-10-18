@@ -83,13 +83,15 @@ interface SessionHeader {
 
 - `readSessionDir(dir): { header: SessionHeader; events: SessionEvent[] }`
   - 列 `session.v*.jsonl`, 按数字升序读取;
-  - 每行 JSON.parse; 空行跳过;
+  - 对 `header.json` 与每个 `session.vN.jsonl` 先 `lstat`: 符号链接、目录或其他非普通文件 → `SessionCorruptionError`(header 用 `invalid_header`, 事件文件用 `invalid_event_line`), 不跟随链接读取;
+  - 每行 JSON.parse; 空行跳过; `payload` 必须为对象, 否则 `invalid_event_line`;
   - 校验 seq 全局严格递增且从 0 开始(跨代连续);
   - 校验 event.type 属于 `EventType`; 否则 fail-closed;
   - header JSON 解析/字段校验失败 → `SessionCorruptionError("invalid_header")`;
   - 坏行 → `SessionCorruptionError("invalid_event_line")`, `detail` 含代文件与行号;
   - seq 不连续 → `SessionCorruptionError("invalid_seq")`。
-- 保留现有 `readSessionFile(path)` 供单文件测试; 新增 `readSessionDir`。
+- `SessionHandle.append` 写当前代文件前先 `lstat`: 符号链接或非普通文件 → `SessionCorruptionError("invalid_event_line")`, 不写外部文件。
+- 保留现有 `readSessionFile(path)` 供单文件测试, 同样拒绝符号链接/非普通文件; 新增 `readSessionDir`。
 
 ### 4.4 resumeSession
 
@@ -100,6 +102,7 @@ resumeSession(sessionDir: string, opts?: { generationThresholdBytes?: number }):
 - `sessionDir === ""` 或路径存在但不是目录 → `SessionResumeError("invalid_target")`; 目录/header 缺失 → `missing_session_dir`。
 - 读取 header + 全部事件;
 - **崩溃尾部恢复**: 读取后先尝试 `buildMessages(events)`。若唯一的可恢复情形是「最后一个 assistant 批次的 toolCalls 缺少 tool_result」, 则为新 handle 按 toolCalls 原顺序补齐缺失的 `tool_result`(`payload.code = "tool_result_lost"`, `payload.text = "result lost due to crash"`, `parent = assistant.seq`, `detail.crashRecovery = true`), 再追加 `interrupted { reason: "crash_recovery" }`; 其他投影错误仍 fail-closed, 不改 header/历史事件。
+- **恢复幂等与失败补偿**: 先读原 `header.status`; append 顺序为「缺失 tool_result(按 toolCalls 顺序) → interrupted → 原子写 header open」。任一步失败时把 header 原子恢复为原 status(原为 `closed` 时)并抛原错误, 已 append 的事件保留; 下一次 resume 若发现已有 `detail.crashRecovery=true` 的 `tool_result_lost` 但其后缺少 `interrupted{reason:"crash_recovery"}`, 只补 interrupted; 已有则不再重复追加。
 - 重建 `eventList` 与 `nextSeq = lastSeq + 1`;
 - 打开最后一个代文件用于追加(不截断); 若目录中无日志文件 → fail-closed;
 - `close()` 行为与 createSession 相同;
@@ -132,9 +135,9 @@ forkSession(
 - `atSeq` 必须使 `events[0..atSeq]` **可被 `buildMessages` 投影**(批次闭合), 不再按事件类型判断: 批中 `usage`、部分 `tool_result`、未闭合的 assistant 批次、越界/负数/非整数一律 → `SessionForkError("not_turn_boundary")`; 无工具轮的 `usage` 前缀与普通 user 前缀可通过。
 - 前缀 = `events[0..atSeq]`(含 atSeq), **保留原 seq 与 parent**, 不重编号; fork 成功后 `events()` 必须可再次投影。
 - 新目录缺省 `$HARNESS_HOME/sessions/<newId>`; `opts.id` 提供时校验 id 规则, 缺省随机生成; `opts.id` 不得等于源会话 id。
-- `targetDir` 不得位于源会话目录内(含等于源目录, 用 `path.relative` 判定), 否则 `SessionForkError("invalid_target")`。
-- header: 新 `id`、`createdAt`、`status:"open"`、`forkedFrom:{sessionId, seq:atSeq}`; 复制 `provider/model/workdir`(若存在)。
-- **artifact 自包含**: 前缀中 `tool_result.payload.artifactPath` 指向的文件若存在, 复制到新会话 `artifacts/` 并重写事件中的路径; 文件缺失时保留原路径, 并在该事件 `payload.detail.artifactMissing = true` 标记, 不阻塞 fork。
+- `targetDir` 不得位于源会话目录内(含等于源目录), 否则 `SessionForkError("invalid_target")`; 源存在时对 source/target 及 target 的已存在祖先做 `realpath` 后判定, 阻断经符号链接/junction 的等价路径。源目录本身为符号链接 → `invalid_target`。
+- header: 新 `id`、`createdAt`、`status:"open"`、`forkedFrom:{sessionId, seq:atSeq}`; 复制 `provider/model/workdir`(若存在); `forkedFrom.sessionId` 复用 `isValidSessionId` 校验。
+- **artifact 自包含**: 前缀中 `tool_result.payload.artifactPath` 指向的文件若存在, 复制到新会话 `artifacts/` 并重写事件中的路径; 文件缺失时保留原路径, 并在该事件 `payload.detail.artifactMissing = true` 标记, 不阻塞 fork。词法边界检查后对源根与 artifact 再做 `realpath` 比较, 符号链接越界按缺失处理(TOCTOU/短名缺口见 D-040/D-047)。
 - 事件写入 `session.v1.jsonl`(逐行 append 前缀); 之后 append 从 `atSeq+1` 开始。
 - 原会话不受影响; 两个 handle 可并发追加。
 - **目标目录占位**: 先对父目录 `mkdir`(recursive) 创建缺失层级; 再对 `targetDir` 使用**非递归 `mkdir`** 做原子占位。
@@ -171,7 +174,7 @@ forkSession(
 
 - header: create open → close closed(原子写); 重复 close 幂等; resume closed 目录后状态 open。
 - resume: 正常恢复续写; seq 连续; 坏 header/坏行/seq 跳号/未知类型 → `SessionCorruptionError` 对应 code; 空目录 → 错; runSession `resume:true` 缺 sessionDir → 错; model 不一致 → `SessionResumeError`; systemPrompt 不一致 → 错。
-- fork: `atSeq` 为 `tool_result`/`usage` 成功; `assistant`/`user`/越界 → `SessionForkError`; 前缀事件与 parent 保留; 新 header.forkedFrom; 原会话追加不受影响; targetDir 非空 → 错; 被引用 artifact 复制并重写路径, 缺失时 `artifactMissing`。
+- fork: `atSeq` 使前缀可被 `buildMessages` 投影时成功(含 tool_result/usage/user/无工具轮 assistant 前缀); 前缀不可投影(批中 usage、部分 result、未闭合批次)、越界/负数/非整数 → `SessionForkError`; 前缀事件与 parent 保留; 新 header.forkedFrom; 原会话追加不受影响; targetDir 非空 → 错; 被引用 artifact 复制并重写路径, 缺失/越界时 `artifactMissing`。
 - rollover: 阈值 1KB, 写入多事件产生 v1/v2; 读取合并顺序与 seq 正确; 旧文件内容不变。
 - checkpoint: query 两轮各有 checkpoint, 位置正确。
 - usageTotals: 多 usage 累加; 缺字段按 0; resume 后 query 的 cost 包含历史(用 maxCostUsd 触发验证)。

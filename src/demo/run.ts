@@ -9,6 +9,7 @@ import type { PricePerMillion } from "../loop/breakers.js";
 import { computeCostUsd } from "../loop/breakers.js";
 import type { LoopFinishReason } from "../loop/events.js";
 import { readSessionDir } from "../session/persistence.js";
+import { toTokenCount } from "../session/handle.js";
 
 const USAGE = `用法: node dist/demo/run.js [--help] <prompt>
 
@@ -84,10 +85,10 @@ export function sessionCost(sessionDir: string, price?: PricePerMillion): Sessio
     for (const event of readSessionDir(sessionDir).events) {
       if (event.type !== "usage") continue;
       const payload = event.payload;
-      const prompt = typeof payload.promptTokens === "number" ? payload.promptTokens : 0;
-      const completion =
-        typeof payload.completionTokens === "number" ? payload.completionTokens : 0;
-      const cached = typeof payload.cachedTokens === "number" ? payload.cachedTokens : undefined;
+      const prompt = toTokenCount(payload.promptTokens);
+      const completion = toTokenCount(payload.completionTokens);
+      const cached =
+        payload.cachedTokens === undefined ? undefined : toTokenCount(payload.cachedTokens);
       promptTokens += prompt;
       completionTokens += completion;
       if (cached !== undefined) cachedTokens += cached;

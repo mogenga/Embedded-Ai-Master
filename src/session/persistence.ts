@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { constants, readFileSync, readdirSync } from "node:fs";
-import { copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { constants, lstatSync, readFileSync, readdirSync } from "node:fs";
+import { copyFile, lstat, mkdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveHarnessHome } from "../config/harness-home.js";
 import { buildMessages } from "../context/build.js";
@@ -35,8 +35,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+type RegularFileKind = "header" | "event";
+
+function regularFileError(
+  kind: RegularFileKind,
+  file: string,
+  cause?: unknown,
+): SessionCorruptionError {
+  const isHeader = kind === "header";
+  return new SessionCorruptionError(
+    isHeader ? "invalid_header" : "invalid_event_line",
+    `${isHeader ? "Invalid session header" : "Invalid event file"}: ${file}`,
+    {
+      file: path.basename(file),
+      ...(cause === undefined ? {} : { cause }),
+    },
+  );
+}
+
+function assertRegularFile(file: string, kind: RegularFileKind): void {
+  let info;
+  try {
+    info = lstatSync(file);
+  } catch (error) {
+    throw regularFileError(kind, file, error);
+  }
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw regularFileError(kind, file);
+  }
+}
+
+export function assertRegularEventFile(file: string): void {
+  assertRegularFile(file, "event");
+}
+
 function readHeader(dir: string): SessionHeader {
   const file = path.join(dir, "header.json");
+  assertRegularFile(file, "header");
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(file, "utf8"));
@@ -66,11 +101,13 @@ function parseGeneration(name: string): number | null {
 }
 
 export function listSessionLogFiles(dir: string): string[] {
-  return readdirSync(dir)
+  const files = readdirSync(dir)
     .map((name) => ({ name, generation: parseGeneration(name) }))
     .filter((entry): entry is { name: string; generation: number } => entry.generation !== null)
     .sort((left, right) => left.generation - right.generation)
     .map((entry) => entry.name);
+  for (const name of files) assertRegularFile(path.join(dir, name), "event");
+  return files;
 }
 
 function readEvents(dir: string, files: string[]): SessionEvent[] {
@@ -96,6 +133,13 @@ function readEvents(dir: string, files: string[]): SessionEvent[] {
         throw new SessionCorruptionError(
           "invalid_event_line",
           `Invalid event line: ${name}:${lineNo}`,
+          { file: name, line: lineNo },
+        );
+      }
+      if (!isRecord(parsed.payload)) {
+        throw new SessionCorruptionError(
+          "invalid_event_line",
+          `Invalid event payload: ${name}:${lineNo}`,
           { file: name, line: lineNo },
         );
       }
@@ -179,6 +223,18 @@ function isPathInside(parentDir: string, childDir: string): boolean {
   return relative !== ".." && !relative.startsWith(`..${path.sep}`);
 }
 
+async function realpathAllowMissing(value: string): Promise<string> {
+  try {
+    return await realpath(value);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    const parent = path.dirname(value);
+    if (parent === value) return value;
+    return path.join(await realpathAllowMissing(parent), path.basename(value));
+  }
+}
+
 function markArtifactMissing(event: SessionEvent): void {
   if (!isRecord(event.payload)) return;
   const detail = event.payload.detail;
@@ -213,9 +269,23 @@ async function relocateArtifact(
   const artifactPath = event.payload.artifactPath;
   if (typeof artifactPath !== "string") return;
   const sourceRoot = path.resolve(sourceDir);
+  const realSourceRoot = await realpath(sourceRoot);
   const sourcePath = path.resolve(sourceRoot, artifactPath);
   const rootPrefix = sourceRoot.endsWith(path.sep) ? sourceRoot : `${sourceRoot}${path.sep}`;
   if (!normalizePathForCompare(sourcePath).startsWith(normalizePathForCompare(rootPrefix))) {
+    markArtifactMissing(event);
+    return;
+  }
+  let realSourcePath: string;
+  try {
+    realSourcePath = await realpath(sourcePath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    markArtifactMissing(event);
+    return;
+  }
+  if (!isPathInside(realSourceRoot, realSourcePath)) {
     markArtifactMissing(event);
     return;
   }
@@ -282,6 +352,19 @@ export async function forkSession(
     opts.generationThresholdBytes,
   );
   const resolvedSourceDir = path.resolve(sourceDir);
+  let sourceInfo;
+  try {
+    sourceInfo = await lstat(resolvedSourceDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (sourceInfo?.isSymbolicLink() === true) {
+    throw new SessionForkError(
+      "invalid_target",
+      `Fork source directory must not be a symbolic link: ${resolvedSourceDir}`,
+      { dir: resolvedSourceDir },
+    );
+  }
   const source = readSessionDir(resolvedSourceDir);
   assertForkBoundary(source.events, atSeq);
   const id = opts.id ?? randomUUID();
@@ -299,7 +382,9 @@ export async function forkSession(
       ? path.join(resolveHarnessHome(), "sessions", id)
       : rawTargetDir,
   );
-  if (isPathInside(resolvedSourceDir, targetDir)) {
+  const realSourceDir = await realpathAllowMissing(resolvedSourceDir);
+  const realTargetDir = await realpathAllowMissing(targetDir);
+  if (isPathInside(realSourceDir, realTargetDir)) {
     throw new SessionForkError(
       "invalid_target",
       `Fork target directory must not be inside the source directory: ${targetDir}`,

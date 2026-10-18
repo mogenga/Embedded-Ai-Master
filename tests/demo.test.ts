@@ -208,6 +208,33 @@ describe("sessionCost", () => {
     });
   });
 
+  it("token 累加对负数与非有限值归一为 0", async () => {
+    const sessionDir = await writeSession([
+      {
+        seq: 0,
+        ts: "2026-01-01T00:00:00.000Z",
+        type: "usage",
+        payload: { promptTokens: -5, completionTokens: Number.POSITIVE_INFINITY, cachedTokens: Number.NaN },
+      },
+      {
+        seq: 1,
+        ts: "2026-01-01T00:00:01.000Z",
+        type: "usage",
+        payload: { promptTokens: 10, completionTokens: 5, cachedTokens: -1 },
+      },
+    ]);
+
+    const result = sessionCost(sessionDir, { input: 1, output: 1, cachedInput: 1 });
+
+    expect(result).toMatchObject({
+      priced: true,
+      promptTokens: 10,
+      completionTokens: 5,
+      cachedTokens: 0,
+    });
+    expect(result?.cost).toBeCloseTo(0.000015, 12);
+  });
+
   it("读取失败返回 undefined", async () => {
     const dir = await tempDir();
     expect(sessionCost(path.join(dir, "missing"), { input: 1, output: 1 })).toBeUndefined();

@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -130,6 +131,54 @@ describe("readSessionDir", () => {
     expect(captureCorruption(() => readSessionDir(dir)).code).toBe("invalid_header");
   });
 
+  it("header 为符号链接 → invalid_header 且不跟随", () => {
+    const dir = makeTempDir();
+    const realHeader = path.join(makeTempDir(), "real-header.json");
+    writeFileSync(realHeader, `${JSON.stringify(defaultHeader())}\n`, "utf8");
+    symlinkSync(realHeader, path.join(dir, "header.json"), "file");
+    writeLines(dir, "session.v1.jsonl", [JSON.stringify(makeEvent(0))]);
+
+    const error = captureCorruption(() => readSessionDir(dir));
+
+    expect(error.code).toBe("invalid_header");
+    expect(error.detail).toMatchObject({ file: "header.json" });
+  });
+
+  it("header 为目录 → invalid_header", () => {
+    const dir = makeTempDir();
+    mkdirSync(path.join(dir, "header.json"));
+    writeLines(dir, "session.v1.jsonl", [JSON.stringify(makeEvent(0))]);
+
+    const error = captureCorruption(() => readSessionDir(dir));
+
+    expect(error.code).toBe("invalid_header");
+    expect(error.detail).toMatchObject({ file: "header.json" });
+  });
+
+  it("日志为符号链接 → invalid_event_line 且不跟随", () => {
+    const dir = makeTempDir();
+    const realLog = path.join(makeTempDir(), "real-log.jsonl");
+    writeFileSync(realLog, `${JSON.stringify(makeEvent(0))}\n`, "utf8");
+    writeHeader(dir, defaultHeader());
+    symlinkSync(realLog, path.join(dir, "session.v1.jsonl"), "file");
+
+    const error = captureCorruption(() => readSessionDir(dir));
+
+    expect(error.code).toBe("invalid_event_line");
+    expect(error.detail).toMatchObject({ file: "session.v1.jsonl" });
+  });
+
+  it("日志为目录 → invalid_event_line", () => {
+    const dir = makeTempDir();
+    writeHeader(dir, defaultHeader());
+    mkdirSync(path.join(dir, "session.v1.jsonl"));
+
+    const error = captureCorruption(() => readSessionDir(dir));
+
+    expect(error.code).toBe("invalid_event_line");
+    expect(error.detail).toMatchObject({ file: "session.v1.jsonl" });
+  });
+
   it.each([
     ["空 id", { id: "" }],
     ["非法字符 id", { id: "bad id" }],
@@ -142,6 +191,9 @@ describe("readSessionDir", () => {
     ["workdir 非字符串", { workdir: [] }],
     ["forkedFrom 非对象", { forkedFrom: "x" }],
     ["forkedFrom.sessionId 非字符串", { forkedFrom: { sessionId: 1, seq: 0 } }],
+    ["forkedFrom.sessionId 空串", { forkedFrom: { sessionId: "", seq: 0 } }],
+    ["forkedFrom.sessionId 非法字符", { forkedFrom: { sessionId: "bad id", seq: 0 } }],
+    ["forkedFrom.sessionId Windows 保留名", { forkedFrom: { sessionId: "CON", seq: 0 } }],
     ["forkedFrom.seq 为负", { forkedFrom: { sessionId: "s", seq: -1 } }],
     ["forkedFrom.seq 非整数", { forkedFrom: { sessionId: "s", seq: 1.5 } }],
   ])("header %s → invalid_header", (_name, patch) => {
@@ -183,6 +235,28 @@ describe("readSessionDir", () => {
     writeLines(dir, "session.v1.jsonl", ["null"]);
 
     expect(captureCorruption(() => readSessionDir(dir)).code).toBe("invalid_event_line");
+  });
+
+  it.each([
+    ["null", null],
+    ["数组", []],
+    ["字符串", "payload"],
+    ["缺失", undefined],
+  ])("payload 为 %s → invalid_event_line", (_name, payload) => {
+    const dir = makeTempDir();
+    writeHeader(dir, defaultHeader());
+    const event: Record<string, unknown> = {
+      seq: 0,
+      ts: "2026-10-18T00:00:00.000Z",
+      type: "user",
+    };
+    if (payload !== undefined) event.payload = payload;
+    writeLines(dir, "session.v1.jsonl", [JSON.stringify(event)]);
+
+    const error = captureCorruption(() => readSessionDir(dir));
+
+    expect(error.code).toBe("invalid_event_line");
+    expect(error.detail).toMatchObject({ file: "session.v1.jsonl", line: 1 });
   });
 
   it("seq 跳号 → invalid_seq", () => {
@@ -317,7 +391,7 @@ describe("forkSession", () => {
     expect(session.events()).toHaveLength(6);
   });
 
-  it("assistant/批中 usage/部分 tool_result/越界/负数 fork → not_turn_boundary 且不写文件", async () => {
+  it("批中 usage/部分 tool_result/越界/负数/未闭合批次 fork → not_turn_boundary 且不写文件", async () => {
     const { dir, session } = await makeSource();
     await appendBatch(session, ["t1", "t2"]);
     await session.append({
@@ -328,6 +402,20 @@ describe("forkSession", () => {
 
     for (const atSeq of [2, 3, 4, 6, -1, 1.5]) {
       const targetDir = path.join(makeTempDir(), `fork-${String(atSeq).replace(".", "_")}`);
+      await expect(forkSession(dir, atSeq, { targetDir, id: "f" })).rejects.toMatchObject({
+        code: "not_turn_boundary",
+      });
+      expect(existsSync(targetDir)).toBe(false);
+    }
+  });
+
+  it("atSeq 等于或超过事件数 → not_turn_boundary 且不写文件", async () => {
+    const { dir, session } = await makeSource();
+    await session.append({ type: "user", payload: { content: "u" } });
+    const eventCount = readSessionDir(dir).events.length;
+
+    for (const atSeq of [eventCount, eventCount + 1]) {
+      const targetDir = path.join(makeTempDir(), `fork-bound-${atSeq}`);
       await expect(forkSession(dir, atSeq, { targetDir, id: "f" })).rejects.toMatchObject({
         code: "not_turn_boundary",
       });
@@ -524,6 +612,34 @@ describe("forkSession", () => {
     expect(existsSync(targetDir)).toBe(false);
   });
 
+  it("targetDir 经符号链接落在源目录内 → invalid_target 且不写文件", async () => {
+    const { dir, session } = await makeSource();
+    await session.append({ type: "user", payload: { content: "u" } });
+    const inner = path.join(dir, "inner");
+    mkdirSync(inner);
+    const alias = path.join(makeTempDir(), "alias");
+    symlinkSync(inner, alias, process.platform === "win32" ? "junction" : "dir");
+    const targetDir = path.join(alias, "fork");
+
+    await expect(forkSession(dir, 0, { targetDir, id: "fork" })).rejects.toMatchObject({
+      code: "invalid_target",
+    });
+    expect(existsSync(targetDir)).toBe(false);
+  });
+
+  it("fork 源目录为符号链接 → invalid_target 且不写目标", async () => {
+    const { dir, session } = await makeSource();
+    await session.append({ type: "user", payload: { content: "u" } });
+    const link = path.join(makeTempDir(), "source-link");
+    symlinkSync(dir, link, process.platform === "win32" ? "junction" : "dir");
+    const targetDir = path.join(makeTempDir(), "fork");
+
+    await expect(forkSession(link, 0, { targetDir, id: "fork" })).rejects.toMatchObject({
+      code: "invalid_target",
+    });
+    expect(existsSync(targetDir)).toBe(false);
+  });
+
   it("targetDir 与 sourceDir 相同 → invalid_target", async () => {
     const { dir, session } = await makeSource();
     await session.append({ type: "user", payload: { content: "u" } });
@@ -625,6 +741,28 @@ describe("forkSession", () => {
     expect(forked.events()[4]?.payload.detail).toMatchObject({ artifactMissing: true });
     expect(forked.events()[5]?.payload.artifactPath).toBe(outsideAbsolute);
     expect(forked.events()[5]?.payload.detail).toMatchObject({ artifactMissing: true });
+    expect(existsSync(path.join(targetDir, "artifacts"))).toBe(false);
+  });
+
+  it("artifact 符号链接指向源目录外 → 不复制并按缺失标记", async () => {
+    const { dir, session } = await makeSource();
+    mkdirSync(path.join(dir, "artifacts"), { recursive: true });
+    const outside = path.join(makeTempDir(), "outside.txt");
+    writeFileSync(outside, "outside", "utf8");
+    const link = path.join(dir, "artifacts", "link.txt");
+    symlinkSync(outside, link, "file");
+    const assistantSeq = await appendBatch(session, ["t"]);
+    await session.append({
+      type: "tool_result",
+      payload: { id: "t", ok: true, text: "x", artifactPath: link },
+      parent: assistantSeq,
+    });
+    const targetDir = path.join(makeTempDir(), "fork");
+
+    const forked = await forkSession(dir, assistantSeq + 2, { targetDir, id: "fork-link" });
+
+    expect(forked.events()[4]?.payload.artifactPath).toBe(link);
+    expect(forked.events()[4]?.payload.detail).toMatchObject({ artifactMissing: true });
     expect(existsSync(path.join(targetDir, "artifacts"))).toBe(false);
   });
 

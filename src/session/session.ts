@@ -13,7 +13,11 @@ import {
   writeHeaderAtomic,
 } from "./handle.js";
 import type { SessionHandle } from "./handle.js";
-import { readSessionDir } from "./persistence.js";
+import {
+  assertRegularEventFile,
+  listSessionLogFiles,
+  readSessionDir,
+} from "./persistence.js";
 import type { SessionEvent, SessionHeader } from "./types.js";
 
 export { openSessionHandle } from "./handle.js";
@@ -28,6 +32,11 @@ interface MissingToolResult {
   parent: number;
 }
 
+interface CrashRecoveryPlan {
+  missing: MissingToolResult[];
+  needsInterrupted: boolean;
+}
+
 function crashRecoveryResultPayload(id: string): Record<string, unknown> {
   return {
     id,
@@ -38,13 +47,49 @@ function crashRecoveryResultPayload(id: string): Record<string, unknown> {
   };
 }
 
+function isCrashRecoveryResult(event: SessionEvent): boolean {
+  return (
+    event.type === "tool_result" &&
+    isRecord(event.payload) &&
+    event.payload.code === "tool_result_lost" &&
+    isRecord(event.payload.detail) &&
+    event.payload.detail.crashRecovery === true
+  );
+}
+
+function needsCrashRecoveryInterrupted(events: readonly SessionEvent[]): boolean {
+  let lastResult = -1;
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (isCrashRecoveryResult(events[index])) {
+      lastResult = index;
+      break;
+    }
+  }
+  if (lastResult < 0) return false;
+  for (let index = lastResult + 1; index < events.length; index += 1) {
+    const event = events[index];
+    if (
+      event.type === "interrupted" &&
+      isRecord(event.payload) &&
+      event.payload.reason === "crash_recovery"
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // 只恢复「最后一个 assistant 批次缺 tool_result」这一种崩溃尾部；
 // 其余投影错误保持 fail-closed，避免把日志损坏伪装成可恢复状态。
-function planCrashRecovery(events: readonly SessionEvent[]): MissingToolResult[] | undefined {
+function planCrashRecovery(
+  events: readonly SessionEvent[],
+): CrashRecoveryPlan | undefined {
   let projectionError: unknown;
   try {
     buildMessages(events);
-    return undefined;
+    return needsCrashRecoveryInterrupted(events)
+      ? { missing: [], needsInterrupted: true }
+      : undefined;
   } catch (error) {
     projectionError = error;
   }
@@ -109,13 +154,17 @@ function planCrashRecovery(events: readonly SessionEvent[]): MissingToolResult[]
     type: "interrupted",
     payload: { reason: "crash_recovery" },
   });
+
   try {
     buildMessages(repaired);
   } catch {
     throw projectionError;
   }
 
-  return missing.map((id) => ({ id, parent: assistant.seq }));
+  return {
+    missing: missing.map((id) => ({ id, parent: assistant.seq })),
+    needsInterrupted: true,
+  };
 }
 
 async function assertSessionExists(dir: string, headerPath: string): Promise<void> {
@@ -162,8 +211,24 @@ export async function createSession(
   const generationThresholdBytes = resolveGenerationThresholdBytes(
     opts.generationThresholdBytes,
   );
-  const id = opts.id ?? randomUUID();
+  if (sessionDir === "") {
+    throw new SessionResumeError("invalid_target", "sessionDir must not be empty", {
+      dir: sessionDir,
+    });
+  }
   const dir = path.resolve(sessionDir);
+  let dirInfo;
+  try {
+    dirInfo = await stat(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  if (dirInfo !== undefined && !dirInfo.isDirectory()) {
+    throw new SessionResumeError("invalid_target", `Session path is not a directory: ${dir}`, {
+      dir,
+    });
+  }
+  const id = opts.id ?? randomUUID();
   const header = validateHeader({
     id,
     createdAt: new Date().toISOString(),
@@ -221,29 +286,54 @@ export async function resumeSession(
   await assertSessionExists(dir, headerPath);
   const { header, events, logFiles } = readSessionDir(dir);
   const recovery = planCrashRecovery(events);
+  const originalStatus = header.status;
   const lastLog = logFiles[logFiles.length - 1];
-  const logPath = path.join(dir, lastLog);
-  const { size } = await stat(logPath);
-  const openHeader = await writeHeaderAtomic(headerPath, { ...header, status: "open" });
+  const lastLogPath = path.join(dir, lastLog);
+  const { size } = await stat(lastLogPath);
   for (const event of events) deepFreeze(event);
-  const handle = createHandle(dir, openHeader, events, logPath, {
+  const appendHandle = createHandle(dir, header, events, lastLogPath, {
     generationThresholdBytes,
     currentBytes: size,
   });
-  if (recovery !== undefined) {
-    for (const missing of recovery) {
-      await handle.append({
-        type: "tool_result",
-        payload: crashRecoveryResultPayload(missing.id),
-        parent: missing.parent,
-      });
+  try {
+    if (recovery !== undefined) {
+      for (const missing of recovery.missing) {
+        await appendHandle.append({
+          type: "tool_result",
+          payload: crashRecoveryResultPayload(missing.id),
+          parent: missing.parent,
+        });
+      }
+      if (recovery.needsInterrupted) {
+        await appendHandle.append({
+          type: "interrupted",
+          payload: { reason: "crash_recovery" },
+        });
+      }
     }
-    await handle.append({ type: "interrupted", payload: { reason: "crash_recovery" } });
+    const currentLog = listSessionLogFiles(dir).at(-1) ?? lastLog;
+    const currentLogPath = path.join(dir, currentLog);
+    const { size: currentBytes } = await stat(currentLogPath);
+    const openHeader = await writeHeaderAtomic(headerPath, { ...header, status: "open" });
+    return createHandle(
+      dir,
+      openHeader,
+      appendHandle.events().slice(),
+      currentLogPath,
+      { generationThresholdBytes, currentBytes },
+    );
+  } catch (error) {
+    if (originalStatus === "closed") {
+      await writeHeaderAtomic(headerPath, { ...header, status: originalStatus }).catch(
+        () => undefined,
+      );
+    }
+    throw error;
   }
-  return handle;
 }
 
 export function readSessionFile(filePath: string): SessionEvent[] {
+  assertRegularEventFile(filePath);
   const content = readFileSync(filePath, "utf8");
   return content
     .split(/\r?\n/)

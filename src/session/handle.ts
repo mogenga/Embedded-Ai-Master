@@ -1,5 +1,6 @@
-import { appendFile, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { SessionCorruptionError } from "./errors.js";
 import type { SessionEvent, SessionHeader } from "./types.js";
 
 const DEFAULT_GENERATION_THRESHOLD_BYTES = 50 * 1024 * 1024;
@@ -41,7 +42,7 @@ export function validateHeader(value: unknown): SessionHeader {
     const raw = value.forkedFrom;
     if (
       !isRecord(raw) ||
-      typeof raw.sessionId !== "string" ||
+      !isValidSessionId(raw.sessionId) ||
       typeof raw.seq !== "number" ||
       !Number.isInteger(raw.seq) ||
       raw.seq < 0
@@ -91,7 +92,24 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function toCount(value: unknown): number {
+async function assertRegularLogFile(logPath: string): Promise<void> {
+  let info;
+  try {
+    info = await lstat(logPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (info.isSymbolicLink() || !info.isFile()) {
+    throw new SessionCorruptionError(
+      "invalid_event_line",
+      `Session log is not a regular file: ${logPath}`,
+      { file: path.basename(logPath) },
+    );
+  }
+}
+
+export function toTokenCount(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
 }
 
@@ -167,6 +185,7 @@ export function createHandle(
         deepFreeze(event);
         const line = `${JSON.stringify(event)}\n`;
         const lineBytes = Buffer.byteLength(line);
+        await assertRegularLogFile(currentLogPath);
         const nextLogPath =
           currentBytes > 0 &&
           lineBytes <= generationThresholdBytes &&
@@ -194,9 +213,9 @@ export function createHandle(
       const totals: UsageTotals = { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
       for (const event of eventList) {
         if (event.type !== "usage" || !isRecord(event.payload)) continue;
-        totals.promptTokens += toCount(event.payload.promptTokens);
-        totals.completionTokens += toCount(event.payload.completionTokens);
-        totals.cachedTokens += toCount(event.payload.cachedTokens);
+        totals.promptTokens += toTokenCount(event.payload.promptTokens);
+        totals.completionTokens += toTokenCount(event.payload.completionTokens);
+        totals.cachedTokens += toTokenCount(event.payload.cachedTokens);
       }
       return totals;
     },

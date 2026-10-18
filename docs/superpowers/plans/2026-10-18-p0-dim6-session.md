@@ -23,7 +23,7 @@
 ## Review Focus
 
 1. resume 的旧 header 没有 `model` 字段 → 不比较, 允许 resume。→ Task 6
-2. fork 的 `atSeq` 为负数/越界/指向 `assistant` → `SessionForkError`, 不写任何文件。→ Task 5
+2. fork 的 `atSeq` 为负数/越界/使前缀不可被 `buildMessages` 投影 → `SessionForkError`, 不写任何文件。→ Task 5
 3. fork 的 `artifactPath` 指向不存在/源目录外/相对路径 → 不复制、标记 `artifactMissing`, 不越界写。→ Task 5
 4. rollover 阈值极小或单条事件超过阈值 → 仍写当前代, 不拆分一行、不无限建文件。→ Task 5
 5. resume 后日志尾部是坏行/半行 → fail-closed, 不吞掉。→ Task 3
@@ -207,13 +207,13 @@ git commit -m "feat(session): resume恢复与usage汇总"
 - Consumes: Task 2 `readSessionDir`, Task 3 内部 handle 构造
 - Produces:
   - `forkSession(sourceDir: string, atSeq: number, opts?: { targetDir?: string; id?: string }): Promise<SessionHandle>`
-  - 规则: `atSeq` 必须是 `tool_result`/`usage`; 前缀保留 seq/parent; `header.forkedFrom={sessionId,seq}`; target 非空抛 `target_not_empty`; artifact 复制并重写路径, 缺失标记 `detail.artifactMissing=true`
+  - 规则: `atSeq` 必须使 `events[0..atSeq]` 可被 `buildMessages` 投影(批次闭合); 前缀保留 seq/parent; `header.forkedFrom={sessionId,seq}`; target 非空抛 `target_not_empty`; artifact 复制并重写路径, 缺失标记 `detail.artifactMissing=true`
 
 - [ ] **Step 1: 写失败测试**
 
 ```ts
 it("在 tool_result 边界 fork 并保留前缀/ parent", async () => { /* 构造 user/assistant/tool_result, fork */ });
-it("在 assistant/user/越界/负数 fork → not_turn_boundary", async () => {});
+it("在前缀不可投影(批中 usage/部分 result/未闭合批次)/越界/负数 fork → not_turn_boundary", async () => {});
 it("fork header.forkedFrom 正确且原会话不受影响", async () => {
   // fork 后向新会话 append, 原会话 events 不变
 });
@@ -231,7 +231,7 @@ Expected: FAIL(forkSession 不存在)。
 
 - [ ] **Step 3: 实现**
 
-校验 atSeq 与事件类型; 克隆前缀事件(深拷贝), 对 `tool_result.payload.artifactPath` 用 `path.basename` 复制到新 `artifacts/`; 若源文件不存在则标记。写 header 与新 `session.v1.jsonl`, 用 Task 3 的 handle 构造, `nextSeq=atSeq+1`。
+校验 atSeq 边界并用 `buildMessages` 校验前缀可投影; 克隆前缀事件(深拷贝), 对 `tool_result.payload.artifactPath` 用 `path.basename` 复制到新 `artifacts/`; 若源文件不存在则标记。写 header 与新 `session.v1.jsonl`, 用 Task 3 的 handle 构造, `nextSeq=atSeq+1`。
 
 - [ ] **Step 4: 验证通过**
 
