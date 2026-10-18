@@ -73,3 +73,14 @@
 - **关键产出**：红队审查结论 PASS_WITH_CONCERNS。6 个变异探针全部被杀（costUsd 累加、status 分支、text-only 回退、pending、verify-ui finally return、GuardNotice 直接置已执行），7 次还原均逐字一致。发现 4 项 P2：artifact-only 结果被投成 empty_result、SSE 重复 error 并发重连（实测 3 实例）、超长 text 折叠摘要仍渲染全首行、loop costUsd 未做有限数校验；另 4 项 Minor。修复落为 plan Task 12：artifact 保留 readout、SSE 单 timer 去重与 close 静默/构造异常转 onError、折叠摘要截断 120 字符、`asCost` 统一校验、清理 styles.css 重复 `.dock` 与重复 media 查询；Usage 缺字段补 0 登记 D-062。提交 `f34f696`。
 - **被拒绝或纠偏**：未改 usage 缺字段补 0 的语义（仅登记）；未提交工作区既有的 README.md 无关改动。
 - **翻车与返工**：无生产逻辑返工；Task 12 首跑 RED 9 failed 后一次转绿。全量 522 passed / 1 skipped；V1-V14 全 PASS。
+
+## 2026-10-18 · 用户要求不要 mock 数据：真实数据链路与验收改造
+
+- **用户关键原话**："把验收脚本改为真实数据服务链路，并更新文档"；"验收使用真实临时会话文件（header.json + session.v1.jsonl），不得向前端注入数据"；"临时目录清理失败只 warning，不得影响 SUMMARY 与退出码（Task 11 已修的假绿路径不能回归）"；"前端从 `/api/*` 加载真实数据；删除全部演示数据；无会话/无 KB/设备 unknown 显示空态；未配置 `VITE_ACTION_URL` 时发送禁用"。
+- **关键产出**：
+  1. `scripts/verify-ui.mjs` 删除静态 serve，改为「临时 `HARNESS_HOME`（真实 `header.json` + `session.v1.jsonl`，含 user / assistant ask / tool_call / tool_result（readout+evidence）/ verdict / guard / usage / status）+ 真实 KB 目录 → 启动 `dist/server/serve.js` → 轮询 `/api/sessions` → CDP 验收 → 关闭服务 → 清理」；V14 断言真实 guard 四要素（写入 / 0x40004408 / 0x0009 / 待确认）；新增 V0 空态附加检查（空 `HARNESS_HOME` 下「暂无会话」「未配置知识库」，不计入 14 项）；清理失败仅 warning，不改变 SUMMARY 与退出码。
+  2. `README.md` Web 工作台改为真实数据启动流程（`build` + `build:web` + `serve:ui`）、`HARNESS_UI_PORT` / `HARNESS_HOME` / `HARNESS_UI_STATIC`、六个 API 端点与 501 诚实边界、空态说明；删除「示例会话 / 回放演示」表述。
+  3. `docs/deferred-issues.md`：D-053、D-060 标记已解决；D-058 标记数据来源已解决、设备连接状态仍待 D-052；D-051 补 501 现状；D-059 复核仍存在；新增 D-063（API 只读、actions/events 未实现）、D-064（KB 深度 8 / 条目 2000 静默截断）、D-065（会话列表坏目录 errors 未展示）。
+- **被拒绝或纠偏**：不接受「静态 serve `dist-web` + 前端演示数据」的验收方式；不向前端注入会话数据，只通过真实文件与 API 提供；不新增依赖、不跑 npm install/npx、不改 `.superpowers/`。
+- **翻车与返工**：V11 首次在真实数据下只遍历到 1 个控件。定位为设备三字段均为 `unknown`，TopBar 前两个 chip 的 `tag|cls|label` 完全相同（`button|chip|未接入`），脚本误判为「Tab 回到同一控件」而提前 break。修复为 FOCUS_PROBE 附带元素坐标并纳入去重 key，复跑遍历 29 个控件、0 个无焦点环。旧版静态验收脚本在同样数据缺失下同样只覆盖 1 个控件，证明这是既有盲区而非本次新引入。
+- **验证**：`vitest run`、`tsc --noEmit`、`tsc -p tsconfig.web.json --noEmit`、`vite build`、`tsc -p tsconfig.build.json` 全通过；`node scripts/verify-ui.mjs` V1-V14 全 PASS + V0 PASS，SUMMARY 14/14 PASS，exit 0，临时服务与目录已清理。

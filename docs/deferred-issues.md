@@ -433,6 +433,7 @@
 
 - **发现**: 2026-10-18,Task 10 视觉验收。
 - **现象**: `src/ui/main.tsx` 向 `VITE_ACTION_URL` POST `{ text }`,但未定义请求 id、会话 id、响应状态与错误映射;后端未接入时仅 `console.warn`,没有可观测的 UI 反馈。
+- **Task 15 更新**: 本地服务已提供 `/api/actions`(POST)与 `/api/events`(GET),但两者均诚实返回 501;请求/响应 schema、实时事件格式与错误映射仍未定义(详见 D-063)。
 - **影响**: 真实后端接入时端点路径与 schema 仍需重新约定;UI 无法区分「已受理 / 参数拒绝 / 网络失败」,也无法安全重试或去重。
 - **触发升级条件**: 接入首个真实 action 端点;需要失败重试、幂等或前端可观测的提交状态。
 - **修复建议**: 定义 action 请求/响应 schema(`requestId`、`sessionId`、`text`;202 受理、4xx 校验失败、5xx 可重试),前端落提交中/失败态,并按 `requestId` 去重。
@@ -448,10 +449,10 @@
 ### D-053 · 无后端时 Composer 清空输入
 
 - **发现**: 2026-10-18,Task 10 视觉验收。
-- **现象**: `Composer.send()` 在调用 `onSend` 后无条件 `setText("")` 并清空 textarea;`main.tsx` 在 `VITE_ACTION_URL` 未配置时只 `console.warn` 并返回。演示态用户输入被清空且未发送。
-- **影响**: 违背「不得静默丢弃输入」的交互要求(仅控制台可见),演示与离线评审时输入丢失。
-- **触发升级条件**: 无后端演示态需要保留输入;接入 action 端点后需要失败回填。
-- **修复建议**: 让 `onSend` 返回提交结果(boolean/Promise),Composer 仅在成功受理后清空;无端点时将发送按钮置禁用并给出可见说明,失败时回填原文。
+- **状态**: 已解决(2026-10-18,Task 14/15)。
+- **原现象**: `Composer.send()` 在调用 `onSend` 后无条件 `setText("")` 并清空 textarea;`main.tsx` 在 `VITE_ACTION_URL` 未配置时只 `console.warn` 并返回。演示态用户输入被清空且未发送。
+- **修复**: `main.tsx` 在未配置 `VITE_ACTION_URL` 时不传 `onSend`,`Composer` 据此禁用发送并展示「未配置提交端点,输入不会发送」;失败路径保留输入并提示「发送失败,输入已保留」。
+- **验证**: `tests/ui/components/composer-dock.test.tsx` 覆盖禁用态与失败回填;`npm run verify:ui` 的真实数据页面显示禁用发送与说明。
 
 ### D-054 · 717px 工作区下知识库整树需内部滚动
 
@@ -488,26 +489,27 @@
 ### D-058 · Dock/设备/日志为静态演示数据
 
 - **发现**: 2026-10-18,Task 11 第一轮整体审查修复。
-- **现象**: `App` 用 `DEMO_REGISTERS` / `DEMO_LOG_LINES` 渲染调试坞;`DeviceMonitor` 的芯片型号、探针连接、CPU 状态为字面量;复位确认后只进入「执行中,等待工具结果」,没有外部事件把它推进到「已执行」。
-- **影响**: 演示态可用,但无法反映真实设备与日志;复位流程在无后端时永久停留执行中(有意的诚实行为,不伪造成功)。
-- **触发升级条件**: 接入设备状态/日志事件;复位动作接 action 端点并回传结果。
-- **修复建议**: Dock 数据改为 props 或事件投影;`DeviceMonitor` 接收设备状态与复位结果事件,由事件驱动「已执行」。
+- **状态**: 数据来源已解决(2026-10-18,Task 14);设备连接状态仍待 D-052。
+- **原现象**: `App` 用 `DEMO_REGISTERS` / `DEMO_LOG_LINES` 渲染调试坞;`DeviceMonitor` 的芯片型号、探针连接、CPU 状态为字面量;复位确认后只进入「执行中,等待工具结果」,没有外部事件把它推进到「已执行」。
+- **修复**: 删除全部演示数据。`Dock` 的寄存器与日志改由 `TranscriptView` 的工具卡投影(`deriveRegisters` / `deriveLogLines`);设备字段来自 `/api/device`(当前恒为 `unknown`)。无读数时显示「暂无寄存器读数」。
+- **残余**: `/api/device` 尚无真实设备接入,状态恒为 `unknown`;复位确认后仍停在「执行中」,等待未来的 action/tool_result 通道(D-063)。
 
 ### D-059 · 回放/导出按钮未接行为
 
 - **发现**: 2026-10-18,Task 11 第一轮整体审查修复。
-- **现象**: `ConversationHeader` 的「回放」「导出 transcript」按钮没有 `onClick`,点击无任何反馈或副作用。
-- **影响**: 用户无法从界面触发回放或导出;按钮存在但不可用,可能被误认为已实现。
+- **Task 15 复核**: 仍存在。`ConversationHeader` 的「回放」「导出 transcript」按钮没有 `onClick`,点击无任何反馈或副作用;真实数据接线后回放入口尚无契约。
+- **现象**: 按钮存在但不可用,可能被误认为已实现。
+- **影响**: 用户无法从界面触发回放或导出。
 - **触发升级条件**: 交付回放/导出能力;验收脚本需要点击验证。
 - **修复建议**: 增加 `onReplay` / `onExport` 回调并由宿主实现(导出 transcript 可序列化 `TranscriptView`);未接线时禁用按钮并给出可见说明。
 
 ### D-060 · SSE 无后端时输入处理
 
 - **发现**: 2026-10-18,Task 11 第一轮整体审查修复。
-- **现象**: `main.tsx` 中 `VITE_ACTION_URL` 未配置时 `console.warn` 后返回;配置了 `VITE_EVENT_STREAM_URL` 但无 action 端点时,Composer 仍清空输入且界面无失败提示。D-053 记录的是输入被清空,这里记录的是 SSE 与 action 两条通道不同步时的处理缺口。
-- **影响**: 流式模式下用户误以为消息已提交;无可见失败态,无法重试。
-- **触发升级条件**: 接入真实 SSE 服务端;需要提交中/失败态与重发。
-- **修复建议**: 统一 `onSend` 返回受理结果,Composer 仅在受理后清空;无 action 端点时禁用发送并显示说明;失败时回填原文。
+- **状态**: 已解决(2026-10-18,Task 14/15)。
+- **原现象**: `main.tsx` 中 `VITE_ACTION_URL` 未配置时 `console.warn` 后返回;配置了 `VITE_EVENT_STREAM_URL` 但无 action 端点时,Composer 仍清空输入且界面无失败提示。D-053 记录的是输入被清空,这里记录的是 SSE 与 action 两条通道不同步时的处理缺口。
+- **修复**: 未配置 `VITE_ACTION_URL` 时 `onSend` 不传入,`Composer` 发送按钮禁用并显示「未配置提交端点,输入不会发送」;未配置 `VITE_EVENT_STREAM_URL` 时不建立实时流,不出现「实时事件流中断」提示。两条通道不再互相暗示已提交。
+- **残余**: action/事件流本身仍未实现,见 D-063。
 
 ### D-061 · StatusBar context/limit 来源未定
 
@@ -524,6 +526,30 @@
 - **影响**: 用量展示把「字段缺失」呈现为真实 0,状态栏与成本核算无法据此告警;排查上游 usage 漂移时缺少信号。
 - **触发升级条件**: 服务端 usage 字段可缺省,或需要在 UI 区分缺失与 0。
 - **修复建议**: 记录已出现的字段集合,缺失字段保持 `undefined` 并由 UI 显示 `—`;或在投影层引入 `complete` 标记,单独告警不完整 usage。
+
+### D-063 · Web API 只读,写操作与实时事件流未实现
+
+- **发现**: 2026-10-18,Task 15 真实数据验收。
+- **现象**: `dist/server/serve.js` 的 `/api/actions`(POST)与 `/api/events`(GET)固定返回 501 `action_not_implemented` / `event_stream_not_implemented`;没有 action 请求/响应 schema、会话绑定、SSE 事件格式与重连语义。前端 `VITE_ACTION_URL` / `VITE_EVENT_STREAM_URL` 默认未配置,发送按钮禁用。
+- **影响**: 工作台只能读取既有会话与知识库,不能发起新对话、接收实时 LoopEvent 或回传写操作结果;复位提示会停留在「执行中,等待工具结果」。
+- **触发升级条件**: 接入 `runSession`/`query` 或 MCP 事件;需要提交、重试、中断;真机调试写入。
+- **修复建议**: 定义 action schema(`requestId`、`sessionId`、`text`,202 受理/4xx/5xx)与 SSE 事件(`LoopEvent` JSON、`id`/`Last-Event-ID` 重放);501 迁移为真实实现并补端到端测试。
+
+### D-064 · 知识库扫描深度与条目上限静默截断
+
+- **发现**: 2026-10-18,Task 15 真实数据验收。
+- **现象**: `src/server/api.ts` 的 `scanKb` 最多展开 8 层目录(`KB_MAX_DEPTH = 8`),总条目上限 2000(`KB_MAX_ENTRIES = 2000`);达到上限后循环 `break`,超深目录返回空 `children`,响应中没有截断标记。
+- **影响**: 大型或深层知识库会被静默裁剪,界面看起来像完整索引;V6 只覆盖小规模 fixture,无法暴露该边界。
+- **触发升级条件**: 知识库超过 2000 条目或目录深度超过 8;需要完整索引或性能上限提示。
+- **修复建议**: 响应增加 `truncated` / `limits` 字段并在知识库面板提示「已截断」;上限可配置或改为按需懒加载子目录。
+
+### D-065 · 会话列表坏目录进 errors 但界面未展示
+
+- **发现**: 2026-10-18,Task 15 真实数据验收。
+- **现象**: `/api/sessions` 对读取失败的会话目录收集 `{ dir, code }` 到 `errors`;前端 `loadWorkbench` 只使用 `sessions`,`SessionPane` 不渲染 `errors`。
+- **影响**: 损坏、权限不足或格式非法的会话在界面上完全不可见,用户无法区分「没有会话」与「会话损坏」;排查只能直接看 API 响应或服务端日志。
+- **触发升级条件**: 出现 `session_corrupt` / 权限错误;需要在界面提示可修复项。
+- **修复建议**: 前端保留 `errors` 并在会话面板展示可折叠告警(区分损坏与读取失败);提供重试或定位目录的入口。
 
 ---
 
@@ -556,3 +582,4 @@
 | 2026-10-18 | P0 前端 Task 11 第一轮整体审查修复:录入 D-058 ~ D-061(Dock 静态数据、回放/导出未接线、SSE 无后端输入处理、StatusBar context/limit 来源);V13 改为检查一致性测试文件,验收脚本清理失败不再吞汇总 |
 | 2026-10-18 | P0 前端 Task 10 视觉验收:录入 D-051 ~ D-057(action 端点契约、StatusBar 状态推断、无后端清空输入、717px 树内部滚动、V3 滚动条口径、V11 静态 Tab 范围、Chromium 探测覆盖);设计 v1.2 同步 V2/V3/V6/V11 口径 |
 | 2026-10-18 | P0 前端 Task 12 第二轮红队审查修复:修正空 text + artifact 投影、SSE 单 timer 重连/close 后静默/构造抛错收敛、折叠摘要截断、costUsd 有限非负校验;清理 `styles.css` 重复 `.dock` 与 media 查询;录入 D-062(usage 缺字段补 0) |
+| 2026-10-18 | P0 前端 Task 15 真实数据验收:验收脚本改为启动 `dist/server/serve.js`(临时 `HARNESS_HOME` 写入真实会话与 KB),V14 断言真实 guard 文案并新增 V0 空态附加检查;修复 V11 以坐标区分同文案控件(设备 unknown 下三个「未接入」chip 曾导致遍历提前终止);README 改为真实数据流程与 API 表;D-053/D-060 标记已解决,D-058 标记数据来源已解决,D-051 补 501 现状;录入 D-063(API 只读、actions/events 未实现)、D-064(KB 深度/条目上限)、D-065(坏目录 errors 未展示) |

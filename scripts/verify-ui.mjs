@@ -1,31 +1,29 @@
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
-import { existsSync, readFileSync, rmSync } from "node:fs";
-import { extname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+
 
 const ROOT = resolve(process.cwd());
 const DIST = join(ROOT, "dist-web");
-const PAGE_PATH = "/web/index.html";
+const SERVE_ENTRY = join(ROOT, "dist", "server", "serve.js");
+const PAGE_PATH = "/";
 const VIEWPORT = { width: 1600, height: 1000 };
 const WORKBENCH_HEIGHT = 717;
-
-const MIME = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "text/javascript; charset=utf-8",
-  ".mjs": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json; charset=utf-8",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".ico": "image/x-icon",
-  ".woff2": "font/woff2",
-};
+const SESSION_ID = "sess-verify-01";
 
 const results = [];
+const extraResults = [];
 
 function check(id, name, ok, actual, expected) {
   results.push({ id, name, ok, actual, expected });
   console.log(`${ok ? "PASS" : "FAIL"} ${id} ${name} | 实测 ${actual} | 期望 ${expected}`);
+}
+
+function checkExtra(id, name, ok, actual, expected) {
+  extraResults.push({ id, name, ok, actual, expected });
+  console.log(`${ok ? "PASS" : "FAIL"} ${id}（附加，不计入 14 项）${name} | 实测 ${actual} | 期望 ${expected}`);
 }
 
 function delay(ms) {
@@ -55,29 +53,346 @@ function findChrome() {
   return candidates.find((candidate) => candidate && existsSync(candidate));
 }
 
-function startStaticServer(rootDir) {
-  const server = createServer((req, res) => {
-    const rawPath = decodeURIComponent((req.url ?? "/").split("?")[0]);
-    const rel = rawPath === "/" ? "index.html" : rawPath.replace(/^\/+/, "");
-    const filePath = resolve(rootDir, rel);
-    if (!filePath.startsWith(resolve(rootDir))) {
-      res.writeHead(403).end("forbidden");
-      return;
+function getFreePort() {
+  return new Promise((done, reject) => {
+    const probe = createServer();
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      const address = probe.address();
+      const port = typeof address === "object" && address !== null ? address.port : 0;
+      probe.close(() => done(port));
+    });
+  });
+}
+
+function writeJson(file, value) {
+  writeFileSync(file, `${JSON.stringify(value)}\n`, "utf8");
+}
+
+function writeSessionFixture(homeDir) {
+  const ts = new Date().toISOString();
+  const sessionDir = join(homeDir, "sessions", SESSION_ID);
+  mkdirSync(sessionDir, { recursive: true });
+  writeJson(join(sessionDir, "header.json"), {
+    id: SESSION_ID,
+    createdAt: ts,
+    status: "closed",
+    provider: "local-gw",
+    model: "local-gw/flash",
+    workdir: ROOT,
+  });
+  const events = [
+    {
+      seq: 0,
+      ts,
+      type: "user",
+      payload: {
+        content:
+          "板子上电后串口打印全是乱码，从第一行开始就这样。用的是 USB-TTL 接 PA9/PA10，终端设的 115200 8N1。同一根线接别的板子正常。",
+      },
+    },
+    {
+      seq: 1,
+      ts,
+      type: "assistant",
+      payload: {
+        content:
+          "第 0 步分流 · 一次只问一个问题\n先用一个问题劈开假设空间：把终端改成 9600、38400、230400 三档各看一眼，哪一档能读出完整字符？",
+        note:
+          "这一步能立刻区分「波特率算错」与「时钟源没切到 PLL」两条主假设，信息增益最高。若三档都不行，则转向电平 / 地线 / 引脚复用。",
+        toolCalls: [],
+      },
+    },
+    {
+      seq: 2,
+      ts,
+      type: "user",
+      payload: { content: "230400 时能勉强读出字符，速度大约是预期的一半。" },
+    },
+    {
+      seq: 3,
+      ts,
+      type: "assistant",
+      payload: {
+        content:
+          "230400 可读、115200 乱码 —— 说明 MCU 实际波特率与目标值不一致，时钟频率与 BRR 计算可能对不上。先检索知识库，再上探针取证。",
+        toolCalls: [
+          { id: "call_kb_1", name: "kb_lookup", arguments: { query: "STM32 UART 乱码 波特率 时钟" } },
+        ],
+      },
+    },
+    {
+      seq: 4,
+      ts,
+      parent: 3,
+      type: "tool_result",
+      payload: {
+        id: "call_kb_1",
+        ok: true,
+        text: "命中 2",
+        detail: {
+          ms: 38,
+          hits: [
+            {
+              path: "protocols/uart-stm32-baud.md",
+              desc: "症状 → 原因 → 鉴别测试表：时钟源 / BRR 计算 / 过采样方式",
+              score: "0.91 · 四段式 · 三级加载进入症状正文",
+              channel: 1,
+            },
+            {
+              path: "system/clock-tree-pll.md",
+              desc: "HSE 起振失败 → 回退 HSI，系统时钟与固件预期不符",
+              score: "0.77 · 按需读取，未整篇加载",
+              channel: 1,
+            },
+          ],
+        },
+      },
+    },
+    {
+      seq: 5,
+      ts,
+      type: "assistant",
+      payload: {
+        content: "",
+        toolCalls: [
+          {
+            id: "call_mem_1",
+            name: "mem_read",
+            arguments: { address: "0x40023808", size: 4, label: "RCC_CFGR" },
+          },
+        ],
+      },
+    },
+    {
+      seq: 6,
+      ts,
+      parent: 5,
+      type: "tool_result",
+      payload: {
+        id: "call_mem_1",
+        ok: true,
+        text: "0x00000000",
+        detail: {
+          ms: 12,
+          readout: [
+            { label: "地址", value: "0x4002_3808" },
+            { label: "读回", value: "0x0000_0000" },
+            {
+              label: "字段",
+              value: "RCC_CFGR.SW[1:0] = 0b00 → 系统时钟仍为 HSI，未切到 PLL",
+            },
+          ],
+          evidence: [
+            {
+              name: "时钟源判定",
+              code: "RCC_CFGR.SWS",
+              value: "0b00 HSI",
+              verdict: "bad",
+              label: "与预期不符",
+            },
+          ],
+        },
+      },
+    },
+    {
+      seq: 7,
+      ts,
+      type: "assistant",
+      payload: {
+        content: "",
+        toolCalls: [
+          {
+            id: "call_mem_2",
+            name: "mem_read",
+            arguments: { address: "0x40004408", size: 4, label: "USART2_BRR" },
+          },
+        ],
+      },
+    },
+    {
+      seq: 8,
+      ts,
+      parent: 7,
+      type: "tool_result",
+      payload: {
+        id: "call_mem_2",
+        ok: true,
+        text: "0x0000002E",
+        detail: {
+          ms: 11,
+          readout: [
+            { label: "地址", value: "0x4000_4408" },
+            { label: "读回", value: "0x0000_002E" },
+            {
+              label: "字段",
+              value:
+                "USART2_BRR = 46 —— 按 PCLK1 = 84 MHz、115200 计算所得（84e6 / (16 × 115200) ≈ 45.6）",
+            },
+          ],
+          evidence: [
+            {
+              name: "BRR 与真实时钟一致性",
+              code: "16e6 / (16 × 46) ≈ 21.7 kbps",
+              value: "实际 ≈ 21.7 kbps",
+              verdict: "bad",
+              label: "偏快 5.3×",
+            },
+            {
+              name: "工具诚实性检查",
+              code: "全 0 不得判为无故障",
+              value: "0x2E ≠ 0x00",
+              verdict: "ok",
+              label: "读数有效",
+            },
+          ],
+        },
+      },
+    },
+    {
+      seq: 9,
+      ts,
+      type: "assistant",
+      payload: {
+        content: "",
+        toolCalls: [],
+        verdict: {
+          rootCause:
+            "固件按 PCLK1 = 84 MHz 计算 USART2_BRR，但 HSE 晶振未起振，PLL 使能失败后系统回退到 HSI（16 MHz）。时钟与 BRR 不一致，波特率整体偏快约 5.3 倍，接收端按 115200 采样即得乱码。",
+          evidence: [
+            { name: "RCC_CFGR.SW", code: "0x40023808", value: "0x00", verdict: "warn", label: "HSI 直供" },
+            { name: "USART2_BRR", code: "0x40004408", value: "0x2E", verdict: "warn", label: "按 84 MHz 计算" },
+            { name: "实测波特率", code: "16e6 / (16 × 46)", value: "21.7 kbps", verdict: "bad", label: "≠ 115200" },
+          ],
+          prediction:
+            "在 HSI 直供前提下，将 USART2->BRR 改为按 16 MHz 计算的值 0x0009；预取预测：终端回到 115200 应立即可读，且实测波特率落在 111.1 kbps（偏差 3.5%，在容限内）。若仍乱码，则本判据被推翻，转向 HSE 起振条件排查。",
+          ownership: [
+            { t: "agent", title: "agent 自己做", desc: "读寄存器、反汇编 SystemInit、比对 BRR 计算式。" },
+            { t: "user", title: "需要你回答", desc: "改 BRR 后 115200 是否恢复可读。" },
+            { t: "manual", title: "建议你执行", desc: "用万用表确认 HSE 晶振是否起振（8 MHz）。" },
+          ],
+          confidence: "高",
+        },
+      },
+    },
+    {
+      seq: 10,
+      ts,
+      type: "assistant",
+      payload: {
+        content: "",
+        toolCalls: [],
+        guard: { action: "写入", address: "0x40004408", value: "0x0009", state: "待确认" },
+      },
+    },
+    {
+      seq: 11,
+      ts,
+      type: "usage",
+      payload: {
+        promptTokens: 8120,
+        completionTokens: 1460,
+        cachedTokens: 2048,
+        costUsd: 0.018,
+      },
+    },
+    { seq: 12, ts, type: "status", payload: { status: "done" } },
+  ];
+  writeFileSync(
+    join(sessionDir, "session.v1.jsonl"),
+    `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+    "utf8",
+  );
+}
+
+function writeKbFixture(homeDir) {
+  const kbDir = join(homeDir, "kb");
+  for (const dir of ["厂商分流", "protocols", "system"]) {
+    mkdirSync(join(kbDir, dir), { recursive: true });
+  }
+  for (const name of ["stm32.md", "gd32.md", "nrf52.md", "esp32.md"]) {
+    writeFileSync(join(kbDir, "厂商分流", name), `# ${name}\n`, "utf8");
+  }
+  writeFileSync(
+    join(kbDir, "protocols", "uart-stm32-baud.md"),
+    "# STM32 UART 波特率\n\nHSE 起振失败会回退 HSI，BRR 计算与实际时钟不一致。\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(kbDir, "system", "clock-tree-pll.md"),
+    "# 时钟树\n\nPLL 使能失败后的回退路径。\n",
+    "utf8",
+  );
+}
+
+function startService(homeDir, port) {
+  const child = spawn(process.execPath, [SERVE_ENTRY], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      HARNESS_HOME: homeDir,
+      HARNESS_UI_PORT: String(port),
+      HARNESS_UI_STATIC: DIST,
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  const output = [];
+  const capture = (chunk) => {
+    output.push(String(chunk));
+    if (output.length > 20) output.shift();
+  };
+  child.stdout.on("data", capture);
+  child.stderr.on("data", capture);
+  return {
+    child,
+    port,
+    output,
+    exited: new Promise((done) => child.once("exit", (code, signal) => done({ code, signal }))),
+  };
+}
+
+async function stopService(service) {
+  if (service === undefined) return;
+  if (service.child.exitCode === null && service.child.signalCode === null) {
+    service.child.kill();
+    await Promise.race([service.exited, delay(3000)]);
+  }
+  if (service.child.exitCode === null && service.child.signalCode === null) {
+    service.child.kill("SIGKILL");
+    await Promise.race([service.exited, delay(1000)]);
+  }
+}
+
+async function waitForSessions(service, predicate = () => true) {
+  let lastError;
+  for (let i = 0; i < 100; i += 1) {
+    if (service.child.exitCode !== null) {
+      throw new Error(`dist/server/serve.js 提前退出（code ${service.child.exitCode}）：${service.output.join("")}`);
     }
     try {
-      const body = readFileSync(filePath);
-      res.writeHead(200, {
-        "content-type": MIME[extname(filePath).toLowerCase()] ?? "application/octet-stream",
-        "cache-control": "no-store",
-      });
-      res.end(body);
-    } catch {
-      res.writeHead(404).end("not found");
+      const response = await fetch(`http://127.0.0.1:${service.port}/api/sessions`);
+      if (response.ok) {
+        const body = await response.json();
+        if (predicate(body)) return body;
+        lastError = new Error("会话列表未满足等待条件");
+      } else {
+        lastError = new Error(`HTTP ${response.status}`);
+      }
+    } catch (error) {
+      lastError = error;
     }
-  });
-  return new Promise((done) => {
-    server.listen(0, "127.0.0.1", () => done({ server, port: server.address().port }));
-  });
+    await delay(100);
+  }
+  throw lastError ?? new Error("等待 UI 服务就绪超时");
+}
+
+function removeDir(dir) {
+  try {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+  } catch (error) {
+    console.warn(`WARN 临时目录清理失败：${dir}（${error instanceof Error ? error.message : String(error)}）`);
+  }
 }
 
 class CDP {
@@ -254,11 +569,14 @@ const FOCUS_PROBE = `(() => {
   const element = document.activeElement;
   if (!element || element === document.body) return { done: true };
   const style = getComputedStyle(element);
+  const rect = element.getBoundingClientRect();
   return {
     done: false,
     tag: element.tagName.toLowerCase(),
     cls: typeof element.className === "string" ? element.className : (element.className && element.className.baseVal) || "",
     label: (element.getAttribute("aria-label") || element.textContent || "").trim().slice(0, 24),
+    x: +rect.x.toFixed(2),
+    y: +rect.y.toFixed(2),
     outlineStyle: style.outlineStyle,
     outlineWidth: style.outlineWidth,
     outlineColor: style.outlineColor,
@@ -312,6 +630,9 @@ async function main() {
   if (!existsSync(join(DIST, "web", "index.html"))) {
     fail("dist-web/web/index.html 不存在，请先运行 npm run build:web", 1);
   }
+  if (!existsSync(SERVE_ENTRY)) {
+    fail("dist/server/serve.js 不存在，请先运行 npm run build", 1);
+  }
   if (process.env.CHROME_PATH && !existsSync(process.env.CHROME_PATH)) {
     fail(`CHROME_PATH 指向的文件不存在：${process.env.CHROME_PATH}`, 2);
   }
@@ -321,33 +642,45 @@ async function main() {
   }
   console.log(`INFO 浏览器 ${chrome}`);
 
-  const { server, port } = await startStaticServer(DIST);
-  const debugPort = 9300 + Math.floor(Math.random() * 500);
-  const profile = join(process.env.TEMP || process.env.TMP || ROOT, `eam-verify-${process.pid}-${Date.now()}`);
-  const child = spawn(
-    chrome,
-    [
-      "--headless=new",
-      "--disable-gpu",
-      "--no-sandbox",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--disable-extensions",
-      `--remote-debugging-port=${debugPort}`,
-      `--user-data-dir=${profile}`,
-      "about:blank",
-    ],
-    { stdio: "ignore", windowsHide: true },
-  );
+  const home = mkdtempSync(join(tmpdir(), "eam-verify-home-"));
+  const emptyHome = mkdtempSync(join(tmpdir(), "eam-verify-empty-"));
+  const profile = join(tmpdir(), `eam-verify-${process.pid}-${Date.now()}`);
+  writeSessionFixture(home);
+  writeKbFixture(home);
 
+  const port = await getFreePort();
+  const service = startService(home, port);
+  const emptyPort = await getFreePort();
+  let emptyService;
   let cdp;
-  let sessionId;
+  let child;
+
   try {
+    const sessions = await waitForSessions(service, (body) => Array.isArray(body.sessions) && body.sessions.length > 0);
+    console.log(`INFO 真实会话 ${sessions.sessions.map((item) => item.id).join(",")}`);
+
+    const debugPort = 9300 + Math.floor(Math.random() * 500);
+    child = spawn(
+      chrome,
+      [
+        "--headless=new",
+        "--disable-gpu",
+        "--no-sandbox",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-extensions",
+        `--remote-debugging-port=${debugPort}`,
+        `--user-data-dir=${profile}`,
+        "about:blank",
+      ],
+      { stdio: "ignore", windowsHide: true },
+    );
+
     const version = await fetchJson(`http://127.0.0.1:${debugPort}/json/version`);
     cdp = await CDP.connect(version.webSocketDebuggerUrl);
     const target = await cdp.send("Target.createTarget", { url: "about:blank" });
     const attached = await cdp.send("Target.attachToTarget", { targetId: target.targetId, flatten: true });
-    sessionId = attached.sessionId;
+    const sessionId = attached.sessionId;
 
     const evaluate = async (expression) => {
       const response = await cdp.send(
@@ -361,6 +694,18 @@ async function main() {
       return response.result.value;
     };
 
+    const navigate = async (url) => {
+      const loaded = cdp.waitEvent("Page.loadEventFired", sessionId);
+      await cdp.send("Page.navigate", { url }, sessionId);
+      await loaded;
+      for (let i = 0; i < 50; i += 1) {
+        const ready = await evaluate("Boolean(document.querySelector('.app'))");
+        if (ready) break;
+        await delay(100);
+      }
+      await delay(300);
+    };
+
     await cdp.send("Page.enable", {}, sessionId);
     await cdp.send("Runtime.enable", {}, sessionId);
     await cdp.send("Emulation.setDeviceMetricsOverride", {
@@ -370,15 +715,7 @@ async function main() {
       mobile: false,
     }, sessionId);
 
-    const loaded = cdp.waitEvent("Page.loadEventFired", sessionId);
-    await cdp.send("Page.navigate", { url: `http://127.0.0.1:${port}${PAGE_PATH}` }, sessionId);
-    await loaded;
-    for (let i = 0; i < 50; i += 1) {
-      const ready = await evaluate("Boolean(document.querySelector('.app'))");
-      if (ready) break;
-      await delay(100);
-    }
-    await delay(300);
+    await navigate(`http://127.0.0.1:${port}${PAGE_PATH}`);
 
     const layout = await evaluate(LAYOUT_PROBE);
 
@@ -411,8 +748,20 @@ async function main() {
     check("V10", "无 emoji", layout.emoji.length === 0, layout.emoji.length === 0 ? "0 个" : `${layout.emoji.length} 个：${layout.emoji.join("")}`, "0 个");
 
     const pendingGuard = layout.guards.find((guard) => guard.state === "待确认");
-    const v14Ok = pendingGuard !== undefined && !pendingGuard.text.includes("已执行") && layout.confirmDone.length === 0;
-    check("V14", "写操作确认", v14Ok, `待确认守卫=${pendingGuard ? "存在" : "缺失"} 已执行文案=${pendingGuard && pendingGuard.text.includes("已执行")} 复位完成文案=${layout.confirmDone.length}`, "待确认且无已执行文案");
+    const guardText = pendingGuard === undefined ? "" : pendingGuard.text;
+    const guardFields = ["写入", "0x40004408", "0x0009", "待确认"].filter((field) => guardText.includes(field));
+    const v14Ok =
+      pendingGuard !== undefined &&
+      guardFields.length === 4 &&
+      !guardText.includes("已执行") &&
+      layout.confirmDone.length === 0;
+    check(
+      "V14",
+      "写操作确认",
+      v14Ok,
+      `待确认守卫=${pendingGuard ? "存在" : "缺失"} 文案字段=${guardFields.join("|") || "无"} 已执行文案=${guardText.includes("已执行")} 复位完成文案=${layout.confirmDone.length}`,
+      "真实 guard 文案含 写入/0x40004408/0x0009/待确认，且无已执行文案",
+    );
 
     await evaluate("document.activeElement && document.activeElement.blur(); document.body.setAttribute('tabindex','-1'); document.body.focus(); true");
     const focused = [];
@@ -422,7 +771,7 @@ async function main() {
       await delay(20);
       const focus = await evaluate(FOCUS_PROBE);
       if (focus.done) break;
-      const key = `${focus.tag}|${focus.cls}|${focus.label}`;
+      const key = `${focus.tag}|${focus.cls}|${focus.label}|${focus.x}|${focus.y}`;
       if (focused.some((item) => item.key === key)) break;
       focused.push({ ...focus, key });
     }
@@ -441,7 +790,7 @@ async function main() {
     await cdp.send("Emulation.setEmulatedMedia", { features: [] }, sessionId);
 
     const shell = await evaluate("(() => ({ hasShell: Boolean(document.querySelector('.app')), bodyText: document.body.innerText.length }))()");
-    if (!shell.hasShell) fail("页面未渲染", 1);
+    if (!shell.hasShell) throw new Error("页面未渲染");
 
     const themeExpect = {
       light: { canvas: "rgb(234, 238, 241)", accent: "rgb(15, 157, 141)", thumb: "rgb(198, 208, 217)" },
@@ -517,25 +866,53 @@ async function main() {
         : `缺失或未含断言：${consistencyPath}`,
       "存在且含 transcriptFromSession/transcriptFromLoop 断言，由 vitest 覆盖",
     );
+
+    emptyService = startService(emptyHome, emptyPort);
+    await waitForSessions(emptyService, (body) => Array.isArray(body.sessions) && body.sessions.length === 0);
+    await navigate(`http://127.0.0.1:${emptyPort}${PAGE_PATH}`);
+    let emptyState = { sessions: "", kb: "" };
+    for (let i = 0; i < 50; i += 1) {
+      emptyState = await evaluate(`(() => ({
+        sessions: (document.querySelector('.rail-bottom .pane-empty')?.textContent ?? '').trim(),
+        kb: (document.querySelector('.rail-top .pane-empty')?.textContent ?? '').trim(),
+      }))()`);
+      if (emptyState.sessions === "暂无会话" && emptyState.kb === "未配置知识库") break;
+      await delay(100);
+    }
+    checkExtra(
+      "V0",
+      "空态文案",
+      emptyState.sessions === "暂无会话" && emptyState.kb === "未配置知识库",
+      `会话="${emptyState.sessions}" 知识库="${emptyState.kb}"`,
+      "暂无会话 / 未配置知识库",
+    );
   } finally {
     if (cdp) cdp.close();
-    await new Promise((done) => server.close(done));
-    child.kill();
-    await delay(300);
-    try {
-      rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
-    } catch (error) {
-      console.warn(`WARN 临时目录清理失败：${profile}（${error instanceof Error ? error.message : String(error)}）`);
+    await stopService(service);
+    await stopService(emptyService);
+    if (child) {
+      child.kill();
+      await delay(300);
     }
+    removeDir(profile);
+    removeDir(home);
+    removeDir(emptyHome);
   }
 
   const failed = results.filter((item) => !item.ok);
+  const extraFailed = extraResults.filter((item) => !item.ok);
   console.log("");
   console.log(`SUMMARY ${results.length - failed.length}/${results.length} PASS`);
+  if (extraResults.length > 0) {
+    console.log(`EXTRA ${extraResults.length - extraFailed.length}/${extraResults.length} PASS（不计入 14 项）`);
+  }
   if (failed.length > 0) {
     console.log(`FAILED ${failed.map((item) => item.id).join(", ")}`);
   }
-  process.exit(failed.length > 0 ? 1 : 0);
+  if (extraFailed.length > 0) {
+    console.log(`EXTRA_FAILED ${extraFailed.map((item) => item.id).join(", ")}`);
+  }
+  process.exit(failed.length > 0 || extraFailed.length > 0 ? 1 : 0);
 }
 
 main().catch((error) => {

@@ -1,6 +1,6 @@
 # Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 内核，附带一个可运行的 Web 诊断工作台。当前交付 P0 内核（主循环与模型接入、会话事实源、工具管线、headless demo）与前端工作台（三栏布局、三态主题、消息流、调试坞、会话回放）。
+面向嵌入式调试场景的 agent 内核，附带一个可运行的 Web 诊断工作台。当前交付 P0 内核（主循环与模型接入、会话事实源、工具管线、headless demo）与前端工作台（三栏布局、三态主题、消息流、调试坞、真实会话/知识库/设备状态读取）。
 
 ## 技术栈
 
@@ -102,16 +102,32 @@ demo 不读取 `HARNESS_COMPAT_API_KEY`（该变量仅 live 测试使用）；de
 
 ## Web 工作台
 
+工作台没有演示数据：页面启动后从本地服务的 `/api/*` 读取真实会话、知识库与设备状态。
+
 ```bash
-npm run dev:web     # http://localhost:5173/（入口 web/index.html）
-npm run build:web   # 产物 dist-web/web/index.html
+npm run build       # 内核产物 dist/server/serve.js
+npm run build:web   # 前端产物 dist-web/
+npm run serve:ui    # 真实数据服务，默认 http://127.0.0.1:5174/
 ```
 
-- **架构**：Preact 只承担组件化与增量 diff；全部业务状态经 `src/ui/view/transcript.ts` 的纯函数投影 `TranscriptView`，实时渲染与回放共用同一归约。前端类型直接复用内核 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations`，不维护第二套事件模型。
-- **回放模式**：未配置事件流时，页面渲染 `src/ui/demo/fixtures.ts` 的演示会话，可离线评审完整诊断流程（症状 → 分流 → KB → 取证 → 判决 → 写操作确认）。
-- **实时通道**：配置 `VITE_EVENT_STREAM_URL` 后通过 `EventSource` 消费 `LoopEvent`；配置 `VITE_ACTION_URL` 后 Composer 以 `POST {"text":...}` 提交。二者均为可注入抽象（`src/ui/view/sse.ts`），服务端接入前不伪造提交成功。
+- **环境变量**：`HARNESS_UI_PORT` 改监听端口（默认 `5174`）；`HARNESS_HOME` 指定会话与知识库根目录（默认 `~/.harness`）；`HARNESS_UI_STATIC` 指定前端静态产物目录（默认 `dist-web`）。服务只监听 `127.0.0.1`。
+- **架构**：Preact 只承担组件化与增量 diff；全部业务状态经 `src/ui/view/transcript.ts` 的纯函数投影 `TranscriptView`。前端类型直接复用内核 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations`，不维护第二套事件模型。
+- **数据加载**：首屏并行请求 `/api/sessions`、`/api/kb`、`/api/device`，再按会话列表首项请求 `/api/sessions/<id>` 的真实事件日志；切换会话重新拉取。调试坞的寄存器与日志由工具卡投影，不再使用静态演示数据。
+- **API**：
+
+  | 方法 | 路径 | 行为 |
+  |---|---|---|
+  | GET | `/api/sessions` | `{ sessions: [{ id, createdAt, status, model?, workdir? }], errors: [{ dir, code }] }`；坏会话目录进 `errors` 而不是中断列表 |
+  | GET | `/api/sessions/:id` | `{ header, events }`；非法 id 400，不存在 404，损坏会话 500 `session_corrupt` |
+  | GET | `/api/kb` | `{ root, tree }`；未配置 `kb/` 时返回 `{ root: null, tree: [] }` |
+  | GET | `/api/device` | 当前恒为 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` |
+  | POST | `/api/actions` | 501 `action_not_implemented`（写操作尚未实现） |
+  | GET | `/api/events` | 501 `event_stream_not_implemented`（事件流尚未实现） |
+
+- **诚实边界**：写操作与实时事件流未实现，前端不伪造提交成功。未配置 `VITE_ACTION_URL` 时发送按钮禁用并提示「未配置提交端点，输入不会发送」；未配置 `VITE_EVENT_STREAM_URL` 时不建立实时流。
+- **空态**：无会话显示「暂无会话」，未配置 `$HARNESS_HOME/kb/` 显示「未配置知识库」，设备字段为 `unknown` 时显示「未接入」。
 - **主题**：`light` / `system` / `dark` 三态，`localStorage` 键 `eam-theme`，默认 `system`；切换不重载页面。所有颜色经 CSS 变量，图标为内联 SVG sprite。
-- **验收**：`npm run verify:ui` 通过无头 Chromium 实测 V1-V14（三栏几何、无溢出/截断、滚动条配色与占位、三主题解析、无 emoji、焦点可见、减少动效、回放一致性、写操作确认）。浏览器探测优先 `CHROME_PATH`，其次 Chrome/Edge 常见安装路径；找不到时以 exit 2 明确失败。
+- **验收**：`npm run verify:ui` 先要求 `dist-web/` 与 `dist/server/serve.js` 已构建，然后创建临时 `HARNESS_HOME`（写入一条真实会话日志与示例知识库目录），启动 `dist/server/serve.js`，用无头 Chromium 经 CDP 实测 V1-V14（三栏几何、无溢出/截断、滚动条配色与占位、三主题解析、无 emoji、焦点可见、减少动效、回放一致性、真实写操作确认文案）；另以空 `HARNESS_HOME` 起第二个服务检查空态文案（V0，附加项不计入 14 项）。结束后关闭服务并清理临时目录，清理失败仅 warning。浏览器探测优先 `CHROME_PATH`，其次 Chrome/Edge 常见安装路径；找不到时以 exit 2 明确失败。
 - **安全边界**：写内存/复位需显式确认，确认后仅进入「执行中，等待工具结果」，不会在前端伪造「已执行」（R2）；工具失败显式展示错误码与文本（R3）。
 
 ## 会话管理
@@ -207,11 +223,11 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 
 前端工作台：
 
-- SSE 事件流与 action 端点契约未定，后端接入前不伪造提交成功（D-051、D-060）。
-- Dock/设备/日志为静态演示数据，尚未由会话事件驱动（D-058）。
+- 服务端 API 只读，写操作与 SSE 事件流尚未实现（501）；action/事件流契约待定（D-051、D-063）。
+- Dock 的寄存器与日志已由工具卡投影，设备状态仍恒为 `unknown`，缺少显式连接状态枚举（D-052、D-058）。
 - 回放/导出按钮已渲染但未接行为（D-059）。
-- StatusBar 的探针/串口状态由 props 推断，缺少显式状态枚举（D-052）。
-- 无后端时输入不会回填，接入端点后需补提交中/失败态（D-053）。
+- 会话列表的坏目录只进 `errors`，界面暂不展示（D-065）。
+- 知识库扫描深度上限 8、条目上限 2000，超出会静默截断（D-064）。
 - 717px 工作区下知识库整树需内部滚动（D-054）；V3/V11 的验收口径边界见 D-055、D-056。
 - Chromium 非标准安装需设置 `CHROME_PATH`（D-057）。
 
