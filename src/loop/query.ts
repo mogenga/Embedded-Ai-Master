@@ -197,7 +197,7 @@ export async function* query(
   const toolSchemas = toModelToolSchemas(ctx.tools.all());
   const costTracked = ctx.pricePerMillion !== undefined;
   let turn = 0;
-  let costUsd = 0;
+  let costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
   let pending: PendingBatch | undefined;
   let exitReason: ExitReason | undefined;
 
@@ -220,6 +220,8 @@ export async function* query(
         }
         throw error;
       }
+
+      await session.append({ type: "checkpoint", payload: { turn } });
 
       let messages = buildMessages(session.events());
       const budget = ctx.budget(messages);

@@ -37,6 +37,7 @@
 - **影响**: 回滚清理逻辑是"防覆写"的核心保险,未被直接验证。
 - **触发升级条件**: 覆盖率阈值被卡,或出现半初始化残留文件的实际事故。
 - **修复建议**: 构造「header 写成功、log 创建失败」与「并发 close 两次」两个用例。注: 2026-10-17 已补一条回滚测试,但只覆盖了 `headerCreated` 分支。
+- **状态**: **部分解决**(2026-10-18,维度6 Task 2)。已补「两次 `close` 返回同一 Promise」断言,`close` 二次调用分支已覆盖;`logCreated` 回滚分支仍未被直接命中,保留本项跟踪。
 
 ## 二、接口与契约
 
@@ -302,6 +303,7 @@
 - **影响**: 会话日志可能不可回放或缺少终止原因,违背「日志是唯一事实源」的审计要求。
 - **触发升级条件**: 真实断电/强杀/磁盘满;多进程并发写同一会话;消费者依赖日志还原终止原因。
 - **修复建议**: 写入后 `fsync` 或采用临时文件 + rename;启动时校验并隔离坏尾行;把初始化写入纳入统一错误出口并补失败回滚测试。
+- **扩展**: 2026-10-18,维度6 Task3 审查。closed 会话末行缺换行时,`readSessionDir` 仍能解析,`resumeSession` 成功;后续 `append` 直接追加,与上一行粘连,再次读取报 `invalid_event_line`。已补测试钉死当前行为(`tests/session.test.ts`「closed 会话末行缺换行时 resume 仍成功续写」),未实现自动补换行或坏尾隔离,留待本项修复。
 
 ### D-036 · 4xx 未细分 408/409/425
 
@@ -328,6 +330,105 @@
 - **修复**: 适配器在解析失败分支额外置 `invalidJson: true`(模型自己输出的参数不可能带该标记,除非恰好被 JSON.parse 成带此键的对象——但那需要模型显式输出该键,且解析成功路径不会补标记);`query` 与 `buildMessages` 的 marker 判定都改为「`invalidJson === true` 且形状匹配」的双条件。`CompletionResult.toolCalls[]` 与 `AssistantPayload.toolCalls[]` 增加 `invalidJson?: boolean`;该标记不进入工具入参。
 - **测试**: `openai.test.ts` 三条 invalid_json 用例改为断言完整对象含 `invalidJson: true`,并新增「模型输出恰好形如 marker 的合法 arguments 时不标记」;`build.test.ts` 新增「未标记 invalidJson 的同形 arguments 按普通对象序列化」;`query.test.ts` 新增「模型输出形如 marker 的合法参数时照常执行工具」。变异探针:适配器永不置标记 → 4 failed,`query` 退回仅看形状 → 1 failed,`buildMessages` 退回仅看形状 → 1 failed。
 
+### D-039 · 同一会话目录并发 resume/append 无跨进程锁
+
+- **发现**: 2026-10-18,维度6 Task3 审查。
+- **现象**: `resumeSession` 只校验目录与 header 后重建 handle,不获取目录级锁;同一会话目录可被多个进程或句柄同时 resume/append,seq 来自各自内存的 `eventList.length`,可产生重复 seq 或交错行。2026-10-18 Task4 审查补充: `forkSession` 仅用非递归 `mkdir` 对**目标目录创建**做原子占位,可挡住并发 fork 同一 target;但 fork 成功后其他进程仍可绕过该占位直接打开该目录 append,锁未覆盖会话生命周期。
+- **影响**: 并发写会破坏 JSONL 的 seq 连续性,使日志无法回放;当前仅靠「同一目录只有一个活跃 handle」的约定规避。
+- **触发升级条件**: CLI/UI 支持多窗口或多进程打开同一会话;出现实际重复 seq、交错写入或读取 `invalid_event_line`/`invalid_seq`。
+- **修复建议**: 引入目录级锁文件(如 `session.lock`,`O_EXCL` 创建,带超时与陈旧锁回收),`resumeSession` 与 `forkSession` 成功后均持有到 `close`;或改为单写者服务统一代理写入。
+
+### D-040 · artifact 越界校验仅做词法路径判断
+
+- **发现**: 2026-10-18,维度6 Task4 审查修复。
+- **现象**: `forkSession` 复制 artifact 前用 `path.resolve` 后的字符串前缀判断源路径是否位于 sourceDir 内(Windows 额外转小写);未调用 `realpath`,不解析符号链接、junction、Windows 8.3 短文件名或其他等价路径形态。若 sourceDir 内存在指向外部的链接,词法检查仍会放行。
+- **影响**: 当前工具产物由 harness 直接写入 sourceDir/artifacts,不会产生链接,风险低;但若未来 artifact 来源扩展到用户指定路径或外部工具输出,可能复制 sourceDir 之外的文件。
+- **触发升级条件**: artifact 路径可由用户/外部工具控制;出现链接目录、junction 或大小写/短名绕过;安全审查要求严格边界。
+- **修复建议**: 对 sourceDir 与 artifact 路径分别 `realpath` 后比较,拒绝非普通文件与跨根路径;或在写入 artifact 时记录规范化后的相对路径,读取时只接受该相对路径。
+- **2026-10-18 扩展**: 第二轮红队修复已对源根与 artifact 路径追加 `realpath` 越界检查,链接越界按 `artifactMissing` 处理;但词法检查仍保留在前,`lstat`/`realpath` 与 `copyFile` 之间的 TOCTOU、junction 与 8.3 短名仍未覆盖,详见 D-047。非普通文件(含目录 artifact)仍按 D-042 处理。
+
+### D-041 · fork 失败回滚只删 targetDir,父目录链残留且回滚失败静默
+
+- **发现**: 2026-10-18,维度6 Task4 审查(Task5 登记)。
+- **现象**: `forkSession` 失败时 `cleanupTargetDir` 仅对 `targetDir` 做 `rm(recursive)`,不回滚为占位而由 `mkdir(path.dirname(targetDir), { recursive: true })` 创建的父目录链;回滚步骤全部以 `.catch(() => undefined)` 吞掉错误。若失败发生在占位前(父目录已创建),或回滚本身失败,调用方只收到原始错误。
+- **影响**: 失败 fork 会残留空父目录;反复失败可能留下目录树。回滚失败无任何信号,调用方可能误判「未写入任何内容」,也增加后续排障成本。
+- **触发升级条件**: fork 目标固定为多层不存在目录;出现残留目录导致后续 `target_not_empty`;需要严格的失败原子性与可观测回滚。
+- **修复建议**: 记录本次实际创建的父目录层级并在失败时逆序删除;把回滚失败聚合进抛出的错误(`cause`/`detail` 或 `AggregateError`),至少保留可诊断信号。
+
+### D-042 · artifact 越界与缺失共用 artifactMissing,目录 artifact 未定义
+
+- **发现**: 2026-10-18,维度6 Task4 审查(Task5 登记)。
+- **现象**: artifact 路径词法越界(位于 sourceDir 外)与源文件缺失(`stat` ENOENT)都调用 `markArtifactMissing`,统一写 `detail.artifactMissing = true`,消费方无法区分「拒绝复制」与「源文件不存在」。此外 `artifactPath` 指向目录时行为未定义: `stat` 成功,但随后 `copyFile` 抛 `EISDIR`/`EPERM`,导致整个 fork 失败,而不是按 artifact 缺失跳过。
+- **影响**: 缺失原因不可审计;目录型 artifact 会阻塞 fork,与设计「artifact 缺失不阻塞 fork」不一致。
+- **触发升级条件**: 需要区分 artifact 缺失原因;工具产物可能为目录;出现因 artifact 为目录导致的 fork 失败。
+- **修复建议**: 为越界、缺失、非普通文件定义区分性标记或原因码(如 `artifactRejected`/`artifactMissing`/`artifactUnsupported`);复制前用 `stat().isFile()` 校验,非普通文件按不支持标记并跳过复制。
+- **2026-10-18 复核扩展**: fork 边界改为「前缀可投影」后,artifact 处理未变: 越界(位于 sourceDir 外)与源文件缺失仍统一走 `markArtifactMissing`,共用 `detail.artifactMissing = true`;目录型 artifact 行为仍未定义。
+
+### D-043 · `header.workdir` 与实际工具 cwd 来源不一致
+
+- **发现**: 2026-10-18,维度6 Task6 审查修复。
+- **现象**: `runSession` create 路径把 `workdir: opts.cwd ?? process.cwd()` 写入 `header.workdir`;但传给 `LoopCtx.cwd` 的仍是 `opts.cwd`(未提供即 `undefined`),工具管线在 `src/tools/pipeline.ts:314` 用 `opts.cwd ?? session.dir` 作为实际执行目录。未显式传 `opts.cwd` 时,header 记录的是启动进程的 cwd,工具实际在 `session.dir` 下执行。
+- **影响**: header 元数据无法用于还原/审计工具真实工作目录;未来若基于 `header.workdir` 重放、fork 或恢复编辑上下文,会得到与执行语义不符的路径。当前工具仅 `echo`,风险低。
+- **触发升级条件**: 出现依赖 `header.workdir` 恢复执行上下文的功能(重放、继续编辑、脚本路径解析);或工具从 `echo` 扩展到文件读写/命令执行。
+- **修复建议**: 统一来源——create 时写入 `opts.cwd ?? session.dir`,或让 `LoopCtx.cwd` 默认取 `header.workdir`;在 design 中明确 `header.workdir` 是「会话工作目录」还是「进程启动目录」。
+
+### D-044 · resume 只校验首个 system 事件
+
+- **发现**: 2026-10-18,维度6 Task6 审查修复。
+- **现象**: `runSession` resume 时用 `events.find((event) => event.type === "system")` 只比较首条 system 事件内容;后续 system 事件既不参与内容比较,也不影响「无 system」判定。当前 P0 仅由 `createSession` 写入一条 system,`query` 只在无 system 时补写一条,不会产生多条。
+- **影响**: 若未来支持多 system 事件(分层提示、运行时追加/替换),resume 可能放行与当前 `systemPrompt` 不一致的会话,空会话补写判定也可能误判。
+- **触发升级条件**: 引入多 system 事件;compaction 或运行时修改 system prompt;多段提示拼接。
+- **修复建议**: 明确 `systemPrompt` 与多 system 的映射策略(拼接、比较全部、或只允许首条),校验所有相关事件并给出确定性规则。
+
+### D-045 · `checkpoint.turn` 每次 query 从 1 重新编号,resume 后与历史重复
+
+- **发现**: 2026-10-18,维度6 Task8 收尾。
+- **现象**: `src/loop/query.ts` 在每次 `query` 调用内以 `let turn = 0` 起算,每轮 `turn += 1` 后写入 `checkpoint { turn }`。resume 后再次调用 `query` 会重新从 1 编号,生成的 checkpoint 与同目录历史 checkpoint 的 `turn` 重复;当前 checkpoint 只被写入,没有恢复/重放消费方。
+- **影响**: 当前仅影响日志审计可读性,不影响执行;若未来按 `turn` 定位断点、去重或恢复,重复编号会产生歧义。
+- **触发升级条件**: 出现 checkpoint 消费方(断点续跑、回合定位、恢复投影);需要按 `turn` 唯一定位。
+- **修复建议**: 由 `query` 从会话日志最后一个 checkpoint 的 `turn` 续编,或改用全局 `seq`/事件序号作为唯一标识,并在 design 中明确语义。
+
+### D-046 · 无主错误时 close 异常上抛分支缺真实路径测试
+
+- **发现**: 2026-10-18,维度6 Task8 收尾。
+- **现象**: `runSession` 的 `finally` 中,`session.close()` 异常仅在 `hasPrimaryError === false` 时上抛(`src/index.ts:179-185`)。现有集成测试只覆盖「运行期主错误 + close 异常不覆盖原错误」;`tests/integration.test.ts` 已有 `resumeCloseFailure` mock 可让 resume 返回的 handle `close` 抛出,但未构造「无主错误且 close 抛出」的用例,该上抛分支未被看守。
+- **影响**: 当前行为正确但无回归保护;若重排 `finally` 或调整错误优先级,可能静默吞掉 close 失败而不被测试发现。
+- **触发升级条件**: 重构 `runSession` 装配/关闭流程;引入可注入的 handle 工厂;审计关闭错误可观测性。
+- **修复建议**: 复用现有 `resumeCloseFailure` mock(或抽 handle 工厂),补一条「resume 正常完成、close 抛错 → 调用方收到 close 错误」的集成测试。
+- **2026-10-18 补充(close 失败重试语义)**: `createHandle.close()` 一旦失败,`accepting` 已置为 `false` 且 `closePromise` 缓存的是 rejected Promise;后续 `close()` 返回同一 rejected Promise,handle 也不能再 `append`。当前**不实现重试**,调用方需重建 handle 或重新 resume;该语义与「close 失败却标记 closed」的反目标一致。
+
+### D-047 · lstat 校验与打开之间的 TOCTOU,junction/8.3 短名未专项覆盖
+
+- **发现**: 2026-10-18,第二轮红队审查 C-1 修复。
+- **现象**: 读取与 append 前用 `lstat` 拒绝符号链接/非普通文件,但检查与随后的 `readFileSync`/`appendFile` 不是同一文件描述符,存在被替换的窗口;Windows junction 的 `isSymbolicLink()` 表现依赖 Node/平台版本,8.3 短名也未纳入路径比较的专项测试。fork 的 source/target/artifact 已用 `realpath` 缓解路径等价问题,但不等于关闭 TOCTOU。
+- **影响**: 会话目录可被非可信进程写时,理论上仍可能被诱导读写会话目录外的文件;当前单用户本机 harness、目录由 harness 独占,风险低。
+- **触发升级条件**: 会话目录可被其他用户/进程写;多用户或共享目录部署;安全审查要求消除 TOCTOU 或明确覆盖 Windows reparse point/短名。
+- **修复建议**: 用 `O_NOFOLLOW`(或平台等价语义)打开并以同一 fd 完成 `fstat` + 读写;Windows 侧明确 `FILE_FLAG_OPEN_REPARSE_POINT` 策略;补 junction、8.3 短名与「检查后替换」的对抗性测试。
+
+### D-048 · 代文件不连续(只有 v2 无 v1)仍被接受
+
+- **发现**: 2026-10-18,第二轮红队审查修复。
+- **现象**: `readSessionDir` 只按现存 `session.vN.jsonl` 的数字升序合并,不校验代编号从 1 连续到最大代;目录中只有 `session.v2.jsonl` 时,只要 seq 从 0 开始即可正常读取,缺失的 `v1` 不产生任何错误。
+- **影响**: 代文件缺失可能是日志被删除、截断或同步失败的信号,当前被静默接受,审计链完整性无法保证;未来若按代定位断点或做增量同步,缺档会导致语义偏差。
+- **触发升级条件**: 需要严格的日志完整性/审计证明;出现跨代缺档导致的断点续跑或定位错误;引入日志同步/备份。
+- **修复建议**: 读取时校验代编号从 1 连续到最大代,缺档抛 `SessionCorruptionError`(新增专用 code 或复用 `invalid_event_line`),并补「只有 v2」「v1+v3」等缺档测试。
+
+### D-049 · create/resume 允许目录符号链接,与 fork 拒绝源目录链接口径不一致
+
+- **发现**: 2026-10-18,最终加固审查。
+- **现象**: `createSession`/`resumeSession` 通过 `path.resolve` + `stat` 跟随目录符号链接,允许在链接指向的真实目录中创建/读取会话;`forkSession` 则显式 `lstat` 源目录并拒绝符号链接(`invalid_target`)。同一会话目录经链接访问时,create/resume 可用而 fork 不可用。
+- **影响**: 行为不一致会让调用方难以判断链接目录是否是受支持输入;若链接在 create/resume 期间被替换,实际读写位置可能与调用方预期不同,也削弱 fork 边界检查的可解释性。
+- **触发升级条件**: CLI/UI 允许用户指定会话目录;需要统一链接语义(一律拒绝或一律解析);出现链接目录被替换导致的写入位置偏差。
+- **修复建议**: 明确并统一策略——推荐 create/resume 与 fork 一致,对目录本身 `lstat` 拒绝符号链接;或全部改为 `realpath` 后按真实目录工作并在 header 记录,同时补三入口一致性的测试。
+
+### D-050 · payload 非对象 fail-closed 后,含 `payload:null` 的旧日志无法读取
+
+- **发现**: 2026-10-18,最终加固审查。
+- **现象**: 第二轮修复后 `readSessionDir` 对 `payload` 非对象(含 `null`、数组、字符串、缺失)统一抛 `SessionCorruptionError("invalid_event_line")`。旧版本可能已写出 `payload:null` 或缺 `payload` 的 `usage` 事件,这类日志升级后从「可读取、`usageTotals` 按 0 跳过」变为整份会话不可读。
+- **影响**: 兼容性回退:旧日志无法 resume/回放,只能人工修复或降级读取;这是有意的 fail-closed 收紧,但当前没有迁移/告警路径。
+- **触发升级条件**: 需要读取历史会话;出现旧日志因 `payload:null` 无法恢复的事故;引入日志版本/迁移机制。
+- **修复建议**: 明确日志 schema 版本并在读取时区分「旧版可容忍」与「新版必须对象」;或提供一次性修复工具把非对象 payload 归一为 `{}` 并记录迁移标记;至少在错误信息中提示兼容性变更。
+
 ---
 
 ## 变更记录
@@ -348,3 +449,11 @@
 | 2026-10-18 | Task 9 交付核验:D-029 升级为阻塞并**修复**(重复 tool call id 会使会话永久不可回放;query 落日志前拒绝 + buildMessages 二次守卫);补齐乱序 tool_result 投影断言 |
 | 2026-10-18 | `fix/p0-full-review` 全量复核:修复 C1/C2/C3/I3/I7/I9/I6/D15;录入 D-031 ~ D-038(响应体上限、请求超时、tool_calls 预算、代理对截断、会话原子性、4xx 细分、tool call 校验、marker 形状) |
 | 2026-10-18 | 全量复核(二轮):D-038 探针证实可触发并**修复**(适配器解析失败才置 `invalidJson: true`,query/buildMessages 双条件判定);补齐三处变异探针看守 |
+| 2026-10-18 | 维度6 Task3 审查修复:录入 D-039(同目录并发 resume/append 无跨进程锁);D-035 扩展记录末行缺换行导致续写粘连;`usageTotals` 容错非对象 payload,导出 `openSessionHandle` 供 fork 复用 |
+| 2026-10-18 | 维度6 Task4 审查修复:fork 增加 artifact 词法越界拒绝、失败回滚、非递归 `mkdir` 原子占位、同名 artifact 后缀、targetDir 为文件拒绝;D-039 扩展记录 fork 后 append 仍无跨进程锁,录入 D-040(artifact 路径仅词法校验,未解析链接/短名) |
+| 2026-10-18 | 维度6 Task5:rollover 接线 `create/resume/fork`(默认 50 MiB、非法阈值 `TypeError`、resume/fork 字节校准);补已存在空目录与父路径为文件的 fork 用例;录入 D-041(fork 回滚父目录残留/静默)、D-042(artifact 缺失原因不可区分/目录 artifact 未定义) |
+| 2026-10-18 | 维度6 Task6 审查修复:resume 改为「先读取校验、后 `resumeSession`」,失败不写 header/日志;新增 `session_id_mismatch`;`finally` 的 close 异常不再覆盖主错误;录入 D-043(`header.workdir` 与工具 cwd 来源不一致)、D-044(多 system 只校验首个) |
+| 2026-10-18 | 维度6 Task8 收尾:复核 D-039 ~ D-044 均仍为未解决,描述与当前实现一致;录入 D-045(checkpoint.turn 每次 query 从 1 重编号、resume 后与历史重复)、D-046(无主错误时 close 异常上抛分支缺真实路径测试) |
+| 2026-10-18 | 第一轮整体审查修复:fork 边界改为前缀可投影;resume 增加崩溃尾部恢复;统一 header 校验;D-042 扩展记录越界/缺失共用 artifactMissing;D-046 补充 close 失败不重试语义 |
+| 2026-10-18 | 第二轮红队修复 C-1/I-1:读取与 append 增加 lstat 普通文件/非链接校验;resume 崩溃恢复改为先 append 后写 header open 并支持失败回滚与幂等补 interrupted;fork source/target/artifact 增加 realpath 边界;录入 D-047(TOCTOU/junction/短名)、D-048(代文件不连续仍被接受);D-040 扩展记录 realpath 接线与残余缺口 |
+| 2026-10-18 | 最终加固:header 临时文件改为 `header.json.<uuid>.tmp` + `wx`,避免预置链接写入越界;补 `readSessionFile` symlink 直达用例与 Windows 无权限 skipIf;design §5 补 symlink/payload/恢复幂等/realpath 条目;录入 D-049(create/resume 跟随目录链接与 fork 不一致)、D-050(payload 非对象 fail-closed 的旧日志兼容性影响);dev-notes 明确恢复补偿分支为防御性 |

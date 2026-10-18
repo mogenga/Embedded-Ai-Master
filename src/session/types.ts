@@ -7,7 +7,18 @@ export type EventType =
   | "usage"
   | "checkpoint"
   | "status"
-  | "interrupted";
+  | "interrupted"
+  | "compaction";
+
+export interface SessionHeader {
+  id: string;
+  createdAt: string;
+  status: "open" | "closed";
+  provider?: string;
+  model?: string;
+  workdir?: string;
+  forkedFrom?: { sessionId: string; seq: number };
+}
 
 export interface SessionEvent {
   seq: number;
