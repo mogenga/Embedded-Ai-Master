@@ -10,6 +10,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// 与 query 的分流条件一致: 必须显式 invalidJson=true 才按 marker 回填 raw(D-038)
 function isInvalidJsonMarker(value: unknown): value is InvalidJsonMarker {
   return isRecord(value) && value.error === "invalid_json" && typeof value.raw === "string";
 }
@@ -43,7 +44,7 @@ function projectAssistant(
       const name = requireString(raw.name, `${field}.name`);
       const args = raw.arguments;
       let serialized: string;
-      if (isInvalidJsonMarker(args)) {
+      if (raw.invalidJson === true && isInvalidJsonMarker(args)) {
         serialized = args.raw;
       } else if (isRecord(args)) {
         serialized = JSON.stringify(args);

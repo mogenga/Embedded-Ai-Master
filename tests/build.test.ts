@@ -82,12 +82,26 @@ describe("buildMessages 投影重组", () => {
     const messages = buildMessages([
       mk(0, "assistant", {
         content: "",
-        toolCalls: [{ id: "c1", name: "echo", arguments: { error: "invalid_json", raw: "{bad" } }],
+        toolCalls: [{ id: "c1", name: "echo", arguments: { error: "invalid_json", raw: "{bad" }, invalidJson: true }],
       }),
       mk(1, "tool_result", { id: "c1", ok: false, text: "bad" }, 0),
     ]);
 
     expect(messages[0].tool_calls?.[0].function.arguments).toBe("{bad");
+  });
+
+  it("未标记 invalidJson 的同形 arguments 按普通对象序列化(D-038)", () => {
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: { error: "invalid_json", raw: "{bad" } }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: false, text: "bad" }, 0),
+    ]);
+
+    expect(messages[0].tool_calls?.[0].function.arguments).toBe(
+      '{"error":"invalid_json","raw":"{bad"}',
+    );
   });
 
   it("usage/checkpoint/status/interrupted 事件被丢弃", () => {

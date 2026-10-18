@@ -32,6 +32,11 @@ export interface CompletionResult {
     id: string;
     name: string;
     arguments: Record<string, unknown> | { error: "invalid_json"; raw: string };
+    /**
+     * 适配器内部标记: arguments 解析失败时为 true。
+     * 模型自己输出的同形参数不会带此标记,避免形状误判(D-038)。
+     */
+    invalidJson?: boolean;
   }>;
   truncatedByMaxTokens: boolean;
   usage?: {

@@ -116,7 +116,12 @@ describe("OpenAI 兼容模型适配器", () => {
       { id: "call-1", function: { name: "echo", arguments: "{bad" } },
     ] }, finish_reason: "tool_calls" }] }));
 
-    expect(result.toolCalls[0].arguments).toEqual({ error: "invalid_json", raw: "{bad" });
+    expect(result.toolCalls[0]).toEqual({
+      id: "call-1",
+      name: "echo",
+      arguments: { error: "invalid_json", raw: "{bad" },
+      invalidJson: true,
+    });
   });
 
   it.each(["null", "[]"])("JSON arguments 为 %s 时返回 invalid_json", async (raw) => {
@@ -124,7 +129,12 @@ describe("OpenAI 兼容模型适配器", () => {
       { id: "call-1", function: { name: "echo", arguments: raw } },
     ] }, finish_reason: "tool_calls" }] }));
 
-    expect(result.toolCalls[0].arguments).toEqual({ error: "invalid_json", raw });
+    expect(result.toolCalls[0]).toEqual({
+      id: "call-1",
+      name: "echo",
+      arguments: { error: "invalid_json", raw },
+      invalidJson: true,
+    });
   });
 
   it("非字符串 tool_calls arguments 返回结构化错误且保留字符串化值", async () => {
@@ -132,7 +142,25 @@ describe("OpenAI 兼容模型适配器", () => {
       { id: "call-1", function: { name: "echo", arguments: { value: 1 } } },
     ] }, finish_reason: "tool_calls" }] }));
 
-    expect(result.toolCalls[0].arguments).toEqual({ error: "invalid_json", raw: "[object Object]" });
+    expect(result.toolCalls[0]).toEqual({
+      id: "call-1",
+      name: "echo",
+      arguments: { error: "invalid_json", raw: "[object Object]" },
+      invalidJson: true,
+    });
+  });
+
+  it("模型输出恰好形如 marker 的合法 arguments 时不标记 invalidJson", async () => {
+    const result = await complete(successFetch({ choices: [{ message: { content: "", tool_calls: [
+      { id: "call-1", function: { name: "echo", arguments: '{"error":"invalid_json","raw":"{bad"}' } },
+    ] }, finish_reason: "tool_calls" }] }));
+
+    expect(result.toolCalls[0]).toEqual({
+      id: "call-1",
+      name: "echo",
+      arguments: { error: "invalid_json", raw: "{bad" },
+    });
+    expect(result.toolCalls[0]).not.toHaveProperty("invalidJson");
   });
 
   it("message.content 缺失时返回空字符串", async () => {

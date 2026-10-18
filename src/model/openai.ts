@@ -157,19 +157,25 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
         }
         const raw = call.function?.arguments;
         let args: Record<string, unknown> | { error: "invalid_json"; raw: string };
+        let invalidJson = true;
         if (typeof raw !== "string") {
           args = { error: "invalid_json", raw: String(raw) };
         } else {
           try {
             const parsed: unknown = JSON.parse(raw);
-            args = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-              ? parsed as Record<string, unknown>
-              : { error: "invalid_json", raw };
+            if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) {
+              args = parsed as Record<string, unknown>;
+              invalidJson = false;
+            } else {
+              args = { error: "invalid_json", raw };
+            }
           } catch {
             args = { error: "invalid_json", raw };
           }
         }
-        return { id: call.id, name: call.function.name, arguments: args };
+        return invalidJson
+          ? { id: call.id, name: call.function.name, arguments: args, invalidJson: true }
+          : { id: call.id, name: call.function.name, arguments: args };
       });
       const content = typeof message?.content === "string" ? message.content : "";
       if (content) opts.onDelta?.(content);

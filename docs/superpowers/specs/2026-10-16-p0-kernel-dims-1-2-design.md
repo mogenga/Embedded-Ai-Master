@@ -119,7 +119,7 @@ export interface ModelToolSchema {
 
 export interface CompletionResult {
   content: string;
-  toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> | { error: "invalid_json"; raw: string } }>;
+  toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> | { error: "invalid_json"; raw: string }; invalidJson?: boolean }>; // invalidJson 仅由适配器解析失败分支置 true(D-038)
   truncatedByMaxTokens: boolean;
   usage?: { promptTokens: number; completionTokens: number; cachedTokens?: number };
   stopReason: "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | unknown;

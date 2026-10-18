@@ -921,7 +921,7 @@ describe("query 主循环", () => {
   it("invalid_json 标记分流: 不进 executeBatch,raw 保留且正常调用仍执行", async () => {
     const provider = scriptedProvider([
       reply("", [
-        { id: "m1", name: "echo", arguments: { error: "invalid_json", raw: "{bad" } },
+        { id: "m1", name: "echo", arguments: { error: "invalid_json", raw: "{bad" }, invalidJson: true },
         echoCall("c2", "ok"),
       ]),
       reply("done"),
@@ -962,6 +962,48 @@ describe("query 主循环", () => {
     const assistant = session.events().find((event) => event.type === "assistant");
     expect(logged[0].parent).toBe(assistant?.seq);
     expect(logged[1].parent).toBe(assistant?.seq);
+  });
+
+  it("模型输出形如 marker 的合法参数时照常执行工具(D-038)", async () => {
+    const seen: unknown[] = [];
+    const acceptsMarkerShape: ToolDef<{ error: "invalid_json"; raw: string }> = {
+      name: "accept",
+      description: "接受同形参数",
+      schema: z.object({ error: z.literal("invalid_json"), raw: z.string() }),
+      annotations: { readOnly: true },
+      execute: async (input) => {
+        seen.push(input);
+        return { isError: false, code: "ok", message: "", text: JSON.stringify(input) };
+      },
+    };
+    const provider = scriptedProvider([
+      reply("", [
+        {
+          id: "c1",
+          name: "accept",
+          arguments: { error: "invalid_json", raw: '{"real":1}' },
+        },
+      ]),
+      reply("done"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([acceptsMarkerShape]),
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(seen).toStrictEqual([{ error: "invalid_json", raw: '{"real":1}' }]);
+    expect(events.find((event) => event.kind === "tool_result")).toMatchObject({
+      kind: "tool_result",
+      id: "c1",
+      ok: true,
+      code: "ok",
+    });
+    expect(session.events().find((event) => event.type === "tool_result")?.payload).toMatchObject({
+      id: "c1",
+      ok: true,
+      code: "ok",
+    });
   });
 
   it("每轮 complete 前预算检查,超限时每轮最多压缩一次", async () => {

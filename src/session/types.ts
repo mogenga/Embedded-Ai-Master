@@ -23,6 +23,7 @@ export interface AssistantPayload {
     id: string;
     name: string;
     arguments: Record<string, unknown> | { error: "invalid_json"; raw: string };
+    invalidJson?: boolean;
   }>;
 }
 

@@ -321,11 +321,12 @@
 
 ### D-038 · `invalid_json` marker 形状可能被模型输出误判
 
+- **状态**: **已解决**(2026-10-18,全量复核后用运行时探针证实可触发,随即修复)。
 - **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
-- **现象**: `src/context/build.ts` 与 `src/loop/query.ts` 通过 `value.error === "invalid_json" && typeof value.raw === "string"` 识别内部 marker;模型真实输出的工具参数若恰好是同一形状,会被误判为解析失败 marker。
-- **影响**: 正常工具参数可能被绕过或改写成错误回填,行为与模型意图不一致;该形状也可被输入构造利用。
-- **触发升级条件**: 模型输出该形状参数;工具参数来自不可信来源;需要区分内部标记与模型数据。
-- **修复建议**: 使用不可伪造的内部标识(独立字段、品牌化对象或仅在解析失败路径生成并携带校验标记),避免仅靠形状判别。
+- **原现象**: `src/context/build.ts` 与 `src/loop/query.ts` 通过 `value.error === "invalid_json" && typeof value.raw === "string"` 识别内部 marker;模型真实输出的工具参数若恰好是同一形状,会被误判为解析失败 marker。
+- **实际后果(探针证实)**: 构造一个恰好接受 `{ error: "invalid_json", raw }` 的 Zod 工具,模型返回该形状的**合法**参数时,`query` 在 `splitToolUses` 直接短路为 `code: "invalid_json"` 的 tool_result,工具从未执行;日志也按错误记录。即模型合法输出被内核改写,违背 R3「工具必须诚实」。
+- **修复**: 适配器在解析失败分支额外置 `invalidJson: true`(模型自己输出的参数不可能带该标记,除非恰好被 JSON.parse 成带此键的对象——但那需要模型显式输出该键,且解析成功路径不会补标记);`query` 与 `buildMessages` 的 marker 判定都改为「`invalidJson === true` 且形状匹配」的双条件。`CompletionResult.toolCalls[]` 与 `AssistantPayload.toolCalls[]` 增加 `invalidJson?: boolean`;该标记不进入工具入参。
+- **测试**: `openai.test.ts` 三条 invalid_json 用例改为断言完整对象含 `invalidJson: true`,并新增「模型输出恰好形如 marker 的合法 arguments 时不标记」;`build.test.ts` 新增「未标记 invalidJson 的同形 arguments 按普通对象序列化」;`query.test.ts` 新增「模型输出形如 marker 的合法参数时照常执行工具」。变异探针:适配器永不置标记 → 4 failed,`query` 退回仅看形状 → 1 failed,`buildMessages` 退回仅看形状 → 1 failed。
 
 ---
 
@@ -346,3 +347,4 @@
 | 2026-10-18 | Task 9 第四轮整合审查:录入 D-030(初始化 append 失败不落 `interrupted(error)`),N3(补偿写失败未测)与 N5(批次交错负例)并入;`pricePerMillion` 在 config schema 增加非负有限校验 |
 | 2026-10-18 | Task 9 交付核验:D-029 升级为阻塞并**修复**(重复 tool call id 会使会话永久不可回放;query 落日志前拒绝 + buildMessages 二次守卫);补齐乱序 tool_result 投影断言 |
 | 2026-10-18 | `fix/p0-full-review` 全量复核:修复 C1/C2/C3/I3/I7/I9/I6/D15;录入 D-031 ~ D-038(响应体上限、请求超时、tool_calls 预算、代理对截断、会话原子性、4xx 细分、tool call 校验、marker 形状) |
+| 2026-10-18 | 全量复核(二轮):D-038 探针证实可触发并**修复**(适配器解析失败才置 `invalidJson: true`,query/buildMessages 双条件判定);补齐三处变异探针看守 |

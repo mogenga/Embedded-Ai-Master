@@ -53,8 +53,19 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function isInvalidJsonMarker(value: unknown): value is InvalidJsonMarker {
-  return isRecord(value) && value.error === "invalid_json" && typeof value.raw === "string";
+// 内部标记必须显式携带 invalidJson=true(由适配器解析失败分支生成);
+// 仅凭 arguments 形状判断会把模型合法输出的同形参数误判为解析失败(D-038)。
+function isInvalidJsonMarker(
+  call: CompletionResult["toolCalls"][number],
+): call is CompletionResult["toolCalls"][number] & {
+  arguments: { error: "invalid_json"; raw: string };
+} {
+  return (
+    call.invalidJson === true
+    && isRecord(call.arguments)
+    && call.arguments.error === "invalid_json"
+    && typeof call.arguments.raw === "string"
+  );
 }
 
 // 重复 tool call id 会让日志出现同 id 的两条 tool_result，回放投影时必抛错，
@@ -117,7 +128,7 @@ function splitToolUses(toolCalls: CompletionResult["toolCalls"]): {
 } {
   const calls: BatchCall[] = [];
   const slots: CallSlot[] = toolCalls.map((call) => {
-    if (isInvalidJsonMarker(call.arguments)) {
+    if (isInvalidJsonMarker(call)) {
       return { marker: markerResult(call.arguments.raw) };
     }
     calls.push({ id: call.id, name: call.name, input: call.arguments });
