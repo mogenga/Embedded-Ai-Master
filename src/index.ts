@@ -12,7 +12,7 @@ import { SessionResumeError } from "./session/errors.js";
 import { readSessionDir } from "./session/persistence.js";
 import { createSession, resumeSession } from "./session/session.js";
 import type { SessionHandle } from "./session/session.js";
-import { echoTool } from "./tools/echo.js";
+import { createBuiltinTools } from "./tools/builtin.js";
 import { isWindowsReservedName } from "./tools/pipeline.js";
 import { ToolRegistry } from "./tools/registry.js";
 
@@ -45,6 +45,7 @@ function assertSessionId(sessionId: string): void {
 interface ResumePlan {
   session: SessionHandle;
   systemPromptToAppend?: string;
+  cwd?: string;
 }
 
 async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumePlan> {
@@ -80,6 +81,20 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
     );
   }
 
+  if (
+    header.workdir !== undefined
+    && opts.cwd !== undefined
+    && path.resolve(header.workdir) !== path.resolve(opts.cwd)
+  ) {
+    throw new SessionResumeError(
+      "workdir_mismatch",
+      `Session workdir ${header.workdir} does not match requested cwd ${opts.cwd}`,
+      { expected: opts.cwd, actual: header.workdir },
+    );
+  }
+
+  const cwd = opts.cwd ?? header.workdir;
+
   let systemPromptToAppend: string | undefined;
   if (opts.systemPrompt !== undefined) {
     const systemEvent = events.find((event) => event.type === "system");
@@ -103,7 +118,9 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
   }
 
   const session = await resumeSession(sessionDir);
-  return systemPromptToAppend === undefined ? { session } : { session, systemPromptToAppend };
+  return systemPromptToAppend === undefined
+    ? { session, ...(cwd === undefined ? {} : { cwd }) }
+    : { session, systemPromptToAppend, ...(cwd === undefined ? {} : { cwd }) };
 }
 
 export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
@@ -153,19 +170,22 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   const id = opts.sessionId ?? randomUUID();
   let session: SessionHandle;
   let systemPromptToAppend: string | undefined;
+  let runCwd: string | undefined;
 
   if (resume && resumeDir !== undefined) {
     const plan = await planResume(resumeDir, opts);
     session = plan.session;
     systemPromptToAppend = plan.systemPromptToAppend;
+    runCwd = plan.cwd;
   } else {
     const sessionDir = resumeDir ?? path.join(home, "sessions", id);
+    runCwd = opts.cwd ?? process.cwd();
     session = await createSession(sessionDir, {
       id,
       systemPrompt: opts.systemPrompt,
       provider: providerName,
       model: opts.model,
-      workdir: opts.cwd ?? process.cwd(),
+      workdir: runCwd,
     });
   }
 
@@ -179,11 +199,11 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       session,
       model: modelProtocol,
       modelCfg: model,
-      tools: new ToolRegistry([echoTool]),
+      tools: new ToolRegistry(createBuiltinTools()),
       budget: (messages) => checkBudget(messages, model.contextWindow),
       signal: opts.signal ?? new AbortController().signal,
       artifactDir: path.join(session.dir, "artifacts"),
-      cwd: opts.cwd,
+      cwd: runCwd,
       timeoutMs: opts.timeoutMs,
       pricePerMillion: provider.pricePerMillion,
     };

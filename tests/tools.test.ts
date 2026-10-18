@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
+import { createBuiltinTools } from "../src/tools/builtin.js";
 import { echoTool } from "../src/tools/echo.js";
 import { ToolRegistry, toModelToolSchemas } from "../src/tools/registry.js";
 import type { ToolDef } from "../src/tools/types.js";
@@ -19,6 +20,25 @@ function makeTool<I>(name: string, schema: z.ZodType<I>): ToolDef<I> {
     execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
   };
 }
+
+describe("createBuiltinTools", () => {
+  it("按固定顺序返回 5 个内置工具", () => {
+    expect(createBuiltinTools().map((tool) => tool.name)).toEqual([
+      "echo",
+      "fs",
+      "shell",
+      "glob",
+      "grep",
+    ]);
+  });
+
+  it("可直接构造注册表且无重复工具名", () => {
+    const registry = new ToolRegistry(createBuiltinTools());
+
+    expect(registry.all()).toHaveLength(5);
+    expect(registry.lookup("fs")?.name).toBe("fs");
+  });
+});
 
 describe("ToolRegistry", () => {
   it("lookup 命中与未命中", () => {
