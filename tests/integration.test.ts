@@ -94,6 +94,32 @@ const EMPTY_RESPONSE = {
   usage: { prompt_tokens: 20, completion_tokens: 3 },
 };
 
+const LONG_TOOL_TEXT = "E".repeat(400);
+
+const LONG_TOOL_RESPONSE = {
+  choices: [
+    {
+      message: {
+        content: "",
+        tool_calls: [
+          {
+            id: "call-long",
+            type: "function",
+            function: { name: "echo", arguments: JSON.stringify({ text: LONG_TOOL_TEXT }) },
+          },
+        ],
+      },
+      finish_reason: "tool_calls",
+    },
+  ],
+  usage: { prompt_tokens: 5, completion_tokens: 2 },
+};
+
+const SUMMARY_RESPONSE = {
+  choices: [{ message: { content: "summary-of-old-context" }, finish_reason: "stop" }],
+  usage: { prompt_tokens: 100, completion_tokens: 10 },
+};
+
 const PROVIDERS = {
   gw: {
     protocol: "openai-chat-completions",
@@ -374,6 +400,77 @@ describe("runSession 端到端装配", () => {
       { kind: "interrupted", reason: "max_turns" },
       { kind: "done", finishReason: "max_turns" },
     ]);
+  });
+
+  it("compaction 默认开启:小 contextWindow 下历史工具结果触发摘要并落日志", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "auto-compaction");
+    const { impl, calls } = mockFetch([LONG_TOOL_RESPONSE, SUMMARY_RESPONSE, EMPTY_RESPONSE]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/tiny",
+        providersText: providersWith({ tiny: { contextWindow: 30, maxOutput: 512 } }),
+        sessionDir,
+        fetchImpl: impl,
+        compaction: { keepRecentTurns: 0 },
+      }),
+    );
+
+    expect(calls).toHaveLength(3);
+    expect(calls[1].body.tools).toEqual([]);
+    const summaryMessages = calls[1].body.messages as Array<{ role: string; content: string }>;
+    expect(summaryMessages[0]).toMatchObject({ role: "system" });
+
+    const finalMessages = calls[2].body.messages as Array<{ role: string; content: string }>;
+    const finalSystem = finalMessages.find(
+      (message) => message.role === "system" && message.content.includes("[Conversation summary]"),
+    );
+    expect(finalSystem).toBeDefined();
+    expect(finalSystem?.content).toContain("summary-of-old-context");
+    const toolMessages = finalMessages.filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0].content).toContain("[tool result elided");
+
+    const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(
+      log.some((event) => event.type === "compaction" && event.payload.kind === "microcompact"),
+    ).toBe(true);
+    expect(
+      log.some((event) => event.type === "compaction" && event.payload.kind === "summary"),
+    ).toBe(true);
+    expect(log.filter((event) => event.type === "usage").length).toBeGreaterThanOrEqual(2);
+    expect(events.some((event) => event.kind === "compacted")).toBe(true);
+  });
+
+  it("compaction.enabled:false 时不压缩并保留完整工具结果", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "no-compaction");
+    const { impl, calls } = mockFetch([LONG_TOOL_RESPONSE, EMPTY_RESPONSE]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/tiny",
+        providersText: providersWith({ tiny: { contextWindow: 30, maxOutput: 512 } }),
+        sessionDir,
+        fetchImpl: impl,
+        compaction: { enabled: false },
+      }),
+    );
+
+    expect(calls).toHaveLength(2);
+    const finalMessages = calls[1].body.messages as Array<{ role: string; content: string }>;
+    const toolMessages = finalMessages.filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0].content).toBe(LONG_TOOL_TEXT);
+
+    const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(log.some((event) => event.type === "compaction")).toBe(false);
+    expect(events.some((event) => event.kind === "compacted")).toBe(false);
   });
 
   it("结束后会话日志可读且工具结果完整", async () => {

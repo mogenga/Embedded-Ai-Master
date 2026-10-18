@@ -1,5 +1,6 @@
 import type { ModelCfg } from "../config/providers.js";
 import { buildMessages } from "../context/build.js";
+import type { TokenMeter } from "../context/token-meter.js";
 import type {
   CompletionResult,
   ModelChatMessage,
@@ -23,6 +24,7 @@ export interface LoopCtx {
   tools: ToolRegistry;
   budget: (messages: ModelChatMessage[]) => { over: boolean; tokens: number; softLimit: number };
   compactor?: (session: SessionHandle) => Promise<void>;
+  meter?: TokenMeter;
   signal: AbortSignal;
   artifactDir: string;
   cwd?: string;
@@ -232,9 +234,19 @@ export async function* query(
       let messages = buildMessages(session.events());
       const budget = ctx.budget(messages);
       if (budget.over && ctx.compactor !== undefined) {
-        await ctx.compactor(session);
+        try {
+          await ctx.compactor(session);
+        } catch (error) {
+          if (isAbortError(error) || ctx.signal.aborted) {
+            exitReason = "normal";
+            yield* emitInterrupted(session, "aborted");
+            return;
+          }
+          throw error;
+        }
         yield { kind: "compacted" };
         messages = buildMessages(session.events());
+        costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
       }
 
       let response: CompletionResult;
@@ -278,6 +290,10 @@ export async function* query(
         costUsd += computeCostUsd(usage, ctx.pricePerMillion);
       } else {
         await session.append({ type: "status", payload: { status: "usage_missing" } });
+      }
+
+      if (response.usage !== undefined) {
+        ctx.meter?.observe(response.usage.promptTokens, messages);
       }
 
       yield { kind: "model_message", content: response.content };

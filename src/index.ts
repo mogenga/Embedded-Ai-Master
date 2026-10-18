@@ -3,10 +3,14 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { resolveHarnessHome } from "./config/harness-home.js";
 import { loadProviders, parseProviders, resolveModelRef } from "./config/providers.js";
-import { checkBudget } from "./context/budget.js";
+import { checkBudget, checkBudgetTokens } from "./context/budget.js";
+import { compactSession } from "./context/compact.js";
+import { createTokenMeter } from "./context/token-meter.js";
+import type { TokenMeter } from "./context/token-meter.js";
 import type { LoopEvent } from "./loop/events.js";
 import { query } from "./loop/query.js";
 import type { LoopCtx } from "./loop/query.js";
+import { heuristicCountTokens } from "./model/count.js";
 import { createOpenAIProvider } from "./model/openai.js";
 import { SessionResumeError } from "./session/errors.js";
 import { readSessionDir } from "./session/persistence.js";
@@ -30,6 +34,12 @@ export interface RunOptions {
   maxCostUsd?: number;
   cwd?: string;
   timeoutMs?: number;
+  compaction?: {
+    enabled?: boolean;
+    keepRecentTurns?: number;
+    keepTailRatio?: number;
+    softRatio?: number;
+  };
 }
 
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -203,17 +213,52 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       await session.append({ type: "system", payload: { content: systemPromptToAppend } });
     }
 
+    const signal = opts.signal ?? new AbortController().signal;
+    const compaction = opts.compaction;
+    const compactionEnabled = compaction?.enabled !== false;
+    let meter: TokenMeter | undefined;
+    let budget: LoopCtx["budget"];
+    let compactor: LoopCtx["compactor"];
+
+    if (compactionEnabled) {
+      const softRatio = compaction?.softRatio ?? 0.8;
+      const tokenMeter = createTokenMeter(heuristicCountTokens);
+      meter = tokenMeter;
+      budget = (messages) =>
+        checkBudgetTokens(tokenMeter.measure(messages), model.contextWindow, softRatio);
+      compactor = (target) =>
+        compactSession({
+          session: target,
+          model: modelProtocol,
+          modelCfg: model,
+          pricePerMillion: provider.pricePerMillion,
+          signal,
+          meter: tokenMeter,
+          softRatio,
+          ...(compaction?.keepRecentTurns !== undefined
+            ? { keepRecentTurns: compaction.keepRecentTurns }
+            : {}),
+          ...(compaction?.keepTailRatio !== undefined
+            ? { keepTailRatio: compaction.keepTailRatio }
+            : {}),
+        });
+    } else {
+      budget = (messages) => checkBudget(messages, model.contextWindow);
+    }
+
     const ctx: LoopCtx = {
       session,
       model: modelProtocol,
       modelCfg: model,
       tools: new ToolRegistry(createBuiltinTools()),
-      budget: (messages) => checkBudget(messages, model.contextWindow),
-      signal: opts.signal ?? new AbortController().signal,
+      budget,
+      signal,
       artifactDir: path.join(session.dir, "artifacts"),
       cwd: runCwd,
       timeoutMs: opts.timeoutMs,
       pricePerMillion: provider.pricePerMillion,
+      ...(meter !== undefined ? { meter } : {}),
+      ...(compactor !== undefined ? { compactor } : {}),
     };
 
     yield* query(ctx, opts.input, {
