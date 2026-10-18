@@ -281,6 +281,28 @@ describe("会话持久化", () => {
     expect(Object.isFrozen(loaded?.payload.nested)).toBe(true);
   });
 
+  it("openSessionHandle 克隆 header 后冻结", async () => {
+    const dir = makeTempDir();
+    const header: SessionHeader = {
+      id: "sess-header-clone",
+      createdAt: "2026-10-18T00:00:00.000Z",
+      status: "open",
+      forkedFrom: { sessionId: "source", seq: 1 },
+    };
+    writeFileSync(path.join(dir, "header.json"), `${JSON.stringify(header)}\n`, "utf8");
+    writeFileSync(path.join(dir, "session.v1.jsonl"), "", "utf8");
+
+    const handle = openSessionHandle(dir, header, []);
+    header.forkedFrom!.seq = 9;
+    header.id = "mutated";
+
+    expect(handle.header).not.toBe(header);
+    expect(handle.header.id).toBe("sess-header-clone");
+    expect(handle.header.forkedFrom).toEqual({ sessionId: "source", seq: 1 });
+    expect(Object.isFrozen(handle.header)).toBe(true);
+    expect(Object.isFrozen(handle.header.forkedFrom)).toBe(true);
+  });
+
   it("close 原子更新 status 为 closed 且幂等", async () => {
     const dir = makeTempDir();
     const session = await createSession(dir);

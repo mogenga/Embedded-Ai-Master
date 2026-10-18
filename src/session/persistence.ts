@@ -1,16 +1,17 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync, readdirSync } from "node:fs";
-import { copyFile, mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { constants, readFileSync, readdirSync } from "node:fs";
+import { copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveHarnessHome } from "../config/harness-home.js";
-import { isWindowsReservedName } from "../tools/pipeline.js";
 import { SessionCorruptionError, SessionForkError } from "./errors.js";
-import { openSessionHandle } from "./handle.js";
+import { openSessionHandle, writeHeaderAtomic } from "./handle.js";
 import type { SessionHandle } from "./handle.js";
 import type { EventType, SessionEvent, SessionHeader } from "./types.js";
 
 const SESSION_LOG_PATTERN = /^session\.v(\d+)\.jsonl$/;
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+const MAX_ARTIFACT_COPY_ATTEMPTS = 1_000;
 
 const EVENT_TYPES: Record<EventType, true> = {
   system: true,
@@ -146,24 +147,39 @@ function assertForkBoundary(events: SessionEvent[], atSeq: number): void {
 }
 
 function assertForkId(id: string): void {
-  if (!SESSION_ID_PATTERN.test(id) || isWindowsReservedName(id)) {
+  if (!SESSION_ID_PATTERN.test(id) || WINDOWS_RESERVED_NAME.test(id)) {
     throw new SessionForkError("invalid_target", `Invalid fork session id: ${JSON.stringify(id)}`, {
       id,
     });
   }
 }
 
-async function ensureEmptyTargetDir(targetDir: string): Promise<void> {
-  try {
-    const entries = await readdir(targetDir);
-    if (entries.length > 0) {
-      throw new SessionForkError("target_not_empty", `Target directory is not empty: ${targetDir}`, {
-        dir: targetDir,
-      });
+function normalizePathForCompare(value: string): string {
+  return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
+function markArtifactMissing(event: SessionEvent): void {
+  if (!isRecord(event.payload)) return;
+  const detail = event.payload.detail;
+  event.payload.detail = isRecord(detail)
+    ? { ...detail, artifactMissing: true }
+    : { originalDetail: detail, artifactMissing: true };
+}
+
+async function copyArtifactExclusive(sourcePath: string, artifactsDir: string): Promise<string> {
+  const baseName = path.basename(sourcePath);
+  const extension = path.extname(baseName);
+  const stem = baseName.slice(0, baseName.length - extension.length);
+  for (let attempt = 0; ; attempt += 1) {
+    const name = attempt === 0 ? baseName : `${stem}-${attempt}${extension}`;
+    const targetPath = path.join(artifactsDir, name);
+    try {
+      await copyFile(sourcePath, targetPath, constants.COPYFILE_EXCL);
+      return targetPath;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST" || attempt >= MAX_ARTIFACT_COPY_ATTEMPTS) throw error;
     }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    await mkdir(targetDir, { recursive: true });
   }
 }
 
@@ -175,22 +191,65 @@ async function relocateArtifact(
   if (event.type !== "tool_result" || !isRecord(event.payload)) return;
   const artifactPath = event.payload.artifactPath;
   if (typeof artifactPath !== "string") return;
-  const sourcePath = path.isAbsolute(artifactPath)
-    ? artifactPath
-    : path.resolve(sourceDir, artifactPath);
+  const sourceRoot = path.resolve(sourceDir);
+  const sourcePath = path.resolve(sourceRoot, artifactPath);
+  const rootPrefix = sourceRoot.endsWith(path.sep) ? sourceRoot : `${sourceRoot}${path.sep}`;
+  if (!normalizePathForCompare(sourcePath).startsWith(normalizePathForCompare(rootPrefix))) {
+    markArtifactMissing(event);
+    return;
+  }
   try {
     await stat(sourcePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    const detail = isRecord(event.payload.detail) ? event.payload.detail : {};
-    event.payload.detail = { ...detail, artifactMissing: true };
+    markArtifactMissing(event);
     return;
   }
   const artifactsDir = path.join(targetDir, "artifacts");
   await mkdir(artifactsDir, { recursive: true });
-  const targetPath = path.join(artifactsDir, path.basename(sourcePath));
-  await copyFile(sourcePath, targetPath);
-  event.payload.artifactPath = targetPath;
+  event.payload.artifactPath = await copyArtifactExclusive(sourcePath, artifactsDir);
+}
+
+function invalidTargetDir(targetDir: string): SessionForkError {
+  return new SessionForkError("invalid_target", `Invalid target directory: ${targetDir}`, {
+    dir: targetDir,
+  });
+}
+
+async function claimTargetDir(targetDir: string): Promise<boolean> {
+  try {
+    await mkdir(path.dirname(targetDir), { recursive: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EEXIST" || code === "ENOTDIR") throw invalidTargetDir(targetDir);
+    throw error;
+  }
+  try {
+    await mkdir(targetDir);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOTDIR") throw invalidTargetDir(targetDir);
+    if (code !== "EEXIST") throw error;
+    const info = await stat(targetDir).catch(() => undefined);
+    if (info === undefined || !info.isDirectory()) throw invalidTargetDir(targetDir);
+    throw new SessionForkError("target_not_empty", `Target directory is not empty: ${targetDir}`, {
+      dir: targetDir,
+    });
+  }
+}
+
+async function cleanupTargetDir(targetDir: string, created: boolean): Promise<void> {
+  if (created) {
+    await rm(targetDir, { recursive: true, force: true }).catch(() => undefined);
+    return;
+  }
+  for (const name of ["header.json.tmp", "header.json", "session.v1.jsonl"]) {
+    await rm(path.join(targetDir, name), { force: true }).catch(() => undefined);
+  }
+  await rm(path.join(targetDir, "artifacts"), { recursive: true, force: true }).catch(
+    () => undefined,
+  );
 }
 
 export async function forkSession(
@@ -198,33 +257,42 @@ export async function forkSession(
   atSeq: number,
   opts: { targetDir?: string; id?: string } = {},
 ): Promise<SessionHandle> {
-  const source = readSessionDir(path.resolve(sourceDir));
+  const resolvedSourceDir = path.resolve(sourceDir);
+  const source = readSessionDir(resolvedSourceDir);
   assertForkBoundary(source.events, atSeq);
   const id = opts.id ?? randomUUID();
   assertForkId(id);
+  const rawTargetDir = opts.targetDir;
   const targetDir = path.resolve(
-    opts.targetDir ?? path.join(resolveHarnessHome(), "sessions", id),
+    rawTargetDir === undefined || rawTargetDir === ""
+      ? path.join(resolveHarnessHome(), "sessions", id)
+      : rawTargetDir,
   );
-  await ensureEmptyTargetDir(targetDir);
+  const createdTargetDir = await claimTargetDir(targetDir);
 
-  const prefix = source.events.slice(0, atSeq + 1).map((event) => structuredClone(event));
-  for (const event of prefix) {
-    await relocateArtifact(event, path.resolve(sourceDir), targetDir);
+  try {
+    const prefix = source.events.slice(0, atSeq + 1).map((event) => structuredClone(event));
+    for (const event of prefix) {
+      await relocateArtifact(event, resolvedSourceDir, targetDir);
+    }
+
+    const header: SessionHeader = {
+      id,
+      createdAt: new Date().toISOString(),
+      status: "open",
+      ...(source.header.provider === undefined ? {} : { provider: source.header.provider }),
+      ...(source.header.model === undefined ? {} : { model: source.header.model }),
+      ...(source.header.workdir === undefined ? {} : { workdir: source.header.workdir }),
+      forkedFrom: { sessionId: source.header.id, seq: atSeq },
+    };
+
+    await writeHeaderAtomic(path.join(targetDir, "header.json"), header);
+    const logPath = path.join(targetDir, "session.v1.jsonl");
+    await writeFile(logPath, `${prefix.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+
+    return openSessionHandle(targetDir, header, prefix);
+  } catch (error) {
+    await cleanupTargetDir(targetDir, createdTargetDir);
+    throw error;
   }
-
-  const header: SessionHeader = {
-    id,
-    createdAt: new Date().toISOString(),
-    status: "open",
-    ...(source.header.provider === undefined ? {} : { provider: source.header.provider }),
-    ...(source.header.model === undefined ? {} : { model: source.header.model }),
-    ...(source.header.workdir === undefined ? {} : { workdir: source.header.workdir }),
-    forkedFrom: { sessionId: source.header.id, seq: atSeq },
-  };
-
-  await writeFile(path.join(targetDir, "header.json"), `${JSON.stringify(header)}\n`, "utf8");
-  const logPath = path.join(targetDir, "session.v1.jsonl");
-  await writeFile(logPath, `${prefix.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
-
-  return openSessionHandle(targetDir, header, prefix);
 }

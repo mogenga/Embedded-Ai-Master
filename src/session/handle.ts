@@ -120,7 +120,8 @@ export function openSessionHandle(
   _opts: { generationThresholdBytes?: number } = {},
 ): SessionHandle {
   const sessionDir = path.resolve(dir);
-  const cloned = structuredClone(events);
-  for (const event of cloned) deepFreeze(event);
-  return createHandle(sessionDir, header, cloned, path.join(sessionDir, "session.v1.jsonl"));
+  const clonedEvents = structuredClone(events);
+  for (const event of clonedEvents) deepFreeze(event);
+  const clonedHeader = deepFreeze(structuredClone(header));
+  return createHandle(sessionDir, clonedHeader, clonedEvents, path.join(sessionDir, "session.v1.jsonl"));
 }
