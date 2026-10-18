@@ -25,10 +25,16 @@ export interface BatchOptions {
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_TIMEOUT_MS = 2_147_483_647;
 const ARTIFACT_TOKEN_THRESHOLD = 8_000;
 const MAX_TEXT_TOKENS = 25_000;
 const MAX_TEXT_CHARS = MAX_TEXT_TOKENS * 4;
 const MAX_ARTIFACT_ID_CHARS = 100;
+const MAX_ARTIFACT_ATTEMPTS = 1_000;
+const MAX_NAME_ECHO_CHARS = 200;
+const MAX_SCHEMA_MESSAGE_CHARS = 2_000;
+const MAX_ISSUES = 20;
+const MAX_ISSUE_MESSAGE_CHARS = 500;
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
 class ToolTimeoutError extends Error {
@@ -45,8 +51,12 @@ class ToolAbortedError extends Error {
   }
 }
 
-function failure(code: string, message: string, detail?: unknown): ToolResult {
-  const result: ToolResult = { isError: true, code, message, text: message };
+function truncateText(value: string, maxChars: number): string {
+  return value.length > maxChars ? value.slice(0, maxChars) : value;
+}
+
+function failure(code: string, message: string, detail?: unknown, text = message): ToolResult {
+  const result: ToolResult = { isError: true, code, message, text };
   if (detail !== undefined) result.detail = detail;
   return result;
 }
@@ -56,54 +66,135 @@ function safeArtifactId(id: string): string {
   return WINDOWS_RESERVED_NAME.test(safe) ? `_${safe}` : safe;
 }
 
-function artifactFileName(callId: string): string {
-  const hash8 = createHash("sha256").update(callId).digest("hex").slice(0, 8);
-  return `${safeArtifactId(callId)}-${hash8}.txt`;
+function artifactBaseName(callId: string): string {
+  const hash = createHash("sha256").update(callId).digest("hex").slice(0, 16);
+  return `${safeArtifactId(callId)}-${hash}`;
 }
 
-function resolveTimeoutMs(timeoutMs: number | undefined): number {
-  if (timeoutMs === undefined) return DEFAULT_TIMEOUT_MS;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return DEFAULT_TIMEOUT_MS;
-  return timeoutMs;
+function isEexist(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "EEXIST";
 }
 
-async function persistIfLarge(
-  result: ToolResult,
+async function writeArtifact(artifactDir: string, baseName: string, text: string): Promise<string> {
+  await mkdir(artifactDir, { recursive: true });
+  for (let attempt = 0; attempt < MAX_ARTIFACT_ATTEMPTS; attempt += 1) {
+    const fileName = attempt === 0 ? `${baseName}.txt` : `${baseName}-${attempt}.txt`;
+    const artifactPath = path.join(artifactDir, fileName);
+    try {
+      await writeFile(artifactPath, text, { encoding: "utf8", flag: "wx" });
+      return artifactPath;
+    } catch (error) {
+      if (!isEexist(error)) throw error;
+    }
+  }
+  throw new Error(`artifact name exhausted: ${baseName}`);
+}
+
+function describeType(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function normalizeToolResult(value: unknown): ToolResult {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return failure(
+      "tool_protocol_error",
+      `invalid ToolResult: expected object, got ${describeType(value)}`,
+    );
+  }
+  const record = value as Record<string, unknown>;
+  const problems: string[] = [];
+  if (typeof record.isError !== "boolean") {
+    problems.push(`isError must be boolean, got ${describeType(record.isError)}`);
+  }
+  if (typeof record.code !== "string") {
+    problems.push(`code must be string, got ${describeType(record.code)}`);
+  }
+  if (typeof record.message !== "string") {
+    problems.push(`message must be string, got ${describeType(record.message)}`);
+  }
+  if (typeof record.text !== "string") {
+    problems.push(`text must be string, got ${describeType(record.text)}`);
+  }
+  if (problems.length > 0) {
+    return failure("tool_protocol_error", `invalid ToolResult: ${problems.join("; ")}`);
+  }
+  return record as unknown as ToolResult;
+}
+
+function mergeArtifactError(detail: unknown, artifactError: string): unknown {
+  if (detail !== null && typeof detail === "object" && !Array.isArray(detail)) {
+    return { ...(detail as Record<string, unknown>), artifactError };
+  }
+  if (detail === undefined) return { artifactError };
+  return { originalDetail: detail, artifactError };
+}
+
+async function finalizeResult(
+  value: unknown,
   callId: string,
   artifactDir: string,
 ): Promise<ToolResult> {
+  const result = normalizeToolResult(value);
   const tokens = heuristicCountTokens([{ role: "tool", content: result.text }]);
   if (tokens <= ARTIFACT_TOKEN_THRESHOLD) return result;
 
-  const artifactPath = path.join(artifactDir, artifactFileName(callId));
-  await mkdir(artifactDir, { recursive: true });
-  await writeFile(artifactPath, result.text, "utf8");
-  const text = result.text.length > MAX_TEXT_CHARS ? result.text.slice(0, MAX_TEXT_CHARS) : result.text;
-  return { ...result, text, artifactPath };
+  try {
+    const artifactPath = await writeArtifact(artifactDir, artifactBaseName(callId), result.text);
+    const truncated = result.text.length > MAX_TEXT_CHARS;
+    const body = truncated ? result.text.slice(0, MAX_TEXT_CHARS) : result.text;
+    const marker = truncated
+      ? `\n[truncated; full output at ${artifactPath}]`
+      : `\n[full output at ${artifactPath}]`;
+    return { ...result, text: `${body}${marker}`, artifactPath };
+  } catch (error) {
+    const text = truncateText(result.text, MAX_TEXT_CHARS);
+    const artifactError = error instanceof Error ? error.message : String(error);
+    return { ...result, text, detail: mergeArtifactError(result.detail, artifactError) };
+  }
 }
 
-async function runOne(
+function resolveTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    return DEFAULT_TIMEOUT_MS;
+  }
+  return Math.min(Math.max(Math.floor(timeoutMs), 1), MAX_TIMEOUT_MS);
+}
+
+async function executeOne(
   session: SessionHandle,
   tools: ToolRegistry,
   call: BatchCall,
   opts: BatchOptions,
-): Promise<BatchResult> {
+): Promise<unknown> {
   const tool = tools.lookup(call.name);
   if (!tool) {
-    return { id: call.id, result: failure("tool_not_found", `tool not found: ${call.name}`) };
+    const displayName = truncateText(call.name, MAX_NAME_ECHO_CHARS);
+    return failure(
+      "tool_not_found",
+      `tool not found: ${displayName}`,
+      undefined,
+      `tool not found: ${call.name}`,
+    );
   }
 
   const parsed = tool.schema.safeParse(call.input);
   if (!parsed.success) {
-    const message =
+    const rawMessage =
       parsed.error.issues
         .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
         .join("; ") || "schema validation failed";
-    return { id: call.id, result: failure("schema_validation", message, parsed.error.issues) };
+    const message = truncateText(rawMessage, MAX_SCHEMA_MESSAGE_CHARS);
+    const issues = parsed.error.issues.slice(0, MAX_ISSUES).map((issue) => ({
+      ...issue,
+      message: truncateText(issue.message, MAX_ISSUE_MESSAGE_CHARS),
+    }));
+    return failure("schema_validation", message, issues);
   }
 
   if (opts.signal.aborted) {
-    return { id: call.id, result: failure("tool_aborted", "tool aborted before execution") };
+    return failure("tool_aborted", "tool aborted before execution");
   }
 
   const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
@@ -122,44 +213,53 @@ async function runOne(
     opts.signal.addEventListener("abort", abortListener, { once: true });
   });
 
-  let result: ToolResult;
   try {
     const execution = Promise.resolve().then(() => tool.execute(parsed.data, ctx, signal));
     void execution.catch(() => undefined);
-    result = await Promise.race([execution, timeout, aborted]);
+    return await Promise.race([execution, timeout, aborted]);
   } catch (error) {
     if (error instanceof ToolTimeoutError) {
-      return { id: call.id, result: failure("tool_timeout", error.message) };
+      return failure("tool_timeout", error.message);
     }
     if (error instanceof ToolAbortedError) {
-      return { id: call.id, result: failure("tool_aborted", error.message) };
+      return failure("tool_aborted", error.message);
     }
     if (timeoutSignal.aborted && !opts.signal.aborted) {
-      return { id: call.id, result: failure("tool_timeout", `tool timed out after ${timeoutMs}ms`) };
+      return failure("tool_timeout", `tool timed out after ${timeoutMs}ms`);
     }
     if (error instanceof Error && error.name === "AbortError") {
-      return { id: call.id, result: failure("tool_aborted", error.message || "tool aborted") };
+      return failure("tool_aborted", error.message || "tool aborted");
     }
-    return {
-      id: call.id,
-      result: failure("tool_execution_error", error instanceof Error ? error.message : String(error)),
-    };
+    return failure(
+      "tool_execution_error",
+      error instanceof Error ? error.message : String(error),
+    );
   } finally {
     if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
     if (abortListener !== undefined) opts.signal.removeEventListener("abort", abortListener);
   }
+}
 
-  try {
-    return { id: call.id, result: await persistIfLarge(result, call.id, opts.artifactDir) };
-  } catch (error) {
-    return {
-      id: call.id,
-      result: failure(
-        "tool_execution_error",
-        `artifact write failed: ${error instanceof Error ? error.message : String(error)}`,
-      ),
-    };
-  }
+async function runOne(
+  session: SessionHandle,
+  tools: ToolRegistry,
+  call: BatchCall,
+  opts: BatchOptions,
+): Promise<BatchResult> {
+  const value = await executeOne(session, tools, call, opts);
+  return { id: call.id, result: await finalizeResult(value, call.id, opts.artifactDir) };
+}
+
+async function duplicateResult(call: BatchCall, opts: BatchOptions): Promise<BatchResult> {
+  const message = `duplicate call id: ${truncateText(call.id, MAX_NAME_ECHO_CHARS)}`;
+  return {
+    id: call.id,
+    result: await finalizeResult(
+      failure("duplicate_call_id", message),
+      call.id,
+      opts.artifactDir,
+    ),
+  };
 }
 
 export async function executeBatch(
@@ -168,14 +268,26 @@ export async function executeBatch(
   calls: BatchCall[],
   opts: BatchOptions,
 ): Promise<BatchResult[]> {
-  const concurrent = calls.every((call) => tools.lookup(call.name)?.annotations?.readOnly === true);
+  const seen = new Set<string>();
+  const duplicates = calls.map((call) => {
+    if (typeof call.id !== "string" || call.id.length === 0) return false;
+    if (seen.has(call.id)) return true;
+    seen.add(call.id);
+    return false;
+  });
+  const run = (call: BatchCall, duplicate: boolean): Promise<BatchResult> =>
+    duplicate ? duplicateResult(call, opts) : runOne(session, tools, call, opts);
+
+  const concurrent = calls.every(
+    (call) => tools.lookup(call.name)?.annotations?.readOnly === true,
+  );
   if (concurrent) {
-    return Promise.all(calls.map((call) => runOne(session, tools, call, opts)));
+    return Promise.all(calls.map((call, index) => run(call, duplicates[index])));
   }
 
   const results: BatchResult[] = [];
-  for (const call of calls) {
-    results.push(await runOne(session, tools, call, opts));
+  for (let index = 0; index < calls.length; index += 1) {
+    results.push(await run(calls[index], duplicates[index]));
   }
   return results;
 }

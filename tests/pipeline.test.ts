@@ -1,4 +1,5 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { getEventListeners } from "node:events";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -107,7 +108,7 @@ function artifactPathOf(
   if (artifactPath === undefined) throw new Error("missing artifactPath");
   expect(path.dirname(artifactPath)).toBe(dir);
   expect(path.basename(artifactPath)).toMatch(
-    new RegExp(`^${safeId}-[0-9a-f]{8}\\.txt$`),
+    new RegExp(`^${safeId}-[0-9a-f]{16}(?:-\\d+)?\\.txt$`),
   );
   return artifactPath;
 }
@@ -273,10 +274,16 @@ describe("executeBatch 错误与取消", () => {
     expect(results[0].result.text).toContain("kaboom");
   });
 
-  it("timeoutMs 到期 → tool_timeout,即使工具不监听 signal", async () => {
+  it("timeoutMs 到期 → tool_timeout,且工具收到的 signal 已 abort", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
-    const spans: Span[] = [];
-    const reg = new ToolRegistry([delayedTool("slow", 50, true, spans)]);
+    let received: AbortSignal | undefined;
+    const reg = new ToolRegistry([
+      makeTool<{}>("slow", async (_input, _ctx, signal) => {
+        received = signal;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return ok("slow");
+      }, true),
+    ]);
 
     const results = await executeBatch(session, reg, [call("1", "slow")], {
       signal: new AbortController().signal,
@@ -286,6 +293,8 @@ describe("executeBatch 错误与取消", () => {
 
     expect(results[0].result.isError).toBe(true);
     expect(results[0].result.code).toBe("tool_timeout");
+    expect(received).toBeDefined();
+    expect(received?.aborted).toBe(true);
   });
 
   it("超时 abort 后工具抛 AbortError → tool_timeout", async () => {
@@ -329,6 +338,21 @@ describe("executeBatch 错误与取消", () => {
       expect(results[0].result).toMatchObject({ isError: false, code: "ok", text: "slow" });
     },
   );
+
+  it.each([1.5, 5_000_000_000])("timeoutMs=%s 整数化/上限化且不抛错", async (timeoutMs) => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const reg = new ToolRegistry([
+      makeTool<{}>("instant", async () => ok("instant"), true),
+    ]);
+
+    const results = await executeBatch(session, reg, [call("1", "instant")], {
+      signal: new AbortController().signal,
+      artifactDir: artifactDir(),
+      timeoutMs,
+    });
+
+    expect(results[0].result).toMatchObject({ isError: false, code: "ok", text: "instant" });
+  });
 
   it("批次 signal 已取消 → tool_aborted 且不执行工具", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
@@ -387,6 +411,21 @@ describe("executeBatch 错误与取消", () => {
     expect(results[0].result.isError).toBe(true);
     expect(results[0].result.code).toBe("tool_aborted");
   });
+
+  it("executeBatch 结束后移除 opts.signal 的 abort 监听", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const controller = new AbortController();
+    const reg = new ToolRegistry([makeTool<{}>("ok", async () => ok("done"), true)]);
+
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+
+    await executeBatch(session, reg, [call("1", "ok")], {
+      signal: controller.signal,
+      artifactDir: artifactDir(),
+    });
+
+    expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
+  });
 });
 
 describe("executeBatch 证据落盘", () => {
@@ -421,13 +460,15 @@ describe("executeBatch 证据落盘", () => {
 
     const result = results[0].result;
     expect(result.isError).toBe(false);
-    expect(result.text).toBe(text);
+    expect(result.text.startsWith(text)).toBe(true);
+    expect(result.text).toContain("[full output at");
     const artifactPath = artifactPathOf(result.artifactPath, dir, "big-1");
+    expect(result.text).toContain(artifactPath);
     expect(await readFile(artifactPath, "utf8")).toBe(text);
     expect(append).not.toHaveBeenCalled();
   });
 
-  it("30000 token 输出 → text 截断为 100000 字符,落盘保留全文", async () => {
+  it("30000 token 输出 → 截断并追加 truncated 标记,落盘保留全文", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "y".repeat(120000);
     const reg = new ToolRegistry([outputTool("huge", text)]);
@@ -439,9 +480,10 @@ describe("executeBatch 证据落盘", () => {
     });
 
     const result = results[0].result;
-    expect(result.text.length).toBe(100000);
-    expect(result.text).toBe(text.slice(0, 100000));
+    expect(result.text.startsWith(text.slice(0, 100000))).toBe(true);
+    expect(result.text).toContain("[truncated; full output at");
     const artifactPath = artifactPathOf(result.artifactPath, dir, "huge-1");
+    expect(result.text).toContain(artifactPath);
     expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
 
@@ -473,7 +515,10 @@ describe("executeBatch 证据落盘", () => {
     });
 
     const result = results[0].result;
+    expect(result.text.startsWith(text)).toBe(true);
+    expect(result.text).toContain("[full output at");
     const artifactPath = artifactPathOf(result.artifactPath, dir, "edge-8001");
+    expect(result.text).toContain(artifactPath);
     expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
 
@@ -489,13 +534,15 @@ describe("executeBatch 证据落盘", () => {
     });
 
     const result = results[0].result;
-    expect(result.text).toBe(text);
-    expect(result.text).toHaveLength(100000);
+    expect(result.text.startsWith(text)).toBe(true);
+    expect(result.text).toContain("[full output at");
+    expect(result.text).not.toContain("[truncated");
     const artifactPath = artifactPathOf(result.artifactPath, dir, "edge-100000");
+    expect(result.text).toContain(artifactPath);
     expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
 
-  it("100001 字符截断为前 100000", async () => {
+  it("100001 字符截断为前 100000 并追加 truncated 标记", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "h".repeat(100001);
     const reg = new ToolRegistry([outputTool("edge", text)]);
@@ -507,9 +554,10 @@ describe("executeBatch 证据落盘", () => {
     });
 
     const result = results[0].result;
-    expect(result.text).toHaveLength(100000);
-    expect(result.text).toBe(text.slice(0, 100000));
+    expect(result.text.startsWith(text.slice(0, 100000))).toBe(true);
+    expect(result.text).toContain("[truncated; full output at");
     const artifactPath = artifactPathOf(result.artifactPath, dir, "edge-100001");
+    expect(result.text).toContain(artifactPath);
     expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
 
@@ -570,27 +618,275 @@ describe("executeBatch 证据落盘", () => {
     expect(await readFile(second, "utf8")).toBe(textB);
   });
 
-  it("模型控制的 call.id 无法路径穿越", async () => {
+  it.each([
+    ["parent-traversal", "../evil", "___evil"],
+    ["windows-traversal", "..\\evil", "___evil"],
+    ["absolute", "C:\\Windows\\x", "C__Windows_x"],
+    ["nul", "\u0000ctrl", "_ctrl"],
+    ["chinese", "中文", "__"],
+    ["long", "a".repeat(300), "a".repeat(100)],
+  ])("路径 id（%s）被限制在 artifactDir 内", async (_label, id, safeId) => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "z".repeat(40000);
     const reg = new ToolRegistry([outputTool("big", text)]);
     const dir = artifactDir();
 
-    const results = await executeBatch(session, reg, [call("../evil", "big")], {
+    const results = await executeBatch(session, reg, [call(id, "big")], {
       signal: new AbortController().signal,
       artifactDir: dir,
     });
 
-    const artifactPath = results[0].result.artifactPath;
-    expect(artifactPath).toBeDefined();
-    if (artifactPath === undefined) throw new Error("missing artifactPath");
+    const result = results[0].result;
+    expect(result.isError).toBe(false);
+    const artifactPath = artifactPathOf(result.artifactPath, dir, safeId);
     const fileName = path.basename(artifactPath);
     expect(fileName).not.toContain("..");
     expect(fileName).not.toContain("/");
     expect(fileName).not.toContain("\\");
-    expect(fileName).toMatch(/^___evil-[0-9a-f]{8}\.txt$/);
-    expect(path.dirname(artifactPath)).toBe(dir);
     expect(await readFile(artifactPath, "utf8")).toBe(text);
+  });
+});
+
+describe("executeBatch 证据唯一性", () => {
+  it("同批重复 id → 第二次 duplicate_call_id 且不执行", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const execute = vi.fn(async () => ok("first"));
+    const reg = new ToolRegistry([makeTool<{}>("tool", execute, true)]);
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("dup", "tool"), call("dup", "tool")],
+      { signal: new AbortController().signal, artifactDir: artifactDir() },
+    );
+
+    expect(results[0].result.code).toBe("ok");
+    expect(results[1].result).toMatchObject({ isError: true, code: "duplicate_call_id" });
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("同批两个 readOnly 工具同 id 不覆盖", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const textA = "p".repeat(40000);
+    const textB = "q".repeat(40000);
+    const reg = new ToolRegistry([
+      outputTool("first-tool", textA),
+      outputTool("second-tool", textB),
+    ]);
+    const dir = artifactDir();
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("same", "first-tool"), call("same", "second-tool")],
+      { signal: new AbortController().signal, artifactDir: dir },
+    );
+
+    expect(results[0].result.code).toBe("ok");
+    expect(results[1].result.code).toBe("duplicate_call_id");
+    const artifactPath = artifactPathOf(results[0].result.artifactPath, dir, "same");
+    expect(await readFile(artifactPath, "utf8")).toBe(textA);
+    expect(await readdir(dir)).toHaveLength(1);
+  });
+
+  it("跨批同 id 两次落盘两个文件且内容各自正确", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const textA = "r".repeat(40000);
+    const textB = "s".repeat(40000);
+    const reg = new ToolRegistry([
+      outputTool("big-a", textA),
+      outputTool("big-b", textB),
+    ]);
+    const dir = artifactDir();
+
+    const first = await executeBatch(session, reg, [call("shared", "big-a")], {
+      signal: new AbortController().signal,
+      artifactDir: dir,
+    });
+    const second = await executeBatch(session, reg, [call("shared", "big-b")], {
+      signal: new AbortController().signal,
+      artifactDir: dir,
+    });
+
+    const firstPath = artifactPathOf(first[0].result.artifactPath, dir, "shared");
+    const secondPath = artifactPathOf(second[0].result.artifactPath, dir, "shared");
+    expect(firstPath).not.toBe(secondPath);
+    expect(path.basename(secondPath)).toMatch(/-1\.txt$/);
+    expect(await readFile(firstPath, "utf8")).toBe(textA);
+    expect(await readFile(secondPath, "utf8")).toBe(textB);
+  });
+});
+
+describe("executeBatch ToolResult 形状校验", () => {
+  it.each([
+    ["null", null],
+    ["缺少 text", { isError: false, code: "ok", message: "" }],
+    ["text 为 null", { isError: false, code: "ok", message: "", text: null }],
+    ["text 为 number", { isError: false, code: "ok", message: "", text: 1 }],
+    ["isError 为 string", { isError: "false", code: "ok", message: "", text: "x" }],
+  ])("%s → tool_protocol_error", async (_label, bad) => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const reg = new ToolRegistry([
+      makeTool<{}>("bad", async () => bad as unknown as ToolResult, true),
+    ]);
+
+    const results = await executeBatch(session, reg, [call("1", "bad")], {
+      signal: new AbortController().signal,
+      artifactDir: artifactDir(),
+    });
+
+    const result = results[0].result;
+    expect(result).toMatchObject({ isError: true, code: "tool_protocol_error" });
+    expect(result.message).toContain("invalid ToolResult");
+    expect(result.text).toBe(result.message);
+  });
+
+  it("协议错误摘要不拼接原始大对象", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const bad = {
+      isError: false,
+      code: "ok",
+      message: "",
+      text: 1,
+      blob: "z".repeat(100000),
+    };
+    const reg = new ToolRegistry([
+      makeTool<{}>("bad", async () => bad as unknown as ToolResult, true),
+    ]);
+
+    const results = await executeBatch(session, reg, [call("1", "bad")], {
+      signal: new AbortController().signal,
+      artifactDir: artifactDir(),
+    });
+
+    const result = results[0].result;
+    expect(result.code).toBe("tool_protocol_error");
+    expect(result.message.length).toBeLessThan(500);
+    expect(result.message).not.toContain("zzzz");
+  });
+});
+
+describe("executeBatch 落盘失败", () => {
+  async function blockedArtifactDir(): Promise<string> {
+    const blocked = path.join(tmp, "blocked");
+    await writeFile(blocked, "x");
+    return blocked;
+  }
+
+  it("成功结果保留 isError/text 并记录 artifactError", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const text = "t".repeat(40000);
+    const reg = new ToolRegistry([outputTool("big", text)]);
+    const dir = await blockedArtifactDir();
+
+    const results = await executeBatch(session, reg, [call("1", "big")], {
+      signal: new AbortController().signal,
+      artifactDir: dir,
+    });
+
+    const result = results[0].result;
+    expect(result.isError).toBe(false);
+    expect(result.code).toBe("ok");
+    expect(result.text).toBe(text);
+    expect(result.artifactPath).toBeUndefined();
+    expect(result.detail).toMatchObject({ artifactError: expect.any(String) });
+  });
+
+  it("错误结果保留原 code 并记录 artifactError", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const text = "u".repeat(40000);
+    const reg = new ToolRegistry([
+      makeTool<{}>(
+        "fails",
+        async () => ({ isError: true, code: "tool_failed", message: "failed", text }),
+        true,
+      ),
+    ]);
+    const dir = await blockedArtifactDir();
+
+    const results = await executeBatch(session, reg, [call("1", "fails")], {
+      signal: new AbortController().signal,
+      artifactDir: dir,
+    });
+
+    const result = results[0].result;
+    expect(result.isError).toBe(true);
+    expect(result.code).toBe("tool_failed");
+    expect(result.text).toBe(text);
+    expect(result.detail).toMatchObject({ artifactError: expect.any(String) });
+  });
+});
+
+describe("executeBatch 出口限长", () => {
+  it("300000 字符 call.name → text 截断/落盘并带 truncated 标记", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const reg = new ToolRegistry([]);
+    const dir = artifactDir();
+
+    const results = await executeBatch(session, reg, [call("long-name", "n".repeat(300000))], {
+      signal: new AbortController().signal,
+      artifactDir: dir,
+    });
+
+    const result = results[0].result;
+    expect(result.code).toBe("tool_not_found");
+    expect(result.message.length).toBeLessThanOrEqual(220);
+    expect(result.text.startsWith("tool not found: ")).toBe(true);
+    expect(result.text).toContain("[truncated; full output at");
+    const artifactPath = artifactPathOf(result.artifactPath, dir, "long-name");
+    expect(result.text).toContain(artifactPath);
+  });
+
+  it("200000 字符 schema 键 → message ≤2000 且 issues ≤20", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const key = "k".repeat(200000);
+    const reg = new ToolRegistry([
+      {
+        name: "big-schema",
+        description: "大键 schema",
+        schema: z.object({ [key]: z.string() }),
+        annotations: { readOnly: true },
+        execute: async () => ok("never"),
+      },
+    ]);
+
+    const results = await executeBatch(session, reg, [call("1", "big-schema", {})], {
+      signal: new AbortController().signal,
+      artifactDir: artifactDir(),
+    });
+
+    const result = results[0].result;
+    expect(result.code).toBe("schema_validation");
+    expect(result.message.length).toBeLessThanOrEqual(2000);
+    const issues = result.detail as Array<{ message: string }>;
+    expect(issues.length).toBeLessThanOrEqual(20);
+    for (const issue of issues) expect(issue.message.length).toBeLessThanOrEqual(500);
+  });
+
+  it("超过 20 条 schema issue 只保留 20 条", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const shape: Record<string, z.ZodString> = {};
+    for (let index = 0; index < 25; index += 1) {
+      shape[`field_${index}`] = z.string();
+    }
+    const reg = new ToolRegistry([
+      {
+        name: "many-issues",
+        description: "多问题 schema",
+        schema: z.object(shape),
+        annotations: { readOnly: true },
+        execute: async () => ok("never"),
+      },
+    ]);
+
+    const results = await executeBatch(session, reg, [call("1", "many-issues", {})], {
+      signal: new AbortController().signal,
+      artifactDir: artifactDir(),
+    });
+
+    const issues = results[0].result.detail as Array<{ message: string }>;
+    expect(issues).toHaveLength(20);
+    for (const issue of issues) expect(issue.message.length).toBeLessThanOrEqual(500);
   });
 });
 
