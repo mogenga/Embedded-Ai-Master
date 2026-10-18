@@ -1,0 +1,270 @@
+# P0 前端工程（Web 工作台）实现设计
+
+> 版本 v1.0 · 2026-10-18 · 状态：设计基线，等待实现
+> 上位事实源：`docs/frontend-design.md` v1.1（设计契约与视觉令牌，本 spec 不重复其全部内容，只落地工程实现决策）；视觉基线：`prototypes/index.html`
+> 本 spec 边界：只定义前端工程的目录结构、模块职责、构建/测试配置、类型接线、状态投影、验收映射；不定义内核行为，不修改内核语义。
+
+---
+
+## 1. 目标与范围
+
+在 `feat/p0` 分支上落地一个可运行的 Web 工作台（诊断工作台），实现 `docs/frontend-design.md` 定义的三栏布局、三态主题、消息流组件、调试坞、状态栏与回放能力。工程必须与既有内核（`src/loop` / `src/session`）复用同一套事件类型，避免第二套投影逻辑。
+
+### 1.1 范围内
+
+- 前端工程脚手架：Vite 构建、Preact 组件化、vitest 组件测试环境（happy-dom）。
+- 三栏工作台布局与响应式降级（对齐 frontend-design §4、§11）。
+- 三态主题系统（light / system / dark），`localStorage` 键 `eam-theme`，默认 `system`。
+- 全部 15 个组件规格（topbar / knowledge pane / session pane / conversation header / pathline / message stream / tool card / verdict card / guard notice / composer / dock / device monitor / port settings / debug log / status bar）。
+- `TranscriptView` 纯函数归约（前端唯一视图模型；实时渲染与回放共用）。
+- SSE + HTTP POST 客户端抽象（保留 `EventSource` 替换点）。
+- 视觉验收脚本：V1-V14 在无头 Chromium 下实测（对齐 frontend-design §12）。
+
+### 1.2 范围外
+
+- 不做真实后端接线（内核 `query` 的 SSE 服务端尚未实现）；前端只提供传输抽象与 demo 数据回放。
+- 不做移动端优先；窄屏仅"可用降级"。
+- 不做 MCP server 工具清单与权限策略界面。
+- 不新增内核测试；不改变 `src/loop` / `src/session` 现有语义。
+
+---
+
+## 2. 技术约束（内联，完整，实施不得更改）
+
+以下为已定案约束（来源：AGENTS.md 硬约束 + frontend-design §2）：
+
+- **语言与运行时**：TypeScript + Node 24，ESM-only，禁止 CommonJS 混用；`package.json` `"engines": { "node": ">=24" }`。
+- **前端框架**：**Preact + Vite**（2026-10-18 定案，OPEN-UI-01）。Preact 只承担组件化与增量 diff；会话状态都必须留在纯函数投影（`TranscriptView`）中，不得塞进组件内部状态。构建产物为 ESM；Vite 仅用于开发期与打包。
+- **依赖**：`preact`（dependency）；`@preact/preset-vite`、`vite`、`happy-dom`（devDependencies）。`vitest` 已存在（^4.1.6，devDependencies）。除上述外**不新增任何依赖**。
+- **Preact JSX 配置**：TypeScript `"jsx": "react-jsx"`、`"jsxImportSource": "preact"`（Context7 查证 @preact/preset-vite 官方要求）。
+- **Vite 配置**：仓库根 `vite.config.ts` 使用 `plugins: [preact()]`、`build.outDir: "dist-web"`、`build.rollupOptions.input: "web/index.html"`（Context7 查证：`@preact/preset-vite` 官方入门）；入口 `web/index.html` → `src/ui/main.tsx`；产物 `dist-web/`。根 `vitest.config.ts` 优先于 `vite.config.ts` 被 vitest 读取，二者不冲突。
+- **主题**：令牌定义在 `:root`（夜间基线）；日间令牌同时定义在 `[data-theme="light"]` 与 `@media (prefers-color-scheme: light) { [data-theme="system"] }`（frontend-design §6.2）。`localStorage` 键 `eam-theme`，值 `light | system | dark`，默认 `system`。切换不重载、不丢滚动位置。
+- **零 emoji**：界面图标一律内联 SVG（页内 `<symbol>` sprite + `<use>`）；状态点、连接线、分隔线用 CSS 绘制；文案中不使用 emoji（含 `→` 之外的一切图形符号）。
+- **样式**：所有颜色经 CSS 变量引用，组件中**禁止硬编码十六进制值**；令牌与组件样式集中在单一样式表 `src/ui/styles.css`，从 `prototypes/index.html` 提取，不引用原型文件。
+- **测试**：vitest（当前仓库 `vitest ^4.1.6`）。内核测试保持 node 环境不变；UI 组件测试在文件头部使用 `// @vitest-environment happy-dom` 注释切换环境（避免改动全局 environment）。`vitest.config.ts` 的 `test.include` 扩展为 `tests/**/*.test.{ts,tsx,js}`（只加 tsx 扩展名，其余配置不动）。UI 逻辑纯函数（投影、主题解析、SSE 抽象）在 node 环境测试。
+- **严格模式**：`strict: true`；相对导入带 `.js` 后缀；`verbatimModuleSyntax` 生效（类型导入用 `import type`）。
+- **不加代码注释**：生产代码与样式不加说明性注释。
+- **浏览器基线**：Chromium 系与 Firefox 当前稳定版；滚动条使用标准属性 `scrollbar-color` + `::-webkit-scrollbar` 双写（frontend-design §5.4）。
+- **安全边界落到界面**：写内存 / 复位操作的确认流程必须存在且默认不生效（R2）；工具失败显式展示错误（R3）。
+- **查证规则**：涉及库/框架用法必须已通过 Context7 核实（Preact preset-vite 配置、vitest happy-dom/projects 用法均已核实）。
+- **Git 协作**：禁止 `git worktree`；只开分支；提交信息 `type(scope): 中文描述 ≤50 字`；依赖安装由用户手动执行（控制器不得运行 `npm install`）。
+
+---
+
+## 3. 工程结构
+
+```
+vite.config.ts                # 仓库根；plugins:[preact()]，input web/index.html，产物 dist-web/
+web/
+  index.html                  # Vite 入口（静态骨架：root 容器 + 内联首屏主题脚本）
+src/ui/
+  main.tsx                    # 入口：读取主题 → render(<App/>)
+  app.tsx                     # App 根：TopBar / Workspace(Rail, Conversation, Dock) / StatusBar
+  theme.ts                    # 主题三态解析与切换（纯函数 + DOM 副作用分离）
+  icons.tsx                   # <Icon name> 组件 + Symbol sprite 定义（可被测试引用）
+  styles.css                  # 全部令牌 + 组件样式（从 prototypes/index.html 提取整理）
+  components/
+    topbar.tsx                # Brand / TargetChips / ThemeSwitch / DockToggle
+    rail/knowledge-pane.tsx   # 检索框 + 知识库树（32px 行、chevron、aria-expanded）
+    rail/session-pane.tsx     # 会话列表（进行中/历史分组、状态点）
+    conversation/header.tsx   # 会话头（标题/状态胶囊/回放/导出）
+    conversation/pathline.tsx # 五步诊断路径条
+    conversation/stream.tsx   # 消息流容器（滚动、gap）
+    conversation/messages.tsx # UserTurn / AgentTurn / AskBlock / Bubble 渲染
+    conversation/tool-card.tsx      # ToolCard（readout / hitlist / evidence / 错误态 / 大输出折叠）
+    conversation/verdict-card.tsx   # VerdictCard（根因/证据链/可证伪/动作归属）
+    conversation/guard-notice.tsx   # GuardNotice（R2 确认提示）
+    conversation/composer.tsx       # Composer（输入/Enter 发送/禁用态）
+    dock/device-monitor.tsx   # 设备监控（字段/按钮/寄存器表）
+    dock/port-settings.tsx    # 端口设置（select/统计卡）
+    dock/debug-log.tsx        # 调试日志（时间/类型标记/文本，自动滚动与暂停）
+    statusbar.tsx             # 状态栏（探针/串口/告警/会话/上下文/费用/平台）
+  view/
+    transcript.ts             # TranscriptView 归约（纯函数，可测，前端唯一视图模型）
+    sse.ts                    # EventSource 抽象 + HTTP POST 动作客户端
+  demo/
+    fixtures.ts               # 演示会话数据（与原型内容一致，供回放/开发态）
+tests/
+  ui/                         # 前端测试（组件用 happy-dom 环境注释，纯逻辑 node 环境）
+
+scripts/
+  verify-ui.mjs               # 无头 Chromium 视觉验收脚本（V1-V14，探针注入）
+```
+
+### 3.1 模块职责边界
+
+- `view/transcript.ts` 是**唯一**状态归约处：输入 `SessionEvent[]` / `LoopEvent[]`，输出 `TranscriptView`。组件一律只读 `TranscriptView` 渲染，不得自行聚合事件。
+- `theme.ts` 分离纯解析（`resolveTheme(choice, media)` → `"light" | "dark"`）与副作用（apply/persist）。
+- `sse.ts` 提供 `createEventStream(url, handlers)`，内部持 `EventSource`，处理重连与 `interrupted`/`done` 分派；`postAction(url, body)` 走 HTTP POST。二者均为独立纯逻辑/薄封装，可注入 `fetch` 与 `EventSource` 以便测试。
+- `icons.tsx` 暴露 `<Icon name="i-logo" size={16}/>`，内部 `<use href="#<name>">`；sprite 声明为受控 SVG（`aria-hidden` + `focusable=false`）。
+- 每个组件文件一个默认导出组件；无内部私有状态（除 Composer 输入框、Dock 分区折叠等**纯 UI 局部态**，与业务状态无关）。
+
+### 3.2 构建与测试命令（合并进根 package.json）
+
+```jsonc
+{
+  "scripts": {
+    "build:web": "vite build",
+    "dev:web": "vite",
+    "verify:ui": "node scripts/verify-ui.mjs",
+    "test:ui": "vitest run tests/ui",
+    "typecheck:web": "tsc -p tsconfig.web.json --noEmit"
+  }
+}
+```
+
+类型检查采用两个 tsconfig：内核 `tsconfig.json`（现状不动）与 `tsconfig.web.json`（extends 内核，`include: ["src/ui", "web", "tests/ui"]`，补 `"jsx": "react-jsx"`、`"jsxImportSource": "preact"`、`lib` 加 DOM）。内核 build（`tsconfig.build.json`）**排除 `src/ui`**，避免前端代码进入内核产物；Web 产物由 Vite 单独产出 `dist-web/`。
+
+---
+
+## 4. 类型接线
+
+前端复用内核现有类型，不复制定义（`import type` + 相对导入 `.js` 后缀）：
+
+| 内核来源 | 类型 | 前端用途 |
+|---|---|---|
+| `src/session/types.ts` | `SessionEvent` / `EventType` / `AssistantPayload` / `ToolResultPayload` | TranscriptView 归约输入、回放 |
+| `src/loop/events.ts` | `LoopEvent`（已扩展 `tool_result` 透传 `code`/`detail`/`artifactPath`） | 实时渲染输入（V13 与回放共用归约） |
+| `src/tools/types.ts` | `ToolAnnotations` | 工具卡语义（readOnly / evidence / destructive） |
+
+**禁止**：前端在 `src/ui/` 重新声明上述类型或字段。
+
+---
+
+## 5. 状态投影（TranscriptView）
+
+`view/transcript.ts` 导出：
+
+```ts
+export type TranscriptStep = "symptom" | "triage" | "kb" | "probe" | "verdict";
+export interface TranscriptView {
+  steps: Array<{ id: TranscriptStep; label: string; state: "done" | "now" | "todo" }>;
+  status: "idle" | "diagnosing" | "done" | "interrupted";
+  events: TranscriptEvent[];          // 保序、只读
+  usage?: { prompt: number; completion: number; cached: number; costUsd?: number };
+  context?: { used: number; limit: number };
+  cost?: number;
+  interruptReason?: string;
+}
+export type TranscriptEvent =
+  | { id: string; kind: "user"; text: string }
+  | { id: string; kind: "assistant"; text: string }
+  | { id: string; kind: "ask"; text: string; note?: string }
+  | { id: string; kind: "tool"; tool: ToolCardModel }
+  | { id: string; kind: "verdict"; verdict: VerdictCardModel }
+  | { id: string; kind: "guard"; guard: GuardModel }
+  | { id: string; kind: "interrupted"; reason: string };
+```
+
+规则（对齐 frontend-design §8.2 投影表）：
+
+- `user` 事件 → 用户气泡；`assistant`（content 非空）→ agent 气泡；`assistant`（toolCalls 非空）→ 工具卡骨架；`tool_result` → 对应工具卡结果区（以 `detail` > `text` > 错误占位为渲染优先级）；`usage` → 状态栏与费用；`status` → 状态胶囊；`interrupted` → 中断提示（danger）并保留既有证据；`checkpoint` / `compaction` 不直接渲染。
+- 工具结果 `ok=false` 必须渲染 `code` 与错误文本，不得渲染空白读数。
+- 写类工具（destructive）默认进入"待确认"，未确认不显示已执行。
+- 归约必须是纯函数、确定性；同一事件序列输入两次必须得同一 `TranscriptView`（V13 一致性前提）。
+- 组件只消费 `TranscriptView`。
+
+---
+
+## 6. 组件规格映射
+
+每个组件严格落地 frontend-design §7 对应小节（尺寸、令牌、aria 属性、动效 160ms、`prefers-reduced-motion` 关闭过渡）。映射表供实现与审查对照，不逐条复制设计文档原文：
+
+| frontend-design § | 组件 | 关键硬性点 |
+|---|---|---|
+| 7.1 | TopBar | 48px 高；三段栅格 `264px | 1fr | auto`；ThemeSwitch 30×24、`aria-pressed` |
+| 7.2 | KnowledgePane | 检索框高 30、占位「kb_lookup · 寄存器名 / 错误码 / 症状」；树行 32px；chevron 旋转 90°；当前厂商 `--accent-soft` 底 |
+| 7.3 | SessionPane | 分组标题 10.5px 弱色；状态点 run/warn/idle；当前会话 `--bg-active` 底 + 1px `--border` |
+| 7.4 | ConversationHeader | 40px 高；左右对齐 20px；回放/导出次级按钮 |
+| 7.5 | PathLine | 五步固定序列；done/now/todo 三态样式；步间连线 14×1px `--border-strong` |
+| 7.6 | MessageStream | 容器 20px 内边距、条目 20px gap；用户靠右 max 540px；AskBlock 左 2px `--info` 竖条 |
+| 7.7 | ToolCard | 卡头 34px `--bg-inset`；三种卡体形态；失败标记 `--danger`；大输出折叠「摘要 + 行数 + 展开」 |
+| 7.8 | VerdictCard | `--accent-line` 1px 边；四区块；动作归属三列等宽；置信度高/中/低 |
+| 7.9 | GuardNotice | `--warn` 1px 边 + `--warn-soft` 底；写明操作类型/目标地址/写入值/当前状态 |
+| 7.10 | Composer | 22px 起随内容长到 120px；Enter 发送 Shift+Enter 换行；空输入禁用发送 |
+| 7.11 | Dock | 404px（<1180 340px）；分区头 38px 可折叠 `aria-expanded` |
+| 7.12 | DeviceMonitor | 标签列 96px；复位按钮 danger 语义进确认流程；寄存器异常值 `--warn` 保留原文本 |
+| 7.13 | PortSettings | 原生 select；错误帧非 0 用 `--danger`；未打开端口统计显示 `—` 不显示 `0` |
+| 7.14 | DebugLog | 三列时间 56px/标记/文本；发送 `--wave-4` 接收 `--wave-1` KB `--wave-2` 错误 `--danger`；上滚后暂停自动滚动 |
+| 7.15 | StatusBar | 26px 高；左右分区；数值 `tabular-nums` 等宽 |
+
+---
+
+## 7. 实时通道抽象
+
+`view/sse.ts` 导出：
+
+```ts
+export interface StreamHandlers {
+  onEvent(ev: LoopEvent): void;
+  onOpen?(): void;
+  onError?(err: unknown): void;
+}
+export function createEventStream(url: string, handlers: StreamHandlers, deps?: { EventSourceCtor?: typeof EventSource; retryMs?: number }): { close(): void };
+export async function postAction<T>(url: string, body: unknown, deps?: { fetchImpl?: typeof fetch }): Promise<T>;
+```
+
+- `createEventStream` 内部以 `EventSource` 实现，收到 `message` 解析 JSON 为 `LoopEvent` 后交 `onEvent`；连接断开按 `retryMs` 重连；显式 `close()` 后不再重连。
+- `postAction` 以 `Content-Type: application/json` POST，非 2xx 抛结构化错误。
+- 依赖注入点（`EventSourceCtor` / `fetchImpl`）供 vitest node 环境测试。
+- 本工程只交付抽象与针对性测试；真实 SSE 服务端接线在服务端实现后接入（见 §1.2）。
+
+---
+
+## 8. 验收映射（V1-V14）
+
+frontend-design §12 的 14 项验收由 `scripts/verify-ui.mjs` 在无头 Chromium 下实测（沿用原型验证同款探针注入法），实现后必须逐项通过。验收脚本读取 `dist-web/` 构建产物页面，注入几何探针并断言：
+
+| 验收 | 断言方法 |
+|---|---|
+| V1 三栏头部对齐 | 左/中/右栏头 boundingClientRect：y=48, height=40 |
+| V2 栏宽 | 左 264、右 404（≥1180px）；主区 = 视口 − 664 |
+| V3 内容对齐 | 内容宽 = 主区宽 − 40 |
+| V4 无横向溢出 | `document.scrollWidth === innerWidth` |
+| V5 无文本截断 | 关键文本元素 scrollWidth ≤ clientWidth + 1 |
+| V6 知识库树完整 | 717px 高工作区下默认展开树不裁剪 |
+| V7 滚动条配色 | dark/light thumb 计算色符合令牌表 |
+| V8 滚动条占位 | 出现滚动条时实占 10px、无横向溢出 |
+| V9 三主题解析 | light/dark/system 的 canvas/accent 计算值符合 §5.1 |
+| V10 无 emoji | 页面文本扫描无 emoji 码点 |
+| V11 焦点可见 | Tab 遍历控件均有可见焦点环 |
+| V12 减少动效 | 开启 reduce 后无过渡与平滑滚动 |
+| V13 回放一致性 | 同一会话 fixture 实时渲染与回放渲染组件序列一致（vitest 断言补充） |
+| V14 写操作确认 | 未确认时界面不显示"已执行" |
+
+运行 `npm run build:web` 后执行 `npm run verify:ui`（依赖系统 Chromium 可执行文件，见脚本 TOCTOU 探测：找不到可执行文件时报明确错误）。
+
+---
+
+## 9. 测试策略
+
+- **内核测试**：`tests/` 现状不动，node 环境。
+- **前端逻辑测试**（node 环境）：`tests/ui/transcript.test.ts`（归约、投影规则、ok=false 错误渲染、V13 fixture 一致性）、`tests/ui/theme.test.ts`（三态解析、边界值）、`tests/ui/sse.test.ts`（重连、close、POST 错误）。
+- **组件测试**（happy-dom，文件头 `// @vitest-environment happy-dom`）：`tests/ui/components/` 下对齐每个组件文件，断言渲染结果与交互（点击折叠、aria 属性、禁用态、`use` 引用图标、无硬编码颜色断言通过 spot check）。
+- **验收**：`scripts/verify-ui.mjs` 无头 Chromium 实测 V1-V14。
+- 每任务 TDD：先写失败测试（RED）→ 最小实现（GREEN）→ 全量验证 → 提交。
+
+---
+
+## 10. 演示数据
+
+`src/ui/demo/fixtures.ts` 提供一个 `SessionEvent[]` 会话 fixture，内容与 `prototypes/index.html` 的消息流一致（UART 乱码诊断：user 气泡 → AskBlock → 用户回答 → kb_lookup 命中 → mem_read×2 证据 → 根因判决 → guard 提示），供回放模式、开发态与验收 V13 使用。组件在无 SSE 连接时以回放模式渲染该 fixture；编程接口允许传入任意 `SessionEvent[]`。
+
+---
+
+## 11. 决策记录（本 spec 新增）
+
+| ID | 结论 | 依据 |
+|---|---|---|
+| UI-SPEC-01 | 前端代码置于 `src/ui/`，与内核同仓同类型域；Web 构建独立 tsconfig.web.json + Vite 产物 `dist-web/` | 复用内核事件类型避免第二套投影；内核构建不被前端 JSX 污染 |
+| UI-SPEC-02 | UI 组件测试用文件头 `// @vitest-environment happy-dom` 切换环境，不改全局 vitest config | 内核测试保持 node 环境零扰动；vitest 官方支持 per-file environment 注释 |
+| UI-SPEC-03 | 组件测试在 happy-dom 断言结构/aria/交互；几何与浏览器行为（V1-V12、V14）全走无头 Chromium `verify-ui.mjs` | happy-dom 不测真实几何布局；浏览器基线为 Chromium 系 |
+| UI-SPEC-04 | 本阶段不回接真实 SSE 服务端，交付 `EventSource` 抽象 + fixture 回放 | 服务端 SSE 未实现；保持前端可独立验收（BR-6 回放依赖会话日志而非硬件） |
+
+---
+
+## 12. 变更记录
+
+| 版本 | 日期 | 说明 |
+|---|---|---|
+| v1.0 | 2026-10-18 | 首版：依据 frontend-design.md v1.1 与 prototypes/index.html 落地前端工程实现决策 |
