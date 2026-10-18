@@ -1,3 +1,4 @@
+import { lstatSync, readFileSync } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Dirent } from "node:fs";
@@ -5,7 +6,8 @@ import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import path from "node:path";
 import { resolveHarnessHome } from "../config/harness-home.js";
 import { SessionCorruptionError } from "../session/errors.js";
-import { readSessionDir } from "../session/persistence.js";
+import { validateHeader } from "../session/handle.js";
+import { listSessionLogFiles, readSessionDir } from "../session/persistence.js";
 import type { SessionEvent, SessionHeader } from "../session/types.js";
 
 export interface ApiOptions {
@@ -110,6 +112,37 @@ function requireMethod(method: string, expected: string): void {
   }
 }
 
+function isPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EACCES" || code === "EPERM";
+}
+
+export function readSessionHeader(dir: string): SessionHeader {
+  const file = path.join(dir, "header.json");
+  try {
+    const info = lstatSync(file);
+    if (info.isSymbolicLink() || !info.isFile()) {
+      throw new SessionCorruptionError("invalid_header", `Invalid session header: ${file}`, {
+        file: "header.json",
+      });
+    }
+    const header = validateHeader(JSON.parse(readFileSync(file, "utf8")));
+    if (listSessionLogFiles(dir).length === 0) {
+      throw new SessionCorruptionError("invalid_header", `Session has no log files: ${dir}`, {
+        dir,
+      });
+    }
+    return header;
+  } catch (error) {
+    if (error instanceof SessionCorruptionError) throw error;
+    if (isPermissionError(error)) throw error;
+    throw new SessionCorruptionError("invalid_header", `Invalid session header: ${file}`, {
+      file: "header.json",
+      cause: error,
+    });
+  }
+}
+
 function summarize(header: SessionHeader): SessionSummary {
   return {
     id: header.id,
@@ -124,25 +157,29 @@ async function handleSessions(res: ServerResponse, harnessHome: string): Promise
   const sessionsDir = path.join(harnessHome, "sessions");
   const sessions: SessionSummary[] = [];
   const errors: Array<{ dir: string; code: string }> = [];
-  const realRoot = await realpathOrNull(sessionsDir);
-  if (realRoot !== null) {
-    let entries: Dirent[] = [];
-    try {
-      entries = await readdir(sessionsDir, { withFileTypes: true });
-    } catch {
-      entries = [];
+  let entries: Dirent[] = [];
+  try {
+    entries = await readdir(sessionsDir, { withFileTypes: true });
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ENOENT") errors.push({ dir: "sessions", code: "unreadable" });
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const dir = entry.name;
+    if (!SESSION_ID_PATTERN.test(dir) || dir === "." || dir === "..") {
+      errors.push({ dir, code: "invalid_id" });
+      continue;
     }
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      try {
-        const { header } = readSessionDir(path.join(sessionsDir, entry.name));
-        sessions.push(summarize(header));
-      } catch (error) {
-        errors.push({
-          dir: entry.name,
-          code: error instanceof SessionCorruptionError ? error.code : "read_error",
-        });
-      }
+    try {
+      const header = readSessionHeader(path.join(sessionsDir, dir));
+      sessions.push({ ...summarize(header), id: dir });
+      if (header.id !== dir) errors.push({ dir, code: "id_mismatch" });
+    } catch (error) {
+      errors.push({
+        dir,
+        code: error instanceof SessionCorruptionError ? error.code : "unreadable",
+      });
     }
   }
   sessions.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
@@ -232,13 +269,6 @@ async function serveStatic(
   if (method !== "GET" && method !== "HEAD") {
     throw new HttpError(405, "method_not_allowed", "不支持的请求方法");
   }
-  if (staticRoot === undefined) {
-    throw new HttpError(404, "not_found", "未找到");
-  }
-  const realRoot = await realpathOrNull(staticRoot);
-  if (realRoot === null) {
-    throw new HttpError(404, "not_found", "未找到");
-  }
   let decoded: string;
   try {
     decoded = decodeURIComponent(pathname);
@@ -246,8 +276,15 @@ async function serveStatic(
     throw new HttpError(400, "invalid_path", "非法的路径");
   }
   const isIndex = decoded === "/" || decoded === "/web/index.html";
-  if (!isIndex && decoded.split(/[\\/]/).includes("..")) {
+  if (decoded.includes("\0") || (!isIndex && decoded.split(/[\\/]/).includes(".."))) {
     throw new HttpError(400, "invalid_path", "非法的路径");
+  }
+  if (staticRoot === undefined) {
+    throw new HttpError(404, "not_found", "未找到");
+  }
+  const realRoot = await realpathOrNull(staticRoot);
+  if (realRoot === null) {
+    throw new HttpError(404, "not_found", "未找到");
   }
   const target = isIndex
     ? path.join(staticRoot, "web", "index.html")
@@ -328,6 +365,7 @@ export function createApiHandler(
 
       await serveStatic(method, res, pathname, staticRoot);
     } catch (error) {
+      req.resume();
       if (res.headersSent) {
         res.end();
         return;

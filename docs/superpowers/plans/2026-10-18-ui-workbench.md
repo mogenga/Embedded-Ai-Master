@@ -1467,3 +1467,77 @@ node ./node_modules/typescript/bin/tsc -p tsconfig.build.json
 node scripts/verify-ui.mjs
 ```
 Expected: 全绿；提交 `feat(ui): 验收脚本接入真实数据服务`。
+---
+
+### Task 16: 真实数据改造第一轮审查修复（P2 + 关键 Minor）
+
+**Files:**
+- Modify: `src/server/api.ts`
+- Modify: `tests/server/api.test.ts`
+- Modify: `src/ui/components/dock/dock.tsx`
+- Modify: `tests/ui/components/composer-dock.test.tsx`
+- Modify: `scripts/verify-ui.mjs`
+- Modify: `docs/superpowers/specs/2026-10-18-ui-workbench-design.md`
+- Modify: `README.md`
+- Modify: `docs/deferred-issues.md`
+
+**Interfaces:**
+- Consumes: Task 13-15 全部产物。
+- Produces:
+  - `src/server/api.ts` 增 `export function readSessionHeader(dir: string): SessionHeader`（只读 `header.json` + 校验存在至少一个合法日志文件与文件类型，不解析事件；非法 → 抛 `SessionCorruptionError`）。
+  - `/api/sessions`：`id` 一律使用目录名（先按 `SESSION_ID_PATTERN` 校验）；`header.id` 与目录名不一致时仍返回目录名作为 id，并在 `errors` 追加 `{ dir, code: "id_mismatch" }`；列表读取失败（权限等）在响应 `errors` 追加 `{ dir, code: "unreadable" }`，不静默当作空。
+  - Dock 状态点与日志标记由真实数据派生：
+    - 设备监控点：`device.probe === "unknown"` → `idle`；否则 `ok`。
+    - 端口设置点：`device.serial === "unknown"` → `idle`；否则 `ok`。
+    - 日志点：存在 `mark === "err"` → `warn`；无日志 → `idle`；否则 `ok`。
+    - 日志 mark：工具名含 `kb`/`lookup` → `kv`；`args` 含 `write`/工具名含 `write`/`reset` → `tx`；读取类（`read`/`serial`/`mem`/`reg`）→ `rx`；失败 → `err`。
+  - `verify-ui.mjs`：V13 改为 `spawnSync(process.execPath, [vitest, "run", "tests/ui/transcript-consistency.test.ts"])` 并以退出码判定；删除 `.confirm-done` 恒真子断言；V14 仅保留真实 guard 文案与「已执行」否定断言。
+  - API 静态路径含 NUL → 400 `invalid_path`；删除未使用的 `realRoot` 变量。
+  - 测试补：目录名与 header.id 不同、权限/坏目录 errors、反斜杠与 symlink 穿越、静态穿越、405、NUL。
+- [ ] **Step 1: 写失败测试**
+
+`tests/server/api.test.ts` 追加：
+- `目录名与 header.id 不同时列表 id 为目录名且可打开`：目录 `dirA`、header.id `s1`，断言 `sessions[0].id === "dirA"`、`errors` 含 `id_mismatch`、`GET /api/sessions/dirA` 为 200。
+- `坏目录不静默`：创建无 header 目录，断言 `errors` 含 `invalid_header` 且不影响好会话。
+- `反斜杠与 NUL`：`/api/sessions/..%5c..%5cetc` → 400；`/%00` → 400。
+- `静态穿越`：`/../package.json` → 400/404 且不返回文件内容。
+- `405`：`POST /api/sessions` → 405。
+
+`tests/ui/components/composer-dock.test.tsx` 追加：
+- `unknown device 状态点为 idle`：渲染 Dock（device 全 unknown）断言设备/端口点 `data-s="idle"`。
+- `日志 mark 派生`：注入 `kb_lookup` 成功与 `mem_read` 失败事件，断言 `kv` 与 `err`。
+
+- [ ] **Step 2: 运行确认 RED**
+
+Run: `node ./node_modules/vitest/vitest.mjs run tests/server/api.test.ts tests/ui/components/composer-dock.test.tsx`
+Expected: 新增用例失败。
+
+- [ ] **Step 3: 实现修复**
+
+按 Interfaces 实现；`readSessionHeader` 不读取事件；列表不再调用 `readSessionDir`。
+
+- [ ] **Step 4: 收紧验收与文档**
+
+1. `verify-ui.mjs` V13 改为子进程跑一致性测试；删除 `.confirm-done` 子断言。
+2. spec §3 目录树更新：删除 `demo/fixtures.ts`，补 `src/server/api.ts`、`src/server/serve.ts`、`src/ui/api/client.ts`、`src/ui/api/load.ts`、`src/ui/state.ts`。
+3. README 空态措辞：StatusBar 的 unknown 显示「—」，TopBar/DeviceMonitor/PortSettings 显示「未接入」。
+4. `docs/deferred-issues.md` 修正 D-053 验证描述；新增 D-066（会话列表 header-only 读取后仍不解析事件）、D-067（Host/Origin 未校验的 DNS rebinding 加固）、D-068（Windows 尾随点 id 别名）。
+
+- [ ] **Step 5: 全量验证**
+
+```bash
+node ./node_modules/vitest/vitest.mjs run
+node ./node_modules/typescript/bin/tsc --noEmit
+node ./node_modules/typescript/bin/tsc -p tsconfig.web.json --noEmit
+node ./node_modules/vite/bin/vite.js build
+node ./node_modules/typescript/bin/tsc -p tsconfig.build.json
+node scripts/verify-ui.mjs
+```
+Expected: 全绿；V1-V14 + V0 全 PASS。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add -A
+git commit -m "fix(ui): 修复真实数据链路与验收强度问题"
+```

@@ -84,3 +84,16 @@
 - **被拒绝或纠偏**：不接受「静态 serve `dist-web` + 前端演示数据」的验收方式；不向前端注入会话数据，只通过真实文件与 API 提供；不新增依赖、不跑 npm install/npx、不改 `.superpowers/`。
 - **翻车与返工**：V11 首次在真实数据下只遍历到 1 个控件。定位为设备三字段均为 `unknown`，TopBar 前两个 chip 的 `tag|cls|label` 完全相同（`button|chip|未接入`），脚本误判为「Tab 回到同一控件」而提前 break。修复为 FOCUS_PROBE 附带元素坐标并纳入去重 key，复跑遍历 29 个控件、0 个无焦点环。旧版静态验收脚本在同样数据缺失下同样只覆盖 1 个控件，证明这是既有盲区而非本次新引入。
 - **验证**：`vitest run`、`tsc --noEmit`、`tsc -p tsconfig.web.json --noEmit`、`vite build`、`tsc -p tsconfig.build.json` 全通过；`node scripts/verify-ui.mjs` V1-V14 全 PASS + V0 PASS，SUMMARY 14/14 PASS，exit 0，临时服务与目录已清理。
+
+## 2026-10-18 · Task 16：真实数据改造第一轮审查修复（P2 + 关键 Minor）
+
+- **用户关键原话**：按 `task-16-brief.md` 修复第一轮审查的 P2 与关键 Minor，"它是你的唯一需求来源"；"严格 TDD：先写失败测试 → RED → 实现 → GREEN → 提交"；"API 只读；错误不泄露绝对路径；诚实边界不变"；"不加代码注释、不新增依赖、不运行 npm install/npx、不用 worktree、不改 `.superpowers/`"。
+- **关键产出**：
+  1. `src/server/api.ts` 新增 `readSessionHeader`（只读 `header.json` + 校验至少一个合法日志文件，不解析事件）；`/api/sessions` 的 id 一律取目录名，`header.id` 不一致记 `id_mismatch`，读取失败记 `unreadable`，非法目录名记 `invalid_id`；列表不再调用 `readSessionDir`，删除死变量 `realRoot`。
+  2. 静态路径解码后含 NUL 或 `..` 段 → 400 `invalid_path`，且校验先于 `staticRoot` 判定；405 路径补 `req.resume()` 消费请求体，避免带 body 的 POST 触发连接重置。
+  3. `src/ui/components/dock/dock.tsx`：设备/端口状态点由 `device.probe` / `device.serial` 派生（unknown → idle），日志点按 err → warn、空 → idle、否则 ok；日志 mark 按失败 → err、kb/lookup → kv、write/reset → tx、读取类 → rx 派生。
+  4. `scripts/verify-ui.mjs`：V13 改为 `spawnSync` 实跑 `tests/ui/transcript-consistency.test.ts` 并以退出码判定；删除 `.confirm-done` 恒真子断言，V14 仅保留真实 guard 文案与「已执行」否定断言。
+  5. 文档：spec 工程树删除 `demo/fixtures.ts`，补 `src/server/api.ts|serve.ts`、`src/ui/state.ts`、`src/ui/api/client.ts|load.ts`；README 区分 StatusBar（「—」）与 TopBar/DeviceMonitor/PortSettings（「未接入」）；D-053 验证描述改为仅组件测试覆盖；新增 D-066（列表不解析事件）、D-067（Host/Origin 未校验）、D-068（Windows 尾随点 id 别名）。
+- **被拒绝或纠偏**：V13 不接受「读测试文件源码含函数名」的文本断言，必须实跑；V14 不接受 `.confirm-done.length === 0` 这类恒真子断言；列表读取失败不允许静默返回空数组；不把 `header.id` 当列表 id（会导致目录 `dirA` 无法打开）。
+- **翻车与返工**：新测试首跑 8 failed（预期 RED）。补测试时符号链接用例漏建目标目录、POST 带 body 与静态穿越用例出现 ECONNRESET（keep-alive 连接复用 + 服务端未消费请求体），分别修正测试数据与在错误分支 `req.resume()` 后转绿。实现后目标测试 33 passed，全量 592 passed / 1 skipped。
+- **验证**：`vitest run` 592 passed / 1 skipped；`tsc --noEmit` 与 `tsc -p tsconfig.web.json --noEmit` 0 error；`vite build` 与 `tsc -p tsconfig.build.json` 成功；`node scripts/verify-ui.mjs` V1-V14 全 PASS、V0 PASS，SUMMARY 14/14。

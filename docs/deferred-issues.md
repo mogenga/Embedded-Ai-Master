@@ -452,7 +452,7 @@
 - **状态**: 已解决(2026-10-18,Task 14/15)。
 - **原现象**: `Composer.send()` 在调用 `onSend` 后无条件 `setText("")` 并清空 textarea;`main.tsx` 在 `VITE_ACTION_URL` 未配置时只 `console.warn` 并返回。演示态用户输入被清空且未发送。
 - **修复**: `main.tsx` 在未配置 `VITE_ACTION_URL` 时不传 `onSend`,`Composer` 据此禁用发送并展示「未配置提交端点,输入不会发送」;失败路径保留输入并提示「发送失败,输入已保留」。
-- **验证**: `tests/ui/components/composer-dock.test.tsx` 覆盖禁用态与失败回填;`npm run verify:ui` 的真实数据页面显示禁用发送与说明。
+- **验证**: `tests/ui/components/composer-dock.test.tsx` 覆盖禁用态、失败回填与输入保留;`verify:ui` 不覆盖该文案(页面默认不配置 `VITE_ACTION_URL`,V1-V14 不涉及 Composer 禁用态)。
 
 ### D-054 · 717px 工作区下知识库整树需内部滚动
 
@@ -551,6 +551,30 @@
 - **触发升级条件**: 出现 `session_corrupt` / 权限错误;需要在界面提示可修复项。
 - **修复建议**: 前端保留 `errors` 并在会话面板展示可折叠告警(区分损坏与读取失败);提供重试或定位目录的入口。
 
+### D-066 · 会话列表 header-only 读取后仍不解析事件
+
+- **发现**: 2026-10-18,Task 16 审查修复。
+- **现象**: `/api/sessions` 改用 `readSessionHeader` 只读 `header.json`,并校验至少存在一个类型合法的日志文件,不再逐行解析事件;事件行 JSON 损坏、seq 断裂或未知类型的会话仍以正常摘要出现在列表。
+- **影响**: 列表的 `status` / `createdAt` 可信且不再受日志体积影响,但事件损坏只在打开详情时以 500 `session_corrupt` 暴露;列表本身没有「可能损坏」信号。
+- **触发升级条件**: 列表需要展示损坏标记;或需要在不打开详情时预判可读性。
+- **修复建议**: 列表返回轻量健康标记(如抽样末行 seq 与文件大小一致性),或前端在详情返回 500 时把该会话标记为损坏并提示。
+
+### D-067 · Host/Origin 未校验的 DNS rebinding 加固
+
+- **发现**: 2026-10-18,Task 16 审查修复。
+- **现象**: UI 服务只监听 `127.0.0.1`,但不校验 `Host` / `Origin` 请求头;恶意页面可借助 DNS rebinding 或跨源请求访问本机只读 API。
+- **影响**: 会话、知识库目录结构与事件内容可能被同机浏览器中的其他页面读取;未来 `/api/actions` 实现后风险升级为写操作。
+- **触发升级条件**: 实现 `/api/actions`;或需要在浏览器中承载不可信来源页面。
+- **修复建议**: 校验 `Host` 仅为 `127.0.0.1:<port>` / `localhost:<port>`,拒绝跨源 `Origin`;或引入启动时生成的一次性 token。
+
+### D-068 · Windows 尾随点 id 别名
+
+- **发现**: 2026-10-18,Task 16 审查修复。
+- **现象**: `SESSION_ID_PATTERN` 允许尾随点(如 `s1.`),而 Windows 文件系统把 `s1.` 与 `s1` 视为同一目录;列表 id 取目录名,可能产生别名或同一目录被重复列出。
+- **影响**: 会话 id 跨平台不稳定,`GET /api/sessions/s1.` 可能命中 `s1`,前端选中态与缓存键可能混淆。
+- **触发升级条件**: Windows 上出现尾随点或尾随空格目录名;或要求 id 跨平台一致。
+- **修复建议**: Windows 上拒绝以点或空格结尾的目录名(列表记 `invalid_id`,请求返回 400),或在入口统一规范化 id。
+
 ---
 
 ## 变更记录
@@ -583,3 +607,4 @@
 | 2026-10-18 | P0 前端 Task 10 视觉验收:录入 D-051 ~ D-057(action 端点契约、StatusBar 状态推断、无后端清空输入、717px 树内部滚动、V3 滚动条口径、V11 静态 Tab 范围、Chromium 探测覆盖);设计 v1.2 同步 V2/V3/V6/V11 口径 |
 | 2026-10-18 | P0 前端 Task 12 第二轮红队审查修复:修正空 text + artifact 投影、SSE 单 timer 重连/close 后静默/构造抛错收敛、折叠摘要截断、costUsd 有限非负校验;清理 `styles.css` 重复 `.dock` 与 media 查询;录入 D-062(usage 缺字段补 0) |
 | 2026-10-18 | P0 前端 Task 15 真实数据验收:验收脚本改为启动 `dist/server/serve.js`(临时 `HARNESS_HOME` 写入真实会话与 KB),V14 断言真实 guard 文案并新增 V0 空态附加检查;修复 V11 以坐标区分同文案控件(设备 unknown 下三个「未接入」chip 曾导致遍历提前终止);README 改为真实数据流程与 API 表;D-053/D-060 标记已解决,D-058 标记数据来源已解决,D-051 补 501 现状;录入 D-063(API 只读、actions/events 未实现)、D-064(KB 深度/条目上限)、D-065(坏目录 errors 未展示) |
+| 2026-10-18 | Task 16 审查修复:会话列表改 header-only 读取(id 取目录名,`id_mismatch`/`unreadable`)、静态路径 NUL/穿越 400、Dock 状态点与日志 mark 由真实数据派生、V13 改实跑一致性测试、V14 删除恒真断言;D-053 验证描述修正;录入 D-066(列表不解析事件)、D-067(Host/Origin 未校验)、D-068(Windows 尾随点 id 别名) |

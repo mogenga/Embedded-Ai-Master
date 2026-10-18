@@ -60,9 +60,13 @@
 vite.config.ts                # 仓库根；plugins:[preact()]，input web/index.html，产物 dist-web/
 web/
   index.html                  # Vite 入口（静态骨架：root 容器 + 内联首屏主题脚本）
+src/server/
+  api.ts                      # 只读 HTTP API（sessions / kb / device / actions / events）+ 静态资源
+  serve.ts                    # 服务入口：HARNESS_UI_PORT / HARNESS_HOME / HARNESS_UI_STATIC
 src/ui/
   main.tsx                    # 入口：读取主题 → render(<App/>)
   app.tsx                     # App 根：TopBar / Workspace(Rail, Conversation, Dock) / StatusBar
+  state.ts                    # 工作台状态与请求竞态闸门
   theme.ts                    # 主题三态解析与切换（纯函数 + DOM 副作用分离）
   icons.tsx                   # <Icon name> 组件 + Symbol sprite 定义（可被测试引用）
   styles.css                  # 全部令牌 + 组件样式（从 prototypes/index.html 提取整理）
@@ -82,11 +86,12 @@ src/ui/
     dock/port-settings.tsx    # 端口设置（select/统计卡）
     dock/debug-log.tsx        # 调试日志（时间/类型标记/文本，自动滚动与暂停）
     statusbar.tsx             # 状态栏（探针/串口/告警/会话/上下文/费用/平台）
+  api/
+    client.ts                 # /api 只读客户端（可注入 fetch）
+    load.ts                   # 首屏并行加载与会话视图装载
   view/
     transcript.ts             # TranscriptView 归约（纯函数，可测，前端唯一视图模型）
     sse.ts                    # EventSource 抽象 + HTTP POST 动作客户端
-  demo/
-    fixtures.ts               # 演示会话数据（与原型内容一致，供回放/开发态）
 tests/
   ui/                         # 前端测试（组件用 happy-dom 环境注释，纯逻辑 node 环境）
     transcript.test.ts        # 归约与投影规则
@@ -212,7 +217,7 @@ export type TranscriptEvent =
 
 | 方法 | 路径 | 响应 | 说明 |
 |---|---|---|---|
-| GET | `/api/sessions` | `{ sessions: SessionSummary[], errors: Array<{ dir, code }> }` | 扫描 `resolveHarnessHome()/sessions/*`，按 `header.createdAt` 倒序；坏目录进 `errors`，不影响其余会话 |
+| GET | `/api/sessions` | `{ sessions: SessionSummary[], errors: Array<{ dir, code }> }` | 扫描 `resolveHarnessHome()/sessions/*`，按 `header.createdAt` 倒序；`id` 一律取目录名，header 只读不解析事件；`header.id` 不一致进 `errors`（`id_mismatch`），读取失败进 `unreadable`，不影响其余会话 |
 | GET | `/api/sessions/:id` | `{ header: SessionHeader, events: SessionEvent[] }` | 校验 id 仅含 `[A-Za-z0-9._-]` 且解析后位于会话根内；不存在 → 404 `session_not_found` |
 | GET | `/api/kb` | `{ root: string \| null, tree: KbNode[] }` | 扫描 `resolveHarnessHome()/kb`；目录不存在 → `root:null, tree:[]` |
 | GET | `/api/device` | `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` | 未接真实探测，诚实返回 unknown |
@@ -222,7 +227,7 @@ export type TranscriptEvent =
 `SessionSummary = { id, createdAt, status, model?, workdir? }`。
 `KbNode = { name, path, kind: "dir" | "file", children?: KbNode[] }`，目录优先排序，深度上限 8 层，条目上限 2000。
 
-静态资源：API 服务同源 serve `dist-web/`，`/` 与 `/web/index.html` 返回 `dist-web/web/index.html`；未命中静态与 API → 404。开发期 `vite.config.ts` 将 `/api` 代理到 `http://127.0.0.1:${HARNESS_UI_PORT ?? 5174}`。
+静态资源：API 服务同源 serve `dist-web/`，`/` 与 `/web/index.html` 返回 `dist-web/web/index.html`；未命中静态与 API → 404；解码后含 NUL 或 `..` 段 → 400 `invalid_path`。开发期 `vite.config.ts` 将 `/api` 代理到 `http://127.0.0.1:${HARNESS_UI_PORT ?? 5174}`。
 
 ### 7.2 前端 API 客户端（`src/ui/api/client.ts`）
 

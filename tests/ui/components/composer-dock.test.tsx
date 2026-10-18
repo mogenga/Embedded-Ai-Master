@@ -5,7 +5,8 @@ import { Composer } from "../../../src/ui/components/conversation/composer.js";
 import { DeviceMonitor } from "../../../src/ui/components/dock/device-monitor.js";
 import { Dock } from "../../../src/ui/components/dock/dock.js";
 import { PortSettings } from "../../../src/ui/components/dock/port-settings.js";
-import { emptyTranscriptView } from "../../../src/ui/view/transcript.js";
+import type { SessionEvent } from "../../../src/session/types.js";
+import { emptyTranscriptView, transcriptFromSession } from "../../../src/ui/view/transcript.js";
 import { makeTranscriptView, UNKNOWN_DEVICE } from "../support/builders.js";
 
 const CONNECTED_DEVICE = {
@@ -141,6 +142,65 @@ describe("dock", () => {
     const names = [...root.querySelectorAll(".reg-name")].map((el) => el.textContent);
     expect(names).toContain("时钟源判定");
     expect(names).toContain("读回");
+  });
+
+  it("unknown 设备与串口的状态点为 idle", () => {
+    const root = mount();
+    render(<Dock view={emptyTranscriptView()} device={UNKNOWN_DEVICE} />, root);
+    const heads = [...root.querySelectorAll<HTMLButtonElement>(".dock-sec-head")];
+    const dot = (title: string) =>
+      heads.find((head) => head.textContent?.includes(title))!.querySelector(".dot")!.getAttribute("data-s");
+    expect(dot("设备监控")).toBe("idle");
+    expect(dot("端口设置")).toBe("idle");
+  });
+
+  it("日志状态点与 mark 由真实工具事件派生", () => {
+    const events: SessionEvent[] = [
+      {
+        seq: 0,
+        ts: "2026-10-18T00:00:00.000Z",
+        type: "assistant",
+        payload: {
+          content: "",
+          toolCalls: [
+            { id: "kb", name: "kb_lookup", arguments: { query: "uart" } },
+            { id: "mem", name: "mem_read", arguments: { address: "0x0" } },
+          ],
+        },
+      },
+      {
+        seq: 1,
+        ts: "2026-10-18T00:00:00.000Z",
+        type: "tool_result",
+        payload: { id: "kb", ok: true, text: "命中 1", detail: { hits: [] } },
+      },
+      {
+        seq: 2,
+        ts: "2026-10-18T00:00:00.000Z",
+        type: "tool_result",
+        payload: { id: "mem", ok: false, text: "读失败", code: "io_error" },
+      },
+    ];
+    const root = mount();
+    render(<Dock view={transcriptFromSession(events)} device={UNKNOWN_DEVICE} />, root);
+    const marks = [...root.querySelectorAll(".log-mark")].map((el) => el.getAttribute("data-l"));
+    expect(marks).toEqual(["kv", "err"]);
+    const heads = [...root.querySelectorAll<HTMLButtonElement>(".dock-sec-head")];
+    const logDot = heads.find((head) => head.textContent?.includes("调试日志"))!.querySelector(".dot");
+    expect(logDot!.getAttribute("data-s")).toBe("warn");
+  });
+
+  it("日志点无错误时为 ok、无日志时为 idle", () => {
+    const root = mount();
+    render(<Dock view={makeTranscriptView()} device={CONNECTED_DEVICE} />, root);
+    const head = [...root.querySelectorAll<HTMLButtonElement>(".dock-sec-head")]
+      .find((item) => item.textContent?.includes("调试日志"))!;
+    expect(head.querySelector(".dot")!.getAttribute("data-s")).toBe("ok");
+    const empty = mount();
+    render(<Dock view={emptyTranscriptView()} device={CONNECTED_DEVICE} />, empty);
+    const emptyHead = [...empty.querySelectorAll<HTMLButtonElement>(".dock-sec-head")]
+      .find((item) => item.textContent?.includes("调试日志"))!;
+    expect(emptyHead.querySelector(".dot")!.getAttribute("data-s")).toBe("idle");
   });
 
   it("从工具事件派生日志与寄存器", () => {

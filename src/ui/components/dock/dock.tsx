@@ -2,7 +2,7 @@ import type { JSX } from "preact";
 import { useState } from "preact/hooks";
 import type { DeviceStatus } from "../../api/client.js";
 import { Icon } from "../../icons.js";
-import type { TranscriptView } from "../../view/transcript.js";
+import type { ToolCardModel, TranscriptView } from "../../view/transcript.js";
 import { DebugLog } from "./debug-log.js";
 import { DeviceMonitor } from "./device-monitor.js";
 import { PortSettings } from "./port-settings.js";
@@ -21,13 +21,22 @@ export type Register = {
   warn?: boolean;
 };
 
+function logMark(tool: ToolCardModel): LogMark {
+  if (!tool.ok) return "err";
+  const name = tool.name.toLowerCase();
+  const args = tool.args.toLowerCase();
+  if (name.includes("kb") || name.includes("lookup")) return "kv";
+  if (name.includes("write") || name.includes("reset") || args.includes("write")) return "tx";
+  return "rx";
+}
+
 export function deriveLogLines(view: TranscriptView): LogLine[] {
   const lines: LogLine[] = [];
   for (const event of view.events) {
     if (event.kind !== "tool") continue;
     lines.push({
       time: "—",
-      mark: event.tool.ok ? "tx" : "err",
+      mark: logMark(event.tool),
       text: `${event.tool.name} ${event.tool.args} · ${event.tool.ok ? "ok" : "error"}`,
     });
   }
@@ -71,12 +80,15 @@ export function Dock({
 
   const logLines = deriveLogLines(view);
   const registers = deriveRegisters(view);
+  const deviceDot = device.probe === "unknown" ? "idle" : "ok";
+  const portDot = device.serial === "unknown" ? "idle" : "ok";
+  const logDot = logLines.length === 0 ? "idle" : logLines.some((line) => line.mark === "err") ? "warn" : "ok";
 
   function head(
     key: SectionKey,
     icon: string,
     title: string,
-    dot: "ok" | "warn",
+    dot: "ok" | "warn" | "idle",
     count?: number,
   ): JSX.Element {
     const open = expanded[key];
@@ -108,19 +120,19 @@ export function Dock({
       {state === "error" ? <p class="pane-empty">调试数据加载失败</p> : null}
       {state === "ready" ? <div class="dock-body">
         <section class="dock-sec">
-          {head("device", "i-cpu", "设备监控", "ok", registers.length)}
+          {head("device", "i-cpu", "设备监控", deviceDot, registers.length)}
           <div class="dock-sec-body">
             <DeviceMonitor device={device} registers={registers} />
           </div>
         </section>
         <section class="dock-sec">
-          {head("port", "i-plug", "端口设置", "ok")}
+          {head("port", "i-plug", "端口设置", portDot)}
           <div class="dock-sec-body">
             <PortSettings serial={device.serial} />
           </div>
         </section>
         <section class="dock-sec">
-          {head("log", "i-log", "调试日志", "warn", logLines.length)}
+          {head("log", "i-log", "调试日志", logDot, logLines.length)}
           <div class="dock-sec-body">
             <DebugLog lines={logLines} />
           </div>

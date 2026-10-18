@@ -1,5 +1,5 @@
-import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -544,7 +544,6 @@ const LAYOUT_PROBE = `(() => {
     truncation: samples,
     emoji,
     guards,
-    confirmDone: $$(".confirm-done").map((element) => (element.textContent || "").trim()),
     scrollbar: (() => {
       const style = getComputedStyle(document.documentElement);
       return { color: style.scrollbarColor, width: style.scrollbarWidth };
@@ -753,13 +752,12 @@ async function main() {
     const v14Ok =
       pendingGuard !== undefined &&
       guardFields.length === 4 &&
-      !guardText.includes("已执行") &&
-      layout.confirmDone.length === 0;
+      !guardText.includes("已执行");
     check(
       "V14",
       "写操作确认",
       v14Ok,
-      `待确认守卫=${pendingGuard ? "存在" : "缺失"} 文案字段=${guardFields.join("|") || "无"} 已执行文案=${guardText.includes("已执行")} 复位完成文案=${layout.confirmDone.length}`,
+      `待确认守卫=${pendingGuard ? "存在" : "缺失"} 文案字段=${guardFields.join("|") || "无"} 已执行文案=${guardText.includes("已执行")}`,
       "真实 guard 文案含 写入/0x40004408/0x0009/待确认，且无已执行文案",
     );
 
@@ -853,18 +851,23 @@ async function main() {
       treeClipped.length === 0;
     check("V6", "知识库树完整", v6Ok, `workspace=${tree.workspaceHeight} railTop=${tree.railTopHeight} tree=${tree.treeHeight} 厂商子项=${tree.childrenCount} 各底边=${tree.childrenBottoms.join(",")} 裁剪=${treeClipped.length}`, "workspace=717 且厂商分流子树完整可见");
 
-    const consistencyPath = join(ROOT, "tests", "ui", "transcript-consistency.test.ts");
-    const consistencySource = existsSync(consistencyPath) ? readFileSync(consistencyPath, "utf8") : "";
-    const consistencyOk =
-      consistencySource.includes("transcriptFromLoop") && consistencySource.includes("transcriptFromSession");
+    const consistencyTest = join(ROOT, "node_modules", "vitest", "vitest.mjs");
+    const consistency = existsSync(consistencyTest)
+      ? spawnSync(
+        process.execPath,
+        [consistencyTest, "run", "tests/ui/transcript-consistency.test.ts"],
+        { cwd: ROOT, encoding: "utf8", windowsHide: true },
+      )
+      : undefined;
+    const consistencyOk = consistency !== undefined && consistency.status === 0;
     check(
       "V13",
       "回放一致性",
       consistencyOk,
-      consistencyOk
-        ? "tests/ui/transcript-consistency.test.ts 存在且含双向归约断言，由 vitest 覆盖"
-        : `缺失或未含断言：${consistencyPath}`,
-      "存在且含 transcriptFromSession/transcriptFromLoop 断言，由 vitest 覆盖",
+      consistency === undefined
+        ? `未找到 vitest：${consistencyTest}`
+        : `vitest 退出码=${consistency.status ?? "null"}`,
+      "tests/ui/transcript-consistency.test.ts 由 vitest 实跑且退出码 0",
     );
 
     emptyService = startService(emptyHome, emptyPort);
