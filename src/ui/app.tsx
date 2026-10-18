@@ -1,4 +1,6 @@
 import type { ComponentChildren, JSX } from "preact";
+import { KnowledgePane } from "./components/rail/knowledge-pane.js";
+import { SessionPane } from "./components/rail/session-pane.js";
 import { StatusBar } from "./components/statusbar.js";
 import { TopBar } from "./components/topbar.js";
 import type { ThemeChoice } from "./theme.js";
@@ -29,7 +31,8 @@ export function App({
       />
       <div class={dockOpen ? "workspace" : "workspace is-collapsed"}>
         <aside class="rail" aria-label="知识库">
-          <div class="placeholder">知识库</div>
+          <KnowledgePane />
+          <SessionPane />
         </aside>
         <main class="conversation" aria-label="对话" data-status={view.status}>
           {children ?? <div class="placeholder">对话</div>}
