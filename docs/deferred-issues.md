@@ -191,6 +191,22 @@
 - **触发升级条件**: P1 接入首个非只读工具(写内存/复位/文件写入)前。
 - **修复建议**: 写工具接入前引入可等待的终止或隔离机制(进程级 worker、MCP 会话级取消并等待服务端确认);或在超时后拒绝启动同批次后续写工具,并把会话标记为需人工确认。
 
+### D-023 · 非字符串 `call.id` 绕过重复检测
+
+- **发现**: 2026-10-18,Task 8 交付核验。
+- **现象**: `executeBatch` 的重复检测在 `typeof call.id !== "string"` 时直接判为非重复(`duplicates` 返回 `false`)。运行时探针: `[{id: 42}, {id: 42}]` 两条都执行并都返回 `ok`。`BatchResult.id` 类型声明为 `string`,但运行期不校验。
+- **影响**: 正常路径无影响——`call.id` 来自 Task 6 适配器解析的 tool call `id`,该处已校验为字符串(Task 6 的 `invalid_response` 守卫)。但这是管线里唯一的静默旁路: 若未来有其他调用方(回放、测试脚本、MCP 工具)构造 `BatchCall`,非字符串 id 会同时绕过重复检测与证据文件命名的字符串假设。
+- **触发升级条件**: ① 出现字符串以外的 id 构造方;② 重复 id 导致证据被覆盖或结果错位的事故。
+- **修复建议**: 在管线入口统一把非法 `id` 归一为 `tool_protocol_error` 结构化结果(与 `normalizeToolResult` 同一风格),或把 `BatchCall.id` 的运行时校验前置到 `query` 的 `collectToolUses`。
+
+### D-024 · `artifactDir` 为空串时的错误文案无指引
+
+- **发现**: 2026-10-18,Task 8 交付核验。
+- **现象**: `artifactDir: ""` 时大输出落盘失败,结果仍为 `isError: false`(正确,不掩盖工具成功),`detail.artifactError` 为 `"ENOENT: no such file or directory, mkdir ''"`。
+- **影响**: 行为正确但文案对使用者无指向性;装配层( Task 10 )若把未配置的路径直接透传,排查时不易意识到是配置缺失。
+- **触发升级条件**: Task 10 装配 `artifactDir` 时(建议届时在装配层做非空校验,而不是改管线)。
+- **修复建议**: 在 `runSession` 装配处校验 `artifactDir` 非空且在会话目录下;管线侧保持现状。
+
 ---
 
 ## 变更记录
@@ -204,3 +220,4 @@
 | 2026-10-17 | Task 7 整合复审:录入 D-019(`$schema` 网关兼容)、D-020(`ToolCtx.cwd` 来源) |
 | 2026-10-18 | Task 7 交付核验:录入 D-021(MCP 工具名 `.`/`/` 需映射);`ToolRegistry` 补注册期校验(名称/根 object/不可表示类型 fail-fast),io=input 断言补齐 |
 | 2026-10-18 | Task 8 第三轮红队修复:D-020 标注接口已解决、Task 9 透传待验;录入 D-022(超时≠强制终止、串行写可能重叠) |
+| 2026-10-18 | Task 8 交付核验:录入 D-023(非字符串 id 绕过重复检测)、D-024(空 artifactDir 文案);D-020 已随 plan Task 9 补 `cwd`/`timeoutMs` 透传要求 |

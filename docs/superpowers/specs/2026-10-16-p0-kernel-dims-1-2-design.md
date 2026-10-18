@@ -173,7 +173,7 @@ interface ToolDef<I> {
 type ToolResult = { isError: boolean; code: string; message: string; detail?: unknown; artifactPath?: string; text: string };
 ```
 
-- 管线五阶段: lookup → schema 校验(safeParse,失败=结构化错误回传,不 throw)→ 权限(P0 恒 allow,接口位)→ execute(超时=signal 中止+结构化超时错)→ 后处理(结果 >8k tokens 全文落盘 `artifacts/<eventId>.txt` 并留 `artifactPath`,事件 text 为截断体且**不超过 25k tokens**,发布 tool_result 事件 + usage 记账)。
+- 管线五阶段: lookup → schema 校验(safeParse,失败=结构化错误回传,不 throw)→ 权限(P0 恒 allow,接口位)→ execute(超时=signal 中止+结构化超时错)→ 后处理(结果 >8k tokens 全文落盘 `artifacts/<safeId>-<callId 的 sha256 前 16 位>[-n].txt` 并留 `artifactPath`,`text` 超过 100000 字符时截断并追加标记,**不超过 25k tokens**)。**职责边界(2026-10-18 经 Task 8 交付核验回填)**: 管线**只返回** `BatchResult[]`,不写会话日志、不发布 tool_result 事件、不记 usage——三者由主循环(Task 9)在拿到批量结果后统一完成。
 - demo `echo`: `{ text: string }`,直接回显;`readOnly: true`(演示批内并行)。
 - 内置注册表: `new ToolRegistry([echo])`,按名查找,未知工具 = 结构化错误。
 
@@ -202,7 +202,7 @@ type ToolResult = { isError: boolean; code: string; message: string; detail?: un
 
 - **B1 provider/model 选择**: `runSession` 签名统一为对象形态,`model: "provider/model"` **必传,无缺省**(确定性优先,夜批可复现);live 开关与 CLI 共用 `HARNESS_COMPAT_MODEL` 环境变量承载该引用。文档 §4.1 的 `runSession(input, cfg)` 是遗留笔误,以 §4.6 对象签名为准。
 - **B2 systemPrompt 落日志**: `SessionEvent.type` 联合**新增 `system`**;会话初始化时 system 事件必为首条,投影只从事件流重建(不走 header.json 旁路)——保"model-visible means logged"结构成立。
-- **B3 大输出截断后的字节去向**: 把 v0.2 §3.2 一级"工具结果落盘"**前移进本轮**(最小实现): 工具结果超 8k tokens 时全文写 `artifacts/<eventId>.txt`,事件存截断文本 + `artifactPath`(全文仍从日志可复原,证据链不丢;投影用截断文本)。这与 #3 完整实现同构,只是时序提前。
+- **B3 大输出截断后的字节去向**: 把 v0.2 §3.2 一级"工具结果落盘"**前移进本轮**(最小实现): 工具结果超 8k tokens 时全文写 `<artifactDir>/<safeId>-<sha256(callId) 前 16 位>.txt`(同名已存在时依次尝试 `-1`/`-2`…),事件存截断文本 + `artifactPath`(全文仍从日志可复原,证据链不丢;投影用截断文本)。`safeId` 由 `callId` 清洗出 `[a-zA-Z0-9_-]` 并截断 100 字符,Windows 保留名(CON/NUL/COM1…)加 `_` 前缀。这与 #3 完整实现同构,只是时序提前。
 - **B4 含工具批次的投影非恒等**: `assistant` 事件携带完整 assistant 消息(含 `tool_calls` 明细);`tool_result` 事件按批用 `parent` 关联(对齐 v0.2 §6 事件模型);`context/build.ts` 投影器做**重组**(连续 assistant + 其同批 tool_result → OpenAI 消息序列),非线序恒等。
 
 ## 5. 测试策略

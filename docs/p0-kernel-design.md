@@ -188,7 +188,7 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
   }
   ```
   `ToolCtx` 携带会话 id、工作目录、事件发布器;`ToolResult` 含 `isError: boolean` + 结构化错误体(`code / message / detail`)——**R3"工具必须诚实"的类型化落点**:错误是数据,不是异常字符串。
-- **五阶段管线**(每批工具调用统一走过):查找 → schema 验证 → 权限检查(P0 恒 allow,接口留位给 P1 #7)→ 执行(超时 / 取消 / 大输出截断)→ 后处理(超限落盘 #3、发布事件 #13 接口、usage 记账)。
+- **五阶段管线**(每批工具调用统一走过):查找 → schema 验证 → 权限检查(P0 恒 allow,接口留位给 P1 #7)→ 执行(超时 / 取消 / 大输出截断)→ 后处理(超限落盘 #3)。**职责边界(P0 实现)**: 管线只返回结构化 `ToolResult`,**不写会话日志、不发布事件、不记 usage**——这三件由主循环在收到批量结果后统一完成(`session.append(tool_result)` / yield 事件 / usage 记账),以保证"落日志"与"投影"由同一处负责、不重复写入。超时只保证管线按时返回 `tool_timeout`,**不保证**工具真正停止(见 `docs/deferred-issues.md` D-022)。
 - **超时分级**:内置 shell 默认 2 min;MCP 工具按 server 声明(serial 类长操作允许分钟级);超时 = signal 中止 + 结构化超时错误回传模型(模型可据此换策略——Phase 0 验证过"防 hang"必须做到工具级)。
 - **大输出截断**:执行器出口统一截断(默认 25k tokens,对齐母本 MCP 截断值),截断体交 #3 一级落盘。
 - **内置最小工具集**(决策点 #3 的答案):`fs`(读/写/编辑合一)、`shell`、`glob`、`grep` 四个进内核——诊断所需的"读日志、翻工程、跑编译"全够用;嵌入式取证一律走 MCP(探针/串口/KB),**不进内核**(领域逻辑不入内核的定位边界)。
