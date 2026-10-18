@@ -14,7 +14,7 @@
 
 - Node >= 24, ESM-only, strict, 相对导入带 `.js` 后缀, `verbatimModuleSyntax`（类型导入用 `import type`）；不新增除 preact/@preact/preset-vite/vite/happy-dom 外任何依赖。
 - **含 JSX 的文件一律用 `.tsx` 扩展名**（`.ts` 不能解析 JSX；Task 1 已实测该错误同时破坏 typecheck 与 lint）。
-- 内核测试与配置零扰动：不改 `vitest.config.ts` 的全局 environment；UI 测试文件头部写 `// @vitest-environment happy-dom`；不改 `tsconfig.json` / `tsconfig.build.json` 的现有 include（`tsconfig.build.json` 新 exclude `src/ui` 除外）。
+- 内核测试与配置零扰动：不改 `vitest.config.ts` 的全局 environment；UI 测试文件头部写 `// @vitest-environment happy-dom`；`vitest.config.ts` 增 `plugins: [preact()]`（否则 Vitest 的 JSX 转换会指向 react/jsx-runtime）；根 `tsconfig.json` 增 exclude `src/ui`、`tests/ui`（前端由 tsconfig.web 检查）；`tsconfig.build.json` 增 exclude `src/ui`。
 - 所有颜色经 CSS 变量引用，组件中禁止硬编码十六进制值；令牌集中在 `src/ui/styles.css`（提取自 `prototypes/index.html`）。
 - 零 emoji：图标一律内联 SVG（`<use href="#…">` 引用页内 symbol），文案不使用 emoji。
 - `localStorage` 键名 `eam-theme`，默认 `system`；切换不重载页面、不丢滚动位置。
@@ -38,7 +38,7 @@
 
 **Files:**
 - Modify: `package.json`（scripts 增 `build:web` / `dev:web` / `verify:ui` / `test:ui` / `typecheck:web`；dependencies 增 `preact`；devDependencies 增 `@preact/preset-vite` / `vite` / `happy-dom`）
-- Modify: `vitest.config.ts`（include 增 `tsx`：`tests/**/*.test.{ts,tsx,js}`；只改 include 模式，`environment`/reporter/coverage 均不动）
+- Modify: `vitest.config.ts`（include 增 `tsx`：`tests/**/*.test.{ts,tsx,js}`；增 `plugins: [preact()]`；`environment`/reporter/coverage 均不动）
 - Create: `tsconfig.web.json`
 - Create: `web/index.html`
 - Create: `vite.config.ts`（仓库根，root 即仓库根，避免 root 外模块解析）

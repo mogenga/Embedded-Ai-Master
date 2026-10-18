@@ -41,7 +41,7 @@
 - **主题**：令牌定义在 `:root`（夜间基线）；日间令牌同时定义在 `[data-theme="light"]` 与 `@media (prefers-color-scheme: light) { [data-theme="system"] }`（frontend-design §6.2）。`localStorage` 键 `eam-theme`，值 `light | system | dark`，默认 `system`。切换不重载、不丢滚动位置。
 - **零 emoji**：界面图标一律内联 SVG（页内 `<symbol>` sprite + `<use>`）；状态点、连接线、分隔线用 CSS 绘制；文案中不使用 emoji（含 `→` 之外的一切图形符号）。
 - **样式**：所有颜色经 CSS 变量引用，组件中**禁止硬编码十六进制值**；令牌与组件样式集中在单一样式表 `src/ui/styles.css`，从 `prototypes/index.html` 提取，不引用原型文件。
-- **测试**：vitest（当前仓库 `vitest ^4.1.6`）。内核测试保持 node 环境不变；UI 组件测试在文件头部使用 `// @vitest-environment happy-dom` 注释切换环境（避免改动全局 environment）。`vitest.config.ts` 的 `test.include` 扩展为 `tests/**/*.test.{ts,tsx,js}`（只加 tsx 扩展名，其余配置不动）。UI 逻辑纯函数（投影、主题解析、SSE 抽象）在 node 环境测试。
+- **测试**：vitest（当前仓库 `vitest ^4.1.6`）。内核测试保持 node 环境不变；UI 组件测试在文件头部使用 `// @vitest-environment happy-dom` 注释切换环境（避免改动全局 environment）。`vitest.config.ts` 的 `test.include` 扩展为 `tests/**/*.test.{ts,tsx,js}`，并加载 `plugins: [preact()]`（否则 Vitest 的 JSX 转换指向 react/jsx-runtime）；根 `tsconfig.json` exclude `src/ui` 与 `tests/ui`，前端由 `tsconfig.web.json` 检查。UI 逻辑纯函数（投影、主题解析、SSE 抽象）在 node 环境测试。
 - **严格模式**：`strict: true`；相对导入带 `.js` 后缀；`verbatimModuleSyntax` 生效（类型导入用 `import type`）。
 - **不加代码注释**：生产代码与样式不加说明性注释。
 - **浏览器基线**：Chromium 系与 Firefox 当前稳定版；滚动条使用标准属性 `scrollbar-color` + `::-webkit-scrollbar` 双写（frontend-design §5.4）。
