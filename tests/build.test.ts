@@ -47,6 +47,7 @@ describe("buildMessages 投影重组", () => {
         content: "我先调用工具",
         toolCalls: [{ id: "c1", name: "echo", arguments: { text: "hi" } }],
       }),
+      mk(1, "tool_result", { id: "c1", ok: true, text: "hi" }, 0),
     ]);
 
     expect(messages[0]).toMatchObject({ role: "assistant", content: "我先调用工具" });
@@ -64,7 +65,9 @@ describe("buildMessages 投影重组", () => {
           { id: "c2", name: "echo", arguments: { text: "b" } },
         ],
       }),
-      mk(1, "assistant", { content: "no tools", toolCalls: [] }),
+      mk(1, "tool_result", { id: "c1", ok: true, text: "a" }, 0),
+      mk(2, "tool_result", { id: "c2", ok: true, text: "b" }, 0),
+      mk(3, "assistant", { content: "no tools", toolCalls: [] }),
     ]);
 
     expect(messages[0].tool_calls?.map((call) => call.id)).toEqual(["c1", "c2"]);
@@ -72,7 +75,7 @@ describe("buildMessages 投影重组", () => {
       '{"text":"a"}',
       '{"text":"b"}',
     ]);
-    expect(messages[1].tool_calls).toStrictEqual([]);
+    expect(messages[3].tool_calls).toStrictEqual([]);
   });
 
   it("invalid_json 标记的 toolCalls 回填原 raw 字符串", () => {
@@ -81,6 +84,7 @@ describe("buildMessages 投影重组", () => {
         content: "",
         toolCalls: [{ id: "c1", name: "echo", arguments: { error: "invalid_json", raw: "{bad" } }],
       }),
+      mk(1, "tool_result", { id: "c1", ok: false, text: "bad" }, 0),
     ]);
 
     expect(messages[0].tool_calls?.[0].function.arguments).toBe("{bad");
@@ -154,16 +158,19 @@ describe("buildMessages 投影重组", () => {
     ).toThrow();
   });
 
-  it("tool_result 的 parent 不存在时抛错", () => {
+  it("tool_result 的 parent 指向自身之后时抛错", () => {
     expect(() =>
-      buildMessages([mk(0, "tool_result", { id: "c1", text: "x" }, 9)]),
-    ).toThrow();
+      buildMessages([
+        mk(0, "assistant", { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] }),
+        mk(1, "tool_result", { id: "c1", text: "x" }, 2),
+      ]),
+    ).toThrow(/must precede it/);
   });
 
   it("tool_result 的 parent 更小但不存在时抛错", () => {
     expect(() =>
       buildMessages([mk(5, "tool_result", { id: "c1", text: "x" }, 3)]),
-    ).toThrow();
+    ).toThrow(/not found/);
   });
 
   it("tool_result 的 parent 未指向 assistant 时抛错", () => {
@@ -176,7 +183,9 @@ describe("buildMessages 投影重组", () => {
   });
 
   it("tool_result 无 parent 时抛错", () => {
-    expect(() => buildMessages([mk(0, "tool_result", { id: "c1", text: "x" })])).toThrow();
+    expect(() => buildMessages([mk(0, "tool_result", { id: "c1", text: "x" })])).toThrow(
+      /must have a parent/,
+    );
   });
 
   it("tool_result 的 id/text 非字符串时抛错", () => {
@@ -208,16 +217,10 @@ describe("buildMessages 投影重组", () => {
   it("tool_result 的 parent seq 必须先于自身", () => {
     expect(() =>
       buildMessages([
-        mk(2, "assistant", { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] }),
+        mk(0, "assistant", { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] }),
         mk(1, "tool_result", { id: "c1", text: "x" }, 2),
       ]),
-    ).toThrow();
-    expect(() =>
-      buildMessages([
-        mk(1, "assistant", { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] }),
-        mk(1, "tool_result", { id: "c1", text: "x" }, 1),
-      ]),
-    ).toThrow();
+    ).toThrow(/must precede it/);
   });
 
   it("tool_result 的 id 必须属于 parent 的 toolCalls", () => {
@@ -226,7 +229,64 @@ describe("buildMessages 投影重组", () => {
         mk(0, "assistant", { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] }),
         mk(1, "tool_result", { id: "c2", text: "x" }, 0),
       ]),
-    ).toThrow();
+    ).toThrow(/not found in parent/);
+  });
+
+  it("assistant 声明的 toolCalls 未全部收到结果时抛错", () => {
+    expect(() =>
+      buildMessages([
+        mk(0, "assistant", {
+          content: "",
+          toolCalls: [
+            { id: "c1", name: "echo", arguments: {} },
+            { id: "c2", name: "echo", arguments: {} },
+          ],
+        }),
+        mk(1, "tool_result", { id: "c1", text: "x" }, 0),
+      ]),
+    ).toThrow(/missing tool_result/);
+  });
+
+  it("tool_result 的 id 重复时抛错", () => {
+    expect(() =>
+      buildMessages([
+        mk(0, "assistant", {
+          content: "",
+          toolCalls: [
+            { id: "c1", name: "echo", arguments: {} },
+            { id: "c2", name: "echo", arguments: {} },
+          ],
+        }),
+        mk(1, "tool_result", { id: "c1", text: "x" }, 0),
+        mk(2, "tool_result", { id: "c1", text: "x" }, 0),
+      ]),
+    ).toThrow(/duplicate/);
+  });
+
+  it("tool 批次未完成时插入 user 抛错", () => {
+    expect(() =>
+      buildMessages([
+        mk(0, "assistant", {
+          content: "",
+          toolCalls: [
+            { id: "c1", name: "echo", arguments: {} },
+            { id: "c2", name: "echo", arguments: {} },
+          ],
+        }),
+        mk(1, "user", { content: "打断" }),
+        mk(2, "tool_result", { id: "c1", text: "x" }, 0),
+        mk(3, "tool_result", { id: "c2", text: "y" }, 0),
+      ]),
+    ).toThrow(/tool batch/);
+  });
+
+  it("system 出现在 user 之后时抛错", () => {
+    expect(() =>
+      buildMessages([
+        mk(0, "user", { content: "hi" }),
+        mk(1, "system", { content: "SYS" }),
+      ]),
+    ).toThrow(/system/);
   });
 
   it("不修改输入事件", () => {

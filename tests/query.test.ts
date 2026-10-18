@@ -5,7 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { buildMessages } from "../src/context/build.js";
-import { computeCostUsd } from "../src/loop/breakers.js";
+import { assertBreakers, computeCostUsd } from "../src/loop/breakers.js";
 import type { LoopEvent } from "../src/loop/events.js";
 import type { LoopCtx } from "../src/loop/query.js";
 import { query } from "../src/loop/query.js";
@@ -138,8 +138,10 @@ describe("query 主循环", () => {
     expect(session.events().map((event) => event.type)).toEqual([
       "user",
       "assistant",
+      "status",
       "tool_result",
       "assistant",
+      "status",
       "status",
     ]);
     const toolResult = session.events().find((event) => event.type === "tool_result");
@@ -229,6 +231,7 @@ describe("query 主循环", () => {
     expect(session.events().map((event) => event.type)).toEqual([
       "user",
       "assistant",
+      "status",
       "tool_result",
       "interrupted",
     ]);
@@ -338,6 +341,92 @@ describe("query 主循环", () => {
     expect(negative).toBeCloseTo(10 / 1_000_000, 12);
   });
 
+  it("负/NaN/Infinity usage 不产生负成本", () => {
+    const price = { input: 1, output: 1, cachedInput: 0.5 };
+
+    expect(
+      computeCostUsd({ promptTokens: -10, completionTokens: -5, cachedTokens: -3 }, price),
+    ).toBe(0);
+    expect(
+      computeCostUsd({ promptTokens: NaN, completionTokens: NaN, cachedTokens: NaN }, price),
+    ).toBe(0);
+    expect(
+      computeCostUsd({ promptTokens: Infinity, completionTokens: Infinity }, price),
+    ).toBe(0);
+  });
+
+  it("assertBreakers 拒绝非法 maxTurns/maxCostUsd", () => {
+    expect(() => assertBreakers({ maxTurns: NaN }, 1, 0)).toThrow(TypeError);
+    expect(() => assertBreakers({ maxTurns: Infinity }, 1, 0)).toThrow(TypeError);
+    expect(() => assertBreakers({ maxTurns: -1 }, 1, 0)).toThrow(TypeError);
+    expect(() => assertBreakers({ maxTurns: 1, maxCostUsd: NaN }, 1, 0)).toThrow(TypeError);
+    expect(() => assertBreakers({ maxTurns: 1, maxCostUsd: Infinity }, 1, 0)).toThrow(TypeError);
+  });
+
+  it("负/NaN usage 归一化后成本不减少,maxCostUsd 仍可触发", async () => {
+    const provider = scriptedProvider([
+      reply("a", [echoCall("c1")], false, {
+        promptTokens: -10,
+        completionTokens: -5,
+        cachedTokens: -3,
+      }),
+      reply("b", [echoCall("c2")], false, { promptTokens: 1, completionTokens: 0 }),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      pricePerMillion: { input: 1_000_000, output: 1_000_000 },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10, maxCostUsd: 1 }));
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "max_cost_usd" });
+    expect(provider.calls).toHaveLength(2);
+    const usages = session.events()
+      .filter((event) => event.type === "usage")
+      .map((event) => event.payload);
+    expect(usages[0]).toStrictEqual({
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedTokens: 0,
+      cachedTokensRaw: -3,
+    });
+    expect(usages[1]).toStrictEqual({ promptTokens: 1, completionTokens: 0 });
+  });
+
+  it("usage 落日志写归一化 cachedTokens", async () => {
+    const provider = scriptedProvider([
+      reply("done", [], false, { promptTokens: 10, completionTokens: 1, cachedTokens: 100 }),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      pricePerMillion: { input: 1, output: 1, cachedInput: 0.1 },
+    });
+
+    await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    const usage = session.events().find((event) => event.type === "usage");
+    expect(usage?.payload).toStrictEqual({
+      promptTokens: 10,
+      completionTokens: 1,
+      cachedTokens: 10,
+      cachedTokensRaw: 100,
+    });
+  });
+
+  it("usage 缺失时逐次落 status usage_missing,不累计成本", async () => {
+    const provider = scriptedProvider([reply("a", [echoCall("c1")]), reply("done")]);
+    const { ctx, session } = await makeCtx(provider, {
+      pricePerMillion: { input: 1, output: 1 },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    const missing = session.events().filter(
+      (event) => event.type === "status" && event.payload.status === "usage_missing",
+    );
+    expect(missing).toHaveLength(2);
+    expect(session.events().filter((event) => event.type === "usage")).toHaveLength(0);
+  });
+
   it("usage 事件按字段落日志,cachedTokens 缺省时不写该键", async () => {
     const provider = scriptedProvider([
       reply("done", [], false, { promptTokens: 12, completionTokens: 3 }),
@@ -382,6 +471,7 @@ describe("query 主循环", () => {
     expect(session.events().map((event) => event.type)).toEqual([
       "user",
       "assistant",
+      "status",
       "interrupted",
     ]);
   });
@@ -489,7 +579,10 @@ describe("query 主循环", () => {
       },
     };
     const provider = scriptedProvider([
-      reply("调用两个", [echoCall("c1", "a"), echoCall("c2", "b")]),
+      reply("调用两个", [echoCall("c1", "a"), echoCall("c2", "b")], false, {
+        promptTokens: 5,
+        completionTokens: 2,
+      }),
     ]);
     const { ctx, session } = await makeCtx(provider, {
       tools: new ToolRegistry([spyTool]),
@@ -504,10 +597,15 @@ describe("query 主循环", () => {
     expect(session.events().map((event) => event.type)).toStrictEqual([
       "user",
       "assistant",
+      "usage",
       "tool_result",
       "tool_result",
       "interrupted",
     ]);
+    expect(session.events().find((event) => event.type === "usage")?.payload).toStrictEqual({
+      promptTokens: 5,
+      completionTokens: 2,
+    });
     const assistant = session.events().find((event) => event.type === "assistant");
     const logged = session.events().filter((event) => event.type === "tool_result");
     expect(logged.map((event) => event.payload)).toStrictEqual([
@@ -537,6 +635,36 @@ describe("query 主循环", () => {
       "assistant",
       "tool",
       "tool",
+    ]);
+  });
+
+  it("无工具调用时消费者提前 return → usage 已落且 interrupted(consumer_closed)", async () => {
+    const provider = scriptedProvider([
+      reply("仅文本", [], false, { promptTokens: 3, completionTokens: 1 }),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const generator = query(ctx, "x", { maxTurns: 10 });
+    const first = await generator.next();
+    expect(first.value).toEqual({ kind: "model_message", content: "仅文本" });
+    await generator.return(undefined);
+
+    expect(session.events().map((event) => event.type)).toStrictEqual([
+      "user",
+      "assistant",
+      "usage",
+      "interrupted",
+    ]);
+    expect(session.events().find((event) => event.type === "usage")?.payload).toStrictEqual({
+      promptTokens: 3,
+      completionTokens: 1,
+    });
+    expect(
+      session.events().find((event) => event.type === "interrupted")?.payload,
+    ).toStrictEqual({ reason: "consumer_closed" });
+    expect(buildMessages(session.events()).map((message) => message.role)).toStrictEqual([
+      "user",
+      "assistant",
     ]);
   });
 
@@ -583,7 +711,119 @@ describe("query 主循环", () => {
 
     await expect(collect(query(ctx, "x", { maxTurns: 10 }))).rejects.toThrow("boom");
 
-    expect(session.events().map((event) => event.type)).toEqual(["user"]);
+    expect(session.events().map((event) => event.type)).toStrictEqual([
+      "user",
+      "interrupted",
+    ]);
+    expect(
+      session.events().find((event) => event.type === "interrupted")?.payload,
+    ).toStrictEqual({ reason: "error" });
+  });
+
+  it("executeBatch 抛错 → 补 tool_result_lost 与 interrupted(error) 后原错误上抛", async () => {
+    const provider = scriptedProvider([
+      reply("调用两个", [echoCall("c1"), echoCall("c2")]),
+    ]);
+    const registry = new ToolRegistry([echoTool]);
+    const brokenTools = {
+      all: () => registry.all(),
+      lookup: () => {
+        throw new Error("lookup exploded");
+      },
+    } as unknown as ToolRegistry;
+    const { ctx, session } = await makeCtx(provider, { tools: brokenTools });
+
+    await expect(collect(query(ctx, "x", { maxTurns: 10 }))).rejects.toThrow(
+      "lookup exploded",
+    );
+
+    const assistant = session.events().find((event) => event.type === "assistant");
+    const results = session.events().filter((event) => event.type === "tool_result");
+    expect(results.map((event) => event.payload)).toStrictEqual([
+      {
+        id: "c1",
+        ok: false,
+        text: "tool result not recorded due to error",
+        code: "tool_result_lost",
+      },
+      {
+        id: "c2",
+        ok: false,
+        text: "tool result not recorded due to error",
+        code: "tool_result_lost",
+      },
+    ]);
+    expect(results.map((event) => event.parent)).toStrictEqual([
+      assistant?.seq,
+      assistant?.seq,
+    ]);
+    expect(
+      session.events()
+        .filter((event) => event.type === "interrupted")
+        .map((event) => event.payload),
+    ).toStrictEqual([{ reason: "error" }]);
+    expect(() => buildMessages(session.events())).not.toThrow();
+  });
+
+  it("append 失败 → 补 tool_result_lost 与 interrupted(error),原错误上抛", async () => {
+    const provider = scriptedProvider([
+      reply("调用两个", [echoCall("c1"), echoCall("c2")], false, {
+        promptTokens: 1,
+        completionTokens: 1,
+      }),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+    let count = 0;
+    const failing: SessionHandle = {
+      id: session.id,
+      dir: session.dir,
+      header: session.header,
+      append: async (event) => {
+        count += 1;
+        if (count === 4) throw new Error("append boom");
+        return session.append(event);
+      },
+      events: () => session.events(),
+      close: () => session.close(),
+    };
+    ctx.session = failing;
+
+    await expect(collect(query(ctx, "x", { maxTurns: 10 }))).rejects.toThrow(
+      "append boom",
+    );
+
+    expect(session.events().map((event) => event.type)).toStrictEqual([
+      "user",
+      "assistant",
+      "usage",
+      "tool_result",
+      "tool_result",
+      "interrupted",
+    ]);
+    const results = session.events().filter((event) => event.type === "tool_result");
+    expect(results.map((event) => event.payload)).toStrictEqual([
+      {
+        id: "c1",
+        ok: false,
+        text: "tool result not recorded due to error",
+        code: "tool_result_lost",
+      },
+      {
+        id: "c2",
+        ok: false,
+        text: "tool result not recorded due to error",
+        code: "tool_result_lost",
+      },
+    ]);
+    expect(
+      session.events().find((event) => event.type === "interrupted")?.payload,
+    ).toStrictEqual({ reason: "error" });
+    expect(
+      session.events().some(
+        (event) => event.type === "interrupted" && event.payload.reason === "consumer_closed",
+      ),
+    ).toBe(false);
+    expect(() => buildMessages(session.events())).not.toThrow();
   });
 
   it("未知工具 → tool_result isError,循环继续至 done", async () => {
@@ -684,6 +924,15 @@ describe("query 主循环", () => {
 
     const events = await collect(query(ctx, "x", { maxTurns: 10 }));
 
+    expect(events.map((event) => event.kind)).toStrictEqual([
+      "compacted",
+      "model_message",
+      "tool_use",
+      "tool_result",
+      "compacted",
+      "model_message",
+      "done",
+    ]);
     expect(events.filter((event) => event.kind === "compacted")).toHaveLength(2);
     expect(compactions).toBe(2);
     expect(provider.calls).toHaveLength(2);

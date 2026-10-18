@@ -224,6 +224,30 @@
 - **触发升级条件**: 成本上限要求单轮硬实时,或单轮成本可能远超阈值。
 - **修复建议**: 在 usage 累计后立即检查并中断(需决定本批工具是否仍执行),或保留轮首检查并在文档写明延迟语义。
 
+### D-027 · 无 usage 时 `maxCostUsd` 静默失效
+
+- **发现**: 2026-10-18,Task 9 第三轮红队审查(I3)。
+- **现象**: 响应缺失 usage 时 `query` 落 `status {status:"usage_missing"}` 并保持 cost 不变;若 provider 长期不返回 usage,`maxCostUsd` 永不计费、永不触发。
+- **影响**: 成本上限在无 usage 的网关上失效;token 仍可从日志观察,但费用熔断不可用。
+- **触发升级条件**: 接入不返回 usage 的网关并要求成本硬上限。
+- **修复建议**: 无 usage 时按 `countTokens` 或响应字符数估算成本并标记 `estimated:true`,或明确拒绝在该 provider 上配置 `maxCostUsd`。
+
+### D-028 · `invalid_json` marker 的 raw 无长度上限
+
+- **发现**: 2026-10-18,Task 9 第三轮红队审查(Minor)。
+- **现象**: `buildMessages` 将 marker 的 raw 原样回填,`query` 的 markerResult 也将 raw 原样写入 text/detail;模型一次输出超长坏参数会直接放大下一轮上下文与日志。
+- **影响**: 极端情况下可能触发 context 超限或日志膨胀,当前无上限/截断。
+- **触发升级条件**: 真实模型输出超长非法 arguments,或日志/上下文预算被单条 raw 顶爆。
+- **修复建议**: 对 raw 设字符上限(如 8k),超限截断并附 `truncated:true`,同时保留 hash/长度摘要。
+
+### D-029 · assistant 重复 tool call id 的投影未拦截
+
+- **发现**: 2026-10-18,Task 9 第三轮红队审查(Minor)。
+- **现象**: `buildMessages` 登记批次时按 id 列表保留重复项;`tool_result` 侧用 seen 集合拒绝重复结果,但 assistant 自身声明重复 id 时,投影出的 `tool_calls` 仍含重复 id。
+- **影响**: 若模型返回重复 id,批次可能永远缺一个结果并在 `buildMessages` 末尾抛 `missing tool_result`,或产生配对歧义。
+- **触发升级条件**: 模型返回重复 tool call id,或引入非 Task 6 的响应构造方。
+- **修复建议**: 在 `projectAssistant` 登记批次时检测重复 id 并抛错(与 `tool_result` 的 duplicate 语义对齐),或在 `query` 分流前归一化/拒绝重复 id。
+
 ---
 
 ## 变更记录
@@ -239,3 +263,4 @@
 | 2026-10-18 | Task 8 第三轮红队修复:D-020 标注接口已解决、Task 9 透传待验;录入 D-022(超时≠强制终止、串行写可能重叠) |
 | 2026-10-18 | Task 8 交付核验:录入 D-023(非字符串 id 绕过重复检测)、D-024(空 artifactDir 文案);D-020 已随 plan Task 9 补 `cwd`/`timeoutMs` 透传要求 |
 | 2026-10-18 | Task 9 第二轮整合审查:D-020 标记已解决(Task 9 已透传 `cwd`/`timeoutMs`);录入 D-025(空 `tool_calls` 数组)、D-026(`maxCostUsd` 延迟一轮);D-023 合并 F9(`query` 不重复校验 `call.id`,信任 Task 6) |
+| 2026-10-18 | Task 9 第三轮红队审查:录入 D-027(无 usage 时 `maxCostUsd` 静默失效)、D-028(marker raw 无上限)、D-029(assistant 重复 tool call id 投影未拦截) |

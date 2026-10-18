@@ -13,7 +13,7 @@ import { toModelToolSchemas } from "../tools/registry.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/types.js";
 import type { BreakerLimits, PricePerMillion } from "./breakers.js";
-import { assertBreakers, computeCostUsd, LoopBroke } from "./breakers.js";
+import { assertBreakers, computeCostUsd, LoopBroke, normalizeUsage } from "./breakers.js";
 import type { LoopEvent, LoopFinishReason } from "./events.js";
 
 export interface LoopCtx {
@@ -41,6 +41,8 @@ interface InvalidJsonMarker {
 type CallSlot = { marker: ToolResult } | { index: number };
 
 type InterruptReason = Exclude<LoopFinishReason, "no_tool_calls">;
+
+type ExitReason = "normal" | "consumer" | "error";
 
 interface PendingBatch {
   assistantSeq: number;
@@ -79,6 +81,15 @@ function abortedToolResult(): ToolResult {
     code: "tool_aborted",
     message: "tool aborted before execution",
     text: "tool aborted before execution",
+  };
+}
+
+function lostToolResult(): ToolResult {
+  return {
+    isError: true,
+    code: "tool_result_lost",
+    message: "tool result not recorded due to error",
+    text: "tool result not recorded due to error",
   };
 }
 
@@ -149,11 +160,13 @@ export async function* query(
   let turn = 0;
   let costUsd = 0;
   let pending: PendingBatch | undefined;
+  let exitReason: ExitReason | undefined;
 
   try {
     while (true) {
       turn += 1;
       if (ctx.signal.aborted) {
+        exitReason = "normal";
         yield* emitInterrupted(session, "aborted");
         return;
       }
@@ -162,6 +175,7 @@ export async function* query(
         assertBreakers(cfg, turn, costUsd, costTracked);
       } catch (error) {
         if (error instanceof LoopBroke) {
+          exitReason = "normal";
           yield* emitInterrupted(session, error.reason);
           return;
         }
@@ -184,6 +198,7 @@ export async function* query(
         });
       } catch (error) {
         if (isAbortError(error) || ctx.signal.aborted) {
+          exitReason = "normal";
           yield* emitInterrupted(session, "aborted");
           return;
         }
@@ -197,22 +212,29 @@ export async function* query(
       if (response.toolCalls.length > 0) {
         pending = { assistantSeq: assistantEvent.seq, calls: response.toolCalls.slice() };
       }
-      yield { kind: "model_message", content: response.content };
-      for (const call of response.toolCalls) {
-        yield { kind: "tool_use", id: call.id, name: call.name, input: call.arguments };
-      }
 
       if (response.usage !== undefined) {
         const usage = response.usage;
-        await session.append({
-          type: "usage",
-          payload: {
-            promptTokens: usage.promptTokens,
-            completionTokens: usage.completionTokens,
-            ...(usage.cachedTokens !== undefined ? { cachedTokens: usage.cachedTokens } : {}),
-          },
-        });
+        const normalized = normalizeUsage(usage);
+        const payload: Record<string, unknown> = {
+          promptTokens: normalized.promptTokens,
+          completionTokens: normalized.completionTokens,
+        };
+        if (normalized.cachedTokens !== undefined) {
+          payload.cachedTokens = normalized.cachedTokens;
+        }
+        if (normalized.cachedTokensRaw !== undefined) {
+          payload.cachedTokensRaw = normalized.cachedTokensRaw;
+        }
+        await session.append({ type: "usage", payload });
         costUsd += computeCostUsd(usage, ctx.pricePerMillion);
+      } else {
+        await session.append({ type: "status", payload: { status: "usage_missing" } });
+      }
+
+      yield { kind: "model_message", content: response.content };
+      for (const call of response.toolCalls) {
+        yield { kind: "tool_use", id: call.id, name: call.name, input: call.arguments };
       }
 
       if (ctx.signal.aborted) {
@@ -227,6 +249,7 @@ export async function* query(
           yield { kind: "tool_result", id: call.id, ok: false, text: result.text };
         }
         pending = undefined;
+        exitReason = "normal";
         yield* emitInterrupted(session, "aborted");
         return;
       }
@@ -237,6 +260,7 @@ export async function* query(
           type: "status",
           payload: { status: "done", finishReason: "no_tool_calls" },
         });
+        exitReason = "normal";
         yield { kind: "done", finishReason: "no_tool_calls" };
         return;
       }
@@ -268,17 +292,41 @@ export async function* query(
 
       if (response.truncatedByMaxTokens) continue;
     }
-  } finally {
+  } catch (error) {
+    exitReason = "error";
     if (pending !== undefined) {
       for (const call of pending.calls) {
-        await session.append({
-          type: "tool_result",
-          payload: toResultPayload(call.id, abortedToolResult()),
-          parent: pending.assistantSeq,
-        });
+        try {
+          await session.append({
+            type: "tool_result",
+            payload: toResultPayload(call.id, lostToolResult()),
+            parent: pending.assistantSeq,
+          });
+        } catch {}
       }
-      await session.append({ type: "interrupted", payload: { reason: "consumer_closed" } });
       pending = undefined;
+    }
+    try {
+      await session.append({ type: "interrupted", payload: { reason: "error" } });
+    } catch {}
+    throw error;
+  } finally {
+    if (exitReason === undefined) {
+      if (pending !== undefined) {
+        for (const call of pending.calls) {
+          try {
+            await session.append({
+              type: "tool_result",
+              payload: toResultPayload(call.id, abortedToolResult()),
+              parent: pending.assistantSeq,
+            });
+          } catch {}
+        }
+        pending = undefined;
+      }
+      try {
+        await session.append({ type: "interrupted", payload: { reason: "consumer_closed" } });
+      } catch {}
     }
   }
 }

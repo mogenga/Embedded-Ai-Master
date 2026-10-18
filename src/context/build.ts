@@ -55,6 +55,12 @@ function projectAssistant(
   };
 }
 
+interface ActiveBatch {
+  assistantSeq: number;
+  remaining: string[];
+  seen: Set<string>;
+}
+
 export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage[] {
   const bySeq = new Map<number, SessionEvent>();
   let previousSeq: number | undefined;
@@ -69,9 +75,23 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
   }
 
   const messages: ModelChatMessage[] = [];
+  let activeBatch: ActiveBatch | undefined;
   for (const event of events) {
+    if (
+      activeBatch !== undefined &&
+      (event.type === "user" || event.type === "system" || event.type === "assistant")
+    ) {
+      throw new TypeError(
+        `tool batch for assistant event ${activeBatch.assistantSeq} is incomplete; ${event.type} event ${event.seq} cannot appear`,
+      );
+    }
     switch (event.type) {
       case "system": {
+        if (messages.some((message) => message.role !== "system")) {
+          throw new TypeError(
+            `system event ${event.seq} must appear before non-system messages`,
+          );
+        }
         messages.push({
           role: "system",
           content: requireString(event.payload.content, `system event ${event.seq} content`),
@@ -86,7 +106,16 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
         break;
       }
       case "assistant": {
-        messages.push(projectAssistant(event.payload, event.seq));
+        const message = projectAssistant(event.payload, event.seq);
+        messages.push(message);
+        const ids = message.tool_calls?.map((call) => call.id) ?? [];
+        if (ids.length > 0) {
+          activeBatch = {
+            assistantSeq: event.seq,
+            remaining: ids.slice(),
+            seen: new Set(),
+          };
+        }
         break;
       }
       case "tool_result": {
@@ -118,6 +147,26 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
             `tool_result event ${event.seq} id ${id} not found in parent ${event.parent} toolCalls`,
           );
         }
+        if (activeBatch === undefined) {
+          throw new TypeError(`tool_result event ${event.seq} has no active tool batch`);
+        }
+        if (event.parent !== activeBatch.assistantSeq) {
+          throw new TypeError(
+            `tool_result event ${event.seq} parent ${event.parent} does not match active tool batch ${activeBatch.assistantSeq}`,
+          );
+        }
+        if (activeBatch.seen.has(id)) {
+          throw new TypeError(`tool_result event ${event.seq} duplicate id ${id}`);
+        }
+        const index = activeBatch.remaining.indexOf(id);
+        if (index < 0) {
+          throw new TypeError(`tool_result event ${event.seq} id ${id} not in active tool batch`);
+        }
+        activeBatch.remaining.splice(index, 1);
+        activeBatch.seen.add(id);
+        if (activeBatch.remaining.length === 0) {
+          activeBatch = undefined;
+        }
         messages.push({ role: "tool", content: text, tool_call_id: id });
         break;
       }
@@ -132,6 +181,11 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
         throw new TypeError(`unknown session event type: ${String(event.type)}`);
       }
     }
+  }
+  if (activeBatch !== undefined) {
+    throw new TypeError(
+      `assistant event ${activeBatch.assistantSeq} has ${activeBatch.remaining.length} missing tool_result events`,
+    );
   }
   return messages;
 }
