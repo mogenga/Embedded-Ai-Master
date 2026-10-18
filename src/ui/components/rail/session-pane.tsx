@@ -1,60 +1,82 @@
 import type { JSX } from "preact";
+import type { SessionSummary } from "../../api/client.js";
 import { Icon } from "../../icons.js";
 
-type SessionState = "run" | "warn" | "idle";
+function formatTime(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return parsed.toISOString().slice(5, 16).replace("T", " ");
+}
 
-type SessionRow = {
-  id: string;
-  title: string;
-  meta: string;
-  state: SessionState;
-  active?: boolean;
-};
+function SessionRow({
+  session,
+  active,
+  onSelect,
+}: {
+  session: SessionSummary;
+  active: boolean;
+  onSelect?: (id: string) => void;
+}): JSX.Element {
+  const state = session.status === "open" ? "run" : "idle";
+  return (
+    <li>
+      <button
+        type="button"
+        class={active ? "session is-active" : "session"}
+        onClick={onSelect === undefined ? undefined : () => onSelect(session.id)}
+      >
+        <span class="dot" data-s={state} />
+        <span class="session-title">{session.id}</span>
+        <span class="session-meta">{formatTime(session.createdAt)}</span>
+      </button>
+    </li>
+  );
+}
 
-const SESSION_GROUPS: ReadonlyArray<{ label: string; rows: ReadonlyArray<SessionRow> }> = [
-  {
-    label: "进行中",
-    rows: [
-      { id: "128", title: "STM32F407 UART 输出乱码", meta: "#128", state: "run", active: true },
-      { id: "127", title: "ESP32 上电无输出", meta: "#127", state: "warn" },
-    ],
-  },
-  {
-    label: "历史",
-    rows: [
-      { id: "i2c", title: "I2C 传感器读回全 0xFF", meta: "2h", state: "idle" },
-      { id: "kinetis", title: "Kinetis 看门狗反复复位", meta: "1d", state: "idle" },
-      { id: "dma", title: "DMA 传输间歇丢帧", meta: "3d", state: "idle" },
-    ],
-  },
-];
-
-export function SessionPane(): JSX.Element {
+export function SessionPane({
+  sessions,
+  activeId,
+  onSelect,
+}: {
+  sessions: SessionSummary[];
+  activeId?: string;
+  onSelect?: (id: string) => void;
+}): JSX.Element {
+  const open = sessions.filter((session) => session.status === "open");
+  const closed = sessions.filter((session) => session.status === "closed");
   return (
     <section class="rail-bottom" aria-label="诊断会话">
       <div class="pane-head">
         <Icon name="i-chat" size={14} />
         <span>诊断会话</span>
-        <button type="button" class="head-btn" title="新建诊断" aria-label="新建诊断">
+        <button type="button" class="head-btn" title="新建诊断" aria-label="新建诊断" disabled>
           <Icon name="i-plus" size={14} />
         </button>
       </div>
-      <ul class="sessions">
-        {SESSION_GROUPS.map((group) => [
-          <li key={group.label} class="session-group">
-            {group.label}
-          </li>,
-          ...group.rows.map((row) => (
-            <li key={row.id}>
-              <button type="button" class={row.active ? "session is-active" : "session"}>
-                <span class="dot" data-s={row.state} />
-                <span class="session-title">{row.title}</span>
-                <span class="session-meta">{row.meta}</span>
-              </button>
-            </li>
-          )),
-        ])}
-      </ul>
+      {sessions.length === 0 ? (
+        <p class="pane-empty">暂无会话</p>
+      ) : (
+        <ul class="sessions">
+          {open.length > 0 ? <li class="session-group">进行中</li> : null}
+          {open.map((session) => (
+            <SessionRow
+              key={session.id}
+              session={session}
+              active={session.id === activeId}
+              onSelect={onSelect}
+            />
+          ))}
+          {closed.length > 0 ? <li class="session-group">历史</li> : null}
+          {closed.map((session) => (
+            <SessionRow
+              key={session.id}
+              session={session}
+              active={session.id === activeId}
+              onSelect={onSelect}
+            />
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

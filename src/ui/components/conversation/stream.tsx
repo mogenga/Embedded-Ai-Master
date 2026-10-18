@@ -13,7 +13,11 @@ export function ConversationStream({
 }): JSX.Element {
   return (
     <div class="cnv-stream">
-      <MessageStream view={view} onGuardConfirm={onGuardConfirm} onGuardReject={onGuardReject} />
+      {view.events.length === 0 ? (
+        <p class="cnv-empty">暂无会话</p>
+      ) : (
+        <MessageStream view={view} onGuardConfirm={onGuardConfirm} onGuardReject={onGuardReject} />
+      )}
     </div>
   );
 }

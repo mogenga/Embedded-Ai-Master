@@ -17,15 +17,18 @@
 - 三态主题系统（light / system / dark），`localStorage` 键 `eam-theme`，默认 `system`。
 - 全部 15 个组件规格（topbar / knowledge pane / session pane / conversation header / pathline / message stream / tool card / verdict card / guard notice / composer / dock / device monitor / port settings / debug log / status bar）。
 - `TranscriptView` 纯函数归约（前端唯一视图模型；实时渲染与回放共用）。
+- 真实数据源：新增最小只读 HTTP API（会话列表、会话事件回放、知识库树、设备状态），前端从 API 加载；无数据时显示空态。
 - SSE + HTTP POST 客户端抽象（保留 `EventSource` 替换点）。
 - 视觉验收脚本：V1-V14 在无头 Chromium 下实测（对齐 frontend-design §12）。
 
 ### 1.2 范围外
 
-- 不做真实后端接线（内核 `query` 的 SSE 服务端尚未实现）；前端只提供传输抽象与 demo 数据回放。
+- 不做真实写操作与实时事件生产：`POST /api/actions` 与 `GET /api/events` 诚实返回未实现，不伪造成功。
+- 不做设备/串口真实探测：`GET /api/device` 返回 `unknown`，不伪造连接状态。
 - 不做移动端优先；窄屏仅"可用降级"。
 - 不做 MCP server 工具清单与权限策略界面。
-- 不新增内核测试；不改变 `src/loop` / `src/session` 现有语义。
+- 不改变 `src/loop` / `src/session` 现有语义；API 只读复用会话持久化。
+- 生产代码零演示数据（fixtures、DEMO 常量一律移除）；测试内部可显式构造测试数据。
 
 ---
 
@@ -201,24 +204,52 @@ export type TranscriptEvent =
 
 ---
 
-## 7. 实时通道抽象
+## 7. 数据 API 与实时通道
 
-`view/sse.ts` 导出：
+### 7.1 只读 HTTP API（`src/server/api.ts`）
+
+服务端只读复用 `src/session/persistence.ts` 的 `readSessionDir`，不改变内核语义。所有响应 `Content-Type: application/json`；错误响应 `{ error: { code, message } }` 与对应状态码。
+
+| 方法 | 路径 | 响应 | 说明 |
+|---|---|---|---|
+| GET | `/api/sessions` | `{ sessions: SessionSummary[], errors: Array<{ dir, code }> }` | 扫描 `resolveHarnessHome()/sessions/*`，按 `header.createdAt` 倒序；坏目录进 `errors`，不影响其余会话 |
+| GET | `/api/sessions/:id` | `{ header: SessionHeader, events: SessionEvent[] }` | 校验 id 仅含 `[A-Za-z0-9._-]` 且解析后位于会话根内；不存在 → 404 `session_not_found` |
+| GET | `/api/kb` | `{ root: string \| null, tree: KbNode[] }` | 扫描 `resolveHarnessHome()/kb`；目录不存在 → `root:null, tree:[]` |
+| GET | `/api/device` | `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` | 未接真实探测，诚实返回 unknown |
+| POST | `/api/actions` | 501 `{ error: { code: "action_not_implemented" } }` | 不伪造受理 |
+| GET | `/api/events` | 501 `{ error: { code: "event_stream_not_implemented" } }` | SSE 未实现 |
+
+`SessionSummary = { id, createdAt, status, model?, workdir? }`。
+`KbNode = { name, path, kind: "dir" | "file", children?: KbNode[] }`，目录优先排序，深度上限 8 层，条目上限 2000。
+
+静态资源：API 服务同源 serve `dist-web/`，`/` 与 `/web/index.html` 返回 `dist-web/web/index.html`；未命中静态与 API → 404。开发期 `vite.config.ts` 将 `/api` 代理到 `http://127.0.0.1:${HARNESS_UI_PORT ?? 5174}`。
+
+### 7.2 前端 API 客户端（`src/ui/api/client.ts`）
 
 ```ts
-export interface StreamHandlers {
-  onEvent(ev: LoopEvent): void;
-  onOpen?(): void;
-  onError?(err: unknown): void;
-}
-export function createEventStream(url: string, handlers: StreamHandlers, deps?: { EventSourceCtor?: typeof EventSource; retryMs?: number }): { close(): void };
-export async function postAction<T>(url: string, body: unknown, deps?: { fetchImpl?: typeof fetch }): Promise<T>;
+export interface SessionSummary { id: string; createdAt: string; status: "open" | "closed"; model?: string; workdir?: string }
+export interface KbNode { name: string; path: string; kind: "dir" | "file"; children?: KbNode[] }
+export interface DeviceStatus { probe: string; serial: string; cpu: string; backend: string }
+export async function fetchSessions(deps?: { fetchImpl?: typeof fetch }): Promise<{ sessions: SessionSummary[]; errors: Array<{ dir: string; code: string }> }>;
+export async function fetchSession(id: string, deps?: { fetchImpl?: typeof fetch }): Promise<{ header: SessionHeader; events: SessionEvent[] }>;
+export async function fetchKb(deps?: { fetchImpl?: typeof fetch }): Promise<{ root: string | null; tree: KbNode[] }>;
+export async function fetchDevice(deps?: { fetchImpl?: typeof fetch }): Promise<DeviceStatus>;
 ```
 
-- `createEventStream` 内部以 `EventSource` 实现，收到 `message` 解析 JSON 为 `LoopEvent` 后交 `onEvent`；连接断开按 `retryMs` 重连；显式 `close()` 后不再重连。
-- `postAction` 以 `Content-Type: application/json` POST，非 2xx 抛结构化错误。
-- 依赖注入点（`EventSourceCtor` / `fetchImpl`）供 vitest node 环境测试。
-- 本工程只交付抽象与针对性测试；真实 SSE 服务端接线在服务端实现后接入（见 §1.2）。
+非 2xx 抛 `{ code, status }`；网络异常上抛。所有函数必须可注入 `fetchImpl` 以便 vitest node 环境测试，且请求相对路径 `/api/...`（dev 走 Vite proxy，生产同源）。
+
+### 7.3 实时通道抽象（保留）
+
+`view/sse.ts` 保留 `createEventStream` / `postAction`（接口与行为见 Task 9/11/12）。配置 `VITE_EVENT_STREAM_URL` 时订阅实时事件并累积归约；未配置时以 `GET /api/sessions/:id` 的真实会话事件回放。`VITE_ACTION_URL` 未配置时发送按钮禁用并给出可见说明（D-053）。
+
+### 7.4 真实数据与空态（禁止演示数据）
+
+- `src/ui/demo/fixtures.ts` 删除；生产代码不得再出现 UART 演示会话、固定知识库树、固定会话列表、DEMO 寄存器/日志常量。
+- 会话列表来自 `fetchSessions`；选中会话事件来自 `fetchSession` 并交给 `transcriptFromSession`。
+- 知识库树来自 `fetchKb`；设备字段来自 `fetchDevice`（`unknown` 显示「未接入」，不显示「已连接」）。
+- 调试坞日志从 `TranscriptView.events` 的工具事件派生；寄存器从工具结果 `detail` 中出现 `registers`/`readout` 时派生；无数据时显示空态说明。
+- 加载失败显示错误与重试入口；无会话显示「暂无会话」；无 KB 显示「未配置知识库」。
+- 测试内部数据放 `tests/ui/support/builders.ts`，不得被生产代码 import。
 
 ---
 
@@ -257,9 +288,12 @@ frontend-design §12 的 14 项验收由 `scripts/verify-ui.mjs` 在无头 Chrom
 
 ---
 
-## 10. 演示数据
+## 10. 数据来源与空态
 
-`src/ui/demo/fixtures.ts` 提供一个 `SessionEvent[]` 会话 fixture，内容与 `prototypes/index.html` 的消息流一致（UART 乱码诊断：user 气泡 → AskBlock → 用户回答 → kb_lookup 命中 → mem_read×2 证据 → 根因判决 → guard 提示），供回放模式、开发态与验收 V13 使用。组件在无 SSE 连接时以回放模式渲染该 fixture；编程接口允许传入任意 `SessionEvent[]`。
+- 生产数据只来自 §7.1 的真实 API 与 §7.3 的实时通道；`src/ui/demo/fixtures.ts` 与 `DEMO_*` 常量删除。
+- 无会话、无知识库、设备未知、API 失败均有明确空态/错误态，不使用占位数据填充。
+- 测试数据集中在 `tests/ui/support/builders.ts`（`makeSessionEvents()` 等），仅供测试 import。
+- 验收脚本构造真实临时会话目录（写真实 `header.json` + `session.v1.jsonl`）交给 API 服务，页面从 API 加载；脚本不向前端注入数据。
 
 ---
 
@@ -270,7 +304,8 @@ frontend-design §12 的 14 项验收由 `scripts/verify-ui.mjs` 在无头 Chrom
 | UI-SPEC-01 | 前端代码置于 `src/ui/`，与内核同仓同类型域；Web 构建独立 tsconfig.web.json + Vite 产物 `dist-web/` | 复用内核事件类型避免第二套投影；内核构建不被前端 JSX 污染 |
 | UI-SPEC-02 | UI 组件测试用文件头 `// @vitest-environment happy-dom` 切换环境，不改全局 vitest config | 内核测试保持 node 环境零扰动；vitest 官方支持 per-file environment 注释 |
 | UI-SPEC-03 | 组件测试在 happy-dom 断言结构/aria/交互；几何与浏览器行为（V1-V12、V14）全走无头 Chromium `verify-ui.mjs` | happy-dom 不测真实几何布局；浏览器基线为 Chromium 系 |
-| UI-SPEC-04 | 本阶段不回接真实 SSE 服务端，交付 `EventSource` 抽象 + fixture 回放 | 服务端 SSE 未实现；保持前端可独立验收（BR-6 回放依赖会话日志而非硬件） |
+| UI-SPEC-04 | ~~本阶段不回接真实 SSE 服务端，交付 `EventSource` 抽象 + fixture 回放~~（被 UI-SPEC-05 取代） | 服务端未实现时的过渡决策 |
+| UI-SPEC-05 | 生产代码零演示数据；新增最小只读 HTTP API（会话/事件回放/KB 树/设备状态），实时与写操作诚实返回未实现；无数据显示空态 | 用户 2026-10-18 明确"不要 mock 数据"；BR-6 回放必须来自真实会话日志 |
 
 ---
 
@@ -279,3 +314,4 @@ frontend-design §12 的 14 项验收由 `scripts/verify-ui.mjs` 在无头 Chrom
 | 版本 | 日期 | 说明 |
 |---|---|---|
 | v1.0 | 2026-10-18 | 首版：依据 frontend-design.md v1.1 与 prototypes/index.html 落地前端工程实现决策 |
+| v1.1 | 2026-10-18 | 用户要求"不要 mock 数据"：新增只读 HTTP API 契约（§7.1-7.4），删除演示数据源（§10），UI-SPEC-05 取代 UI-SPEC-04 |

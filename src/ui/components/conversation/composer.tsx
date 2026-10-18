@@ -5,7 +5,15 @@ import { Icon } from "../../icons.js";
 const MIN_HEIGHT = 22;
 const MAX_HEIGHT = 120;
 
-export function Composer({ onSend }: { onSend: (text: string) => void }): JSX.Element {
+export function Composer({
+  onSend,
+  canSend = true,
+  disabledReason,
+}: {
+  onSend?: (text: string) => void;
+  canSend?: boolean;
+  disabledReason?: string;
+}): JSX.Element {
   const [text, setText] = useState("");
   const field = useRef<HTMLTextAreaElement>(null);
 
@@ -21,9 +29,10 @@ export function Composer({ onSend }: { onSend: (text: string) => void }): JSX.El
   }
 
   function send(): void {
+    if (!canSend) return;
     const value = (field.current?.value ?? text).trim();
     if (!value) return;
-    onSend(value);
+    onSend?.(value);
     setText("");
     const el = field.current;
     if (el) {
@@ -71,13 +80,18 @@ export function Composer({ onSend }: { onSend: (text: string) => void }): JSX.El
             type="button"
             class="send"
             aria-label="发送"
-            disabled={text.trim() === ""}
+            disabled={!canSend || text.trim() === ""}
             onClick={send}
           >
             <Icon name="i-send" size={16} />
           </button>
         </div>
       </div>
+      {canSend ? null : (
+        <p class="composer-note" role="status">
+          {disabledReason ?? "未配置提交端点"}
+        </p>
+      )}
     </div>
   );
 }

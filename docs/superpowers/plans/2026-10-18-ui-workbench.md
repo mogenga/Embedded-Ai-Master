@@ -1192,3 +1192,278 @@ Expected: 全绿；verify-ui 14/14 + SUMMARY。
 git add -A
 git commit -m "fix(ui): 修复红队审查的边界与SSE重连缺陷"
 ```
+
+---
+
+### Task 13: 只读 HTTP API 服务（真实数据源）
+
+**Files:**
+- Create: `src/server/api.ts`
+- Create: `src/server/serve.ts`
+- Create: `tests/server/api.test.ts`
+- Modify: `package.json`（scripts 增 `serve:ui`）
+- Modify: `vite.config.ts`（`server.proxy` 将 `/api` 转发到 `HARNESS_UI_PORT` 默认 5174）
+
+**Interfaces:**
+- Consumes: `resolveHarnessHome(env?)`（`src/config/harness-home.ts`）；`readSessionDir(dir)`（`src/session/persistence.ts`）；`SessionHeader` / `SessionEvent`（`src/session/types.ts`）。
+- Produces:
+  - `export interface ApiOptions { harnessHome?: string; staticRoot?: string }`
+  - `export function createApiHandler(opts?: ApiOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void>`
+  - `export function createUiServer(opts?: ApiOptions & { port?: number; host?: string }): { server: Server; port: number; close(): Promise<void> }`
+  - `src/server/serve.ts` 作为 CLI：读取 `HARNESS_UI_PORT`（默认 5174）、`HARNESS_HOME`、`staticRoot` 默认 `dist-web`，启动后打印 `UI server listening on http://127.0.0.1:<port>/`；收到 SIGINT/SIGTERM 优雅关闭。
+  - 路由与响应严格按 spec §7.1；id 校验 `/^[A-Za-z0-9._-]{1,128}$/` 且 realpath 后必须位于 `<harnessHome>/sessions` 内。
+  - `KbNode` 扫描：`<harnessHome>/kb` 不存在 → `{ root: null, tree: [] }`；目录优先、名称升序、深度上限 8、条目上限 2000。
+  - 静态：`staticRoot` 存在时 `/` 与 `/web/index.html` 返回 `<staticRoot>/web/index.html`；其余路径按文件 serve（防穿越）；未命中 404；MIME 至少覆盖 html/js/css/svg/json/png/ico。
+
+- [ ] **Step 1: 写失败测试**
+
+`tests/server/api.test.ts`（node 环境，使用 `node:http` + `node:fs/promises` + 临时目录）：
+
+```ts
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { createUiServer } from "../../src/server/api.js";
+
+function makeHome(): string {
+  const home = mkdtempSync(path.join(tmpdir(), "eam-ui-api-"));
+  mkdirSync(path.join(home, "sessions", "s1"), { recursive: true });
+  writeFileSync(path.join(home, "sessions", "s1", "header.json"), JSON.stringify({
+    id: "s1", createdAt: "2026-10-18T00:00:00.000Z", status: "closed", model: "local-gw/flash",
+  }));
+  writeFileSync(path.join(home, "sessions", "s1", "session.v1.jsonl"),
+    JSON.stringify({ seq: 0, ts: "t", type: "user", payload: { content: "你好" } }) + "\n");
+  mkdirSync(path.join(home, "kb", "protocols"), { recursive: true });
+  writeFileSync(path.join(home, "kb", "protocols", "uart.md"), "# uart\n");
+  return home;
+}
+
+describe("ui api", () => {
+  let close: (() => Promise<void>) | undefined;
+  afterEach(async () => { await close?.(); close = undefined; });
+
+  it("会话列表返回真实 header", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    const res = await fetch(`http://127.0.0.1:${s.port}/api/sessions`);
+    const body = await res.json() as { sessions: Array<{ id: string; model?: string }> };
+    expect(res.status).toBe(200);
+    expect(body.sessions).toEqual([expect.objectContaining({ id: "s1", model: "local-gw/flash" })]);
+  });
+
+  it("会话事件按真实日志返回", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/sessions/s1`)).json() as { events: unknown[] };
+    expect(body.events).toHaveLength(1);
+  });
+
+  it("拒绝路径穿越与未知会话", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    expect((await fetch(`http://127.0.0.1:${s.port}/api/sessions/..%2f..%2fetc`)).status).toBe(400);
+    expect((await fetch(`http://127.0.0.1:${s.port}/api/sessions/nope`)).status).toBe(404);
+  });
+
+  it("知识库树扫描真实目录", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/kb`)).json() as { root: string | null; tree: Array<{ name: string; kind: string }> };
+    expect(body.root).toContain("kb");
+    expect(body.tree).toEqual([expect.objectContaining({ name: "protocols", kind: "dir" })]);
+  });
+
+  it("设备状态诚实返回 unknown", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/device`)).json() as Record<string, string>;
+    expect(body).toEqual({ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" });
+  });
+
+  it("写操作与事件流诚实返回 501", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    expect((await fetch(`http://127.0.0.1:${s.port}/api/actions`, { method: "POST", body: "{}" })).status).toBe(501);
+    expect((await fetch(`http://127.0.0.1:${s.port}/api/events`)).status).toBe(501);
+  });
+});
+```
+
+- [ ] **Step 2: 运行确认失败**
+
+Run: `node ./node_modules/vitest/vitest.mjs run tests/server/api.test.ts`
+Expected: FAIL——`Cannot find module '../../src/server/api.js'`。
+
+- [ ] **Step 3: 实现 API 与 CLI**
+
+按 Interfaces 实现；只读、无外部依赖；所有错误 JSON 化；不写任何文件（`harnessHome` 仅读）。`readSessionDir` 抛错时按 `SessionCorruptionError.code` 返回 500 `session_corrupt`，不泄露绝对路径。
+
+- [ ] **Step 4: 运行确认通过**
+
+Run: `node ./node_modules/vitest/vitest.mjs run tests/server/api.test.ts`
+Expected: PASS（6 passed）。
+
+- [ ] **Step 5: 接入 scripts 与 dev proxy**
+
+`package.json` 增 `"serve:ui": "node dist/server/serve.js"`；`vite.config.ts` 增：
+
+```ts
+server: {
+  proxy: {
+    "/api": `http://127.0.0.1:${process.env.HARNESS_UI_PORT ?? "5174"}`,
+  },
+},
+```
+
+- [ ] **Step 6: 全量验证与提交**
+
+```bash
+node ./node_modules/vitest/vitest.mjs run
+node ./node_modules/typescript/bin/tsc --noEmit
+node ./node_modules/typescript/bin/tsc -p tsconfig.build.json
+```
+Expected: 全绿；提交 `feat(ui): 新增只读真实数据API服务`。
+
+---
+
+### Task 14: 前端接真实数据并移除全部演示数据
+
+**Files:**
+- Create: `src/ui/api/client.ts`
+- Create: `tests/ui/api-client.test.ts`
+- Create: `tests/ui/support/builders.ts`
+- Delete: `src/ui/demo/fixtures.ts`
+- Modify: `src/ui/main.tsx`
+- Modify: `src/ui/app.tsx`
+- Modify: `src/ui/components/rail/knowledge-pane.tsx`
+- Modify: `src/ui/components/rail/session-pane.tsx`
+- Modify: `src/ui/components/conversation/header.tsx`
+- Modify: `src/ui/components/conversation/messages.tsx`（如需）
+- Modify: `src/ui/components/dock/dock.tsx`
+- Modify: `src/ui/components/dock/device-monitor.tsx`
+- Modify: `src/ui/components/dock/port-settings.tsx`
+- Modify: `src/ui/components/dock/debug-log.tsx`
+- Modify: `src/ui/components/statusbar.tsx`
+- Modify: `src/ui/components/conversation/composer.tsx`（发送按钮禁用态与可见说明）
+- Modify: `src/ui/styles.css`（空态/错误态/加载态样式）
+- Modify: 既有 `tests/ui/**`（移除 fixture 依赖，改用 builders 或显式 props）
+
+**Interfaces:**
+- Consumes: Task 13 的 API；`view/transcript.ts`、`view/sse.ts`、`theme.ts`、`icons.tsx`。
+- Produces:
+  - `src/ui/api/client.ts` 按 spec §7.2 导出 `SessionSummary`、`KbNode`、`DeviceStatus`、`fetchSessions`、`fetchSession`、`fetchKb`、`fetchDevice`。
+  - `App` props 改为：
+    ```ts
+    interface AppProps {
+      view: TranscriptView;
+      sessions: SessionSummary[];
+      activeSessionId?: string;
+      onSelectSession?: (id: string) => void;
+      kbTree: KbNode[];
+      kbRoot?: string | null;
+      device: DeviceStatus;
+      onSend?: (text: string) => void;
+      canSend?: boolean;
+      themeChoice?: ThemeChoice;
+      onThemeChange?: (c: ThemeChoice) => void;
+      dockOpen?: boolean;
+      onDockToggle?: () => void;
+      connection?: "loading" | "ready" | "error";
+      errorMessage?: string;
+      onRetry?: () => void;
+    }
+    ```
+  - `main.tsx` 状态机：`loading` → 并行 `fetchSessions`/`fetchKb`/`fetchDevice` → 有会话则 `fetchSession(第一个)` → `transcriptFromSession`；失败进入 `error` 并渲染重试；无会话 `ready` 且 `view` 为空视图（`emptyTranscriptView()`）。
+  - `transcript.ts` 增 `export function emptyTranscriptView(): TranscriptView`（五步 todo、status idle、events []）。
+  - `KnowledgePane({ nodes, root })`：`nodes` 为空显示「未配置知识库」；`SessionPane({ sessions, activeId, onSelect })`：空显示「暂无会话」。
+  - `Dock` 从 `view` 派生日志：每个 tool 事件 → `{ time, mark: "tx", text: "<name> <args> · <ok|error>" }`；寄存器从 `tool.evidence`/`tool.readout` 映射为 `{ name, value, warn }`；无数据空态。
+  - `DeviceMonitor({ device })`：四个字段按 `unknown` 显示「未接入」。
+  - `Composer({ onSend, canSend, disabledReason })`：`canSend=false` 时发送按钮禁用并显示可见说明（如「未配置提交端点」）；不静默清空。
+`tests/ui/support/builders.ts`：`makeSessionEvents()`、`makeTranscriptView()` 等，仅测试 import。
+- **禁止**：生产代码 `src/ui/**` 中再出现 `UART_TRANSCRIPT_EVENTS`、`DEMO_REGISTERS`、`DEMO_LOG_LINES`、固定会话列表、固定 KB 树。
+
+- [ ] **Step 1: 写失败测试**
+
+1. `tests/ui/api-client.test.ts`（node 环境）：注入 `fetchImpl`，断言四个函数请求 URL、成功解析、非 2xx 抛 `{ code, status }`、网络异常上抛。
+2. 更新组件测试：`SessionPane` 空 sessions 显示「暂无会话」；`KnowledgePane` 空 tree 显示「未配置知识库」；`DeviceMonitor` 全 unknown 显示「未接入」；`Composer` `canSend=false` 时 disabled 且显示说明。
+3. 新增 `tests/ui/no-mock.test.ts`：读取 `src/ui/**` 源码并断言不含 `UART_TRANSCRIPT_EVENTS|DEMO_REGISTERS|DEMO_LOG_LINES`（node 环境，`node:fs` 遍历）。
+
+- [ ] **Step 2: 运行确认 RED**
+
+Run: `node ./node_modules/vitest/vitest.mjs run tests/ui`
+Expected: 新用例失败（模块/空态/禁用态未实现）。
+
+- [ ] **Step 3: 实现 API 客户端与状态机**
+
+按 Interfaces 实现；`main.tsx` 用 `useEffect` 加载，`AbortController` 取消卸载后的更新；错误信息用界面语言（不打印堆栈）。
+
+- [ ] **Step 4: 改造组件为空态/props 驱动**
+
+逐个替换静态数据；删除 `src/ui/demo/fixtures.ts`；把原 fixture 数据搬进 `tests/ui/support/builders.ts`（仅供测试）。
+
+- [ ] **Step 5: 运行确认 GREEN + 全量**
+
+```bash
+node ./node_modules/vitest/vitest.mjs run tests/ui
+node ./node_modules/vitest/vitest.mjs run
+node ./node_modules/typescript/bin/tsc --noEmit
+node ./node_modules/typescript/bin/tsc -p tsconfig.web.json --noEmit
+node ./node_modules/vite/bin/vite.js build
+```
+Expected: 全绿；`grep -r "UART_TRANSCRIPT_EVENTS\|DEMO_REGISTERS\|DEMO_LOG_LINES" src/ui` 无命中。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add -A
+git commit -m "feat(ui): 前端接入真实数据并移除演示数据"
+```
+
+---
+
+### Task 15: 验收脚本与文档改造（真实数据）
+
+**Files:**
+- Modify: `scripts/verify-ui.mjs`
+- Modify: `README.md`
+- Modify: `docs/deferred-issues.md`
+- Modify: `dev-notes/原型-UI.md`
+- Modify: `docs/superpowers/specs/2026-10-18-ui-workbench-design.md`（若实现中发现契约偏差）
+
+**Interfaces:**
+- Consumes: Task 13 `dist/server/serve.js`；Task 14 前端；`dist-web/`。
+- Produces:
+  - `verify-ui.mjs`：构建后启动 `dist/server/serve.js`（临时 `HARNESS_HOME`，写入一条真实会话 `header.json` + `session.v1.jsonl`，含 user/assistant/tool_result/verdict/guard 事件），页面 URL `http://127.0.0.1:<port>/`；探针 V1-V14 照旧；V14 断言真实 guard 文案；脚本结束时关闭服务并清理临时目录（清理失败仅 warning，不得影响退出码）。
+  - 无会话/无 KB 场景另起一次服务断言空态文案存在（「暂无会话」「未配置知识库」）——作为 V0 附加项打印，不计入 V1-V14。
+  - README：更新「Web 工作台」为真实数据流程（`npm run build && npm run serve:ui`、`HARNESS_UI_PORT`、`HARNESS_HOME`、空态、未实现端点诚实返回 501）。
+  - `docs/deferred-issues.md`：更新 D-051/D-053/D-058/D-059/D-060 状态；新增 D-063（API 只读、写操作与 SSE 未实现）、D-064（KB 扫描深度/条目上限）、D-065（会话列表坏目录进 errors）。
+
+- [ ] **Step 1: 改造验收脚本**
+
+启动顺序：`vite build` → 临时 HARNESS_HOME + 会话文件 → `node dist/server/serve.js` → 轮询 `/api/sessions` → CDP 验收 → 关闭服务 → 清理。
+
+- [ ] **Step 2: 运行确认**
+
+```bash
+node ./node_modules/vite/bin/vite.js build
+node ./node_modules/typescript/bin/tsc -p tsconfig.build.json
+node scripts/verify-ui.mjs
+```
+Expected: V1-V14 全 PASS + SUMMARY；服务与临时目录已清理。
+
+- [ ] **Step 3: 更新文档与留痕**
+
+README 的 Web 工作台章节改为真实数据启动流程与端点说明；deferred 更新；dev-notes 追加"用户要求不要 mock 数据"的阶段记录（原话、产出、纠偏、返工）。
+
+- [ ] **Step 4: 全量验证与提交**
+
+```bash
+node ./node_modules/vitest/vitest.mjs run
+node ./node_modules/typescript/bin/tsc --noEmit
+node ./node_modules/typescript/bin/tsc -p tsconfig.web.json --noEmit
+node ./node_modules/vite/bin/vite.js build
+node ./node_modules/typescript/bin/tsc -p tsconfig.build.json
+node scripts/verify-ui.mjs
+```
+Expected: 全绿；提交 `feat(ui): 验收脚本接入真实数据服务`。

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { DEMO_SESSION_ID, transcriptFromSession, transcriptFromLoop, reduceStep } from "../../src/ui/view/transcript.js";
+import { emptyTranscriptView, transcriptFromSession, transcriptFromLoop, reduceStep } from "../../src/ui/view/transcript.js";
 import type { TranscriptEvent } from "../../src/ui/view/transcript.js";
 import type { SessionEvent } from "../../src/session/types.js";
 import type { LoopEvent } from "../../src/loop/events.js";
-import { UART_TRANSCRIPT_EVENTS } from "../../src/ui/demo/fixtures.js";
+import { makeSessionEvents } from "./support/builders.js";
 
 function toolPair(result: Record<string, unknown>): SessionEvent[] {
   return [
@@ -27,21 +27,21 @@ function lastTool(events: readonly SessionEvent[]): Extract<TranscriptEvent, { k
 
 describe("transcript", () => {
   it("user 事件渲染为用户气泡", () => {
-    const v = transcriptFromSession(UART_TRANSCRIPT_EVENTS);
+    const v = transcriptFromSession(makeSessionEvents());
     expect(v.events[0]).toMatchObject({ kind: "user", text: expect.stringContaining("乱码") });
   });
   it("第0步分流渲染为 ask", () => {
-    const v = transcriptFromSession(UART_TRANSCRIPT_EVENTS);
+    const v = transcriptFromSession(makeSessionEvents());
     expect(v.events[1]).toMatchObject({ kind: "ask", text: expect.stringContaining("分流") });
   });
   it("工具卡渲染且持有证据", () => {
-    const v = transcriptFromSession(UART_TRANSCRIPT_EVENTS);
+    const v = transcriptFromSession(makeSessionEvents());
     const tools = v.events.filter((e) => e.kind === "tool") as Array<{ kind: "tool"; tool: { name: string; evidence?: unknown[] } }>;
     expect(tools.some((t) => t.tool.name === "mem_read" && ((t.tool.evidence ?? []).length > 0))).toBe(true);
   });
   it("ok=false 的工具呈现 error 形态且保留错误码", () => {
     const evs = [
-      ...UART_TRANSCRIPT_EVENTS,
+      ...makeSessionEvents(),
       { seq: 99, ts: "t", type: "assistant", payload: { content: "", toolCalls: [{ id: "c9", name: "serial_read", arguments: {} }] } },
       { seq: 100, ts: "t", type: "tool_result", payload: { id: "c9", ok: false, code: "io_timeout", text: "读取超时" }, parent: 99 },
     ] as unknown as SessionEvent[];
@@ -51,19 +51,19 @@ describe("transcript", () => {
     expect(tool.tool.errorCode).toBe("io_timeout");
   });
   it("verdict 渲染为判决卡", () => {
-    const v = transcriptFromSession(UART_TRANSCRIPT_EVENTS);
+    const v = transcriptFromSession(makeSessionEvents());
     expect(v.events.some((e) => e.kind === "verdict")).toBe(true);
   });
   it("guard 渲染为安全提示", () => {
-    const v = transcriptFromSession(UART_TRANSCRIPT_EVENTS);
+    const v = transcriptFromSession(makeSessionEvents());
     const g = v.events.find((e) => e.kind === "guard");
     expect(g && g.kind === "guard" && g.guard.state).toBe("待确认");
   });
   it("归约确定性：同输入两次结果全等", () => {
-    expect(transcriptFromSession(UART_TRANSCRIPT_EVENTS)).toEqual(transcriptFromSession(UART_TRANSCRIPT_EVENTS));
+    expect(transcriptFromSession(makeSessionEvents())).toEqual(transcriptFromSession(makeSessionEvents()));
   });
   it("五步路径：verdict 后全部 done", () => {
-    const steps = reduceStep(UART_TRANSCRIPT_EVENTS);
+    const steps = reduceStep(makeSessionEvents());
     expect(steps.map((s) => s.state)).toEqual(["done", "done", "done", "done", "done"]);
   });
   it("成功但无 detail 且有 text 时投影为 readout 纯文本", () => {
@@ -132,7 +132,7 @@ describe("transcript", () => {
     expect(view.interruptReason).toBeUndefined();
   });
   it("usage 事件投影 usage 与累计 cost", () => {
-    const view = transcriptFromSession(UART_TRANSCRIPT_EVENTS);
+    const view = transcriptFromSession(makeSessionEvents());
     expect(view.usage).toMatchObject({ prompt: 8120, completion: 1460, cached: 2048 });
     expect(view.cost).toBeCloseTo(0.018);
   });
@@ -184,7 +184,11 @@ describe("transcript", () => {
     ]);
     expect(invalid.cost).toBeUndefined();
   });
-  it("DEMO_SESSION_ID 为 #128", () => {
-    expect(DEMO_SESSION_ID).toBe("#128");
+  it("emptyTranscriptView 返回五步待办、idle 与空事件", () => {
+    const view = emptyTranscriptView();
+    expect(view.status).toBe("idle");
+    expect(view.events).toEqual([]);
+    expect(view.steps.map((step) => step.state)).toEqual(["now", "todo", "todo", "todo", "todo"]);
+    expect(view.sessionId).toBeUndefined();
   });
 });

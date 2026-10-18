@@ -1,4 +1,5 @@
 import type { JSX } from "preact";
+import type { DeviceStatus } from "../api/client.js";
 import { Icon } from "../icons.js";
 import type { ThemeChoice } from "../theme.js";
 
@@ -8,16 +9,22 @@ const THEME_OPTIONS: ReadonlyArray<{ value: ThemeChoice; icon: string; label: st
   { value: "dark", icon: "i-moon", label: "夜间主题" },
 ];
 
+function field(value: string): string {
+  return value === "unknown" || value === "" ? "未接入" : value;
+}
+
 export function TopBar({
   themeChoice,
   onThemeChange,
   dockOpen,
   onDockToggle,
+  device,
 }: {
   themeChoice: ThemeChoice;
   onThemeChange: (c: ThemeChoice) => void;
   dockOpen: boolean;
   onDockToggle: () => void;
+  device: DeviceStatus;
 }): JSX.Element {
   return (
     <header class="topbar">
@@ -33,18 +40,15 @@ export function TopBar({
       <div class="targets">
         <button type="button" class="chip">
           <Icon name="i-chip" size={14} />
-          <strong>STM32F407ZGT6</strong>
-          <Icon name="i-chevron-down" size={14} />
+          <strong>{field(device.cpu)}</strong>
         </button>
         <button type="button" class="chip">
-          <Icon name="i-branch" size={14} />
-          <span>fix/uart-baud</span>
-          <Icon name="i-chevron-down" size={14} />
+          <Icon name="i-plug" size={14} />
+          <span>{field(device.probe)}</span>
         </button>
         <button type="button" class="chip chip--state">
           <Icon name="i-terminal" size={14} />
-          <span>OpenOCD · 真机</span>
-          <Icon name="i-chevron-down" size={14} />
+          <span>{field(device.backend)}</span>
         </button>
       </div>
       <div class="topbar-right">

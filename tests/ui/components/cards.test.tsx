@@ -6,7 +6,7 @@ import { VerdictCard } from "../../../src/ui/components/conversation/verdict-car
 import { GuardNotice } from "../../../src/ui/components/conversation/guard-notice.js";
 import { transcriptFromSession } from "../../../src/ui/view/transcript.js";
 import type { TranscriptEvent } from "../../../src/ui/view/transcript.js";
-import { UART_TRANSCRIPT_EVENTS } from "../../../src/ui/demo/fixtures.js";
+import { makeSessionEvents } from "../support/builders.js";
 
 function mount(): HTMLElement {
   const root = document.createElement("div");
@@ -37,7 +37,7 @@ describe("cards", () => {
     expect(root.querySelector(".readout")).toBeNull();
   });
   it("证据卡判定胶囊带图标与文字", () => {
-    const v = transcriptFromSession(UART_TRANSCRIPT_EVENTS);
+    const v = transcriptFromSession(makeSessionEvents());
     const toolEv = v.events.find(
       (e) => e.kind === "tool" && e.tool.evidence?.some((row) => row.label === "偏快 5.3×"),
     ) as Extract<TranscriptEvent, { kind: "tool" }> | undefined;
@@ -51,7 +51,7 @@ describe("cards", () => {
     expect(pill?.textContent).toContain("偏快 5.3×");
   });
   it("判决卡含根因/证据/预测/归属四区块", () => {
-    const v = transcriptFromSession(UART_TRANSCRIPT_EVENTS);
+    const v = transcriptFromSession(makeSessionEvents());
     const verdictEv = v.events.find((e) => e.kind === "verdict") as
       | Extract<TranscriptEvent, { kind: "verdict" }>
       | undefined;

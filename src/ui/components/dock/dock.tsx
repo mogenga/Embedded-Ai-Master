@@ -1,6 +1,8 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
+import type { DeviceStatus } from "../../api/client.js";
 import { Icon } from "../../icons.js";
+import type { TranscriptView } from "../../view/transcript.js";
 import { DebugLog } from "./debug-log.js";
 import { DeviceMonitor } from "./device-monitor.js";
 import { PortSettings } from "./port-settings.js";
@@ -19,35 +21,49 @@ export type Register = {
   warn?: boolean;
 };
 
-export const DEMO_REGISTERS: Register[] = [
-  { name: "RCC_CFGR", value: "0x0000_0000", warn: true },
-  { name: "USART2_BRR", value: "0x0000_002E" },
-  { name: "USART2_SR", value: "0x0000_00C0" },
-  { name: "SCB->CFSR", value: "0x0000_0000" },
-];
+export function deriveLogLines(view: TranscriptView): LogLine[] {
+  const lines: LogLine[] = [];
+  for (const event of view.events) {
+    if (event.kind !== "tool") continue;
+    lines.push({
+      time: "—",
+      mark: event.tool.ok ? "tx" : "err",
+      text: `${event.tool.name} ${event.tool.args} · ${event.tool.ok ? "ok" : "error"}`,
+    });
+  }
+  return lines;
+}
 
-export const DEMO_LOG_LINES: LogLine[] = [
-  { time: "21:40:02", mark: "kv", text: 'kb_lookup "STM32 UART 乱码" → 命中 protocols/uart-stm32-baud.md' },
-  { time: "21:40:05", mark: "tx", text: "mem_read 0x40023808 → 0x00000000 (12ms)" },
-  { time: "21:40:07", mark: "tx", text: "mem_read 0x40004408 → 0x0000002E (11ms)" },
-  { time: "21:40:09", mark: "rx", text: "serial_read 512B → 乱码 96% · 校验错误 312" },
-  { time: "21:40:11", mark: "err", text: "写内存请求 USART2->BRR = 0x0009 · 等待确认（规则 R2）" },
-];
+export function deriveRegisters(view: TranscriptView): Register[] {
+  const registers: Register[] = [];
+  for (const event of view.events) {
+    if (event.kind !== "tool") continue;
+    if (event.tool.evidence !== undefined) {
+      for (const row of event.tool.evidence) {
+        registers.push({ name: row.name, value: row.value, warn: row.verdict !== "ok" });
+      }
+      continue;
+    }
+    if (event.tool.readout !== undefined) {
+      for (const row of event.tool.readout) {
+        registers.push({ name: row.label, value: row.value });
+      }
+    }
+  }
+  return registers;
+}
 
 type SectionKey = "device" | "port" | "log";
 
-export function Dock({
-  logLines,
-  registers,
-}: {
-  logLines: LogLine[];
-  registers: Register[];
-}): JSX.Element {
+export function Dock({ view, device }: { view: TranscriptView; device: DeviceStatus }): JSX.Element {
   const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
     device: true,
     port: true,
     log: true,
   });
+
+  const logLines = deriveLogLines(view);
+  const registers = deriveRegisters(view);
 
   function head(
     key: SectionKey,
@@ -62,10 +78,7 @@ export function Dock({
         type="button"
         class="dock-sec-head"
         aria-expanded={open}
-        onClick={(event) => {
-          event.currentTarget.setAttribute("aria-expanded", open ? "false" : "true");
-          setExpanded((prev) => ({ ...prev, [key]: !prev[key] }));
-        }}
+        onClick={() => setExpanded((prev) => ({ ...prev, [key]: !prev[key] }))}
       >
         <Icon name={icon} size={15} />
         <span class="t">{title}</span>
@@ -88,13 +101,13 @@ export function Dock({
         <section class="dock-sec">
           {head("device", "i-cpu", "设备监控", "ok", registers.length)}
           <div class="dock-sec-body">
-            <DeviceMonitor registers={registers} />
+            <DeviceMonitor device={device} registers={registers} />
           </div>
         </section>
         <section class="dock-sec">
           {head("port", "i-plug", "端口设置", "ok")}
           <div class="dock-sec-body">
-            <PortSettings />
+            <PortSettings serial={device.serial} />
           </div>
         </section>
         <section class="dock-sec">

@@ -1,107 +1,101 @@
 import type { JSX } from "preact";
+import { useState } from "preact/hooks";
+import type { KbNode } from "../../api/client.js";
 import { Icon } from "../../icons.js";
 
-type TreeNode = {
-  id: string;
-  label: string;
-  count?: number;
-  active?: boolean;
-  children?: ReadonlyArray<TreeNode>;
-};
-
-const KB_TREE: ReadonlyArray<TreeNode> = [
-  {
-    id: "vendor",
-    label: "vendor/ 厂商分流",
-    count: 18,
-    children: [
-      { id: "stm32", label: "STM32 系列", count: 6, active: true },
-      { id: "esp", label: "ESP32 / ESP8266", count: 4 },
-      { id: "gd32", label: "GD32 / CH32", count: 3 },
-      { id: "nrf", label: "nRF5x / Kinetis", count: 3 },
-    ],
-  },
-  {
-    id: "protocols",
-    label: "protocols/ 协议层",
-    count: 20,
-    children: [
-      { id: "uart", label: "UART 乱码与丢字节" },
-      { id: "i2c", label: "I2C 总线锁死" },
-      { id: "spi", label: "SPI 时序与片选" },
-    ],
-  },
-  {
-    id: "system",
-    label: "system/ 系统层",
-    count: 15,
-    children: [
-      { id: "clock", label: "时钟树与 PLL" },
-      { id: "watchdog", label: "看门狗与低功耗" },
-    ],
-  },
-  { id: "reference", label: "reference/ 寄存器查表", count: 39 },
-  { id: "debug", label: "debug/ HardFault 解码" },
-  { id: "index", label: "index.yaml 症状索引", count: 85 },
-];
-
-const KB_TOTAL = 103;
-
-function toggleRow(event: JSX.TargetedMouseEvent<HTMLButtonElement>): void {
-  const row = event.currentTarget;
-  row.setAttribute("aria-expanded", String(row.getAttribute("aria-expanded") !== "true"));
+function countFiles(nodes: readonly KbNode[]): number {
+  let total = 0;
+  for (const node of nodes) {
+    if (node.kind === "file") total += 1;
+    else total += countFiles(node.children ?? []);
+  }
+  return total;
 }
 
-function TreeItem({ node }: { node: TreeNode }): JSX.Element {
-  if (!node.children) {
+function TreeItem({
+  node,
+  level,
+  expanded,
+  onToggle,
+}: {
+  node: KbNode;
+  level: number;
+  expanded: Record<string, boolean>;
+  onToggle: (path: string) => void;
+}): JSX.Element {
+  if (node.kind === "file") {
     return (
       <li>
-        <button type="button" class={node.active ? "tree-row is-active" : "tree-row"}>
+        <button type="button" class="tree-row" style={`padding-left:${8 + level * 12}px`}>
           <span class="leaf-dot" />
-          <span class="label">{node.label}</span>
-          {node.count === undefined ? null : <span class="tag">{node.count}</span>}
+          <span class="label">{node.name}</span>
         </button>
       </li>
     );
   }
+  const open = expanded[node.path] === true;
+  const children = node.children ?? [];
   return (
     <li>
       <button
         type="button"
         class="tree-row"
-        aria-expanded={node.id === "vendor"}
-        onClick={toggleRow}
+        aria-expanded={open}
+        style={`padding-left:${8 + level * 12}px`}
+        onClick={() => onToggle(node.path)}
       >
         <Icon name="i-chevron" size={14} className="chev" />
-        <span class="label">{node.label}</span>
-        {node.count === undefined ? null : <span class="tag">{node.count}</span>}
+        <span class="label">{node.name}</span>
+        {children.length === 0 ? null : <span class="tag">{children.length}</span>}
       </button>
-      <ul class="tree-children">
-        {node.children.map((child) => (
-          <TreeItem key={child.id} node={child} />
-        ))}
-      </ul>
+      {open && children.length > 0 ? (
+        <ul class="tree-children">
+          {children.map((child) => (
+            <TreeItem
+              key={child.path}
+              node={child}
+              level={level + 1}
+              expanded={expanded}
+              onToggle={onToggle}
+            />
+          ))}
+        </ul>
+      ) : null}
     </li>
   );
 }
 
-export function KnowledgePane(): JSX.Element {
+export function KnowledgePane({ nodes, root }: { nodes: KbNode[]; root?: string | null }): JSX.Element {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
+    const initial: Record<string, boolean> = {};
+    for (const node of nodes) if (node.kind === "dir") initial[node.path] = true;
+    return initial;
+  });
+
+  function toggle(path: string): void {
+    setExpanded((prev) => ({ ...prev, [path]: prev[path] !== true }));
+  }
+
   return (
     <section class="rail-top" aria-label="知识库">
       <div class="pane-head">
         <Icon name="i-book" size={14} />
         <span>知识库</span>
-        <span class="count">{KB_TOTAL}</span>
+        <span class="count">{countFiles(nodes)}</span>
       </div>
       <div class="kb-search">
         <Icon name="i-search" size={14} />
         <input type="search" aria-label="检索知识库" placeholder="kb_lookup · 寄存器名 / 错误码 / 症状" />
       </div>
-      <ul class="tree">
-        {KB_TREE.map((node) => (
-          <TreeItem key={node.id} node={node} />
-        ))}
-      </ul>
+      {nodes.length === 0 ? (
+        <p class="pane-empty">{root === null ? "未配置知识库" : "知识库为空"}</p>
+      ) : (
+        <ul class="tree">
+          {nodes.map((node) => (
+            <TreeItem key={node.path} node={node} level={0} expanded={expanded} onToggle={toggle} />
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

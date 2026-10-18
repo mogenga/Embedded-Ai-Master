@@ -23,7 +23,7 @@ export function DebugLog({ lines }: { lines: LogLine[] }): JSX.Element {
     <div class="log-wrap">
       <div class="log" ref={view} onScroll={onScroll}>
         {lines.length === 0 ? (
-          <p class="log-empty">探针与串口的每次调用都会在此留痕，供夜批排障与会话回放使用。</p>
+          <p class="log-empty">暂无工具调用。探针与串口的每次调用都会在此留痕。</p>
         ) : (
           lines.map((line, index) => (
             <div class="log-item" key={`${line.time}-${line.mark}-${index}`}>

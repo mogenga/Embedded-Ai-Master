@@ -87,8 +87,6 @@ export interface TranscriptView {
   interruptReason?: string;
 }
 
-export const DEMO_SESSION_ID = "#128";
-
 const ASK_PREFIX = "第 0 步分流";
 
 const STEP_LABELS: ReadonlyArray<{ id: TranscriptStepId; label: string }> = [
@@ -534,4 +532,8 @@ export function reduceStep(events: readonly unknown[]): TranscriptStep[] {
     }
     return { id, label, state: "todo" };
   });
+}
+
+export function emptyTranscriptView(): TranscriptView {
+  return { steps: reduceStep([]), status: "idle", events: [] };
 }

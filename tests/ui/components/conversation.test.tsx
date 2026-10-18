@@ -6,10 +6,10 @@ import { PathLine } from "../../../src/ui/components/conversation/pathline.js";
 import { MessageStream } from "../../../src/ui/components/conversation/messages.js";
 import { reduceStep, transcriptFromSession } from "../../../src/ui/view/transcript.js";
 import type { SessionEvent } from "../../../src/session/types.js";
-import { UART_TRANSCRIPT_EVENTS } from "../../../src/ui/demo/fixtures.js";
+import { makeSessionEvents } from "../support/builders.js";
 
 describe("conversation", () => {
-  const view = transcriptFromSession(UART_TRANSCRIPT_EVENTS);
+  const view = transcriptFromSession(makeSessionEvents());
   it("会话头展示标题与胶囊", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
@@ -20,7 +20,7 @@ describe("conversation", () => {
   it("路径条五步状态匹配 reduceStep", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
-    render(<PathLine steps={reduceStep(UART_TRANSCRIPT_EVENTS)} />, root);
+    render(<PathLine steps={reduceStep(makeSessionEvents())} />, root);
     expect(root.querySelectorAll(".step").length).toBe(5);
     expect(root.querySelectorAll(`.step[data-s="done"]`).length).toBe(5);
   });
@@ -34,7 +34,7 @@ describe("conversation", () => {
   });
   it("消息流不渲染 checkpoint 事件（无幽灵节点）", () => {
     const events: SessionEvent[] = [
-      ...UART_TRANSCRIPT_EVENTS,
+      ...makeSessionEvents(),
       { seq: 90, ts: "t", type: "checkpoint", payload: { turn: 1 } },
       { seq: 91, ts: "t", type: "compaction", payload: { summary: "压缩" } },
     ];

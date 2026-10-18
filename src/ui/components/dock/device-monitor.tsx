@@ -1,43 +1,52 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
+import type { DeviceStatus } from "../../api/client.js";
 import { Icon } from "../../icons.js";
 import type { Register } from "./dock.js";
 
 type ResetState = "idle" | "confirming" | "executing";
 
-export function DeviceMonitor({ registers }: { registers: Register[] }): JSX.Element {
+function field(value: string): string {
+  return value === "unknown" || value === "" ? "未接入" : value;
+}
+
+export function DeviceMonitor({
+  device,
+  registers,
+}: {
+  device: DeviceStatus;
+  registers: Register[];
+}): JSX.Element {
   const [reset, setReset] = useState<ResetState>("idle");
+  const connected = device.cpu !== "unknown" && device.cpu !== "";
 
   return (
     <>
       <dl class="field">
         <dt>目标</dt>
-        <dd>
-          STM32F407ZGT6 <span class="sub">Cortex-M4 · 168 MHz</span>
-        </dd>
+        <dd>{field(device.cpu)}</dd>
         <dt>探针</dt>
-        <dd>
-          <span class="pill" data-s="ok">
-            OpenOCD · ST-Link V2 已连接
-          </span>
-        </dd>
+        <dd>{field(device.probe)}</dd>
         <dt>CPU 状态</dt>
-        <dd class="mono">Halted @ 0x0800_1A2C</dd>
+        <dd class="mono">{connected ? "已连接" : "未接入"}</dd>
         <dt>仿真后端</dt>
-        <dd>
-          <span class="pill">Renode 未启用</span>
-        </dd>
+        <dd>{field(device.backend)}</dd>
       </dl>
       <div class="btn-row">
-        <button type="button" class="btn btn--primary">
+        <button type="button" class="btn btn--primary" disabled={!connected}>
           <Icon name="i-pause" size={14} />
           <span>暂停</span>
         </button>
-        <button type="button" class="btn">
+        <button type="button" class="btn" disabled={!connected}>
           <Icon name="i-play" size={14} />
           <span>继续</span>
         </button>
-        <button type="button" class="btn btn--danger" onClick={() => setReset("confirming")}>
+        <button
+          type="button"
+          class="btn btn--danger"
+          disabled={!connected}
+          onClick={() => setReset("confirming")}
+        >
           <Icon name="i-power" size={14} />
           <span>复位</span>
         </button>
@@ -45,7 +54,7 @@ export function DeviceMonitor({ registers }: { registers: Register[] }): JSX.Ele
       {reset === "confirming" ? (
         <div class="confirm">
           <p>
-            复位目标 <strong>STM32F407ZGT6</strong>，写入 <code>AIRCR @ 0xE000_ED0C = 0x05FA_0004</code>。
+            复位目标 <strong>{field(device.cpu)}</strong>，写入 <code>AIRCR @ 0xE000_ED0C = 0x05FA_0004</code>。
           </p>
           <div class="btn-row">
             <button type="button" class="btn btn--danger" onClick={() => setReset("executing")}>
@@ -79,8 +88,8 @@ export function DeviceMonitor({ registers }: { registers: Register[] }): JSX.Ele
               </td>
             </tr>
           ) : (
-            registers.map((register) => (
-              <tr key={register.name}>
+            registers.map((register, index) => (
+              <tr key={`${register.name}-${index}`}>
                 <td class="reg-name">{register.name}</td>
                 <td class={register.warn ? "reg-val flag" : "reg-val"}>{register.value}</td>
               </tr>
