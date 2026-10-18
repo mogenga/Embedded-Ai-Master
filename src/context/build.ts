@@ -1,5 +1,6 @@
 import type { ModelChatMessage } from "../model/protocol.js";
 import type { SessionEvent } from "../session/types.js";
+import { truncateSurrogateSafe } from "./text.js";
 
 interface InvalidJsonMarker {
   error: "invalid_json";
@@ -113,7 +114,7 @@ function formatElided(payload: Record<string, unknown>, text: string): string {
   }
   const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
   const firstLine = text.split(/\r?\n/, 1)[0];
-  return `[tool result elided; ${toolName}: ${firstLine.slice(0, ELIDED_FIRST_LINE_CHARS)}]`;
+  return `[tool result elided; ${toolName}: ${truncateSurrogateSafe(firstLine, ELIDED_FIRST_LINE_CHARS)}]`;
 }
 
 export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage[] {

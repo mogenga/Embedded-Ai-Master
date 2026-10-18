@@ -780,10 +780,10 @@
 ### D-093 · 三级边界的逐事件 token 估算为近似值
 
 - **发现**: 2026-10-19,维度3 Task5 收尾。
-- **现象**: `computeTailBoundary` 按事件文本长度 / 4 逐事件累计,未计入 `tool_calls` 参数、role/分隔符开销与 CJK 偏差;且边界计算不使用 `TokenMeter` 的锚定 ratio,与预算检查口径不完全一致。
+- **现象**: `computeTailBoundary` 按事件文本长度 / 4 逐事件累计;assistant 事件已计入 `tool_calls` 序列化长度(与本轮之后的 `heuristicCountTokens` 口径一致),但仍未计入 role/分隔符开销、CJK 偏差,且边界计算不使用 `TokenMeter` 的锚定 ratio,与预算检查口径不完全一致。
 - **影响**: 尾部 16% 的实际保留量可能偏离目标;边界可能过早或过晚摘要,极端情况下产生额外 `failed` 或超出预期窗口。
 - **触发升级条件**: 尾部包含大 `tool_calls` 或 CJK 内容;实测窗口与估算偏差显著;摘要频繁在临界点失败。
-- **修复建议**: 统一用 `TokenMeter.measure` 对候选前缀做增量估算,或在边界计算中复用 ratio 与 `tool_calls` 序列化长度。
+- **修复建议**: 统一用 `TokenMeter.measure` 对候选前缀做增量估算,或在边界计算中补齐 role/分隔符/CJK 估算并复用 ratio。
 - **状态**: 未解决;当前边界只保证批次完整与 evidence 回退。
 
 ### D-094 · 摘要失败后无同轮自动重试
@@ -812,6 +812,24 @@
 - **触发升级条件**: 单轮包含大量工具调用;任务需要回溯多轮证据;不同模型窗口下压缩行为差异明显。
 - **修复建议**: 基于 token 预算而非固定轮数保护近期结果,或在 `RunOptions.compaction` 上提供文档化建议值与运行时告警。
 - **状态**: 未解决;当前允许调用方显式覆盖。
+
+### D-097 · `compacted` 事件不区分压缩成功与失败
+
+- **发现**: 2026-10-19,维度3 第一轮整体审查(Minor 项)。
+- **现象**: `query` 在 compactor 返回后无条件 `yield { kind: "compacted" }`;`compactSession` 在摘要为空、被 `maxOutputTokens` 截断、边界 `no_progress` 或摘要调用失败时只追加 `compaction {kind:"failed"}` 并正常返回,因此事件流同样发出 `compacted`。
+- **影响**: 调用方若以 `compacted` 判断压缩成功会误判;成功/失败仍可从会话日志区分,但事件流与日志语义不一致。
+- **触发升级条件**: 调用方依赖事件流做重试、成本提示或 UI 状态;需要把压缩结果暴露给上层。
+- **修复建议**: 让 compactor 返回结果并由 `query` 携带成功/失败信息,或新增显式 `compaction_result` 事件;保持事件流与日志一致。
+- **状态**: 未解决;README 已注明 `compacted` 仅表示"本轮压缩尝试结束"。
+
+### D-098 · 坏 summary 容错与 `failed.stage:"microcompact"` 分支未闭环
+
+- **发现**: 2026-10-19,维度3 第一轮整体审查(Minor 项)。
+- **现象**: `buildMessages` 对不完整 summary(`coversUpToSeq` 落在批次中间或与 tool_result 父子关系冲突)直接忽略并退回全量视图;`compactSession` 没有追加 `failed.stage:"microcompact"` 的路径(二级只在 append 前做纯内存筛选)。坏 summary 的恢复策略与二级失败归因均缺少测试。
+- **影响**: 损坏日志可能静默退化为全量视图,或在每次压缩时重复触发摘要/`no_progress`;二级阶段若未来引入 I/O 或裁剪失败,无法按 `stage` 区分。
+- **触发升级条件**: 出现真实坏 summary 日志;microcompact 阶段引入可失败操作;需要按阶段统计压缩失败。
+- **修复建议**: 为无效 summary 追加一次性降级标记/告警并明确重建策略;二级失败时补 `failed.stage:"microcompact"` 记录与测试。
+- **状态**: 未解决;本轮不扩大范围。
 
 ---
 
@@ -856,3 +874,4 @@
 | 2026-10-19 | 维度4 第二轮红队修复:shell `rm` 任一 `-r/-f` + 根目标即危险、`--no-preserve-root` 一律危险、token 引号全移除、`chdir` 纳入跟踪、无参 `pushd` 保守、detail 摘要不切断代理对;glob 限制 pattern 长度/段数并折叠连续 `**/`;grep 校验 `glob` 非法、合并不可读目录披露;录入 D-086(glob ReDoS 未完全消除)与 D-087 ~ D-090(改目录方式未跟踪、shell 展开绕过、跳过披露分类、grep glob 重复编译) |
 | 2026-10-19 | 维度4 复审 minor:glob 连续 `**/` 折叠改为只从完整段边界开始(避免 `a**/**/x` 被误折叠),补回归测试;文档补齐无参 `cd`/`chdir`/`pushd` 保守语义;D-088 现象扩充引号内分隔符与带空格环境变量赋值绕过 |
 | 2026-10-19 | 维度3 Task5 收尾:README 补三级压缩、`RunOptions.compaction`、evidence 保护与摘要成本;录入 D-091 ~ D-096(prompt cache 断裂仅告警、摘要质量、逐事件估算、摘要不重试、compaction 事件增长、`keepRecentTurns` 默认值) |
+| 2026-10-19 | 维度3 第一轮整体审查修复:摘要空/全空白/截断落 `failed` 且不计费;`no_progress` 幂等守卫;比例配置入口校验;`heuristicCountTokens` 计入 `tool_calls`;transcript/首行截断保护代理对;删除 `CompactOptions.pricePerMillion`;补充压缩后 resume、summary+坏尾部恢复、批次边界与 evidence 用例;更正 D-093(assistant 已计 `tool_calls`),录入 D-097(`compacted` 不区分成功/失败)、D-098(坏 summary 容错与 microcompact failed 分支) |

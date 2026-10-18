@@ -1,10 +1,10 @@
 import type { ModelCfg } from "../config/providers.js";
-import type { PricePerMillion } from "../loop/breakers.js";
 import { heuristicCountTokens } from "../model/count.js";
 import type { CompletionResult, ModelChatMessage, ModelProtocol } from "../model/protocol.js";
 import type { SessionHandle } from "../session/session.js";
 import type { SessionEvent } from "../session/types.js";
 import { buildMessages } from "./build.js";
+import { truncateSurrogateSafe } from "./text.js";
 import type { TokenMeter } from "./token-meter.js";
 
 export const SUMMARY_PROMPT =
@@ -14,12 +14,19 @@ export interface CompactOptions {
   session: SessionHandle;
   model: ModelProtocol;
   modelCfg: ModelCfg;
-  pricePerMillion?: PricePerMillion;
   keepRecentTurns?: number;
   keepTailRatio?: number;
   softRatio?: number;
   meter?: TokenMeter;
   signal: AbortSignal;
+}
+
+export function assertCompactionRatios(keepTailRatio: number, softRatio: number): void {
+  if (!(keepTailRatio > 0 && keepTailRatio < softRatio && softRatio < 1)) {
+    throw new TypeError(
+      `keepTailRatio and softRatio must satisfy 0 < keepTailRatio < softRatio < 1; got keepTailRatio=${keepTailRatio}, softRatio=${softRatio}`,
+    );
+  }
 }
 
 function isAbortError(error: unknown): boolean {
@@ -168,6 +175,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
     meter,
     signal,
   } = opts;
+  assertCompactionRatios(keepTailRatio, softRatio);
   const softLimit = Math.floor(modelCfg.contextWindow * softRatio);
   const measure = () => {
     const messages = buildMessages(session.events());
@@ -207,6 +215,14 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   const latest = session.events();
   let coversUpToSeq = computeTailBoundary(latest, modelCfg.contextWindow, keepTailRatio);
   coversUpToSeq = adjustSummaryBoundary(latest, coversUpToSeq);
+  const previousBoundary = lastSummaryBoundary(latest);
+  if (previousBoundary !== undefined && coversUpToSeq <= previousBoundary) {
+    await session.append({
+      type: "compaction",
+      payload: { kind: "failed", reason: "no_progress", stage: "summary" },
+    });
+    return;
+  }
   const prefix = latest.filter((event) => event.seq <= coversUpToSeq);
   const hasContent = prefix.some(
     (event) => event.type === "user" || event.type === "assistant" || event.type === "tool_result",
@@ -231,8 +247,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   }
 
   const maxChars = Math.floor(modelCfg.contextWindow * 0.6 * 4);
-  let transcript = toTranscript(prefixMessages);
-  if (transcript.length > maxChars) transcript = transcript.slice(0, maxChars);
+  const transcript = truncateSurrogateSafe(toTranscript(prefixMessages), maxChars);
 
   let result: CompletionResult;
   try {
@@ -249,6 +264,21 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
     await session.append({
       type: "compaction",
       payload: { kind: "failed", reason: failureReason(error), stage: "summary" },
+    });
+    return;
+  }
+
+  if (result.content.trim() === "") {
+    await session.append({
+      type: "compaction",
+      payload: { kind: "failed", reason: "empty summary", stage: "summary" },
+    });
+    return;
+  }
+  if (result.truncatedByMaxTokens) {
+    await session.append({
+      type: "compaction",
+      payload: { kind: "failed", reason: "summary truncated", stage: "summary" },
     });
     return;
   }

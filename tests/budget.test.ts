@@ -54,3 +54,22 @@ describe("checkBudgetTokens", () => {
     expect(checkBudgetTokens(0, 10000).over).toBe(false);
   });
 });
+describe("预算计入 tool_calls", () => {
+  it("content 为空但 tool_calls 很大时按 tool_calls 计入并 over", () => {
+    const messages: ModelChatMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "echo", arguments: JSON.stringify({ text: "x".repeat(32000) }) },
+          },
+        ],
+      },
+    ];
+
+    expect(checkBudget(messages, 10000).over).toBe(true);
+  });
+});

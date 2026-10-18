@@ -4,7 +4,7 @@ import path from "node:path";
 import { resolveHarnessHome } from "./config/harness-home.js";
 import { loadProviders, parseProviders, resolveModelRef } from "./config/providers.js";
 import { checkBudget, checkBudgetTokens } from "./context/budget.js";
-import { compactSession } from "./context/compact.js";
+import { assertCompactionRatios, compactSession } from "./context/compact.js";
 import { createTokenMeter } from "./context/token-meter.js";
 import type { TokenMeter } from "./context/token-meter.js";
 import type { LoopEvent } from "./loop/events.js";
@@ -143,6 +143,8 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
 
 export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   if (opts.sessionId !== undefined) assertSessionId(opts.sessionId);
+  const compaction = opts.compaction;
+  assertCompactionRatios(compaction?.keepTailRatio ?? 0.16, compaction?.softRatio ?? 0.8);
   if (opts.sessionDir !== undefined) {
     if (opts.sessionDir === "") {
       throw new SessionResumeError("invalid_target", "sessionDir must not be empty", {
@@ -214,7 +216,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     }
 
     const signal = opts.signal ?? new AbortController().signal;
-    const compaction = opts.compaction;
+
     const compactionEnabled = compaction?.enabled !== false;
     let meter: TokenMeter | undefined;
     let budget: LoopCtx["budget"];
@@ -231,7 +233,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
           session: target,
           model: modelProtocol,
           modelCfg: model,
-          pricePerMillion: provider.pricePerMillion,
+
           signal,
           meter: tokenMeter,
           softRatio,

@@ -114,7 +114,7 @@ docs/             设计、计划与已知问题
 
 1. **一级落盘**：单条工具结果超过 8000 tokens 时写入会话目录 `artifacts/`，模型消息截断到 25000 tokens 并附完整输出路径。
 2. **二级 microcompact**：估算 token 超过 `contextWindow * softRatio`（默认 0.8）后，把**非 evidence**、非最近 `keepRecentTurns`（默认 2）轮、尚未 elide 的工具结果替换为占位：有 `artifactPath` 时保留路径引用，否则保留 `<toolName>: <首行 120 字符>`。只追加 `compaction` 事件，原始 `tool_result` 仍在日志。
-3. **三级 autocompact**：二级后仍超阈值时，用同一模型把 `coversUpToSeq` 之前的历史摘要为纯文本；尾部按 `keepTailRatio`（默认 0.16）逐字保留，system 事件始终保留，摘要以 `role: system` 的 `[Conversation summary]` 消息插在最后一条 system 之后。边界若落在 assistant/tool_result 批次中间或会覆盖 evidence，则回退；没有可摘要内容或摘要失败时追加 `compaction {kind:"failed"}`，不静默成功；取消则传播。
+3. **三级 autocompact**：二级后仍超阈值时，用同一模型把 `coversUpToSeq` 之前的历史摘要为纯文本；尾部按 `keepTailRatio`（默认 0.16）**不被 summary 覆盖**（`microcompact` 仍可能替换其中非 evidence 的工具结果），system 事件始终保留，摘要以 `role: system` 的 `[Conversation summary]` 消息插在最后一条 system 之后。边界若落在 assistant/tool_result 批次中间或会覆盖 evidence，则回退；没有可摘要内容、摘要为空或被 `maxOutputTokens` 截断、边界未超过上一次 summary（`no_progress`）、摘要调用失败时追加 `compaction {kind:"failed"}`，不静默成功；取消则传播。`keepTailRatio` 与 `softRatio` 必须满足 `0 < keepTailRatio < softRatio < 1`，非法配置在 `runSession` / `compactSession` 入口抛 `TypeError`。
 
 evidence 保护：`ToolResultPayload.evidence === true` 的结果不会被二级/三级修剪（投影层仍会防御旧日志中的错误 elide）。摘要请求的 usage 作为独立 `usage` 事件落日志，`query` 在压缩后按会话累计 usage 重算 `costUsd`，因此计入 `maxCostUsd` 熔断。
 
@@ -137,7 +137,7 @@ for await (const event of runSession({
 
 `compaction.enabled: false` 不注入 compactor / TokenMeter，只保留原有 `checkBudget` 启发式预算检查。
 
-压缩事件可回放：同一日志经 `buildMessages` 产生同一视图；同一会话重复调用不会重复 elide 已处理的 seq。
+压缩事件可回放：同一日志经 `buildMessages` 产生同一视图；同一会话重复调用不会重复 elide 已处理的 seq。`compacted` 循环事件只表示“本轮压缩尝试结束”，即使日志追加了 `failed` 也会发出；需要区分成功/失败时读取 `compaction` 事件（D-097）。
 
 ## headless demo
 

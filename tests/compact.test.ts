@@ -17,11 +17,11 @@ interface ModelCall {
   signal: AbortSignal;
 }
 
-function ok(content = "SUMMARY"): CompletionResult {
+function ok(content = "SUMMARY", truncatedByMaxTokens = false): CompletionResult {
   return {
     content,
     toolCalls: [],
-    truncatedByMaxTokens: false,
+    truncatedByMaxTokens,
     usage: { promptTokens: 100, completionTokens: 10, cachedTokens: 5 },
     stopReason: "stop",
   };
@@ -95,6 +95,42 @@ async function addBatch(
   if (opts.artifactPath !== undefined) payload.artifactPath = opts.artifactPath;
   const result = await session.append({ type: "tool_result", payload, parent: assistant.seq });
   return { assistant, result };
+}
+
+async function addMultiBatch(
+  session: SessionHandle,
+  id: string,
+  results: Array<{ id: string; text: string; evidence?: boolean }>,
+) {
+  void id;
+  const assistant = await session.append({
+    type: "assistant",
+    payload: {
+      content: "",
+      toolCalls: results.map((item) => ({ id: item.id, name: "echo", arguments: { id: item.id } })),
+    },
+  });
+  const appended = [];
+  for (const item of results) {
+    const payload: Record<string, unknown> = {
+      id: item.id,
+      ok: true,
+      text: item.text,
+      toolName: "echo",
+    };
+    if (item.evidence === true) payload.evidence = true;
+    appended.push(
+      await session.append({ type: "tool_result", payload, parent: assistant.seq }),
+    );
+  }
+  return { assistant, results: appended };
+}
+
+async function addHeavyHistory(session: SessionHandle) {
+  await addUser(session, "x".repeat(6000));
+  await addBatch(session, "c1", "a".repeat(400));
+  await addBatch(session, "c2", "b".repeat(400));
+  await addBatch(session, "c3", "c".repeat(40));
 }
 
 function makeOptions(
@@ -173,7 +209,8 @@ describe("compactSession", () => {
     expect(calls[0].maxOutputTokens).toBe(2048);
     expect(calls[0].messages[0]).toStrictEqual({ role: "system", content: SUMMARY_PROMPT });
     expect(calls[0].messages[1].role).toBe("user");
-    expect(calls[0].messages[1].content.length).toBe(2400);
+    expect(calls[0].messages[1].content.length).toBeLessThanOrEqual(2400);
+    expect(calls[0].messages[1].content).toContain("user: ");
 
     const events = session.events();
     expect(events[events.length - 1].payload).toMatchObject({
@@ -329,5 +366,161 @@ describe("compactSession", () => {
     );
     expect(calls).toHaveLength(2);
     expect(calls[1].messages[1].content).toContain("[Conversation summary]");
+  });
+
+  it.each([
+    ["空串", "", false, "empty summary"],
+    ["全空白", " \n\t ", false, "empty summary"],
+    ["截断", "PARTIAL", true, "summary truncated"],
+  ])("摘要结果%s时 failed 且不落 usage/summary", async (_label, content, truncated, reason) => {
+    const session = await makeSession();
+    await addHeavyHistory(session);
+    const { calls, model } = createFakeModel(async () => ok(content, truncated));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    expect(calls).toHaveLength(1);
+    const events = session.events();
+    expect(events[events.length - 1].payload).toMatchObject({
+      kind: "failed",
+      stage: "summary",
+      reason,
+    });
+    expect(events.some((event) => event.type === "usage")).toBe(false);
+    expect(
+      events.some(
+        (event) => event.type === "compaction" && event.payload.kind === "summary",
+      ),
+    ).toBe(false);
+  });
+
+  it("边界不前进时 failed(no_progress) 且不重复计费", async () => {
+    const session = await makeSession();
+    await addUser(session, "x".repeat(6000));
+    const assistant = await session.append({
+      type: "assistant",
+      payload: {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: { id: "c1" } }],
+      },
+    });
+    const result = await session.append({
+      type: "tool_result",
+      payload: { id: "c1", ok: true, text: "a".repeat(4000), toolName: "echo" },
+      parent: assistant.seq,
+    });
+    await session.append({
+      type: "compaction",
+      payload: { kind: "summary", summary: "S".repeat(4000), coversUpToSeq: result.seq },
+    });
+    const { calls, model } = createFakeModel(async () => {
+      throw new Error("must not summarize again");
+    });
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    expect(calls).toHaveLength(0);
+    const events = session.events();
+    expect(events[events.length - 1].payload).toMatchObject({
+      kind: "failed",
+      stage: "summary",
+      reason: "no_progress",
+    });
+    expect(
+      events.filter(
+        (event) => event.type === "compaction" && event.payload.kind === "summary",
+      ),
+    ).toHaveLength(1);
+    expect(events.filter((event) => event.type === "usage")).toHaveLength(0);
+  });
+
+  it.each<[number, number]>([
+    [0, 0.8],
+    [-0.1, 0.8],
+    [0.8, 0.8],
+    [0.9, 0.8],
+    [0.16, 1],
+    [0.16, 0],
+    [Number.NaN, 0.8],
+  ])("非法比例 keepTailRatio=%s softRatio=%s 抛 TypeError", async (keepTailRatio, softRatio) => {
+    const session = await makeSession();
+    const { model } = createFakeModel();
+
+    await expect(
+      compactSession(
+        makeOptions(session, model, cfg(1000), { keepTailRatio, softRatio }),
+      ),
+    ).rejects.toBeInstanceOf(TypeError);
+  });
+
+  it("无 evidence 时批次中间边界回退到 assistant 之前且可投影", async () => {
+    const session = await makeSession();
+    const user = await addUser(session, "start");
+    const first = await addBatch(session, "c1", "a".repeat(4000));
+    await addBatch(session, "c2", "b".repeat(400));
+    const { calls, model } = createFakeModel(async () => ok("SUMMARY_BATCH"));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    const summaries = session.events().filter(
+      (event) => event.type === "compaction" && event.payload.kind === "summary",
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].payload.coversUpToSeq).toBe(user.seq);
+    expect(summaries[0].payload.coversUpToSeq).toBeLessThan(first.assistant.seq);
+    expect(calls).toHaveLength(1);
+    expect(() => buildMessages(session.events())).not.toThrow();
+    expect(
+      buildMessages(session.events()).some(
+        (message) => message.role === "tool" && message.content === "a".repeat(4000),
+      ),
+    ).toBe(true);
+  });
+
+  it("evidence 位于批次内部时回退到 assistant 之前", async () => {
+    const session = await makeSession();
+    const user = await addUser(session, "start");
+    const batch = await addMultiBatch(session, "b", [
+      { id: "c1", text: "a".repeat(400) },
+      { id: "c2", text: "E".repeat(400), evidence: true },
+      { id: "c3", text: "c".repeat(4000) },
+    ]);
+    const { calls, model } = createFakeModel(async () => ok("SUMMARY_EVIDENCE_IN_BATCH"));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    const summaries = session.events().filter(
+      (event) => event.type === "compaction" && event.payload.kind === "summary",
+    );
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].payload.coversUpToSeq).toBe(user.seq);
+    expect(summaries[0].payload.coversUpToSeq).toBeLessThan(batch.assistant.seq);
+    expect(calls).toHaveLength(1);
+    expect(
+      buildMessages(session.events()).some(
+        (message) => message.role === "tool" && message.content === "E".repeat(400),
+      ),
+    ).toBe(true);
+  });
+
+  it("transcript 截断不切断代理对", async () => {
+    const session = await makeSession();
+    await addUser(session, "start");
+    const transcriptPrefix = "user: start\nassistant: ";
+    const content = "x".repeat(2400 - transcriptPrefix.length - 1) + "😀" + "y".repeat(2000);
+    await session.append({
+      type: "assistant",
+      payload: { content, toolCalls: [] },
+    });
+    await addBatch(session, "c1", "z".repeat(400));
+    const { calls, model } = createFakeModel(async () => ok("SUMMARY_SURROGATE"));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    expect(calls).toHaveLength(1);
+    const transcript = calls[0].messages[1].content;
+    expect(transcript.length).toBeLessThanOrEqual(2400);
+    expect(/[\uD800-\uDBFF]$/.test(transcript)).toBe(false);
+    expect(/^[\uDC00-\uDFFF]/.test(transcript.slice(-1))).toBe(false);
   });
 });

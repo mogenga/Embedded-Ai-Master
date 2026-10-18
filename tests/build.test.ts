@@ -423,6 +423,24 @@ describe("buildMessages 投影重组", () => {
     expect(messages[3].content).toBe("[tool result elided; echo: three]");
   });
 
+  it("microcompact 首行截断不切断代理对", () => {
+    const firstLine = "a".repeat(119) + "😀" + "tail";
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: true, text: firstLine, toolName: "echo" }, 0),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
+    ]);
+
+    expect(messages[1]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: `[tool result elided; echo: ${"a".repeat(119)}]`,
+    });
+  });
+
   it("summary 保留 system 与尾部,并在最后 system 后插入摘要", () => {
     const messages = buildMessages([
       mk(0, "system", { content: "SYS1" }),
