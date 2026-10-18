@@ -168,7 +168,7 @@
 
 ### D-020 · `ToolCtx.cwd` 尚无来源
 
-- **状态**: 接口已解决(2026-10-18,Task 8 `executeBatch` 增加 `cwd`,默认 `session.dir`);Task 9 装配层透传待验。
+- **状态**: 已解决(2026-10-18;Task 8 `executeBatch` 增加 `cwd`/`timeoutMs`,Task 9 `LoopCtx` 已透传;装配层可选,缺省 `session.dir`)。
 - **发现**: 2026-10-17,Task 7 第二轮整合复审。
 - **现象**: `ToolCtx` 要求 `sessionId` 与 `cwd`,但 `SessionHandle` 只有 `id`/`dir`,Task 8 计划中的 `executeBatch` opts 也只有 `signal`/`artifactDir`;`cwd` 由谁提供、取 `process.cwd()` 还是会话工作目录未定义。
 - **影响**: echo 不受影响;文件类工具在 Task 8 接入时行为不确定,可能出现相对路径解析到错误目录。
@@ -196,6 +196,7 @@
 - **发现**: 2026-10-18,Task 8 交付核验。
 - **现象**: `executeBatch` 的重复检测在 `typeof call.id !== "string"` 时直接判为非重复(`duplicates` 返回 `false`)。运行时探针: `[{id: 42}, {id: 42}]` 两条都执行并都返回 `ok`。`BatchResult.id` 类型声明为 `string`,但运行期不校验。
 - **影响**: 正常路径无影响——`call.id` 来自 Task 6 适配器解析的 tool call `id`,该处已校验为字符串(Task 6 的 `invalid_response` 守卫)。但这是管线里唯一的静默旁路: 若未来有其他调用方(回放、测试脚本、MCP 工具)构造 `BatchCall`,非字符串 id 会同时绕过重复检测与证据文件命名的字符串假设。
+- **Task 9 复核(F9)**: `query` 的 `collectToolUses` 不重复校验 `call.id`,明确信任 Task 6 适配器的字符串保证;若未来出现非适配器构造方,按本条目修复建议把校验前移到 `collectToolUses`。
 - **触发升级条件**: ① 出现字符串以外的 id 构造方;② 重复 id 导致证据被覆盖或结果错位的事故。
 - **修复建议**: 在管线入口统一把非法 `id` 归一为 `tool_protocol_error` 结构化结果(与 `normalizeToolResult` 同一风格),或把 `BatchCall.id` 的运行时校验前置到 `query` 的 `collectToolUses`。
 
@@ -206,6 +207,22 @@
 - **影响**: 行为正确但文案对使用者无指向性;装配层( Task 10 )若把未配置的路径直接透传,排查时不易意识到是配置缺失。
 - **触发升级条件**: Task 10 装配 `artifactDir` 时(建议届时在装配层做非空校验,而不是改管线)。
 - **修复建议**: 在 `runSession` 装配处校验 `artifactDir` 非空且在会话目录下;管线侧保持现状。
+
+### D-025 · assistant 空 `tool_calls` 数组原样投影
+
+- **发现**: 2026-10-18,Task 9 第二轮整合审查(F4)。
+- **现象**: `buildMessages` 对 `AssistantPayload.toolCalls = []` 仍输出 `tool_calls: []`。OpenAI 官方允许 assistant 消息携带该形状(与"同时含 content 与 tool_calls"一致),当前按不变处理。
+- **影响**: 官方 API 无影响;少数严格兼容网关可能拒绝空数组,导致整轮 400。
+- **触发升级条件**: 接入真实网关出现消息 400,且定位到空 `tool_calls`。
+- **修复建议**: 若网关拒绝,在空数组时省略 `tool_calls` 键并补投影断言;否则保留现状并固化。
+
+### D-026 · `maxCostUsd` 熔断延迟一轮
+
+- **发现**: 2026-10-18,Task 9 第二轮整合审查(F8)。
+- **现象**: 费用在每轮 `complete` 后累计,`assertBreakers` 只在下一轮 `turn += 1` 后检查。若本轮无工具调用,会先以 `no_tool_calls` 正常结束(不落 `max_cost_usd`);若有工具调用,本批工具会先执行完,下一轮才熔断。
+- **影响**: 单轮成本可能超过上限一个模型响应加一批工具;若超支轮恰好是最后一轮,则不会落 `max_cost_usd`。
+- **触发升级条件**: 成本上限要求单轮硬实时,或单轮成本可能远超阈值。
+- **修复建议**: 在 usage 累计后立即检查并中断(需决定本批工具是否仍执行),或保留轮首检查并在文档写明延迟语义。
 
 ---
 
@@ -221,3 +238,4 @@
 | 2026-10-18 | Task 7 交付核验:录入 D-021(MCP 工具名 `.`/`/` 需映射);`ToolRegistry` 补注册期校验(名称/根 object/不可表示类型 fail-fast),io=input 断言补齐 |
 | 2026-10-18 | Task 8 第三轮红队修复:D-020 标注接口已解决、Task 9 透传待验;录入 D-022(超时≠强制终止、串行写可能重叠) |
 | 2026-10-18 | Task 8 交付核验:录入 D-023(非字符串 id 绕过重复检测)、D-024(空 artifactDir 文案);D-020 已随 plan Task 9 补 `cwd`/`timeoutMs` 透传要求 |
+| 2026-10-18 | Task 9 第二轮整合审查:D-020 标记已解决(Task 9 已透传 `cwd`/`timeoutMs`);录入 D-025(空 `tool_calls` 数组)、D-026(`maxCostUsd` 延迟一轮);D-023 合并 F9(`query` 不重复校验 `call.id`,信任 Task 6) |

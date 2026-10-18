@@ -476,6 +476,70 @@ describe("query 主循环", () => {
     });
   });
 
+  it("消费者提前 return → 补 tool_aborted 日志与 consumer_closed", async () => {
+    let executed = 0;
+    const spyTool: ToolDef<{ text: string }> = {
+      name: "echo",
+      description: "执行计数",
+      schema: z.object({ text: z.string() }),
+      annotations: { readOnly: true },
+      execute: async (input) => {
+        executed += 1;
+        return { isError: false, code: "ok", message: "", text: input.text };
+      },
+    };
+    const provider = scriptedProvider([
+      reply("调用两个", [echoCall("c1", "a"), echoCall("c2", "b")]),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([spyTool]),
+    });
+
+    const generator = query(ctx, "x", { maxTurns: 10 });
+    const first = await generator.next();
+    expect(first.value).toEqual({ kind: "model_message", content: "调用两个" });
+    await generator.return(undefined);
+
+    expect(executed).toBe(0);
+    expect(session.events().map((event) => event.type)).toStrictEqual([
+      "user",
+      "assistant",
+      "tool_result",
+      "tool_result",
+      "interrupted",
+    ]);
+    const assistant = session.events().find((event) => event.type === "assistant");
+    const logged = session.events().filter((event) => event.type === "tool_result");
+    expect(logged.map((event) => event.payload)).toStrictEqual([
+      {
+        id: "c1",
+        ok: false,
+        text: "tool aborted before execution",
+        code: "tool_aborted",
+      },
+      {
+        id: "c2",
+        ok: false,
+        text: "tool aborted before execution",
+        code: "tool_aborted",
+      },
+    ]);
+    expect(logged.map((event) => event.parent)).toStrictEqual([
+      assistant?.seq,
+      assistant?.seq,
+    ]);
+    const interrupted = session.events().find((event) => event.type === "interrupted");
+    expect(interrupted?.payload).toStrictEqual({ reason: "consumer_closed" });
+
+    const messages = buildMessages(session.events());
+    expect(messages.map((message) => message.role)).toStrictEqual([
+      "user",
+      "assistant",
+      "tool",
+      "tool",
+    ]);
+  });
+
   it("模型抛 AbortError → interrupted + done(aborted)", async () => {
     const provider = scriptedProvider([new DOMException("aborted", "AbortError")]);
     const { ctx, session } = await makeCtx(provider);
@@ -708,5 +772,17 @@ describe("query 主循环", () => {
     const existing = await makeCtx(second, { systemPrompt: "SYS" }, "SYS");
     await collect(query(existing.ctx, "x", { maxTurns: 10 }));
     expect(existing.session.events().filter((event) => event.type === "system")).toHaveLength(1);
+  });
+
+  it("会话非空且无 system 时提供 systemPrompt → throw", async () => {
+    const provider = scriptedProvider([]);
+    const { ctx, session } = await makeCtx(provider, { systemPrompt: "SYS" });
+    await session.append({ type: "user", payload: { content: "earlier" } });
+
+    await expect(collect(query(ctx, "x", { maxTurns: 10 }))).rejects.toThrow(/systemPrompt/);
+
+    expect(session.events().filter((event) => event.type === "system")).toHaveLength(0);
+    expect(session.events().map((event) => event.type)).toStrictEqual(["user"]);
+    expect(provider.calls).toHaveLength(0);
   });
 });
