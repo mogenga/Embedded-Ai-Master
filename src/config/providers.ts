@@ -7,15 +7,17 @@ const ModelConfigSchema = z.object({
   maxOutput: z.number().int().positive(),
 });
 
+const PriceSchema = z.number().nonnegative().finite();
+
 const ProviderConfigSchema = z.object({
   protocol: z.literal("openai-chat-completions"),
   baseUrl: z.string().url(),
   apiKeyEnv: z.string().optional(),
   models: z.record(z.string(), ModelConfigSchema),
   pricePerMillion: z.object({
-    input: z.number(),
-    output: z.number(),
-    cachedInput: z.number().optional(),
+    input: PriceSchema,
+    output: PriceSchema,
+    cachedInput: PriceSchema.optional(),
   }).optional(),
 });
 
