@@ -78,7 +78,7 @@ describe("readSessionDir", () => {
     const error = captureCorruption(() => readSessionDir(dir));
 
     expect(error.code).toBe("invalid_header");
-    expect(error.detail).toMatchObject({ file: path.join(dir, "header.json") });
+    expect(error.detail).toMatchObject({ file: "header.json" });
   });
 
   it("header 字段缺失 → invalid_header", () => {
@@ -145,7 +145,7 @@ describe("readSessionDir", () => {
     expect(error.detail).toMatchObject({ file: "session.v1.jsonl", line: 1 });
   });
 
-  it("空目录 → invalid_header", () => {
+  it("空目录 → invalid_header（通用读取语义；resumeSession 另行判定 missing_session_dir）", () => {
     expect(captureCorruption(() => readSessionDir(makeTempDir())).code).toBe("invalid_header");
   });
 
@@ -154,5 +154,17 @@ describe("readSessionDir", () => {
     writeHeader(dir, defaultHeader());
 
     expect(captureCorruption(() => readSessionDir(dir)).code).toBe("invalid_header");
+  });
+
+  it("非规范代文件名不参与读取", () => {
+    const dir = makeTempDir();
+    writeHeader(dir, defaultHeader());
+    writeLines(dir, "session.v01.jsonl", ["{oops}"]);
+    writeLines(dir, "session.v0.jsonl", ["{oops}"]);
+    writeLines(dir, "session.v2.jsonl", [JSON.stringify(makeEvent(0))]);
+
+    const result = readSessionDir(dir);
+
+    expect(result.events.map((event) => event.seq)).toEqual([0]);
   });
 });

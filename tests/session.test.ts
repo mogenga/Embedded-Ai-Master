@@ -1,8 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { createSession, readSessionFile } from "../src/session/session.js";
+import { createSession, readSessionFile, resumeSession } from "../src/session/session.js";
 import {
   SessionCorruptionError,
   SessionForkError,
@@ -255,6 +263,183 @@ describe("会话持久化", () => {
     await session.close();
 
     await expect(session.append({ type: "user", payload: { content: "x" } })).rejects.toThrow();
+  });
+
+  it("resume 恢复事件并续写 seq", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "a" } });
+    await session.close();
+
+    const resumed = await resumeSession(dir);
+
+    expect(resumed.id).toBe(session.id);
+    expect(resumed.dir).toBe(dir);
+    expect(resumed.events().map((event) => event.seq)).toEqual([0]);
+    expect(Object.isFrozen(resumed.events()[0])).toBe(true);
+    const appended = await resumed.append({ type: "user", payload: { content: "b" } });
+    expect(appended.seq).toBe(1);
+    expect(readSessionFile(path.join(dir, "session.v1.jsonl")).map((event) => event.seq)).toEqual([
+      0, 1,
+    ]);
+  });
+
+  it("resume closed 目录后 header 改回 open", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.close();
+
+    const resumed = await resumeSession(dir);
+
+    expect(resumed.header.status).toBe("open");
+    expect(
+      (JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as { status: string }).status,
+    ).toBe("open");
+    await resumed.close();
+    expect(resumed.header.status).toBe("closed");
+  });
+
+  it("resume 追加到最后一个代文件", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "a" } });
+    await session.close();
+    appendFileSync(
+      path.join(dir, "session.v2.jsonl"),
+      `${JSON.stringify({
+        seq: 1,
+        ts: "2026-10-18T00:00:00.000Z",
+        type: "user",
+        payload: { content: "b" },
+      })}\n`,
+      "utf8",
+    );
+
+    const resumed = await resumeSession(dir);
+    const appended = await resumed.append({ type: "user", payload: { content: "c" } });
+
+    expect(appended.seq).toBe(2);
+    expect(
+      readSessionFile(path.join(dir, "session.v2.jsonl")).map((event) => event.payload.content),
+    ).toEqual(["b", "c"]);
+    expect(readSessionFile(path.join(dir, "session.v1.jsonl")).map((event) => event.seq)).toEqual([
+      0,
+    ]);
+  });
+
+  it("resume 空目录抛 missing_session_dir", async () => {
+    await expect(resumeSession(makeTempDir())).rejects.toMatchObject({
+      name: "SessionResumeError",
+      code: "missing_session_dir",
+    });
+  });
+
+  it("resume 目录不存在抛 missing_session_dir", async () => {
+    const missing = path.join(makeTempDir(), "absent");
+
+    await expect(resumeSession(missing)).rejects.toMatchObject({
+      name: "SessionResumeError",
+      code: "missing_session_dir",
+    });
+  });
+
+  it("resume 目录存在但 header 缺失抛 missing_session_dir", async () => {
+    const dir = makeTempDir();
+    writeFileSync(path.join(dir, "session.v1.jsonl"), "", "utf8");
+
+    await expect(resumeSession(dir)).rejects.toMatchObject({
+      name: "SessionResumeError",
+      code: "missing_session_dir",
+      detail: { dir, file: "header.json" },
+    });
+  });
+
+  it("resume 内容损坏仍抛 SessionCorruptionError", async () => {
+    const dir = makeTempDir();
+    writeFileSync(path.join(dir, "header.json"), "{bad", "utf8");
+    writeFileSync(path.join(dir, "session.v1.jsonl"), "", "utf8");
+
+    await expect(resumeSession(dir)).rejects.toMatchObject({
+      name: "SessionCorruptionError",
+      code: "invalid_header",
+      detail: { file: "header.json" },
+    });
+  });
+
+  it("resume 有 header 但无日志仍抛 SessionCorruptionError", async () => {
+    const dir = makeTempDir();
+    writeFileSync(
+      path.join(dir, "header.json"),
+      `${JSON.stringify({ id: "s", createdAt: "2026-10-18T00:00:00.000Z", status: "closed" })}\n`,
+      "utf8",
+    );
+
+    await expect(resumeSession(dir)).rejects.toMatchObject({
+      name: "SessionCorruptionError",
+      code: "invalid_header",
+      detail: { dir },
+    });
+  });
+
+  it("resume 改回 open 的原子写失败时拒绝且磁盘保持 closed", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.close();
+
+    fsFaults.rename = new Error("rename boom");
+    try {
+      await expect(resumeSession(dir)).rejects.toThrow("rename boom");
+    } finally {
+      fsFaults.rename = null;
+    }
+
+    expect(
+      (JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as { status: string }).status,
+    ).toBe("closed");
+    expect(existsSync(path.join(dir, "header.json.tmp"))).toBe(false);
+  });
+
+  it("usageTotals 累加并忽略缺失字段、非有限值与负值", async () => {
+    const session = await createSession(makeTempDir());
+    await session.append({
+      type: "usage",
+      payload: { promptTokens: 10, completionTokens: 5, cachedTokens: 2 },
+    });
+    await session.append({ type: "usage", payload: { promptTokens: 3 } });
+    await session.append({
+      type: "usage",
+      payload: {
+        promptTokens: -1,
+        completionTokens: Number.POSITIVE_INFINITY,
+        cachedTokens: Number.NaN,
+      },
+    });
+    await session.append({ type: "user", payload: { content: "x" } });
+
+    expect(session.usageTotals()).toEqual({
+      promptTokens: 13,
+      completionTokens: 5,
+      cachedTokens: 2,
+    });
+  });
+
+  it("resume 后 usageTotals 包含历史用量", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({
+      type: "usage",
+      payload: { promptTokens: 4, completionTokens: 1, cachedTokens: 0 },
+    });
+    await session.close();
+
+    const resumed = await resumeSession(dir);
+    await resumed.append({ type: "usage", payload: { promptTokens: 6, completionTokens: 1 } });
+
+    expect(resumed.usageTotals()).toEqual({
+      promptTokens: 10,
+      completionTokens: 2,
+      cachedTokens: 0,
+    });
   });
 
   it("结构化会话错误保留 name、code 与 detail", () => {

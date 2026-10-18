@@ -5,18 +5,18 @@ import type { EventType, SessionEvent, SessionHeader } from "./types.js";
 
 const SESSION_LOG_PATTERN = /^session\.v(\d+)\.jsonl$/;
 
-const EVENT_TYPES = new Set<string>([
-  "system",
-  "user",
-  "assistant",
-  "tool_call",
-  "tool_result",
-  "usage",
-  "checkpoint",
-  "status",
-  "interrupted",
-  "compaction",
-] satisfies EventType[]);
+const EVENT_TYPES: Record<EventType, true> = {
+  system: true,
+  user: true,
+  assistant: true,
+  tool_call: true,
+  tool_result: true,
+  usage: true,
+  checkpoint: true,
+  status: true,
+  interrupted: true,
+  compaction: true,
+};
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -29,7 +29,7 @@ function readHeader(dir: string): SessionHeader {
     parsed = JSON.parse(readFileSync(file, "utf8"));
   } catch (error) {
     throw new SessionCorruptionError("invalid_header", `Invalid session header: ${file}`, {
-      file,
+      file: path.basename(file),
       cause: error,
     });
   }
@@ -41,17 +41,26 @@ function readHeader(dir: string): SessionHeader {
     (parsed.status !== "open" && parsed.status !== "closed")
   ) {
     throw new SessionCorruptionError("invalid_header", `Invalid session header: ${file}`, {
-      file,
+      file: path.basename(file),
     });
   }
   return parsed as unknown as SessionHeader;
 }
 
-function listLogFiles(dir: string): string[] {
+function parseGeneration(name: string): number | null {
+  const match = SESSION_LOG_PATTERN.exec(name);
+  if (match === null) return null;
+  const digits = match[1];
+  const generation = Number(digits);
+  if (!Number.isSafeInteger(generation) || generation < 1) return null;
+  return String(generation) === digits ? generation : null;
+}
+
+export function listSessionLogFiles(dir: string): string[] {
   return readdirSync(dir)
-    .map((name) => ({ name, match: SESSION_LOG_PATTERN.exec(name) }))
-    .filter((entry) => entry.match !== null)
-    .sort((left, right) => Number(left.match![1]) - Number(right.match![1]))
+    .map((name) => ({ name, generation: parseGeneration(name) }))
+    .filter((entry): entry is { name: string; generation: number } => entry.generation !== null)
+    .sort((left, right) => left.generation - right.generation)
     .map((entry) => entry.name);
 }
 
@@ -81,7 +90,7 @@ function readEvents(dir: string, files: string[]): SessionEvent[] {
           { file: name, line: lineNo },
         );
       }
-      if (typeof parsed.type !== "string" || !EVENT_TYPES.has(parsed.type)) {
+      if (typeof parsed.type !== "string" || !Object.hasOwn(EVENT_TYPES, parsed.type)) {
         throw new SessionCorruptionError(
           "unknown_event_type",
           `Unknown event type at ${name}:${lineNo}`,
@@ -103,13 +112,17 @@ function readEvents(dir: string, files: string[]): SessionEvent[] {
   return events;
 }
 
-export function readSessionDir(dir: string): { header: SessionHeader; events: SessionEvent[] } {
+export function readSessionDir(dir: string): {
+  header: SessionHeader;
+  events: SessionEvent[];
+  logFiles: string[];
+} {
   const header = readHeader(dir);
-  const files = listLogFiles(dir);
+  const files = listSessionLogFiles(dir);
   if (files.length === 0) {
     throw new SessionCorruptionError("invalid_header", `Session has no log files: ${dir}`, {
-      file: dir,
+      dir,
     });
   }
-  return { header, events: readEvents(dir, files) };
+  return { header, events: readEvents(dir, files), logFiles: files };
 }

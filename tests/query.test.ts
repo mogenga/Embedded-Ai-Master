@@ -837,6 +837,7 @@ describe("query 主循环", () => {
         return session.append(event);
       },
       events: () => session.events(),
+      usageTotals: () => session.usageTotals(),
       close: () => session.close(),
     };
     ctx.session = failing;
