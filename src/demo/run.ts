@@ -18,7 +18,7 @@ const USAGE = `用法: node dist/demo/run.js [--help] <prompt>
   HARNESS_COMPAT_BASE_URL     覆盖 provider 的 baseUrl
   HARNESS_COMPAT_API_KEY_ENV  覆盖 provider 的 apiKeyEnv
 
-退出码: 0 正常完成, 1 熔断, 130 取消, 2 用法或装配错误`;
+退出码: 0 正常完成, 1 熔断, 130 取消, 2 用法/装配/运行期未恢复错误`;
 
 export type ParsedArgs =
   | { kind: "help" }
