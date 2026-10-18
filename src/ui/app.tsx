@@ -1,7 +1,9 @@
 import type { ComponentChildren, JSX } from "preact";
+import { Composer } from "./components/conversation/composer.js";
 import { ConversationHeader } from "./components/conversation/header.js";
 import { PathLine } from "./components/conversation/pathline.js";
 import { ConversationStream } from "./components/conversation/stream.js";
+import { DEMO_LOG_LINES, DEMO_REGISTERS, Dock } from "./components/dock/dock.js";
 import { KnowledgePane } from "./components/rail/knowledge-pane.js";
 import { SessionPane } from "./components/rail/session-pane.js";
 import { StatusBar } from "./components/statusbar.js";
@@ -17,6 +19,7 @@ export function App({
   onThemeChange,
   dockOpen = true,
   onDockToggle,
+  onSend,
   children,
 }: {
   view: TranscriptView;
@@ -24,6 +27,7 @@ export function App({
   onThemeChange?: (c: ThemeChoice) => void;
   dockOpen?: boolean;
   onDockToggle?: () => void;
+  onSend?: (text: string) => void;
   children?: ComponentChildren;
 }): JSX.Element {
   return (
@@ -44,9 +48,10 @@ export function App({
           <PathLine steps={view.steps} />
           <ConversationStream view={view} />
           {children}
+          <Composer onSend={onSend ?? (() => {})} />
         </main>
         <aside class="dock" id="dock" aria-label="调试坞">
-          <div class="placeholder">调试坞</div>
+          <Dock logLines={DEMO_LOG_LINES} registers={DEMO_REGISTERS} />
         </aside>
       </div>
       <StatusBar />
