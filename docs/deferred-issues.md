@@ -346,6 +346,22 @@
 - **触发升级条件**: artifact 路径可由用户/外部工具控制;出现链接目录、junction 或大小写/短名绕过;安全审查要求严格边界。
 - **修复建议**: 对 sourceDir 与 artifact 路径分别 `realpath` 后比较,拒绝非普通文件与跨根路径;或在写入 artifact 时记录规范化后的相对路径,读取时只接受该相对路径。
 
+### D-041 · fork 失败回滚只删 targetDir,父目录链残留且回滚失败静默
+
+- **发现**: 2026-10-18,维度6 Task4 审查(Task5 登记)。
+- **现象**: `forkSession` 失败时 `cleanupTargetDir` 仅对 `targetDir` 做 `rm(recursive)`,不回滚为占位而由 `mkdir(path.dirname(targetDir), { recursive: true })` 创建的父目录链;回滚步骤全部以 `.catch(() => undefined)` 吞掉错误。若失败发生在占位前(父目录已创建),或回滚本身失败,调用方只收到原始错误。
+- **影响**: 失败 fork 会残留空父目录;反复失败可能留下目录树。回滚失败无任何信号,调用方可能误判「未写入任何内容」,也增加后续排障成本。
+- **触发升级条件**: fork 目标固定为多层不存在目录;出现残留目录导致后续 `target_not_empty`;需要严格的失败原子性与可观测回滚。
+- **修复建议**: 记录本次实际创建的父目录层级并在失败时逆序删除;把回滚失败聚合进抛出的错误(`cause`/`detail` 或 `AggregateError`),至少保留可诊断信号。
+
+### D-042 · artifact 越界与缺失共用 artifactMissing,目录 artifact 未定义
+
+- **发现**: 2026-10-18,维度6 Task4 审查(Task5 登记)。
+- **现象**: artifact 路径词法越界(位于 sourceDir 外)与源文件缺失(`stat` ENOENT)都调用 `markArtifactMissing`,统一写 `detail.artifactMissing = true`,消费方无法区分「拒绝复制」与「源文件不存在」。此外 `artifactPath` 指向目录时行为未定义: `stat` 成功,但随后 `copyFile` 抛 `EISDIR`/`EPERM`,导致整个 fork 失败,而不是按 artifact 缺失跳过。
+- **影响**: 缺失原因不可审计;目录型 artifact 会阻塞 fork,与设计「artifact 缺失不阻塞 fork」不一致。
+- **触发升级条件**: 需要区分 artifact 缺失原因;工具产物可能为目录;出现因 artifact 为目录导致的 fork 失败。
+- **修复建议**: 为越界、缺失、非普通文件定义区分性标记或原因码(如 `artifactRejected`/`artifactMissing`/`artifactUnsupported`);复制前用 `stat().isFile()` 校验,非普通文件按不支持标记并跳过复制。
+
 ---
 
 ## 变更记录
@@ -368,3 +384,4 @@
 | 2026-10-18 | 全量复核(二轮):D-038 探针证实可触发并**修复**(适配器解析失败才置 `invalidJson: true`,query/buildMessages 双条件判定);补齐三处变异探针看守 |
 | 2026-10-18 | 维度6 Task3 审查修复:录入 D-039(同目录并发 resume/append 无跨进程锁);D-035 扩展记录末行缺换行导致续写粘连;`usageTotals` 容错非对象 payload,导出 `openSessionHandle` 供 fork 复用 |
 | 2026-10-18 | 维度6 Task4 审查修复:fork 增加 artifact 词法越界拒绝、失败回滚、非递归 `mkdir` 原子占位、同名 artifact 后缀、targetDir 为文件拒绝;D-039 扩展记录 fork 后 append 仍无跨进程锁,录入 D-040(artifact 路径仅词法校验,未解析链接/短名) |
+| 2026-10-18 | 维度6 Task5:rollover 接线 `create/resume/fork`(默认 50 MiB、非法阈值 `TypeError`、resume/fork 字节校准);补已存在空目录与父路径为文件的 fork 用例;录入 D-041(fork 回滚父目录残留/静默)、D-042(artifact 缺失原因不可区分/目录 artifact 未定义) |

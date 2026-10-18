@@ -121,7 +121,7 @@ resumeSession(sessionDir: string, opts?: { generationThresholdBytes?: number }):
 forkSession(
   sourceDir: string,
   atSeq: number,
-  opts?: { targetDir?: string; id?: string },
+  opts?: { targetDir?: string; id?: string; generationThresholdBytes?: number },
 ): Promise<SessionHandle>
 ```
 
@@ -132,14 +132,16 @@ forkSession(
 - **artifact 自包含**: 前缀中 `tool_result.payload.artifactPath` 指向的文件若存在, 复制到新会话 `artifacts/` 并重写事件中的路径; 文件缺失时保留原路径, 并在该事件 `payload.detail.artifactMissing = true` 标记, 不阻塞 fork。
 - 事件写入 `session.v1.jsonl`(逐行 append 前缀); 之后 append 从 `atSeq+1` 开始。
 - 原会话不受影响; 两个 handle 可并发追加。
-- 若 `targetDir` 已存在且非空 → 抛错, 不覆盖。
+- **目标目录占位**: 先对父目录 `mkdir`(recursive) 创建缺失层级; 再对 `targetDir` 使用**非递归 `mkdir`** 做原子占位。
+- `targetDir` 已存在(含空目录)一律 → `SessionForkError("target_not_empty")`, 不写入、不覆盖; `targetDir` 为文件或父路径为文件(`EEXIST`/`ENOTDIR`) → `SessionForkError("invalid_target")`。
 
 ### 4.6 rollover
 
-- `SessionHandle` 维护当前代文件与当前字节数; 每次 append 前若 `currentBytes + lineBytes > threshold` **且当前文件非空** → 打开下一代 `session.v(N+1).jsonl`(`wx`), 从该文件继续; 旧文件不改。
+- 默认阈值 `generationThresholdBytes = 50 MiB`; `createSession`/`resumeSession`/`forkSession` 统一接线, 非法值(非有限、非整数、<= 0) → `TypeError`。
+- `SessionHandle` 维护当前代文件与当前字节数; 每次 append 前计算 `lineBytes`; 仅当 `currentBytes > 0 && lineBytes <= threshold && currentBytes + lineBytes > threshold` → 打开下一代 `session.v(N+1).jsonl`(`wx`), 从该文件继续; 旧文件不改。
+- 当前代为空时不切换(避免刚建 `v1` 空文件就产生 `v2`); 单条事件本身超过阈值时仍写入当前代(不切换、不拆分一行)。
+- `resumeSession` 用最后一个代文件 `stat().size` 校准 `currentBytes`; `forkSession` 只写新的 `session.v1.jsonl`(不复制源的多代), 并以该文件实际大小校准。
 - 跨代读取按数字顺序; seq 继续递增。
-- 阈值必须为正有限整数; 非法 → 回退默认或抛错(实现选抛 TypeError)。
-- 单条事件本身超过阈值时仍写入当前代(不允许跨文件拆分一行)。
 
 ### 4.7 checkpoint 接入
 

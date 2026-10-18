@@ -2,6 +2,25 @@ import { appendFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { SessionEvent, SessionHeader } from "./types.js";
 
+const DEFAULT_GENERATION_THRESHOLD_BYTES = 50 * 1024 * 1024;
+const SESSION_LOG_PATTERN = /^session\.v(\d+)\.jsonl$/;
+
+export function resolveGenerationThresholdBytes(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_GENERATION_THRESHOLD_BYTES;
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    throw new TypeError(`generationThresholdBytes must be a positive finite integer: ${String(value)}`);
+  }
+  return value;
+}
+
+function nextGenerationPath(currentPath: string): string | undefined {
+  const match = SESSION_LOG_PATTERN.exec(path.basename(currentPath));
+  if (match === null) return undefined;
+  const generation = Number(match[1]);
+  if (!Number.isSafeInteger(generation) || generation < 1) return undefined;
+  return path.join(path.dirname(currentPath), `session.v${generation + 1}.jsonl`);
+}
+
 export function deepFreeze<T>(value: T): T {
   if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value);
@@ -50,13 +69,24 @@ export interface SessionHandle {
   close(): Promise<void>;
 }
 
+export interface SessionHandleOptions {
+  generationThresholdBytes?: number;
+  currentBytes?: number;
+}
+
 export function createHandle(
   dir: string,
   header: SessionHeader,
   eventList: SessionEvent[],
   logPath: string,
+  opts: SessionHandleOptions = {},
 ): SessionHandle {
   const headerPath = path.join(dir, "header.json");
+  const generationThresholdBytes = resolveGenerationThresholdBytes(
+    opts.generationThresholdBytes,
+  );
+  let currentLogPath = logPath;
+  let currentBytes = opts.currentBytes ?? 0;
   let pending = Promise.resolve();
   let accepting = true;
   let closePromise: Promise<void> | undefined;
@@ -77,7 +107,22 @@ export function createHandle(
           ts: new Date().toISOString(),
         };
         deepFreeze(event);
-        await appendFile(logPath, `${JSON.stringify(event)}\n`, "utf8");
+        const line = `${JSON.stringify(event)}\n`;
+        const lineBytes = Buffer.byteLength(line);
+        const nextLogPath =
+          currentBytes > 0 &&
+          lineBytes <= generationThresholdBytes &&
+          currentBytes + lineBytes > generationThresholdBytes
+            ? nextGenerationPath(currentLogPath)
+            : undefined;
+        if (nextLogPath === undefined) {
+          await appendFile(currentLogPath, line, "utf8");
+          currentBytes += lineBytes;
+        } else {
+          await appendFile(nextLogPath, line, { encoding: "utf8", flag: "wx" });
+          currentLogPath = nextLogPath;
+          currentBytes = lineBytes;
+        }
         eventList.push(event);
         return event;
       });
@@ -117,11 +162,17 @@ export function openSessionHandle(
   dir: string,
   header: SessionHeader,
   events: SessionEvent[],
-  _opts: { generationThresholdBytes?: number } = {},
+  opts: SessionHandleOptions = {},
 ): SessionHandle {
   const sessionDir = path.resolve(dir);
   const clonedEvents = structuredClone(events);
   for (const event of clonedEvents) deepFreeze(event);
   const clonedHeader = deepFreeze(structuredClone(header));
-  return createHandle(sessionDir, clonedHeader, clonedEvents, path.join(sessionDir, "session.v1.jsonl"));
+  return createHandle(
+    sessionDir,
+    clonedHeader,
+    clonedEvents,
+    path.join(sessionDir, "session.v1.jsonl"),
+    opts,
+  );
 }

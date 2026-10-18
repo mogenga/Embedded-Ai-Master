@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -346,6 +347,33 @@ describe("forkSession", () => {
 
     expect(readFileSync(path.join(targetDir, "keep.txt"), "utf8")).toBe("keep");
     expect(existsSync(path.join(targetDir, "header.json"))).toBe(false);
+  });
+
+  it("targetDir 已存在但为空 → target_not_empty 且不改动目录", async () => {
+    const { dir, session } = await makeSource();
+    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    const emptyTarget = path.join(makeTempDir(), "empty-target");
+    mkdirSync(emptyTarget);
+
+    await expect(forkSession(dir, 0, { targetDir: emptyTarget, id: "fork" })).rejects.toMatchObject({
+      code: "target_not_empty",
+    });
+
+    expect(readdirSync(emptyTarget)).toEqual([]);
+  });
+
+  it("targetDir 父路径为文件 → invalid_target 且不改动文件", async () => {
+    const { dir, session } = await makeSource();
+    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    const parentFile = path.join(makeTempDir(), "parent-file");
+    writeFileSync(parentFile, "keep", "utf8");
+    const targetDir = path.join(parentFile, "child");
+
+    await expect(forkSession(dir, 0, { targetDir, id: "fork" })).rejects.toMatchObject({
+      code: "invalid_target",
+    });
+
+    expect(readFileSync(parentFile, "utf8")).toBe("keep");
   });
 
   it("非法或 Windows 保留 id → invalid_target 且不写文件", async () => {

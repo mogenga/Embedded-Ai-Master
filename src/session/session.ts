@@ -7,6 +7,7 @@ import {
   createHandle,
   deepFreeze,
   openSessionHandle,
+  resolveGenerationThresholdBytes,
   writeHeaderAtomic,
 } from "./handle.js";
 import type { SessionHandle } from "./handle.js";
@@ -51,6 +52,9 @@ export async function createSession(
     generationThresholdBytes?: number;
   } = {},
 ): Promise<SessionHandle> {
+  const generationThresholdBytes = resolveGenerationThresholdBytes(
+    opts.generationThresholdBytes,
+  );
   const id = opts.id ?? randomUUID();
   const dir = path.resolve(sessionDir);
   const header: SessionHeader = {
@@ -84,7 +88,7 @@ export async function createSession(
   }
 
   const handle = openSessionHandle(dir, header, [], {
-    generationThresholdBytes: opts.generationThresholdBytes,
+    generationThresholdBytes,
   });
 
   if (opts.systemPrompt !== undefined) {
@@ -95,16 +99,24 @@ export async function createSession(
 
 export async function resumeSession(
   sessionDir: string,
-  _opts: { generationThresholdBytes?: number } = {},
+  opts: { generationThresholdBytes?: number } = {},
 ): Promise<SessionHandle> {
+  const generationThresholdBytes = resolveGenerationThresholdBytes(
+    opts.generationThresholdBytes,
+  );
   const dir = path.resolve(sessionDir);
   const headerPath = path.join(dir, "header.json");
   await assertSessionExists(dir, headerPath);
   const { header, events, logFiles } = readSessionDir(dir);
-  const logPath = path.join(dir, logFiles[logFiles.length - 1]);
+  const lastLog = logFiles[logFiles.length - 1];
+  const logPath = path.join(dir, lastLog);
+  const { size } = await stat(logPath);
   const openHeader = await writeHeaderAtomic(headerPath, { ...header, status: "open" });
   for (const event of events) deepFreeze(event);
-  return createHandle(dir, openHeader, events, logPath);
+  return createHandle(dir, openHeader, events, logPath, {
+    generationThresholdBytes,
+    currentBytes: size,
+  });
 }
 
 export function readSessionFile(filePath: string): SessionEvent[] {

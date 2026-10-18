@@ -4,7 +4,11 @@ import { copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveHarnessHome } from "../config/harness-home.js";
 import { SessionCorruptionError, SessionForkError } from "./errors.js";
-import { openSessionHandle, writeHeaderAtomic } from "./handle.js";
+import {
+  openSessionHandle,
+  resolveGenerationThresholdBytes,
+  writeHeaderAtomic,
+} from "./handle.js";
 import type { SessionHandle } from "./handle.js";
 import type { EventType, SessionEvent, SessionHeader } from "./types.js";
 
@@ -255,8 +259,11 @@ async function cleanupTargetDir(targetDir: string, created: boolean): Promise<vo
 export async function forkSession(
   sourceDir: string,
   atSeq: number,
-  opts: { targetDir?: string; id?: string } = {},
+  opts: { targetDir?: string; id?: string; generationThresholdBytes?: number } = {},
 ): Promise<SessionHandle> {
+  const generationThresholdBytes = resolveGenerationThresholdBytes(
+    opts.generationThresholdBytes,
+  );
   const resolvedSourceDir = path.resolve(sourceDir);
   const source = readSessionDir(resolvedSourceDir);
   assertForkBoundary(source.events, atSeq);
@@ -289,8 +296,12 @@ export async function forkSession(
     await writeHeaderAtomic(path.join(targetDir, "header.json"), header);
     const logPath = path.join(targetDir, "session.v1.jsonl");
     await writeFile(logPath, `${prefix.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+    const { size } = await stat(logPath);
 
-    return openSessionHandle(targetDir, header, prefix);
+    return openSessionHandle(targetDir, header, prefix, {
+      generationThresholdBytes,
+      currentBytes: size,
+    });
   } catch (error) {
     await cleanupTargetDir(targetDir, createdTargetDir);
     throw error;

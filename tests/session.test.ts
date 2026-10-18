@@ -10,7 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { readSessionDir } from "../src/session/persistence.js";
+import { forkSession, readSessionDir } from "../src/session/persistence.js";
 import {
   createSession,
   openSessionHandle,
@@ -604,5 +604,123 @@ describe("会话持久化", () => {
       session.header.createdAt = "changed";
     }).toThrow();
     expect(typeof session.header.createdAt).toBe("string");
+  });
+});
+
+describe("分代 rollover", () => {
+  it("阈值 1KB 时写入跨代, 读取合并且 seq 连续", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir, { generationThresholdBytes: 1024 });
+    for (let index = 0; index < 20; index += 1) {
+      await session.append({ type: "user", payload: { content: "x".repeat(200) } });
+    }
+    await session.close();
+
+    const { events, logFiles } = readSessionDir(dir);
+
+    expect(events.map((event) => event.seq)).toEqual([...Array(20).keys()]);
+    expect(logFiles.length).toBeGreaterThan(1);
+    expect(existsSync(path.join(dir, "session.v2.jsonl"))).toBe(true);
+    expect(readSessionFile(path.join(dir, "session.v1.jsonl")).length).toBeLessThan(20);
+  });
+
+  it("非法阈值在 create/resume/fork 一致抛 TypeError", async () => {
+    const sourceDir = makeTempDir();
+    const source = await createSession(sourceDir);
+    await source.append({ type: "usage", payload: {} });
+    await source.close();
+    const invalid = [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY];
+
+    for (const value of invalid) {
+      await expect(
+        createSession(makeTempDir(), { generationThresholdBytes: value }),
+      ).rejects.toBeInstanceOf(TypeError);
+      await expect(
+        resumeSession(sourceDir, { generationThresholdBytes: value }),
+      ).rejects.toBeInstanceOf(TypeError);
+      const targetDir = path.join(makeTempDir(), "fork");
+      await expect(
+        forkSession(sourceDir, 0, {
+          targetDir,
+          id: "fork-invalid",
+          generationThresholdBytes: value,
+        }),
+      ).rejects.toBeInstanceOf(TypeError);
+      expect(existsSync(targetDir)).toBe(false);
+    }
+  });
+
+  it("单条事件超过阈值仍写当前代且不拆分", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir, { generationThresholdBytes: 128 });
+    await session.append({ type: "user", payload: { content: "a" } });
+    await session.append({ type: "user", payload: { content: "x".repeat(500) } });
+    await session.close();
+
+    expect(existsSync(path.join(dir, "session.v2.jsonl"))).toBe(false);
+    expect(readSessionFile(path.join(dir, "session.v1.jsonl")).map((event) => event.seq)).toEqual([
+      0, 1,
+    ]);
+  });
+
+  it("当前代为空时首条事件超过阈值也不切换", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir, { generationThresholdBytes: 1 });
+    await session.append({ type: "user", payload: { content: "x" } });
+    await session.close();
+
+    expect(existsSync(path.join(dir, "session.v2.jsonl"))).toBe(false);
+    expect(readSessionFile(path.join(dir, "session.v1.jsonl"))).toHaveLength(1);
+  });
+
+  it("resume 按最后一代文件校准字节数后继续 rollover", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir, { generationThresholdBytes: 1024 });
+    for (let index = 0; index < 3; index += 1) {
+      await session.append({ type: "user", payload: { content: "x".repeat(200) } });
+    }
+    await session.close();
+    expect(existsSync(path.join(dir, "session.v2.jsonl"))).toBe(false);
+
+    const resumed = await resumeSession(dir, { generationThresholdBytes: 1024 });
+    await resumed.append({ type: "user", payload: { content: "x".repeat(200) } });
+    await resumed.close();
+
+    expect(existsSync(path.join(dir, "session.v2.jsonl"))).toBe(true);
+    expect(readSessionFile(path.join(dir, "session.v1.jsonl"))).toHaveLength(3);
+    expect(readSessionFile(path.join(dir, "session.v2.jsonl")).map((event) => event.seq)).toEqual([
+      3,
+    ]);
+    expect(readSessionDir(dir).events.map((event) => event.seq)).toEqual([0, 1, 2, 3]);
+  });
+
+  it("fork 从新的 v1 开始并校准前缀字节数", async () => {
+    const sourceDir = makeTempDir();
+    const source = await createSession(sourceDir, { generationThresholdBytes: 512 });
+    for (let index = 0; index < 6; index += 1) {
+      await source.append({
+        type: "usage",
+        payload: { promptTokens: index, note: "x".repeat(200) },
+      });
+    }
+    await source.close();
+    expect(existsSync(path.join(sourceDir, "session.v2.jsonl"))).toBe(true);
+
+    const targetDir = path.join(makeTempDir(), "fork");
+    const forked = await forkSession(sourceDir, 5, {
+      targetDir,
+      id: "fork-rollover",
+      generationThresholdBytes: 512,
+    });
+
+    expect(existsSync(path.join(targetDir, "session.v1.jsonl"))).toBe(true);
+    expect(existsSync(path.join(targetDir, "session.v2.jsonl"))).toBe(false);
+    await forked.append({ type: "user", payload: { content: "y".repeat(200) } });
+    await forked.close();
+
+    expect(existsSync(path.join(targetDir, "session.v2.jsonl"))).toBe(true);
+    expect(readSessionFile(path.join(targetDir, "session.v2.jsonl")).map((event) => event.seq)).toEqual([
+      6,
+    ]);
   });
 });
