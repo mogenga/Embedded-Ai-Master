@@ -110,6 +110,15 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
         messages.push(message);
         const ids = message.tool_calls?.map((call) => call.id) ?? [];
         if (ids.length > 0) {
+          const seen = new Set<string>();
+          for (const id of ids) {
+            if (seen.has(id)) {
+              throw new TypeError(
+                `assistant event ${event.seq} has duplicate tool call id ${id}`,
+              );
+            }
+            seen.add(id);
+          }
           activeBatch = {
             assistantSeq: event.seq,
             remaining: ids.slice(),

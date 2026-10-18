@@ -57,6 +57,18 @@ function isInvalidJsonMarker(value: unknown): value is InvalidJsonMarker {
   return isRecord(value) && value.error === "invalid_json" && typeof value.raw === "string";
 }
 
+// 重复 tool call id 会让日志出现同 id 的两条 tool_result，回放投影时必抛错，
+// 整份会话从此不可回放。必须在落日志前拒绝，保证"日志是唯一事实源"仍可投影。
+function assertUniqueToolCallIds(toolCalls: CompletionResult["toolCalls"]): void {
+  const seen = new Set<string>();
+  for (const call of toolCalls) {
+    if (seen.has(call.id)) {
+      throw new TypeError(`duplicate tool call id: ${call.id}`);
+    }
+    seen.add(call.id);
+  }
+}
+
 function isAbortError(error: unknown): boolean {
   return (
     typeof error === "object" &&
@@ -205,6 +217,7 @@ export async function* query(
         throw error;
       }
 
+      assertUniqueToolCallIds(response.toolCalls);
       const assistantEvent = await session.append({
         type: "assistant",
         payload: { content: response.content, toolCalls: response.toolCalls },

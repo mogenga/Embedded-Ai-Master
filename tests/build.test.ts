@@ -263,6 +263,42 @@ describe("buildMessages 投影重组", () => {
     ).toThrow(/duplicate/);
   });
 
+  it("assistant 声明重复 tool call id 时抛错", () => {
+    expect(() =>
+      buildMessages([
+        mk(0, "assistant", {
+          content: "",
+          toolCalls: [
+            { id: "dup", name: "echo", arguments: {} },
+            { id: "dup", name: "echo", arguments: {} },
+          ],
+        }),
+      ]),
+    ).toThrow(/duplicate tool call id/);
+  });
+
+  it("tool_result 乱序到达时按事件顺序投影", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "x" }),
+      mk(1, "assistant", {
+        content: "",
+        toolCalls: [
+          { id: "c1", name: "echo", arguments: {} },
+          { id: "c2", name: "echo", arguments: {} },
+        ],
+      }),
+      mk(2, "tool_result", { id: "c2", text: "b" }, 1),
+      mk(3, "tool_result", { id: "c1", text: "a" }, 1),
+    ]);
+
+    expect(messages.map((message) => [message.role, message.tool_call_id ?? ""])).toEqual([
+      ["user", ""],
+      ["assistant", ""],
+      ["tool", "c2"],
+      ["tool", "c1"],
+    ]);
+  });
+
   it("tool 批次未完成时插入 user 抛错", () => {
     expect(() =>
       buildMessages([

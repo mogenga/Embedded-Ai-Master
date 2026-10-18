@@ -720,6 +720,24 @@ describe("query 主循环", () => {
     ).toStrictEqual({ reason: "error" });
   });
 
+  it("模型返回重复 tool call id → 不落不可回放的日志,原错误上抛", async () => {
+    const provider = scriptedProvider([
+      reply("调用两个", [echoCall("dup", "a"), echoCall("dup", "b")]),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+
+    await expect(collect(query(ctx, "x", { maxTurns: 10 }))).rejects.toThrow(
+      /duplicate tool call id/,
+    );
+
+    expect(session.events().map((event) => event.type)).toStrictEqual([
+      "user",
+      "interrupted",
+    ]);
+    expect(session.events().at(-1)?.payload).toStrictEqual({ reason: "error" });
+    expect(() => buildMessages(session.events())).not.toThrow();
+  });
+
   it("executeBatch 抛错 → 补 tool_result_lost 与 interrupted(error) 后原错误上抛", async () => {
     const provider = scriptedProvider([
       reply("调用两个", [echoCall("c1"), echoCall("c2")]),

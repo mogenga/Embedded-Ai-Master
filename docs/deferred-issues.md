@@ -242,11 +242,12 @@
 
 ### D-029 · assistant 重复 tool call id 的投影未拦截
 
-- **发现**: 2026-10-18,Task 9 第三轮红队审查(Minor)。
-- **现象**: `buildMessages` 登记批次时按 id 列表保留重复项;`tool_result` 侧用 seen 集合拒绝重复结果,但 assistant 自身声明重复 id 时,投影出的 `tool_calls` 仍含重复 id。
-- **影响**: 若模型返回重复 id,批次可能永远缺一个结果并在 `buildMessages` 末尾抛 `missing tool_result`,或产生配对歧义。
-- **触发升级条件**: 模型返回重复 tool call id,或引入非 Task 6 的响应构造方。
-- **修复建议**: 在 `projectAssistant` 登记批次时检测重复 id 并抛错(与 `tool_result` 的 duplicate 语义对齐),或在 `query` 分流前归一化/拒绝重复 id。
+- **状态**: **已解决**(2026-10-18,Task 9 交付核验升级为阻塞项后修复)。
+- **发现**: 2026-10-18,Task 9 第三轮红队审查(Minor);交付核验时用运行时探针确认后果远比 Minor 严重,随即升级修复。
+- **原现象**: `buildMessages` 登记批次时按 id 列表保留重复项;`tool_result` 侧用 seen 集合拒绝重复结果,但 assistant 自身声明重复 id 时,投影出的 `tool_calls` 仍含重复 id。
+- **实际后果(探针证实)**: 模型返回两条同 id tool call 时,`query` 会把两条同 id `tool_result` 写入 `session.v1.jsonl`;随后 `buildMessages` 抛 `duplicate id`,该异常冒到消费者;更严重的是 `readSessionFile` 重读同一会话再投影**同样抛错**——一次模型畸形输出即把整份会话日志变成永久不可回放的坏档,违背 BR-6 与「日志是唯一事实源」。
+- **修复**: 双保险。① `query` 在 `session.append(assistant)` 之前调用 `assertUniqueToolCallIds`,重复即抛 `duplicate tool call id`,catch 分支落 `interrupted(error)` 后原错误上抛——**不产生**坏日志(探针复核: 磁盘只剩 `user` + `interrupted`,可正常回放);② `buildMessages` 在登记批次时检测重复 id 并抛 `assistant event <seq> has duplicate tool call id`,守住回放路径。
+- **测试**: `tests/build.test.ts`「assistant 声明重复 tool call id 时抛错」;`tests/query.test.ts`「模型返回重复 tool call id → 不落不可回放的日志,原错误上抛」(同时断言 `buildMessages` 不抛)。两条新断言均经变异探针验证(分别删除两处守卫 → 各 1 例失败)。
 
 ### D-030 · query 初始化 append 失败不落 `interrupted(error)`
 
@@ -276,3 +277,4 @@
 | 2026-10-18 | Task 9 第二轮整合审查:D-020 标记已解决(Task 9 已透传 `cwd`/`timeoutMs`);录入 D-025(空 `tool_calls` 数组)、D-026(`maxCostUsd` 延迟一轮);D-023 合并 F9(`query` 不重复校验 `call.id`,信任 Task 6) |
 | 2026-10-18 | Task 9 第三轮红队审查:录入 D-027(无 usage 时 `maxCostUsd` 静默失效)、D-028(marker raw 无上限)、D-029(assistant 重复 tool call id 投影未拦截) |
 | 2026-10-18 | Task 9 第四轮整合审查:录入 D-030(初始化 append 失败不落 `interrupted(error)`),N3(补偿写失败未测)与 N5(批次交错负例)并入;`pricePerMillion` 在 config schema 增加非负有限校验 |
+| 2026-10-18 | Task 9 交付核验:D-029 升级为阻塞并**修复**(重复 tool call id 会使会话永久不可回放;query 落日志前拒绝 + buildMessages 二次守卫);补齐乱序 tool_result 投影断言 |
