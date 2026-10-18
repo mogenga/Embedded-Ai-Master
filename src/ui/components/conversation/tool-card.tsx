@@ -20,6 +20,7 @@ const FOLD_LIMIT: Record<ToolKind, number> = {
 
 const TEXT_FOLD_LINES = 6;
 const TEXT_FOLD_BYTES = 240;
+const SUMMARY_LIMIT = 120;
 
 const VERDICT_META = {
   bad: { icon: "i-x", text: "与预期不符" },
@@ -53,7 +54,8 @@ function flagText(tool: ToolCardModel): string {
 
 function summary(tool: ToolCardModel, kind: ToolKind): string {
   if (kind === "readout" && tool.readout === undefined && tool.text !== undefined) {
-    return tool.text.split("\n")[0] ?? "";
+    const first = tool.text.split("\n")[0] ?? "";
+    return first.length > SUMMARY_LIMIT ? `${first.slice(0, SUMMARY_LIMIT)}…` : first;
   }
   switch (kind) {
     case "readout": {
@@ -143,7 +145,7 @@ function ToolBody({ tool, kind }: { tool: ToolCardModel; kind: ToolKind }): JSX.
           </Fragment>
         );
       }
-      if (tool.text !== undefined) return <pre class="tool-text">{tool.text}</pre>;
+      if (tool.text !== undefined && tool.text.length > 0) return <pre class="tool-text">{tool.text}</pre>;
       if (tool.artifactPath !== undefined) {
         return <div class="tool-empty">结果已落盘：{tool.artifactPath}</div>;
       }

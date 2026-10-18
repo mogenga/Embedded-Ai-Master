@@ -517,6 +517,14 @@
 - **触发升级条件**: 内核提供上下文用量事件;状态栏需要显示真实占用。
 - **修复建议**: 由内核/服务端在 `usage` 或独立 `context` 事件中提供 `used`/`limit`;明确是否包含 cached token,并在 spec 补充投影规则。
 
+### D-062 · usage 缺字段按 0 补齐导致缺失与真实 0 不可区分
+
+- **发现**: 2026-10-18,Task 12 第二轮红队审查修复。
+- **现象**: `mergeUsage` 对缺失的 `promptTokens` / `completionTokens` / `cachedTokens` 一律按 0 累加;仅带 `costUsd` 的 `usage` 事件也会生成全 0 的 token 用量。
+- **影响**: 用量展示把「字段缺失」呈现为真实 0,状态栏与成本核算无法据此告警;排查上游 usage 漂移时缺少信号。
+- **触发升级条件**: 服务端 usage 字段可缺省,或需要在 UI 区分缺失与 0。
+- **修复建议**: 记录已出现的字段集合,缺失字段保持 `undefined` 并由 UI 显示 `—`;或在投影层引入 `complete` 标记,单独告警不完整 usage。
+
 ---
 
 ## 变更记录
@@ -547,3 +555,4 @@
 | 2026-10-18 | 最终加固:header 临时文件改为 `header.json.<uuid>.tmp` + `wx`,避免预置链接写入越界;补 `readSessionFile` symlink 直达用例与 Windows 无权限 skipIf;design §5 补 symlink/payload/恢复幂等/realpath 条目;录入 D-049(create/resume 跟随目录链接与 fork 不一致)、D-050(payload 非对象 fail-closed 的旧日志兼容性影响);dev-notes 明确恢复补偿分支为防御性 |
 | 2026-10-18 | P0 前端 Task 11 第一轮整体审查修复:录入 D-058 ~ D-061(Dock 静态数据、回放/导出未接线、SSE 无后端输入处理、StatusBar context/limit 来源);V13 改为检查一致性测试文件,验收脚本清理失败不再吞汇总 |
 | 2026-10-18 | P0 前端 Task 10 视觉验收:录入 D-051 ~ D-057(action 端点契约、StatusBar 状态推断、无后端清空输入、717px 树内部滚动、V3 滚动条口径、V11 静态 Tab 范围、Chromium 探测覆盖);设计 v1.2 同步 V2/V3/V6/V11 口径 |
+| 2026-10-18 | P0 前端 Task 12 第二轮红队审查修复:修正空 text + artifact 投影、SSE 单 timer 重连/close 后静默/构造抛错收敛、折叠摘要截断、costUsd 有限非负校验;清理 `styles.css` 重复 `.dock` 与 media 查询;录入 D-062(usage 缺字段补 0) |

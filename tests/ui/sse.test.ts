@@ -24,6 +24,12 @@ class FakeES {
   }
 }
 
+class ThrowingES {
+  constructor() {
+    throw new Error("ctor boom");
+  }
+}
+
 describe("sse", () => {
   beforeEach(() => {
     FakeES.instances = [];
@@ -68,6 +74,46 @@ describe("sse", () => {
     es.emit("error");
     await new Promise((resolve) => setTimeout(resolve, 10));
     expect(FakeES.instances.length).toBe(1);
+  });
+
+  it("连续 error 只调度一次重连", async () => {
+    const s = createEventStream(
+      "http://x/ev",
+      { onEvent: () => {} },
+      { EventSourceCtor: FakeES as unknown as typeof EventSource, retryMs: 5 },
+    );
+    const es = FakeES.instances.at(-1)!;
+    es.emit("error");
+    es.emit("error");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(FakeES.instances.length).toBeLessThanOrEqual(2);
+    s.close();
+  });
+
+  it("close 后 error 不调用 onError", () => {
+    const seen: unknown[] = [];
+    const s = createEventStream(
+      "http://x/ev",
+      { onEvent: () => {}, onError: (e) => seen.push(e) },
+      { EventSourceCtor: FakeES as unknown as typeof EventSource, retryMs: 5 },
+    );
+    const es = FakeES.instances.at(-1)!;
+    s.close();
+    es.emit("error");
+    expect(seen).toHaveLength(0);
+  });
+
+  it("EventSource 构造抛错转 onError 且不逃逸", () => {
+    const seen: unknown[] = [];
+    expect(() =>
+      createEventStream(
+        "http://x/ev",
+        { onEvent: () => {}, onError: (e) => seen.push(e) },
+        { EventSourceCtor: ThrowingES as unknown as typeof EventSource, retryMs: 5 },
+      ),
+    ).not.toThrow();
+    expect(seen).toHaveLength(1);
+    expect((seen[0] as Error).message).toContain("ctor boom");
   });
 
   it("postAction 成功与失败", async () => {

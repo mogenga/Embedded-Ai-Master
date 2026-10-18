@@ -78,6 +78,13 @@ describe("transcript", () => {
     expect(tool.tool.errorCode).toBe("empty_result");
     expect(tool.tool.errorText).toBe("工具未返回读数");
   });
+  it("成功但 text 为空且 artifactPath 存在时保留 readout 与路径", () => {
+    const tool = lastTool(toolPair({ ok: true, text: "", artifactPath: "artifacts/large.bin" }));
+    expect(tool.tool.kind).toBe("readout");
+    expect(tool.tool.artifactPath).toBe("artifacts/large.bin");
+    expect(tool.tool.text).toBe("");
+    expect(tool.tool.errorCode).toBeUndefined();
+  });
   it("artifactPath 透传到工具卡", () => {
     const tool = lastTool(
       toolPair({
@@ -139,6 +146,43 @@ describe("transcript", () => {
     const view = transcriptFromLoop(events);
     expect(view.cost).toBeCloseTo(0.005);
     expect(view.status).toBe("done");
+  });
+  it("session 负数或非有限 costUsd 不进入成本", () => {
+    const negative = transcriptFromSession([
+      { seq: 1, ts: "t", type: "usage", payload: { promptTokens: 10, costUsd: -1 } },
+    ]);
+    expect(negative.cost).toBeUndefined();
+    expect(negative.usage?.costUsd).toBeUndefined();
+    const nan = transcriptFromSession([
+      { seq: 1, ts: "t", type: "usage", payload: { promptTokens: 10, costUsd: Number.NaN } },
+    ]);
+    expect(nan.cost).toBeUndefined();
+    expect(nan.usage?.costUsd).toBeUndefined();
+  });
+  it("session 非法 costUsd 不污染此前累计", () => {
+    const view = transcriptFromSession([
+      { seq: 1, ts: "t", type: "usage", payload: { promptTokens: 1, costUsd: 0.02 } },
+      { seq: 2, ts: "t", type: "usage", payload: { promptTokens: 1, costUsd: -5 } },
+    ]);
+    expect(view.cost).toBeCloseTo(0.02);
+    expect(view.usage?.costUsd).toBeCloseTo(0.02);
+  });
+  it("loop 负数或非有限 costUsd 被忽略", () => {
+    const mixed = transcriptFromLoop([
+      { kind: "model_message", content: "分析中" },
+      { kind: "turn_end", turn: 1, costUsd: 0.002 },
+      { kind: "turn_end", turn: 2, costUsd: -1 },
+      { kind: "turn_end", turn: 3, costUsd: Number.NaN },
+      { kind: "done", finishReason: "no_tool_calls" },
+    ]);
+    expect(mixed.cost).toBeCloseTo(0.002);
+    const invalid = transcriptFromLoop([
+      { kind: "model_message", content: "分析中" },
+      { kind: "turn_end", turn: 1, costUsd: -1 },
+      { kind: "turn_end", turn: 2, costUsd: Number.NaN },
+      { kind: "done", finishReason: "no_tool_calls" },
+    ]);
+    expect(invalid.cost).toBeUndefined();
   });
   it("DEMO_SESSION_ID 为 #128", () => {
     expect(DEMO_SESSION_ID).toBe("#128");

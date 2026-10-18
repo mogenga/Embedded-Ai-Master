@@ -34,7 +34,15 @@ export function createEventStream(
   const log = deps.log ?? ((msg: string): void => console.warn(msg));
   let closed = false;
   let source: EventSource | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  function scheduleReconnect(): void {
+    if (closed || timer !== null) return;
+    timer = setTimeout(() => {
+      timer = null;
+      connect();
+    }, retryMs);
+  }
 
   function connect(): void {
     if (closed) return;
@@ -44,7 +52,14 @@ export function createEventStream(
       handlers.onError?.(err);
       return;
     }
-    const es = new ctor(url);
+    let es: EventSource;
+    try {
+      es = new ctor(url);
+    } catch (err) {
+      log("[sse] EventSource 构造失败，事件流未建立");
+      handlers.onError?.(err);
+      return;
+    }
     source = es;
     es.addEventListener("open", () => {
       handlers.onOpen?.();
@@ -57,11 +72,11 @@ export function createEventStream(
       }
     });
     es.addEventListener("error", (err) => {
-      handlers.onError?.(err);
       if (closed) return;
-      source = undefined;
+      handlers.onError?.(err);
+      if (source === es) source = undefined;
       es.close();
-      timer = setTimeout(connect, retryMs);
+      scheduleReconnect();
     });
   }
 
@@ -71,9 +86,9 @@ export function createEventStream(
     close(): void {
       if (closed) return;
       closed = true;
-      if (timer !== undefined) {
+      if (timer !== null) {
         clearTimeout(timer);
-        timer = undefined;
+        timer = null;
       }
       source?.close();
       source = undefined;

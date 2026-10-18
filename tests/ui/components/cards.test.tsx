@@ -171,6 +171,32 @@ describe("cards", () => {
     );
     expect(root.textContent).toContain("artifacts/read.bin");
   });
+  it("超长 text 的折叠摘要截断到 120 字符", () => {
+    const root = mount();
+    const text = "x".repeat(100000);
+    render(<ToolCard tool={{ id: "t", name: "serial_read", args: "COM3", ok: true, kind: "readout", text }} />, root);
+    const sum = root.querySelector(".tool-fold-sum")?.textContent ?? "";
+    expect(sum.length).toBeLessThanOrEqual(130);
+  });
+  it("readout 空 text 但 artifactPath 存在时展示结果已落盘", () => {
+    const root = mount();
+    render(
+      <ToolCard
+        tool={{
+          id: "a",
+          name: "serial_read",
+          args: "COM3",
+          ok: true,
+          kind: "readout",
+          text: "",
+          artifactPath: "artifacts/large.bin",
+        }}
+      />,
+      root,
+    );
+    expect(root.textContent).toContain("结果已落盘");
+    expect(root.textContent).toContain("artifacts/large.bin");
+  });
   it("GuardNotice 待确认提供确认与拒绝入口，确认后仅执行中", async () => {
     const root = mount();
     let confirmed = 0;

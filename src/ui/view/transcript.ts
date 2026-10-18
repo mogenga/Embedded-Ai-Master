@@ -121,6 +121,11 @@ function asNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function asCost(value: unknown): number | undefined {
+  const parsed = asNumber(value);
+  return parsed !== undefined && parsed >= 0 ? parsed : undefined;
+}
+
 function defaultKind(name: string): ToolKind {
   if (name.startsWith("kb_")) return "hitlist";
   if (name.startsWith("mem_") || name.startsWith("serial_") || name.startsWith("reg_")) return "evidence";
@@ -242,6 +247,11 @@ function applyToolResult(card: ToolCardModel, payload: ToolResultPayload): void 
     card.text = payload.text;
     return;
   }
+  if (card.artifactPath !== undefined && card.artifactPath.length > 0) {
+    card.kind = "readout";
+    card.text = "";
+    return;
+  }
   card.kind = "error";
   card.errorCode = "empty_result";
   card.errorText = "工具未返回读数";
@@ -291,7 +301,7 @@ function toGuardModel(raw: Record<string, unknown>): GuardModel {
 type UsageModel = NonNullable<TranscriptView["usage"]>;
 
 function mergeUsage(current: UsageModel | undefined, payload: Record<string, unknown>): UsageModel {
-  const costUsd = asNumber(payload.costUsd);
+  const costUsd = asCost(payload.costUsd);
   const next: UsageModel = {
     prompt: (current?.prompt ?? 0) + (asNumber(payload.promptTokens) ?? 0),
     completion: (current?.completion ?? 0) + (asNumber(payload.completionTokens) ?? 0),
@@ -395,7 +405,7 @@ export function transcriptFromSession(events: readonly SessionEvent[]): Transcri
       }
       case "usage": {
         usage = mergeUsage(usage, payload);
-        const delta = asNumber(payload.costUsd);
+        const delta = asCost(payload.costUsd);
         if (delta !== undefined) cost = (cost ?? 0) + delta;
         break;
       }
@@ -455,7 +465,8 @@ export function transcriptFromLoop(events: readonly LoopEvent[]): TranscriptView
         break;
       }
       case "turn_end": {
-        if (event.costUsd !== undefined) cost = (cost ?? 0) + event.costUsd;
+        const delta = asCost(event.costUsd);
+        if (delta !== undefined) cost = (cost ?? 0) + delta;
         break;
       }
       case "interrupted": {
