@@ -12,15 +12,24 @@
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "coverage": "vitest run --coverage",
-    "build": "tsc -p tsconfig.build.json"
+    "build": "tsc -p tsconfig.build.json",
+    "build:web": "vite build",
+    "dev:web": "vite",
+    "verify:ui": "node scripts/verify-ui.mjs",
+    "test:ui": "vitest run tests/ui",
+    "typecheck:web": "tsc -p tsconfig.web.json --noEmit"
   },
   "dependencies": {
+    "preact": "^10.29.8",
     "zod": "^4.0.0"
   },
   "devDependencies": {
-    "@vitest/coverage-v8": "^4.1.6",
+    "@preact/preset-vite": "^2.10.6",
     "@types/node": "^24.10.0",
+    "@vitest/coverage-v8": "^4.1.6",
+    "happy-dom": "^21.0.3",
     "typescript": "^5.9.3",
+    "vite": "^8.3.4",
     "vitest": "^4.1.6"
   }
 }

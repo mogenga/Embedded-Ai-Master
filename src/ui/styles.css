@@ -1,0 +1,153 @@
+:root{
+  --font-ui:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"PingFang SC","Noto Sans SC","Microsoft YaHei",sans-serif;
+  --font-mono:"Cascadia Code","JetBrains Mono","SFMono-Regular",Consolas,"Liberation Mono",monospace;
+
+  --bg-canvas:#0e131a;
+  --bg-panel:#141b23;
+  --bg-elevated:#1a232d;
+  --bg-inset:#0a0f15;
+  --bg-hover:#1e2834;
+  --bg-active:#26333f;
+  --bg-sunken:#111922;
+
+  --border:#232e3a;
+  --border-soft:#1c2630;
+  --border-strong:#35424f;
+
+  --text-1:#e4ecf2;
+  --text-2:#9aa8b6;
+  --text-3:#68757f;
+  --text-inverse:#08171a;
+
+  --accent:#35d2c0;
+  --accent-strong:#2bb6a6;
+  --accent-soft:rgba(53,210,192,.12);
+  --accent-line:rgba(53,210,192,.32);
+
+  --ok:#35d2c0;
+  --warn:#e3a94e;
+  --warn-soft:rgba(227,169,78,.13);
+  --danger:#e86c5d;
+  --danger-soft:rgba(232,108,93,.13);
+  --info:#7fb2e5;
+  --info-soft:rgba(127,178,229,.13);
+
+  --wave-1:#35d2c0;
+  --wave-2:#e3a94e;
+  --wave-3:#d97bab;
+  --wave-4:#7fb2e5;
+
+  --scroll-thumb:#2f3d4b;
+  --scroll-thumb-hover:#41546a;
+  --scroll-track:transparent;
+
+  --shadow:0 12px 32px rgba(0,0,0,.38);
+  --radius:8px;
+  --radius-sm:6px;
+  --row:32px;
+  --gutter:16px;
+}
+:root[data-theme="light"]{
+  --bg-canvas:#eaeef1;
+  --bg-panel:#ffffff;
+  --bg-elevated:#ffffff;
+  --bg-inset:#f4f7f9;
+  --bg-hover:#eef3f6;
+  --bg-active:#e2eaef;
+  --bg-sunken:#f2f5f7;
+
+  --border:#d8e0e6;
+  --border-soft:#e6ecf0;
+  --border-strong:#bcc8d2;
+
+  --text-1:#15202b;
+  --text-2:#4d5b69;
+  --text-3:#7c8894;
+  --text-inverse:#ffffff;
+
+  --accent:#0f9d8d;
+  --accent-strong:#0b8276;
+  --accent-soft:rgba(15,157,141,.1);
+  --accent-line:rgba(15,157,141,.34);
+
+  --ok:#0f9d8d;
+  --warn:#a9701a;
+  --warn-soft:rgba(169,112,26,.12);
+  --danger:#c1443a;
+  --danger-soft:rgba(193,68,58,.1);
+  --info:#2c6db0;
+  --info-soft:rgba(44,109,176,.1);
+
+  --wave-1:#0f9d8d;
+  --wave-2:#a9701a;
+  --wave-3:#b04d80;
+  --wave-4:#2c6db0;
+
+  --scroll-thumb:#c6d0d9;
+  --scroll-thumb-hover:#a8b5c0;
+  --scroll-track:transparent;
+
+  --shadow:0 10px 28px rgba(23,42,58,.14);
+}
+@media (prefers-color-scheme: light){
+  :root[data-theme="system"]{
+    --bg-canvas:#eaeef1;
+    --bg-panel:#ffffff;
+    --bg-elevated:#ffffff;
+    --bg-inset:#f4f7f9;
+    --bg-hover:#eef3f6;
+    --bg-active:#e2eaef;
+    --bg-sunken:#f2f5f7;
+    --border:#d8e0e6;
+    --border-soft:#e6ecf0;
+    --border-strong:#bcc8d2;
+    --text-1:#15202b;
+    --text-2:#4d5b69;
+    --text-3:#7c8894;
+    --text-inverse:#ffffff;
+    --accent:#0f9d8d;
+    --accent-strong:#0b8276;
+    --accent-soft:rgba(15,157,141,.1);
+    --accent-line:rgba(15,157,141,.34);
+    --ok:#0f9d8d;
+    --warn:#a9701a;
+    --warn-soft:rgba(169,112,26,.12);
+    --danger:#c1443a;
+    --danger-soft:rgba(193,68,58,.1);
+    --info:#2c6db0;
+    --info-soft:rgba(44,109,176,.1);
+    --wave-1:#0f9d8d;
+    --wave-2:#a9701a;
+    --wave-3:#b04d80;
+    --wave-4:#2c6db0;
+    --scroll-thumb:#c6d0d9;
+    --scroll-thumb-hover:#a8b5c0;
+    --scroll-track:transparent;
+    --shadow:0 10px 28px rgba(23,42,58,.14);
+  }
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;
+  font-family:var(--font-ui);
+  font-size:13px;
+  line-height:1.5;
+  color:var(--text-1);
+  background:var(--bg-canvas);
+  -webkit-font-smoothing:antialiased;
+  text-rendering:optimizeLegibility;
+}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+input,textarea,select{font:inherit;color:inherit}
+ul{margin:0;padding:0;list-style:none}
+::selection{background:var(--accent-line)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px;border-radius:4px}
+
+*{scrollbar-color:var(--scroll-thumb) var(--scroll-track);scrollbar-width:thin}
+::-webkit-scrollbar{width:11px;height:11px}
+::-webkit-scrollbar-track{background:var(--scroll-track)}
+::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border:3px solid transparent;background-clip:padding-box;border-radius:999px}
+::-webkit-scrollbar-thumb:hover{background:var(--scroll-thumb-hover);background-clip:padding-box}
+::-webkit-scrollbar-corner{background:transparent}

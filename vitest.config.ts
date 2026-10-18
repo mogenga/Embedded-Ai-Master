@@ -8,7 +8,7 @@ const includesTmpTests = cliArgs.some((arg) => arg.startsWith('.tmp/') || arg.in
 export default defineConfig({
   test: {
     include: [
-      'tests/**/*.test.{ts,js}',
+      'tests/**/*.test.{ts,tsx,js}',
       ...(includesTmpTests ? ['.tmp/**/*.test.js'] : []),
     ],
     unstubEnvs: true,
