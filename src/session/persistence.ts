@@ -1,9 +1,16 @@
+import { randomUUID } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
+import { copyFile, mkdir, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { SessionCorruptionError } from "./errors.js";
+import { resolveHarnessHome } from "../config/harness-home.js";
+import { isWindowsReservedName } from "../tools/pipeline.js";
+import { SessionCorruptionError, SessionForkError } from "./errors.js";
+import { openSessionHandle } from "./handle.js";
+import type { SessionHandle } from "./handle.js";
 import type { EventType, SessionEvent, SessionHeader } from "./types.js";
 
 const SESSION_LOG_PATTERN = /^session\.v(\d+)\.jsonl$/;
+const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 
 const EVENT_TYPES: Record<EventType, true> = {
   system: true,
@@ -125,4 +132,99 @@ export function readSessionDir(dir: string): {
     });
   }
   return { header, events: readEvents(dir, files), logFiles: files };
+}
+
+function assertForkBoundary(events: SessionEvent[], atSeq: number): void {
+  const boundary = Number.isInteger(atSeq) ? events[atSeq] : undefined;
+  if (boundary === undefined || (boundary.type !== "tool_result" && boundary.type !== "usage")) {
+    throw new SessionForkError(
+      "not_turn_boundary",
+      `Fork position ${atSeq} is not a turn boundary`,
+      { atSeq },
+    );
+  }
+}
+
+function assertForkId(id: string): void {
+  if (!SESSION_ID_PATTERN.test(id) || isWindowsReservedName(id)) {
+    throw new SessionForkError("invalid_target", `Invalid fork session id: ${JSON.stringify(id)}`, {
+      id,
+    });
+  }
+}
+
+async function ensureEmptyTargetDir(targetDir: string): Promise<void> {
+  try {
+    const entries = await readdir(targetDir);
+    if (entries.length > 0) {
+      throw new SessionForkError("target_not_empty", `Target directory is not empty: ${targetDir}`, {
+        dir: targetDir,
+      });
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await mkdir(targetDir, { recursive: true });
+  }
+}
+
+async function relocateArtifact(
+  event: SessionEvent,
+  sourceDir: string,
+  targetDir: string,
+): Promise<void> {
+  if (event.type !== "tool_result" || !isRecord(event.payload)) return;
+  const artifactPath = event.payload.artifactPath;
+  if (typeof artifactPath !== "string") return;
+  const sourcePath = path.isAbsolute(artifactPath)
+    ? artifactPath
+    : path.resolve(sourceDir, artifactPath);
+  try {
+    await stat(sourcePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    const detail = isRecord(event.payload.detail) ? event.payload.detail : {};
+    event.payload.detail = { ...detail, artifactMissing: true };
+    return;
+  }
+  const artifactsDir = path.join(targetDir, "artifacts");
+  await mkdir(artifactsDir, { recursive: true });
+  const targetPath = path.join(artifactsDir, path.basename(sourcePath));
+  await copyFile(sourcePath, targetPath);
+  event.payload.artifactPath = targetPath;
+}
+
+export async function forkSession(
+  sourceDir: string,
+  atSeq: number,
+  opts: { targetDir?: string; id?: string } = {},
+): Promise<SessionHandle> {
+  const source = readSessionDir(path.resolve(sourceDir));
+  assertForkBoundary(source.events, atSeq);
+  const id = opts.id ?? randomUUID();
+  assertForkId(id);
+  const targetDir = path.resolve(
+    opts.targetDir ?? path.join(resolveHarnessHome(), "sessions", id),
+  );
+  await ensureEmptyTargetDir(targetDir);
+
+  const prefix = source.events.slice(0, atSeq + 1).map((event) => structuredClone(event));
+  for (const event of prefix) {
+    await relocateArtifact(event, path.resolve(sourceDir), targetDir);
+  }
+
+  const header: SessionHeader = {
+    id,
+    createdAt: new Date().toISOString(),
+    status: "open",
+    ...(source.header.provider === undefined ? {} : { provider: source.header.provider }),
+    ...(source.header.model === undefined ? {} : { model: source.header.model }),
+    ...(source.header.workdir === undefined ? {} : { workdir: source.header.workdir }),
+    forkedFrom: { sessionId: source.header.id, seq: atSeq },
+  };
+
+  await writeFile(path.join(targetDir, "header.json"), `${JSON.stringify(header)}\n`, "utf8");
+  const logPath = path.join(targetDir, "session.v1.jsonl");
+  await writeFile(logPath, `${prefix.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
+
+  return openSessionHandle(targetDir, header, prefix);
 }
