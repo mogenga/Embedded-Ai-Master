@@ -15,7 +15,7 @@ function deepFreeze<T>(value: T): T {
 export interface SessionHandle {
   id: string;
   dir: string;
-  header: SessionHeader;
+  readonly header: SessionHeader;
   append(ev: Omit<SessionEvent, "seq" | "ts">): Promise<SessionEvent>;
   events(): readonly SessionEvent[];
   close(): Promise<void>;

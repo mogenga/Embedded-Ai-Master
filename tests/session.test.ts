@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -9,6 +9,19 @@ import {
   SessionResumeError,
 } from "../src/session/errors.js";
 import type { SessionEvent } from "../src/session/types.js";
+
+const fsFaults = vi.hoisted(() => ({ rename: null as Error | null }));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    rename: async (oldPath: string, newPath: string): Promise<void> => {
+      if (fsFaults.rename !== null) throw fsFaults.rename;
+      return actual.rename(oldPath, newPath);
+    },
+  };
+});
 
 const tempDirs: string[] = [];
 
@@ -207,14 +220,34 @@ describe("会话持久化", () => {
     const dir = makeTempDir();
     const session = await createSession(dir);
 
-    await session.close();
-    await session.close();
+    const firstClose = session.close();
+    const secondClose = session.close();
+    expect(firstClose).toBe(secondClose);
+    await firstClose;
 
     const onDisk = JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as {
       status: string;
     };
     expect(onDisk.status).toBe("closed");
     expect(session.header.status).toBe("closed");
+  });
+
+  it("close 原子写失败时拒绝且磁盘与内存 header 保持 open", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    const headerBefore = readFileSync(path.join(dir, "header.json"), "utf8");
+
+    fsFaults.rename = new Error("rename boom");
+    try {
+      await expect(session.close()).rejects.toThrow("rename boom");
+    } finally {
+      fsFaults.rename = null;
+    }
+
+    expect(readFileSync(path.join(dir, "header.json"), "utf8")).toBe(headerBefore);
+    expect((JSON.parse(headerBefore) as { status: string }).status).toBe("open");
+    expect(session.header.status).toBe("open");
+    expect(existsSync(path.join(dir, "header.json.tmp"))).toBe(false);
   });
 
   it("close 后 append 拒绝", async () => {
