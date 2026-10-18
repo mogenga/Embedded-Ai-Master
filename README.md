@@ -103,7 +103,7 @@ demo 不读取 `HARNESS_COMPAT_API_KEY`（该变量仅 live 测试使用）；de
 ## Web 工作台
 
 ```bash
-npm run dev:web     # http://localhost:5173/web/index.html
+npm run dev:web     # http://localhost:5173/（入口 web/index.html）
 npm run build:web   # 产物 dist-web/web/index.html
 ```
 
