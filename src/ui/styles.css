@@ -151,3 +151,12 @@ ul{margin:0;padding:0;list-style:none}
 ::-webkit-scrollbar-thumb{background:var(--scroll-thumb);border:3px solid transparent;background-clip:padding-box;border-radius:999px}
 ::-webkit-scrollbar-thumb:hover{background:var(--scroll-thumb-hover);background-clip:padding-box}
 ::-webkit-scrollbar-corner{background:transparent}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
+.ico{flex:none;display:block}
+
+.seg{display:inline-flex;align-items:center;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-inset);padding:2px}
+.seg button{display:grid;place-items:center;width:30px;height:24px;border-radius:4px;color:var(--text-3)}
+.seg button:hover{color:var(--text-1);background:var(--bg-hover)}
+.seg button[aria-pressed="true"]{background:var(--bg-active);color:var(--accent)}
+.icon-btn{display:grid;place-items:center;width:30px;height:30px;border-radius:var(--radius-sm);border:1px solid transparent;color:var(--text-2)}
+.icon-btn:hover{background:var(--bg-hover);color:var(--text-1);border-color:var(--border)}
