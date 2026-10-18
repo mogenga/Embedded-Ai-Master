@@ -76,6 +76,8 @@ node dist/demo/run.js "读取平台信息后结束"
 | `HARNESS_COMPAT_BASE_URL` | 可选，覆盖 provider 的 `baseUrl` |
 | `HARNESS_COMPAT_API_KEY_ENV` | 可选，覆盖 provider 的 `apiKeyEnv` |
 
+demo 不读取 `HARNESS_COMPAT_API_KEY`（该变量仅 live 测试使用）；demo 的密钥来自 `HARNESS_COMPAT_API_KEY_ENV` 指向的环境变量。
+
 退出码：
 
 | 码 | 含义 |
@@ -83,15 +85,16 @@ node dist/demo/run.js "读取平台信息后结束"
 | 0 | 正常完成（模型无工具调用） |
 | 1 | 熔断（`maxTurns` / `maxCostUsd`） |
 | 130 | 取消（SIGINT/SIGTERM） |
-| 2 | 用法或装配错误 |
+| 2 | 用法或装配错误（含运行期未恢复错误：模型 4xx/网络/响应非法/会话写入失败） |
 
 会话写入 `$HARNESS_HOME/sessions/<id>/`：`header.json`、`session.v1.jsonl`、按需生成 `artifacts/`。
 
 ## live 测试
 
-默认跳过，不触网。开启后使用真实 OpenAI 兼容网关：
+默认跳过，不触网。开启后使用真实 OpenAI 兼容网关（git-bash）：
 
 ```bash
+# git-bash
 HARNESS_COMPAT_LIVE=1 \
 HARNESS_COMPAT_MODEL=local-gw/flash \
 HARNESS_COMPAT_BASE_URL=http://127.0.0.1:8080/v1 \
@@ -99,11 +102,17 @@ HARNESS_COMPAT_API_KEY=your-key \
 npm test
 ```
 
+PowerShell：
+
+```powershell
+$env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:HARNESS_COMPAT_BASE_URL="http://127.0.0.1:8080/v1"; $env:HARNESS_COMPAT_API_KEY="your-key"; npm test
+```
+
 `HARNESS_COMPAT_MODEL` 同样使用 `provider/model` 引用，测试会从 `providers.json` 解析出裸模型名与 `apiKeyEnv`；`HARNESS_COMPAT_BASE_URL` 可覆盖 `baseUrl`；`HARNESS_COMPAT_API_KEY` 优先于 `apiKeyEnv`。
 
 ## 临时 API 连通性页面
 
-`.tmp/api-connectivity/index.html` 是本地临时页面（已被 `.gitignore` 忽略，不入库）。浏览器直接打开后填写 Base URL、API Key、Model，发送一次最小 Chat Completions 请求，显示耗时与响应。页面从浏览器直连网关，若被 CORS/本地文件策略阻止会明确提示；API Key 仅保存在页面内存。
+`.tmp/api-connectivity/` 是本机可选临时页面；`.tmp/` 已被 `.gitignore` 忽略，不随仓库分发。若本地存在，可直接用浏览器打开 `index.html`，填写 Base URL、API Key、Model，发送一次最小 Chat Completions 请求；页面从浏览器直连网关，若被 CORS/本地文件策略阻止会明确提示，API Key 仅保存在页面内存。
 
 ## 已知限制
 

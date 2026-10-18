@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ProvidersConfig } from "../src/config/providers.js";
 import {
   parseArgs,
+  resolveExitCode,
   resolveModelRefFromEnv,
   sessionCost,
   withOverrides,
@@ -99,7 +100,7 @@ describe("sessionCost", () => {
     return filePath;
   }
 
-  it("按 usage 事件与价格汇总费用", async () => {
+  it("按 usage 事件与价格汇总费用与 token", async () => {
     const filePath = await writeEvents([
       { seq: 0, ts: "2026-01-01T00:00:00.000Z", type: "user", payload: { content: "hi" } },
       { seq: 1, ts: "2026-01-01T00:00:01.000Z", type: "usage", payload: { promptTokens: 10, completionTokens: 5 } },
@@ -111,18 +112,28 @@ describe("sessionCost", () => {
       },
     ]);
 
-    expect(sessionCost(filePath, { input: 1, output: 2, cachedInput: 0.5 })).toBeCloseTo(
-      0.000038,
-      12,
-    );
+    const result = sessionCost(filePath, { input: 1, output: 2, cachedInput: 0.5 });
+    expect(result).toMatchObject({
+      priced: true,
+      promptTokens: 20,
+      completionTokens: 10,
+      cachedTokens: 4,
+    });
+    expect(result?.cost).toBeCloseTo(0.000038, 12);
   });
 
-  it("price 缺省时费用为 0", async () => {
+  it("price 缺省时 priced 为 false 并统计 token", async () => {
     const filePath = await writeEvents([
       { seq: 0, ts: "2026-01-01T00:00:00.000Z", type: "usage", payload: { promptTokens: 10, completionTokens: 5 } },
     ]);
 
-    expect(sessionCost(filePath)).toBe(0);
+    expect(sessionCost(filePath)).toEqual({
+      cost: 0,
+      priced: false,
+      promptTokens: 10,
+      completionTokens: 5,
+      cachedTokens: 0,
+    });
   });
 
   it("读取失败返回 undefined", async () => {
@@ -135,5 +146,20 @@ describe("sessionCost", () => {
     const filePath = path.join(dir, "broken.jsonl");
     await writeFile(filePath, "{not-json}\n", "utf8");
     expect(sessionCost(filePath, { input: 1, output: 1 })).toBeUndefined();
+  });
+});
+
+describe("resolveExitCode", () => {
+  it("无错误时按 finishReason 映射", () => {
+    expect(resolveExitCode("no_tool_calls")).toBe(0);
+    expect(resolveExitCode("max_turns")).toBe(1);
+    expect(resolveExitCode("max_cost_usd")).toBe(1);
+    expect(resolveExitCode("aborted")).toBe(130);
+    expect(resolveExitCode(undefined)).toBe(1);
+  });
+
+  it("有错误时返回 2", () => {
+    expect(resolveExitCode("no_tool_calls", new Error("boom"))).toBe(2);
+    expect(resolveExitCode(undefined, { code: "api_4xx" })).toBe(2);
   });
 });

@@ -58,30 +58,59 @@ export function withOverrides(
   return next;
 }
 
-export function sessionCost(filePath: string, price?: PricePerMillion): number | undefined {
+export interface SessionCost {
+  cost: number;
+  priced: boolean;
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens: number;
+}
+
+export function sessionCost(filePath: string, price?: PricePerMillion): SessionCost | undefined {
   try {
     let cost = 0;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let cachedTokens = 0;
     for (const event of readSessionFile(filePath)) {
       if (event.type !== "usage") continue;
       const payload = event.payload;
-      const promptTokens = typeof payload.promptTokens === "number" ? payload.promptTokens : 0;
-      const completionTokens =
+      const prompt = typeof payload.promptTokens === "number" ? payload.promptTokens : 0;
+      const completion =
         typeof payload.completionTokens === "number" ? payload.completionTokens : 0;
-      const cachedTokens =
-        typeof payload.cachedTokens === "number" ? payload.cachedTokens : undefined;
+      const cached = typeof payload.cachedTokens === "number" ? payload.cachedTokens : undefined;
+      promptTokens += prompt;
+      completionTokens += completion;
+      if (cached !== undefined) cachedTokens += cached;
       cost += computeCostUsd(
         {
-          promptTokens,
-          completionTokens,
-          ...(cachedTokens === undefined ? {} : { cachedTokens }),
+          promptTokens: prompt,
+          completionTokens: completion,
+          ...(cached === undefined ? {} : { cachedTokens: cached }),
         },
         price,
       );
     }
-    return cost;
+    return {
+      cost,
+      priced: price !== undefined,
+      promptTokens,
+      completionTokens,
+      cachedTokens,
+    };
   } catch {
     return undefined;
   }
+}
+
+export function resolveExitCode(
+  finishReason: LoopFinishReason | undefined,
+  error?: unknown,
+): number {
+  if (error !== undefined) return 2;
+  if (finishReason === "no_tool_calls") return 0;
+  if (finishReason === "aborted") return 130;
+  return 1;
 }
 
 function errorCode(error: unknown): string {
@@ -170,20 +199,24 @@ async function main(): Promise<number> {
   }
 
   console.log(`turns: ${turns}`);
-  const cost = sessionCost(
+  const summary = sessionCost(
     path.join(sessionDir, "session.v1.jsonl"),
     resolved.provider.pricePerMillion,
   );
-  if (cost === undefined) {
-    console.error("警告: 无法读取会话日志，费用未知");
-    console.log("cost: unknown");
+  if (summary === undefined) {
+    console.error("警告: 无法读取会话日志，token 与费用统计未知");
+    console.log("tokens: unknown");
+    console.log("cost: unknown (log unreadable)");
   } else {
-    console.log(`cost: $${cost.toFixed(6)}`);
+    console.log(
+      `tokens: prompt=${summary.promptTokens} completion=${summary.completionTokens} cached=${summary.cachedTokens}`,
+    );
+    console.log(
+      summary.priced ? `cost: $${summary.cost.toFixed(6)}` : "cost: unknown (no price)",
+    );
   }
 
-  if (finishReason === "no_tool_calls") return 0;
-  if (finishReason === "aborted") return 130;
-  return 1;
+  return resolveExitCode(finishReason);
 }
 
 const entry = process.argv[1];
@@ -196,7 +229,7 @@ if (entry !== undefined && import.meta.url === pathToFileURL(entry).href) {
       console.error(
         `${errorCode(error)}: ${error instanceof Error ? error.message : String(error)}`,
       );
-      process.exitCode = 2;
+      process.exitCode = resolveExitCode(undefined, error);
     },
   );
 }
