@@ -1,10 +1,15 @@
 import type { ComponentChildren, JSX } from "preact";
+import { ConversationHeader } from "./components/conversation/header.js";
+import { PathLine } from "./components/conversation/pathline.js";
+import { ConversationStream } from "./components/conversation/stream.js";
 import { KnowledgePane } from "./components/rail/knowledge-pane.js";
 import { SessionPane } from "./components/rail/session-pane.js";
 import { StatusBar } from "./components/statusbar.js";
 import { TopBar } from "./components/topbar.js";
 import type { ThemeChoice } from "./theme.js";
 import type { TranscriptView } from "./view/transcript.js";
+
+const SESSION_TITLE = "STM32F407 UART 输出乱码";
 
 export function App({
   view,
@@ -35,7 +40,10 @@ export function App({
           <SessionPane />
         </aside>
         <main class="conversation" aria-label="对话" data-status={view.status}>
-          {children ?? <div class="placeholder">对话</div>}
+          <ConversationHeader title={SESSION_TITLE} status={view.status} />
+          <PathLine steps={view.steps} />
+          <ConversationStream view={view} />
+          {children}
         </main>
         <aside class="dock" id="dock" aria-label="调试坞">
           <div class="placeholder">调试坞</div>
