@@ -73,6 +73,11 @@ describe("globTool 元数据与 schema", () => {
     expect(globTool.schema.safeParse({ pattern: "*" }).success).toBe(true);
     expect(globTool.schema.safeParse({ pattern: "*", path: "src" }).success).toBe(true);
   });
+
+  it("description 明确 pattern 相对 workdir 且匹配隐藏文件", () => {
+    expect(globTool.description).toContain("workdir");
+    expect(globTool.description).toContain("隐藏");
+  });
 });
 
 describe("matchesGlob", () => {
@@ -109,6 +114,30 @@ describe("matchesGlob", () => {
   it("空 pattern 与 NUL 返回 false", () => {
     expect(matchesGlob("a.ts", "")).toBe(false);
     expect(matchesGlob("a.ts", "a\0b")).toBe(false);
+  });
+
+  it("** 单独匹配任意深度", () => {
+    expect(matchesGlob("a", "**")).toBe(true);
+    expect(matchesGlob("a/b/c", "**")).toBe(true);
+  });
+
+  it("段内 ** 按 * 处理且不跨目录", () => {
+    expect(matchesGlob("ab.ts", "a**b.ts")).toBe(true);
+    expect(matchesGlob("aXYZb.ts", "a**b.ts")).toBe(true);
+    expect(matchesGlob("a/b.ts", "a**b.ts")).toBe(false);
+    expect(matchesGlob("a/x/b", "a/**b")).toBe(false);
+    expect(matchesGlob("a/x/b", "a/*/b")).toBe(true);
+  });
+
+  it("Windows 反斜杠 pattern 规范化为 /", () => {
+    expect(matchesGlob("src/a.ts", "src\\*.ts")).toBe(true);
+    expect(matchesGlob("src/nested/a.ts", "src\\**\\*.ts")).toBe(true);
+  });
+
+  it("* 匹配隐藏文件且大小写敏感", () => {
+    expect(matchesGlob(".env", "*")).toBe(true);
+    expect(matchesGlob("src/.env", "*")).toBe(false);
+    expect(matchesGlob("A.TS", "*.ts")).toBe(false);
   });
 });
 
@@ -267,5 +296,108 @@ describe("glob 执行", () => {
     expect(r.isError).toBe(false);
     expect(r.text).toBe("ok.txt\n[skipped 1 unreadable entries]");
     expect(r.detail).toMatchObject({ skipped: 1 });
+  });
+
+  it("跳过 build/out/target/.pio/cmake-build-* 并保留源码", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "src/a.c");
+    writeAt(workdir, "src/b.c");
+    for (let index = 0; index < 200; index++) writeAt(workdir, `build/obj/f${index}.o`);
+    writeAt(workdir, "out/x.c");
+    writeAt(workdir, "target/y.c");
+    writeAt(workdir, ".pio/z.c");
+    writeAt(workdir, "cmake-build-debug/w.c");
+    writeAt(workdir, "cmake-build-release/v.c");
+
+    const r = await run(workdir, { pattern: "**/*.c" });
+
+    expect(r.text).toBe("src/a.c\nsrc/b.c");
+  });
+
+  it("恰好 5000 个文件不标记 scanTruncated", async () => {
+    const workdir = makeWorkdir();
+    const files = Array.from({ length: 5000 }, (_, index) => fakeFile(`f${index}.zzz`));
+    readdirMock.mockImplementation(async (dir) => {
+      if (path.resolve(dir) === path.resolve(workdir)) return files;
+      return [];
+    });
+
+    const r = await run(workdir, { pattern: "*.ts" });
+
+    expect(r.text).toBe("(no matches)");
+    expect(r.detail).toMatchObject({ scanned: 5000, scanTruncated: false });
+  });
+
+  it("根不可读 → (no matches) 且披露 skipped", async () => {
+    const workdir = makeWorkdir();
+    readdirMock.mockImplementation(async (dir) => {
+      if (path.resolve(dir) === path.resolve(workdir)) {
+        const error = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+        error.code = "EACCES";
+        throw error;
+      }
+      return [];
+    });
+
+    const r = await run(workdir, { pattern: "*" });
+
+    expect(r.isError).toBe(false);
+    expect(r.text).toBe("(no matches)\n[skipped 1 unreadable entries]");
+    expect(r.detail).toMatchObject({ skipped: 1 });
+  });
+
+  it("path 不存在/为文件/空串", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "a.txt");
+
+    const missing = await run(workdir, { pattern: "*", path: "missing" });
+    expect(missing.isError).toBe(true);
+    expect(missing.code).toBe("not_found");
+
+    const file = await run(workdir, { pattern: "*", path: "a.txt" });
+    expect(file.isError).toBe(true);
+    expect(file.code).toBe("not_a_directory");
+
+    const empty = await run(workdir, { pattern: "*", path: "" });
+    expect(empty.isError).toBe(true);
+    expect(empty.code).toBe("path_invalid");
+  });
+
+  it("资源错误 EMFILE → read_failed", async () => {
+    const workdir = makeWorkdir();
+    mkdirSync(path.join(workdir, "busy"));
+    writeAt(workdir, "ok.txt");
+
+    readdirMock.mockImplementation(async (dir, options) => {
+      if (path.basename(dir) === "busy") {
+        const error = new Error("EMFILE: too many open files") as NodeJS.ErrnoException;
+        error.code = "EMFILE";
+        throw error;
+      }
+      return passthrough ? passthrough(dir, options) : [];
+    });
+
+    const r = await run(workdir, { pattern: "**/*.txt" });
+
+    expect(r.isError).toBe(true);
+    expect(r.code).toBe("read_failed");
+  });
+
+  it("显式 path 根为 symlink 目录时跟随", async (ctx) => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "real/a.ts");
+    try {
+      symlinkSync(
+        path.join(workdir, "real"),
+        path.join(workdir, "link"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+    } catch {
+      ctx.skip();
+    }
+
+    const r = await run(workdir, { pattern: "**/*.ts", path: "link" });
+
+    expect(r.text).toBe("link/a.ts");
   });
 });

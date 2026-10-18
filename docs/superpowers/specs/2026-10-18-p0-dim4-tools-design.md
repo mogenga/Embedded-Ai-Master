@@ -112,12 +112,15 @@ schema = z.object({ pattern: z.string().min(1), path: z.string().optional() });
 annotations = { readOnly: true };
 ```
 
-- 根 = `resolveInWorkdir(ctx.cwd, path ?? ".")`; 递归遍历, 跳过 `.git`/`node_modules`/`.harness`/`dist`/`coverage`; 不跟随 symlink。
-- pattern 转正则: `**/` → `(?:.*/)?`(使 `**/*.ts` 匹配根级), 其余 `**` → `.*`, `*` → `[^/]*`, `?` → `[^/]`; 匹配相对 **workdir** 的 POSIX 路径。
-- 上限: 5000 个文件、200 条结果; 返回按字典序排序的、相对 workdir 的 POSIX 路径, 每行一条。
+- 根 = `resolveInWorkdir(path.resolve(ctx.cwd), path ?? ".")`; 递归遍历。
+- 忽略目录: `.git`/`node_modules`/`.harness`/`dist`/`coverage`/`build`/`out`/`target`/`.pio`, 以及前缀 `cmake-build-`(如 `cmake-build-debug`)。
+- 仅遍历中不跟随 symlink(目录与文件均跳过); 显式 `path` 根若为 symlink 目录, `stat`/`readdir` 会跟随并遍历其目标。
+- pattern 先按 Windows 习惯把 `\` 规范化为 `/`; 仅完整路径段(前后为 `/` 或边界)的 `**` 特殊: `**/` → `(?:.*/)?`(使 `**/*.ts` 匹配根级), 段尾 `**` → `.*`; 段内 `**`(如 `a**b`)按 `*` 处理; `*` → `[^/]*`, `?` → `[^/]`, 其余字符转义; 正则加 `u` 标志。匹配相对 **workdir**(不是 `path` 根)的 POSIX 路径; 大小写敏感; `*` 也匹配以点开头的隐藏文件(不实现 dot:false)。
+- 上限: 扫描 5000 个文件、返回 200 条结果; 返回按字典序排序的、相对 workdir 的 POSIX 路径, 每行一条; 结果超出 200 追加 `[truncated]`, 扫描达到 5000 且仍有未处理条目追加 `[scan truncated at 5000 files]`。
 - 无匹配 → `text: "(no matches)"`, `isError:false`。
-- 不可读目录/条目跳过, 在 `text` 末尾加 `[skipped N unreadable entries]`(R3: 不静默)。
-- 非法 pattern(空/无法转换) → `invalid_pattern`。
+- `readdir` 的 `EACCES`/`EPERM`/`ENOENT` 计为不可读, 跳过并在 `text` 末尾加 `[skipped N unreadable entries]`(R3: 不静默); 其他资源错误(`EMFILE`/`ENOMEM` 等) → `read_failed`, 不静默。
+- 非法 pattern(空/含 NUL) → `invalid_pattern`; 根不存在 → `not_found`; 根不是目录 → `not_a_directory`; 路径非法 → `path_invalid`; 越界 → `path_outside_workdir`。
+- `detail`: `{ scanned, matched, returned, skipped, truncated, scanTruncated }`。
 
 ### 4.5 `grep` 工具
 
