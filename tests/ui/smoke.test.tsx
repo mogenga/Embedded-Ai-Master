@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { render } from "preact";
 
@@ -13,7 +13,7 @@ describe("ui smoke", () => {
     expect(document.querySelector(".app")).not.toBeNull();
   });
   it("styles.css 含首屏令牌（:root --bg-canvas）", () => {
-    const css = readFileSync(fileURLToPath(new URL("../../src/ui/styles.css", import.meta.url)), "utf8");
+    const css = readFileSync(path.resolve(process.cwd(), "src/ui/styles.css"), "utf8");
     expect(css).toContain("--bg-canvas:#0e131a");
   });
 });
