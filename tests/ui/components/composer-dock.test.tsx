@@ -72,6 +72,23 @@ describe("composer", () => {
     expect(sent).toBe("");
   });
 
+  it("异步发送失败时保留输入并提示", async () => {
+    const root = mount();
+    render(
+      <Composer
+        onSend={() => Promise.reject(new Error("boom"))}
+      />,
+      root,
+    );
+    const ta = root.querySelector("textarea")!;
+    ta.value = "重试我";
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ta.value).toBe("重试我");
+    expect(root.textContent).toContain("发送失败，输入已保留");
+  });
+
   it("发送后滚动消息流到底部", async () => {
     const stream = document.createElement("div");
     stream.className = "cnv-stream";
@@ -101,11 +118,29 @@ describe("dock", () => {
     expect(dev.getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("加载中与失败时 Dock 不显示空数据态", () => {
+    const root = mount();
+    render(<Dock view={emptyTranscriptView()} device={UNKNOWN_DEVICE} state="loading" />, root);
+    expect(root.textContent).toContain("加载中");
+    expect(root.textContent).not.toContain("暂无工具调用");
+    render(<Dock view={emptyTranscriptView()} device={UNKNOWN_DEVICE} state="error" />, root);
+    expect(root.textContent).toContain("调试数据加载失败");
+    expect(root.textContent).not.toContain("暂无工具调用");
+  });
+
   it("空视图显示空态且统计为 — 而非 0", () => {
     const root = mount();
     render(<Dock view={emptyTranscriptView()} device={UNKNOWN_DEVICE} />, root);
     expect(root.textContent).toContain("暂无工具调用");
     expect(root.textContent).toContain("—");
+  });
+
+  it("同一工具同时含 evidence 与 readout 时两者都进入寄存器表", () => {
+    const root = mount();
+    render(<Dock view={makeTranscriptView()} device={CONNECTED_DEVICE} />, root);
+    const names = [...root.querySelectorAll(".reg-name")].map((el) => el.textContent);
+    expect(names).toContain("时钟源判定");
+    expect(names).toContain("读回");
   });
 
   it("从工具事件派生日志与寄存器", () => {

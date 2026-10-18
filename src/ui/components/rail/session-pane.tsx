@@ -2,10 +2,14 @@ import type { JSX } from "preact";
 import type { SessionSummary } from "../../api/client.js";
 import { Icon } from "../../icons.js";
 
+function pad(value: number): string {
+  return String(value).padStart(2, "0");
+}
+
 function formatTime(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toISOString().slice(5, 16).replace("T", " ");
+  return `${pad(parsed.getMonth() + 1)}-${pad(parsed.getDate())} ${pad(parsed.getHours())}:${pad(parsed.getMinutes())}`;
 }
 
 function SessionRow({
@@ -37,10 +41,12 @@ export function SessionPane({
   sessions,
   activeId,
   onSelect,
+  state = "ready",
 }: {
   sessions: SessionSummary[];
   activeId?: string;
   onSelect?: (id: string) => void;
+  state?: "loading" | "ready" | "error";
 }): JSX.Element {
   const open = sessions.filter((session) => session.status === "open");
   const closed = sessions.filter((session) => session.status === "closed");
@@ -53,7 +59,11 @@ export function SessionPane({
           <Icon name="i-plus" size={14} />
         </button>
       </div>
-      {sessions.length === 0 ? (
+      {state === "loading" ? (
+        <p class="pane-empty">加载中…</p>
+      ) : state === "error" ? (
+        <p class="pane-empty">会话加载失败</p>
+      ) : sessions.length === 0 ? (
         <p class="pane-empty">暂无会话</p>
       ) : (
         <ul class="sessions">

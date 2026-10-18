@@ -1,13 +1,14 @@
 import { render } from "preact";
 import type { LoopEvent } from "../loop/events.js";
-import { ApiError, fetchDevice, fetchKb, fetchSession, fetchSessions } from "./api/client.js";
+import { ApiError } from "./api/client.js";
 import type { DeviceStatus, KbNode, SessionSummary } from "./api/client.js";
+import { loadSessionView, loadWorkbench } from "./api/load.js";
 import { App } from "./app.js";
 import { SYMBOL_SPRITE } from "./icons.js";
 import { applyTheme, onChangeMedia, persistTheme, readStoredTheme } from "./theme.js";
 import type { ThemeChoice } from "./theme.js";
 import { createEventStream, postAction } from "./view/sse.js";
-import { emptyTranscriptView, transcriptFromLoop, transcriptFromSession } from "./view/transcript.js";
+import { emptyTranscriptView, transcriptFromLoop } from "./view/transcript.js";
 import type { TranscriptView } from "./view/transcript.js";
 import "./styles.css";
 
@@ -53,8 +54,11 @@ let state: UiState = {
 let themeChoice: ThemeChoice = readStoredTheme();
 let dockOpen = true;
 let requestSeq = 0;
+let liveView: TranscriptView | undefined;
+let pendingRetry: () => Promise<void> = load;
 
 function errorMessageOf(error: unknown): string {
+  if (error instanceof ApiError && error.code === "invalid_response") return "接口返回内容无法解析";
   if (error instanceof ApiError) return `接口返回错误（${error.code}，HTTP ${error.status}）`;
   return "无法连接本地服务，请确认已运行 node dist/server/serve.js";
 }
@@ -73,17 +77,8 @@ function renderApp(): void {
         kbTree={state.kbTree}
         kbRoot={state.kbRoot}
         device={state.device}
-        onSend={
-          actionUrl === undefined
-            ? undefined
-            : (text) => {
-                void postAction(actionUrl, { text }).catch(() => {
-                  state = { ...state, connection: "error", errorMessage: "消息发送失败" };
-                  renderApp();
-                });
-              }
-        }
-        canSend={actionUrl !== undefined}
+        onSend={actionUrl === undefined ? undefined : (text) => postAction(actionUrl, { text })}
+        canSend={actionUrl !== undefined && state.connection === "ready"}
         themeChoice={themeChoice}
         onThemeChange={(choice) => {
           themeChoice = choice;
@@ -99,7 +94,7 @@ function renderApp(): void {
         connection={state.connection}
         errorMessage={state.errorMessage}
         onRetry={() => {
-          void load();
+          void pendingRetry();
         }}
       />
     </>,
@@ -110,31 +105,19 @@ function renderApp(): void {
 async function load(): Promise<void> {
   const seq = ++requestSeq;
   state = { ...state, connection: "loading", errorMessage: undefined };
+  pendingRetry = load;
   renderApp();
   try {
-    const [sessions, kb, device] = await Promise.all([
-      fetchSessions({ fetchImpl }),
-      fetchKb({ fetchImpl }),
-      fetchDevice({ fetchImpl }),
-    ]);
+    const loaded = await loadWorkbench({ fetchImpl });
     if (seq !== requestSeq || abort.signal.aborted) return;
-    const first = sessions.sessions[0];
-    let view = emptyTranscriptView();
-    let activeSessionId: string | undefined;
-    if (first !== undefined) {
-      const detail = await fetchSession(first.id, { fetchImpl });
-      if (seq !== requestSeq || abort.signal.aborted) return;
-      view = { ...transcriptFromSession(detail.events), sessionId: first.id };
-      activeSessionId = first.id;
-    }
     state = {
       connection: "ready",
-      view,
-      sessions: sessions.sessions,
-      activeSessionId,
-      kbTree: kb.tree,
-      kbRoot: kb.root,
-      device,
+      view: liveView ?? loaded.view,
+      sessions: loaded.sessions,
+      ...(loaded.activeSessionId === undefined ? {} : { activeSessionId: loaded.activeSessionId }),
+      kbTree: loaded.kbTree,
+      kbRoot: loaded.kbRoot,
+      device: loaded.device,
     };
     renderApp();
   } catch (error) {
@@ -145,17 +128,25 @@ async function load(): Promise<void> {
 }
 
 async function selectSession(id: string): Promise<void> {
+  const previousId = state.activeSessionId;
   const seq = ++requestSeq;
   state = { ...state, activeSessionId: id, connection: "ready", errorMessage: undefined };
+  pendingRetry = () => selectSession(id);
   renderApp();
   try {
-    const detail = await fetchSession(id, { fetchImpl });
+    const view = await loadSessionView(id, { fetchImpl });
     if (seq !== requestSeq || abort.signal.aborted) return;
-    state = { ...state, view: { ...transcriptFromSession(detail.events), sessionId: id } };
+    state = { ...state, view };
+    pendingRetry = load;
     renderApp();
   } catch (error) {
     if (seq !== requestSeq || abort.signal.aborted) return;
-    state = { ...state, connection: "error", errorMessage: errorMessageOf(error) };
+    state = {
+      ...state,
+      ...(previousId === undefined ? { activeSessionId: undefined } : { activeSessionId: previousId }),
+      connection: "error",
+      errorMessage: errorMessageOf(error),
+    };
     renderApp();
   }
 }
@@ -167,12 +158,12 @@ if (streamUrl !== undefined) {
       streamed.push(event);
       const view = transcriptFromLoop(streamed);
       if (state.activeSessionId !== undefined) view.sessionId = state.activeSessionId;
+      liveView = view;
       state = { ...state, view, connection: "ready", errorMessage: undefined };
       renderApp();
     },
     onError: () => {
-      state = { ...state, connection: "error", errorMessage: "事件流已中断" };
-      renderApp();
+      console.warn("[ui] 事件流中断，等待重连");
     },
   });
 }

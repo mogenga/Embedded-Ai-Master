@@ -7,14 +7,15 @@ const MAX_HEIGHT = 120;
 
 export function Composer({
   onSend,
-  canSend = true,
+  canSend = onSend !== undefined,
   disabledReason,
 }: {
-  onSend?: (text: string) => void;
+  onSend?: (text: string) => void | Promise<void>;
   canSend?: boolean;
   disabledReason?: string;
 }): JSX.Element {
   const [text, setText] = useState("");
+  const [failed, setFailed] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
 
   function resize(el: HTMLTextAreaElement): void {
@@ -28,12 +29,9 @@ export function Composer({
     if (stream !== null) stream.scrollTop = stream.scrollHeight;
   }
 
-  function send(): void {
-    if (!canSend) return;
-    const value = (field.current?.value ?? text).trim();
-    if (!value) return;
-    onSend?.(value);
+  function clear(): void {
     setText("");
+    setFailed(false);
     const el = field.current;
     if (el) {
       el.value = "";
@@ -43,11 +41,30 @@ export function Composer({
     scrollStreamToBottom();
   }
 
+  async function send(): Promise<void> {
+    if (!canSend) return;
+    const value = (field.current?.value ?? text).trim();
+    if (!value) return;
+    const result = onSend?.(value);
+    if (result === undefined) {
+      clear();
+      return;
+    }
+    setFailed(false);
+    try {
+      await result;
+    } catch {
+      setFailed(true);
+      return;
+    }
+    clear();
+  }
+
   function onKeyDown(event: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>): void {
     if (event.isComposing) return;
     if (event.key !== "Enter" || event.shiftKey) return;
     event.preventDefault();
-    send();
+    void send();
   }
 
   return (
@@ -81,7 +98,9 @@ export function Composer({
             class="send"
             aria-label="发送"
             disabled={!canSend || text.trim() === ""}
-            onClick={send}
+            onClick={() => {
+              void send();
+            }}
           >
             <Icon name="i-send" size={16} />
           </button>
@@ -92,6 +111,11 @@ export function Composer({
           {disabledReason ?? "未配置提交端点"}
         </p>
       )}
+      {failed ? (
+        <p class="composer-note" role="status">
+          发送失败，输入已保留
+        </p>
+      ) : null}
     </div>
   );
 }

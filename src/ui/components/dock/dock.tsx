@@ -42,7 +42,6 @@ export function deriveRegisters(view: TranscriptView): Register[] {
       for (const row of event.tool.evidence) {
         registers.push({ name: row.name, value: row.value, warn: row.verdict !== "ok" });
       }
-      continue;
     }
     if (event.tool.readout !== undefined) {
       for (const row of event.tool.readout) {
@@ -55,7 +54,15 @@ export function deriveRegisters(view: TranscriptView): Register[] {
 
 type SectionKey = "device" | "port" | "log";
 
-export function Dock({ view, device }: { view: TranscriptView; device: DeviceStatus }): JSX.Element {
+export function Dock({
+  view,
+  device,
+  state = "ready",
+}: {
+  view: TranscriptView;
+  device: DeviceStatus;
+  state?: "loading" | "ready" | "error";
+}): JSX.Element {
   const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
     device: true,
     port: true,
@@ -97,7 +104,9 @@ export function Dock({ view, device }: { view: TranscriptView; device: DeviceSta
         <span>调试坞</span>
         <span class="count">按需展开</span>
       </header>
-      <div class="dock-body">
+      {state === "loading" ? <p class="pane-empty">加载中…</p> : null}
+      {state === "error" ? <p class="pane-empty">调试数据加载失败</p> : null}
+      {state === "ready" ? <div class="dock-body">
         <section class="dock-sec">
           {head("device", "i-cpu", "设备监控", "ok", registers.length)}
           <div class="dock-sec-body">
@@ -116,7 +125,7 @@ export function Dock({ view, device }: { view: TranscriptView; device: DeviceSta
             <DebugLog lines={logLines} />
           </div>
         </section>
-      </div>
+      </div> : null}
     </>
   );
 }

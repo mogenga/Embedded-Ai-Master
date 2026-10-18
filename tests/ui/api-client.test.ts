@@ -83,6 +83,16 @@ describe("api client", () => {
     await expect(fetchKb({ fetchImpl })).rejects.toMatchObject({ code: "unknown_error", status: 500 });
   });
 
+  it("2xx 非 JSON 抛 invalid_response", async () => {
+    const fetchImpl: typeof fetch = async () => new Response("not json", { status: 200 });
+    await expect(fetchKb({ fetchImpl })).rejects.toMatchObject({ code: "invalid_response", status: 200 });
+  });
+
+  it("2xx 空 body 抛 invalid_response", async () => {
+    const fetchImpl: typeof fetch = async () => new Response("", { status: 200 });
+    await expect(fetchDevice({ fetchImpl })).rejects.toMatchObject({ code: "invalid_response", status: 200 });
+  });
+
   it("网络异常原样上抛", async () => {
     const failure = new TypeError("network down");
     const fetchImpl: typeof fetch = async () => {

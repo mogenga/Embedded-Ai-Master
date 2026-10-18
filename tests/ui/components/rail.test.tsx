@@ -48,6 +48,16 @@ describe("rail", () => {
     expect(root.textContent).toContain("index.yaml");
   });
 
+  it("知识库加载中与失败时不显示未配置空态", () => {
+    const root = mount();
+    render(<KnowledgePane nodes={[]} root={null} state="loading" />, root);
+    expect(root.textContent).toContain("加载中");
+    expect(root.textContent).not.toContain("未配置知识库");
+    render(<KnowledgePane nodes={[]} root={null} state="error" />, root);
+    expect(root.textContent).toContain("知识库加载失败");
+    expect(root.textContent).not.toContain("未配置知识库");
+  });
+
   it("知识库检索框占位正确且有 aria-label", () => {
     const root = mount();
     render(<KnowledgePane nodes={KB_TREE} root="/kb" />, root);
@@ -70,6 +80,16 @@ describe("rail", () => {
     render(<SessionPane sessions={[]} />, root);
     expect(root.textContent).toContain("暂无会话");
     expect(root.querySelectorAll(".session").length).toBe(0);
+  });
+
+  it("会话加载中与失败时不显示暂无会话", () => {
+    const root = mount();
+    render(<SessionPane sessions={[]} state="loading" />, root);
+    expect(root.textContent).toContain("加载中");
+    expect(root.textContent).not.toContain("暂无会话");
+    render(<SessionPane sessions={[]} state="error" />, root);
+    expect(root.textContent).toContain("会话加载失败");
+    expect(root.textContent).not.toContain("暂无会话");
   });
 
   it("会话列表按状态分组、标记当前项并回传选择", () => {

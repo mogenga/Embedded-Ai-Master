@@ -21,7 +21,7 @@ function TreeItem({
   node: KbNode;
   level: number;
   expanded: Record<string, boolean>;
-  onToggle: (path: string) => void;
+  onToggle: (path: string, open: boolean) => void;
 }): JSX.Element {
   if (node.kind === "file") {
     return (
@@ -33,7 +33,7 @@ function TreeItem({
       </li>
     );
   }
-  const open = expanded[node.path] === true;
+  const open = expanded[node.path] ?? level === 0;
   const children = node.children ?? [];
   return (
     <li>
@@ -42,7 +42,7 @@ function TreeItem({
         class="tree-row"
         aria-expanded={open}
         style={`padding-left:${8 + level * 12}px`}
-        onClick={() => onToggle(node.path)}
+        onClick={() => onToggle(node.path, open)}
       >
         <Icon name="i-chevron" size={14} className="chev" />
         <span class="label">{node.name}</span>
@@ -65,15 +65,19 @@ function TreeItem({
   );
 }
 
-export function KnowledgePane({ nodes, root }: { nodes: KbNode[]; root?: string | null }): JSX.Element {
-  const [expanded, setExpanded] = useState<Record<string, boolean>>(() => {
-    const initial: Record<string, boolean> = {};
-    for (const node of nodes) if (node.kind === "dir") initial[node.path] = true;
-    return initial;
-  });
+export function KnowledgePane({
+  nodes,
+  root,
+  state = "ready",
+}: {
+  nodes: KbNode[];
+  root?: string | null;
+  state?: "loading" | "ready" | "error";
+}): JSX.Element {
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
-  function toggle(path: string): void {
-    setExpanded((prev) => ({ ...prev, [path]: prev[path] !== true }));
+  function toggle(path: string, open: boolean): void {
+    setExpanded((prev) => ({ ...prev, [path]: !open }));
   }
 
   return (
@@ -87,7 +91,11 @@ export function KnowledgePane({ nodes, root }: { nodes: KbNode[]; root?: string 
         <Icon name="i-search" size={14} />
         <input type="search" aria-label="检索知识库" placeholder="kb_lookup · 寄存器名 / 错误码 / 症状" />
       </div>
-      {nodes.length === 0 ? (
+      {state === "loading" ? (
+        <p class="pane-empty">加载中…</p>
+      ) : state === "error" ? (
+        <p class="pane-empty">知识库加载失败</p>
+      ) : nodes.length === 0 ? (
         <p class="pane-empty">{root === null ? "未配置知识库" : "知识库为空"}</p>
       ) : (
         <ul class="tree">

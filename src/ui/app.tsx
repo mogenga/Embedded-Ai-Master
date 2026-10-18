@@ -93,8 +93,13 @@ export function App({
       />
       <div class={dockOpen ? "workspace" : "workspace is-collapsed"}>
         <aside class="rail" aria-label="知识库">
-          <KnowledgePane nodes={kbTree} root={kbRoot} />
-          <SessionPane sessions={sessions} activeId={activeSessionId} onSelect={onSelectSession} />
+          <KnowledgePane nodes={kbTree} root={kbRoot} state={connection} />
+          <SessionPane
+            sessions={sessions}
+            activeId={activeSessionId}
+            onSelect={onSelectSession}
+            state={connection}
+          />
         </aside>
         <main class="conversation" aria-label="对话" data-status={view.status}>
           <ConversationHeader title={title} status={view.status} />
@@ -103,7 +108,7 @@ export function App({
           {failed ? (
             <div class="cnv-state cnv-state--error" role="alert">
               <p>{errorMessage ?? "加载失败"}</p>
-              <button type="button" class="btn" onClick={onRetry}>
+              <button type="button" class="btn" onClick={onRetry} disabled={onRetry === undefined}>
                 <span>重试</span>
               </button>
             </div>
@@ -117,12 +122,14 @@ export function App({
           )}
           <Composer
             onSend={onSend}
-            canSend={canSend}
-            disabledReason={canSend ? undefined : "未配置提交端点，输入不会发送"}
+            canSend={canSend && connection === "ready"}
+            disabledReason={
+              connection === "ready" ? "未配置提交端点，输入不会发送" : "会话尚未就绪，暂不能发送"
+            }
           />
         </main>
         <aside class="dock" id="dock" aria-label="调试坞">
-          <Dock view={view} device={device} />
+          <Dock view={view} device={device} state={connection} />
         </aside>
       </div>
       <StatusBar

@@ -19,7 +19,7 @@ describe("no demo data", () => {
     const hits: string[] = [];
     for (const file of walk(UI_DIR)) {
       const text = readFileSync(file, "utf8");
-      if (/DEMO_[A-Z_]+|UART_TRANSCRIPT_EVENTS/.test(text)) {
+      if (/DEMO_[A-Z_]+|UART_TRANSCRIPT_EVENTS|SESSION_GROUPS|KB_TREE|support\/builders/.test(text)) {
         hits.push(path.relative(UI_DIR, file));
       }
     }
