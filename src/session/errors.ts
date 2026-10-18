@@ -34,7 +34,8 @@ export type SessionResumeCode =
   | "model_mismatch"
   | "system_prompt_mismatch"
   | "session_id_mismatch"
-  | "missing_session_dir";
+  | "missing_session_dir"
+  | "invalid_target";
 
 export class SessionResumeError extends Error {
   readonly code: SessionResumeCode;

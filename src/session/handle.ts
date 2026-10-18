@@ -4,6 +4,64 @@ import type { SessionEvent, SessionHeader } from "./types.js";
 
 const DEFAULT_GENERATION_THRESHOLD_BYTES = 50 * 1024 * 1024;
 const SESSION_LOG_PATTERN = /^session\.v(\d+)\.jsonl$/;
+const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+
+export function isValidSessionId(id: unknown): id is string {
+  return (
+    typeof id === "string" &&
+    SESSION_ID_PATTERN.test(id) &&
+    !WINDOWS_RESERVED_NAME.test(id)
+  );
+}
+
+export function validateHeader(value: unknown): SessionHeader {
+  if (!isRecord(value)) {
+    throw new TypeError("session header must be an object");
+  }
+  if (!isValidSessionId(value.id)) {
+    throw new TypeError(`invalid session header id: ${JSON.stringify(value.id)}`);
+  }
+  if (typeof value.createdAt !== "string" || Number.isNaN(Date.parse(value.createdAt))) {
+    throw new TypeError("session header createdAt must be a parseable date string");
+  }
+  if (value.status !== "open" && value.status !== "closed") {
+    throw new TypeError("session header status must be open or closed");
+  }
+  const provider = value.provider;
+  const model = value.model;
+  const workdir = value.workdir;
+  for (const field of ["provider", "model", "workdir"] as const) {
+    if (value[field] !== undefined && typeof value[field] !== "string") {
+      throw new TypeError(`session header ${field} must be a string`);
+    }
+  }
+  let forkedFrom: SessionHeader["forkedFrom"];
+  if (value.forkedFrom !== undefined) {
+    const raw = value.forkedFrom;
+    if (
+      !isRecord(raw) ||
+      typeof raw.sessionId !== "string" ||
+      typeof raw.seq !== "number" ||
+      !Number.isInteger(raw.seq) ||
+      raw.seq < 0
+    ) {
+      throw new TypeError(
+        "session header forkedFrom must be { sessionId: string, seq: non-negative integer }",
+      );
+    }
+    forkedFrom = { sessionId: raw.sessionId, seq: raw.seq };
+  }
+  return {
+    id: value.id,
+    createdAt: value.createdAt,
+    status: value.status,
+    ...(typeof provider === "string" ? { provider } : {}),
+    ...(typeof model === "string" ? { model } : {}),
+    ...(typeof workdir === "string" ? { workdir } : {}),
+    ...(forkedFrom === undefined ? {} : { forkedFrom }),
+  };
+}
 
 export function resolveGenerationThresholdBytes(value: number | undefined): number {
   if (value === undefined) return DEFAULT_GENERATION_THRESHOLD_BYTES;

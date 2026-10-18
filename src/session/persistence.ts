@@ -3,18 +3,19 @@ import { constants, readFileSync, readdirSync } from "node:fs";
 import { copyFile, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveHarnessHome } from "../config/harness-home.js";
+import { buildMessages } from "../context/build.js";
 import { SessionCorruptionError, SessionForkError } from "./errors.js";
 import {
+  isValidSessionId,
   openSessionHandle,
   resolveGenerationThresholdBytes,
+  validateHeader,
   writeHeaderAtomic,
 } from "./handle.js";
 import type { SessionHandle } from "./handle.js";
 import type { EventType, SessionEvent, SessionHeader } from "./types.js";
 
 const SESSION_LOG_PATTERN = /^session\.v(\d+)\.jsonl$/;
-const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
-const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 const MAX_ARTIFACT_COPY_ATTEMPTS = 1_000;
 
 const EVENT_TYPES: Record<EventType, true> = {
@@ -45,18 +46,14 @@ function readHeader(dir: string): SessionHeader {
       cause: error,
     });
   }
-  if (
-    !isRecord(parsed) ||
-    typeof parsed.id !== "string" ||
-    parsed.id.length === 0 ||
-    typeof parsed.createdAt !== "string" ||
-    (parsed.status !== "open" && parsed.status !== "closed")
-  ) {
+  try {
+    return validateHeader(parsed);
+  } catch (error) {
     throw new SessionCorruptionError("invalid_header", `Invalid session header: ${file}`, {
       file: path.basename(file),
+      cause: error,
     });
   }
-  return parsed as unknown as SessionHeader;
 }
 
 function parseGeneration(name: string): number | null {
@@ -139,19 +136,30 @@ export function readSessionDir(dir: string): {
   return { header, events: readEvents(dir, files), logFiles: files };
 }
 
-function assertForkBoundary(events: SessionEvent[], atSeq: number): void {
-  const boundary = Number.isInteger(atSeq) ? events[atSeq] : undefined;
-  if (boundary === undefined || (boundary.type !== "tool_result" && boundary.type !== "usage")) {
+function assertForkBoundary(events: readonly SessionEvent[], atSeq: number): void {
+  if (!Number.isInteger(atSeq) || atSeq < 0 || atSeq >= events.length) {
     throw new SessionForkError(
       "not_turn_boundary",
       `Fork position ${atSeq} is not a turn boundary`,
       { atSeq },
     );
   }
+  try {
+    buildMessages(events.slice(0, atSeq + 1));
+  } catch (error) {
+    throw new SessionForkError(
+      "not_turn_boundary",
+      `Fork position ${atSeq} does not form a projectable prefix`,
+      {
+        atSeq,
+        cause: error instanceof Error ? error.message : String(error),
+      },
+    );
+  }
 }
 
 function assertForkId(id: string): void {
-  if (!SESSION_ID_PATTERN.test(id) || WINDOWS_RESERVED_NAME.test(id)) {
+  if (!isValidSessionId(id)) {
     throw new SessionForkError("invalid_target", `Invalid fork session id: ${JSON.stringify(id)}`, {
       id,
     });
@@ -160,6 +168,15 @@ function assertForkId(id: string): void {
 
 function normalizePathForCompare(value: string): string {
   return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
+function isPathInside(parentDir: string, childDir: string): boolean {
+  const parent = normalizePathForCompare(path.resolve(parentDir));
+  const child = normalizePathForCompare(path.resolve(childDir));
+  const relative = path.relative(parent, child);
+  if (relative === "") return true;
+  if (path.isAbsolute(relative)) return false;
+  return relative !== ".." && !relative.startsWith(`..${path.sep}`);
 }
 
 function markArtifactMissing(event: SessionEvent): void {
@@ -269,12 +286,26 @@ export async function forkSession(
   assertForkBoundary(source.events, atSeq);
   const id = opts.id ?? randomUUID();
   assertForkId(id);
+  if (opts.id !== undefined && opts.id === source.header.id) {
+    throw new SessionForkError(
+      "invalid_target",
+      `Fork session id must differ from source session id: ${id}`,
+      { id },
+    );
+  }
   const rawTargetDir = opts.targetDir;
   const targetDir = path.resolve(
     rawTargetDir === undefined || rawTargetDir === ""
       ? path.join(resolveHarnessHome(), "sessions", id)
       : rawTargetDir,
   );
+  if (isPathInside(resolvedSourceDir, targetDir)) {
+    throw new SessionForkError(
+      "invalid_target",
+      `Fork target directory must not be inside the source directory: ${targetDir}`,
+      { dir: targetDir },
+    );
+  }
   const createdTargetDir = await claimTargetDir(targetDir);
 
   try {
@@ -283,7 +314,7 @@ export async function forkSession(
       await relocateArtifact(event, resolvedSourceDir, targetDir);
     }
 
-    const header: SessionHeader = {
+    const header = validateHeader({
       id,
       createdAt: new Date().toISOString(),
       status: "open",
@@ -291,7 +322,7 @@ export async function forkSession(
       ...(source.header.model === undefined ? {} : { model: source.header.model }),
       ...(source.header.workdir === undefined ? {} : { workdir: source.header.workdir }),
       forkedFrom: { sessionId: source.header.id, seq: atSeq },
-    };
+    });
 
     await writeHeaderAtomic(path.join(targetDir, "header.json"), header);
     const logPath = path.join(targetDir, "session.v1.jsonl");

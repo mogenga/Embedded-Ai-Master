@@ -398,7 +398,7 @@ git commit -m "feat(loop): 写checkpoint并累计会话成本"
 **Files:**
 - Modify: `README.md`
 - Modify: `docs/deferred-issues.md`
-- Modify: `dev-notes/P0-维度12.md`
+- Modify: `dev-notes/P0-维度6.md`
 - Test: 全量
 
 **Interfaces:**
@@ -421,7 +421,7 @@ deferred: 跨进程会话锁、fork 树导航、FTS5、zstd 等(若未登记)。
 - [ ] **Step 4: 提交**
 
 ```bash
-git add README.md docs/deferred-issues.md dev-notes/P0-维度12.md
+git add README.md docs/deferred-issues.md dev-notes/P0-维度6.md
 git commit -m "docs(session): 补维度6说明与留痕"
 ```
 

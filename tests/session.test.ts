@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { buildMessages } from "../src/context/build.js";
 import { forkSession, readSessionDir } from "../src/session/persistence.js";
 import {
   createSession,
@@ -98,6 +99,20 @@ describe("会话持久化", () => {
 
     expect(readFileSync(path.join(dir, "header.json"), "utf8")).toBe(headerBefore);
     expect(readFileSync(path.join(dir, "session.v1.jsonl"), "utf8")).toBe(logBefore);
+  });
+
+  it("createSession 显式非法 id 或错误类型 → TypeError 且不建目录", async () => {
+    for (const id of ["", "bad id", "CON", "a".repeat(129)]) {
+      const dir = path.join(makeTempDir(), "invalid");
+      await expect(createSession(dir, { id })).rejects.toBeInstanceOf(TypeError);
+      expect(existsSync(dir)).toBe(false);
+    }
+
+    const dir = path.join(makeTempDir(), "bad-type");
+    await expect(
+      createSession(dir, { provider: 1 as unknown as string }),
+    ).rejects.toBeInstanceOf(TypeError);
+    expect(existsSync(dir)).toBe(false);
   });
 
   it("Promise.all 追加顺序与 JSONL 持久化顺序一致", async () => {
@@ -422,6 +437,25 @@ describe("会话持久化", () => {
     });
   });
 
+  it("resume 空 sessionDir → invalid_target", async () => {
+    await expect(resumeSession("")).rejects.toMatchObject({
+      name: "SessionResumeError",
+      code: "invalid_target",
+    });
+  });
+
+  it("resume sessionDir 为文件 → invalid_target", async () => {
+    const file = path.join(makeTempDir(), "session-file");
+    writeFileSync(file, "keep", "utf8");
+
+    await expect(resumeSession(file)).rejects.toMatchObject({
+      name: "SessionResumeError",
+      code: "invalid_target",
+      detail: { dir: file },
+    });
+    expect(readFileSync(file, "utf8")).toBe("keep");
+  });
+
   it("resume 目录存在但 header 缺失抛 missing_session_dir", async () => {
     const dir = makeTempDir();
     writeFileSync(path.join(dir, "session.v1.jsonl"), "", "utf8");
@@ -575,6 +609,134 @@ describe("会话持久化", () => {
     expect(appended.seq).toBe(1);
     expect(readFileSync(logPath, "utf8")).toBe(`${before}${JSON.stringify(appended)}\n`);
     expect(() => readSessionDir(dir)).toThrow(SessionCorruptionError);
+  });
+
+  it("resume 补齐崩溃尾部的缺失 tool_result 并追加 interrupted", async () => {
+    const dir = makeTempDir();
+    const events: SessionEvent[] = [
+      { seq: 0, ts: "2026-10-18T00:00:00.000Z", type: "user", payload: { content: "u" } },
+      {
+        seq: 1,
+        ts: "2026-10-18T00:00:01.000Z",
+        type: "checkpoint",
+        payload: { turn: 1 },
+      },
+      {
+        seq: 2,
+        ts: "2026-10-18T00:00:02.000Z",
+        type: "assistant",
+        payload: {
+          content: "a",
+          toolCalls: [
+            { id: "c1", name: "echo", arguments: {} },
+            { id: "c2", name: "echo", arguments: {} },
+          ],
+        },
+      },
+      {
+        seq: 3,
+        ts: "2026-10-18T00:00:03.000Z",
+        type: "usage",
+        payload: { promptTokens: 1, completionTokens: 1 },
+      },
+      {
+        seq: 4,
+        ts: "2026-10-18T00:00:04.000Z",
+        type: "tool_result",
+        payload: { id: "c1", ok: true, text: "ok" },
+        parent: 2,
+      },
+    ];
+    writeFileSync(
+      path.join(dir, "header.json"),
+      `${JSON.stringify({
+        id: "crash",
+        createdAt: "2026-10-18T00:00:00.000Z",
+        status: "closed",
+      })}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      path.join(dir, "session.v1.jsonl"),
+      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      "utf8",
+    );
+
+    const resumed = await resumeSession(dir);
+    const recovered = resumed.events();
+
+    expect(recovered).toHaveLength(7);
+    expect(recovered.slice(0, events.length)).toEqual(events);
+    expect(recovered[5]).toMatchObject({
+      seq: 5,
+      type: "tool_result",
+      parent: 2,
+      payload: {
+        id: "c2",
+        ok: false,
+        code: "tool_result_lost",
+        text: "result lost due to crash",
+        detail: { crashRecovery: true },
+      },
+    });
+    expect(recovered[6]).toMatchObject({
+      seq: 6,
+      type: "interrupted",
+      payload: { reason: "crash_recovery" },
+    });
+    expect(() => buildMessages(recovered)).not.toThrow();
+    expect(readSessionDir(dir).events).toEqual(recovered);
+    expect(resumed.header.status).toBe("open");
+  });
+
+  it("resume 无未闭合批次时不追加修复事件", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "u" } });
+    await session.append({ type: "checkpoint", payload: { turn: 1 } });
+    await session.append({ type: "assistant", payload: { content: "a", toolCalls: [] } });
+    await session.append({ type: "usage", payload: { promptTokens: 1 } });
+    await session.close();
+
+    const resumed = await resumeSession(dir);
+
+    expect(resumed.events()).toHaveLength(4);
+    expect(resumed.events().some((event) => event.type === "interrupted")).toBe(false);
+    expect(() => buildMessages(resumed.events())).not.toThrow();
+  });
+
+  it("resume 遇到非尾部缺失的投影错误仍 fail-closed 且不改 header", async () => {
+    const dir = makeTempDir();
+    writeFileSync(
+      path.join(dir, "header.json"),
+      `${JSON.stringify({
+        id: "broken",
+        createdAt: "2026-10-18T00:00:00.000Z",
+        status: "closed",
+      })}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      path.join(dir, "session.v1.jsonl"),
+      `${JSON.stringify({
+        seq: 0,
+        ts: "2026-10-18T00:00:00.000Z",
+        type: "user",
+        payload: { content: "u" },
+      })}\n${JSON.stringify({
+        seq: 1,
+        ts: "2026-10-18T00:00:01.000Z",
+        type: "assistant",
+        payload: { content: "a" },
+      })}\n`,
+      "utf8",
+    );
+
+    await expect(resumeSession(dir)).rejects.toBeInstanceOf(TypeError);
+    const header = JSON.parse(readFileSync(path.join(dir, "header.json"), "utf8")) as {
+      status: string;
+    };
+    expect(header.status).toBe("closed");
   });
 
   it("结构化会话错误保留 name、code 与 detail", () => {

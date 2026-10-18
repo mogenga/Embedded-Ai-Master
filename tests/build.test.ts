@@ -104,13 +104,14 @@ describe("buildMessages 投影重组", () => {
     );
   });
 
-  it("usage/checkpoint/status/interrupted 事件被丢弃", () => {
+  it("usage/checkpoint/status/interrupted/compaction 事件被丢弃", () => {
     const messages = buildMessages([
       mk(0, "user", { content: "hi" }),
       mk(1, "usage", { promptTokens: 1, completionTokens: 2 }),
       mk(2, "checkpoint", { summary: "x" }),
       mk(3, "status", { status: "done", finishReason: "no_tool_calls" }),
       mk(4, "interrupted", { reason: "aborted" }),
+      mk(5, "compaction", { summary: "compacted" }),
     ]);
 
     expect(messages).toStrictEqual([{ role: "user", content: "hi" }]);

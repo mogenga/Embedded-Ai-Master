@@ -108,6 +108,25 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
 
 export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   if (opts.sessionId !== undefined) assertSessionId(opts.sessionId);
+  if (opts.sessionDir !== undefined) {
+    if (opts.sessionDir === "") {
+      throw new SessionResumeError("invalid_target", "sessionDir must not be empty", {
+        dir: opts.sessionDir,
+      });
+    }
+    try {
+      const info = await stat(opts.sessionDir);
+      if (!info.isDirectory()) {
+        throw new SessionResumeError(
+          "invalid_target",
+          `Session path is not a directory: ${opts.sessionDir}`,
+          { dir: opts.sessionDir },
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
   const resume = opts.resume === true;
   const resumeDir = opts.sessionDir;
   if (resume && resumeDir === undefined) {

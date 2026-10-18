@@ -8,7 +8,7 @@ import { runSession } from "../index.js";
 import type { PricePerMillion } from "../loop/breakers.js";
 import { computeCostUsd } from "../loop/breakers.js";
 import type { LoopFinishReason } from "../loop/events.js";
-import { readSessionFile } from "../session/session.js";
+import { readSessionDir } from "../session/persistence.js";
 
 const USAGE = `用法: node dist/demo/run.js [--help] <prompt>
 
@@ -75,13 +75,13 @@ export interface SessionCost {
   cachedTokens: number;
 }
 
-export function sessionCost(filePath: string, price?: PricePerMillion): SessionCost | undefined {
+export function sessionCost(sessionDir: string, price?: PricePerMillion): SessionCost | undefined {
   try {
     let cost = 0;
     let promptTokens = 0;
     let completionTokens = 0;
     let cachedTokens = 0;
-    for (const event of readSessionFile(filePath)) {
+    for (const event of readSessionDir(sessionDir).events) {
       if (event.type !== "usage") continue;
       const payload = event.payload;
       const prompt = typeof payload.promptTokens === "number" ? payload.promptTokens : 0;
@@ -208,10 +208,7 @@ async function main(): Promise<number> {
   }
 
   console.log(`turns: ${turns}`);
-  const summary = sessionCost(
-    path.join(sessionDir, "session.v1.jsonl"),
-    resolved.provider.pricePerMillion,
-  );
+  const summary = sessionCost(sessionDir, resolved.provider.pricePerMillion);
   if (summary === undefined) {
     console.error("警告: 无法读取会话日志，token 与费用统计未知");
     console.log("tokens: unknown");

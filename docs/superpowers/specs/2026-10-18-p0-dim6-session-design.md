@@ -97,7 +97,9 @@ interface SessionHeader {
 resumeSession(sessionDir: string, opts?: { generationThresholdBytes?: number }): Promise<SessionHandle>
 ```
 
+- `sessionDir === ""` 或路径存在但不是目录 → `SessionResumeError("invalid_target")`; 目录/header 缺失 → `missing_session_dir`。
 - 读取 header + 全部事件;
+- **崩溃尾部恢复**: 读取后先尝试 `buildMessages(events)`。若唯一的可恢复情形是「最后一个 assistant 批次的 toolCalls 缺少 tool_result」, 则为新 handle 按 toolCalls 原顺序补齐缺失的 `tool_result`(`payload.code = "tool_result_lost"`, `payload.text = "result lost due to crash"`, `parent = assistant.seq`, `detail.crashRecovery = true`), 再追加 `interrupted { reason: "crash_recovery" }`; 其他投影错误仍 fail-closed, 不改 header/历史事件。
 - 重建 `eventList` 与 `nextSeq = lastSeq + 1`;
 - 打开最后一个代文件用于追加(不截断); 若目录中无日志文件 → fail-closed;
 - `close()` 行为与 createSession 相同;
@@ -110,6 +112,8 @@ resumeSession(sessionDir: string, opts?: { generationThresholdBytes?: number }):
 - `resume: true` 时必须提供 `sessionDir`; 调用 `resumeSession(sessionDir)` 而不是 `createSession`。
 - resume 时:
   - `opts.model` 必须与 `header.model`(若存在)一致, 否则抛 `SessionResumeError("model_mismatch")`;
+  - 显式传入的 `opts.sessionId` 与 `header.id` 不一致 → 抛 `SessionResumeError("session_id_mismatch")`;
+  - `opts.sessionDir === ""` 或路径不是目录 → 抛 `SessionResumeError("invalid_target")`;
   - `opts.systemPrompt` 若提供且与已有 system 事件内容不同 → 抛 `SessionResumeError("system_prompt_mismatch")`; 相同/缺省沿用旧值;
   - 不重复写 system/user。
 - create 路径把 `provider`/`model`/`workdir` 写入 header。
@@ -125,9 +129,10 @@ forkSession(
 ): Promise<SessionHandle>
 ```
 
-- `atSeq` 必须是 **turn 边界**: 该 seq 的事件类型为 `tool_result` 或 `usage`。拒绝在 `assistant` 上 fork(此时 tool_result/usage 尚未落全); 失败 → `SessionForkError("not_turn_boundary")`。
-- 前缀 = `events[0..atSeq]`(含 atSeq), **保留原 seq 与 parent**, 不重编号。
-- 新目录缺省 `$HARNESS_HOME/sessions/<newId>`; `opts.id` 提供时校验 id 规则, 缺省随机生成。
+- `atSeq` 必须使 `events[0..atSeq]` **可被 `buildMessages` 投影**(批次闭合), 不再按事件类型判断: 批中 `usage`、部分 `tool_result`、未闭合的 assistant 批次、越界/负数/非整数一律 → `SessionForkError("not_turn_boundary")`; 无工具轮的 `usage` 前缀与普通 user 前缀可通过。
+- 前缀 = `events[0..atSeq]`(含 atSeq), **保留原 seq 与 parent**, 不重编号; fork 成功后 `events()` 必须可再次投影。
+- 新目录缺省 `$HARNESS_HOME/sessions/<newId>`; `opts.id` 提供时校验 id 规则, 缺省随机生成; `opts.id` 不得等于源会话 id。
+- `targetDir` 不得位于源会话目录内(含等于源目录, 用 `path.relative` 判定), 否则 `SessionForkError("invalid_target")`。
 - header: 新 `id`、`createdAt`、`status:"open"`、`forkedFrom:{sessionId, seq:atSeq}`; 复制 `provider/model/workdir`(若存在)。
 - **artifact 自包含**: 前缀中 `tool_result.payload.artifactPath` 指向的文件若存在, 复制到新会话 `artifacts/` 并重写事件中的路径; 文件缺失时保留原路径, 并在该事件 `payload.detail.artifactMissing = true` 标记, 不阻塞 fork。
 - 事件写入 `session.v1.jsonl`(逐行 append 前缀); 之后 append 从 `atSeq+1` 开始。
@@ -176,7 +181,7 @@ forkSession(
 ## 6. 验收口径
 
 1. `npm test` 全绿; `npm run coverage` lines ≥ 85%; lint/typecheck/build 通过。
-2. resume/fork 的会话可被 `buildMessages` 投影, 且 fork 前缀与源会话逐事件一致(seq/parent)。
+2. resume/fork 的会话可被 `buildMessages` 投影, 且 fork 前缀与源会话逐事件一致(seq/parent); 崩溃尾部恢复后(`tool_result_lost` + `interrupted`)同样可投影。
 3. 坏日志 fail-closed, 不静默跳过。
 4. 无新增运行时依赖; 不修改既有事件语义(仅新增 checkpoint/compaction 类型与 header 字段)。
 5. 两轮独立审查通过; `dev-notes` 增量留痕。

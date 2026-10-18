@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { buildMessages } from "../src/context/build.js";
 import { SessionCorruptionError } from "../src/session/errors.js";
 import { forkSession, readSessionDir } from "../src/session/persistence.js";
 import { createSession } from "../src/session/session.js";
@@ -129,6 +130,42 @@ describe("readSessionDir", () => {
     expect(captureCorruption(() => readSessionDir(dir)).code).toBe("invalid_header");
   });
 
+  it.each([
+    ["空 id", { id: "" }],
+    ["非法字符 id", { id: "bad id" }],
+    ["Windows 保留 id", { id: "CON" }],
+    ["createdAt 不可解析", { createdAt: "not-a-date" }],
+    ["createdAt 非字符串", { createdAt: 1 }],
+    ["status 非法", { status: "paused" }],
+    ["provider 非字符串", { provider: 1 }],
+    ["model 非字符串", { model: {} }],
+    ["workdir 非字符串", { workdir: [] }],
+    ["forkedFrom 非对象", { forkedFrom: "x" }],
+    ["forkedFrom.sessionId 非字符串", { forkedFrom: { sessionId: 1, seq: 0 } }],
+    ["forkedFrom.seq 为负", { forkedFrom: { sessionId: "s", seq: -1 } }],
+    ["forkedFrom.seq 非整数", { forkedFrom: { sessionId: "s", seq: 1.5 } }],
+  ])("header %s → invalid_header", (_name, patch) => {
+    const dir = makeTempDir();
+    writeHeader(dir, { ...defaultHeader(), ...patch } as unknown as SessionHeader);
+    writeLines(dir, "session.v1.jsonl", [JSON.stringify(makeEvent(0))]);
+
+    const error = captureCorruption(() => readSessionDir(dir));
+
+    expect(error.code).toBe("invalid_header");
+    expect(error.detail).toMatchObject({ file: "header.json" });
+  });
+
+  it("合法 forkedFrom 通过校验", () => {
+    const dir = makeTempDir();
+    writeHeader(dir, {
+      ...defaultHeader(),
+      forkedFrom: { sessionId: "source", seq: 0 },
+    });
+    writeLines(dir, "session.v1.jsonl", [JSON.stringify(makeEvent(0))]);
+
+    expect(readSessionDir(dir).header.forkedFrom).toEqual({ sessionId: "source", seq: 0 });
+  });
+
   it("坏行 → invalid_event_line 且 detail 含文件与行号", () => {
     const dir = makeTempDir();
     writeHeader(dir, defaultHeader());
@@ -208,42 +245,88 @@ describe("readSessionDir", () => {
     expect(result.events.map((event) => event.seq)).toEqual([0]);
   });
 });
-async function makeSource(): Promise<{ dir: string; session: Awaited<ReturnType<typeof createSession>> }> {
+
+type Session = Awaited<ReturnType<typeof createSession>>;
+
+async function makeSource(): Promise<{ dir: string; session: Session }> {
   const dir = path.join(makeTempDir(), "source");
   return { dir, session: await createSession(dir, { id: "source" }) };
 }
 
+async function appendBatch(session: Session, ids: string[]): Promise<number> {
+  await session.append({ type: "user", payload: { content: "u" } });
+  await session.append({ type: "checkpoint", payload: { turn: 1 } });
+  const assistant = await session.append({
+    type: "assistant",
+    payload: {
+      content: "a",
+      toolCalls: ids.map((id) => ({ id, name: "echo", arguments: {} })),
+    },
+  });
+  await session.append({ type: "usage", payload: { promptTokens: 1 } });
+  return assistant.seq;
+}
+
+async function appendToolTurn(session: Session, ids: string[] = ["t"]): Promise<number> {
+  const assistantSeq = await appendBatch(session, ids);
+  let lastSeq = assistantSeq;
+  for (const id of ids) {
+    const result = await session.append({
+      type: "tool_result",
+      payload: { id, ok: true, text: "r" },
+      parent: assistantSeq,
+    });
+    lastSeq = result.seq;
+  }
+  return lastSeq;
+}
+
 describe("forkSession", () => {
-  it("在 tool_result 边界 fork 并保留前缀与 parent", async () => {
+  it("在批次闭合的 tool_result 边界 fork 并保留前缀与 parent", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "user", payload: { content: "u" } });
-    await session.append({ type: "assistant", payload: { content: "a" }, parent: 0 });
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" }, parent: 1 });
-    await session.append({ type: "usage", payload: { promptTokens: 1 }, parent: 2 });
+    const atSeq = await appendToolTurn(session, ["t1", "t2"]);
     const targetDir = path.join(makeTempDir(), "fork");
 
-    const forked = await forkSession(dir, 2, { targetDir, id: "fork-1" });
+    const forked = await forkSession(dir, atSeq, { targetDir, id: "fork-1" });
 
-    expect(forked.events().map((event) => event.seq)).toEqual([0, 1, 2]);
-    expect(forked.events().map((event) => event.type)).toEqual(["user", "assistant", "tool_result"]);
-    expect(forked.events().map((event) => event.parent)).toEqual([undefined, 0, 1]);
+    expect(forked.events().map((event) => event.seq)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(forked.events().map((event) => event.type)).toEqual([
+      "user",
+      "checkpoint",
+      "assistant",
+      "usage",
+      "tool_result",
+      "tool_result",
+    ]);
+    expect(forked.events().map((event) => event.parent)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      2,
+      2,
+    ]);
     expect(forked.header).toMatchObject({
       id: "fork-1",
       status: "open",
-      forkedFrom: { sessionId: "source", seq: 2 },
+      forkedFrom: { sessionId: "source", seq: atSeq },
     });
+    expect(() => buildMessages(forked.events())).not.toThrow();
     const next = await forked.append({ type: "usage", payload: {} });
-    expect(next.seq).toBe(3);
-    expect(session.events()).toHaveLength(4);
+    expect(next.seq).toBe(6);
+    expect(session.events()).toHaveLength(6);
   });
 
-  it("在 assistant/user/越界/负数 fork → not_turn_boundary 且不写文件", async () => {
+  it("assistant/批中 usage/部分 tool_result/越界/负数 fork → not_turn_boundary 且不写文件", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "user", payload: {} });
-    await session.append({ type: "assistant", payload: {} });
-    await session.append({ type: "tool_result", payload: {} });
+    await appendBatch(session, ["t1", "t2"]);
+    await session.append({
+      type: "tool_result",
+      payload: { id: "t1", ok: true, text: "r" },
+      parent: 2,
+    });
 
-    for (const atSeq of [0, 1, 3, -1, 1.5]) {
+    for (const atSeq of [2, 3, 4, 6, -1, 1.5]) {
       const targetDir = path.join(makeTempDir(), `fork-${String(atSeq).replace(".", "_")}`);
       await expect(forkSession(dir, atSeq, { targetDir, id: "f" })).rejects.toMatchObject({
         code: "not_turn_boundary",
@@ -252,23 +335,47 @@ describe("forkSession", () => {
     }
   });
 
-  it("fork header.forkedFrom 正确且原会话不受影响", async () => {
+  it("user 前缀与无工具轮的 usage 前缀可投影 → 允许 fork", async () => {
     const { dir, session } = await makeSource();
     await session.append({ type: "user", payload: { content: "u" } });
-    await session.append({ type: "assistant", payload: { content: "a" } });
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "checkpoint", payload: { turn: 1 } });
+    await session.append({ type: "assistant", payload: { content: "a", toolCalls: [] } });
+    await session.append({ type: "usage", payload: { promptTokens: 1 } });
+
+    const userFork = await forkSession(dir, 0, {
+      targetDir: path.join(makeTempDir(), "fork-user"),
+      id: "fork-user",
+    });
+    const usageFork = await forkSession(dir, 3, {
+      targetDir: path.join(makeTempDir(), "fork-usage"),
+      id: "fork-usage",
+    });
+
+    expect(() => buildMessages(userFork.events())).not.toThrow();
+    expect(() => buildMessages(usageFork.events())).not.toThrow();
+    expect(usageFork.events().map((event) => event.type)).toEqual([
+      "user",
+      "checkpoint",
+      "assistant",
+      "usage",
+    ]);
+  });
+
+  it("fork header.forkedFrom 正确且原会话不受影响", async () => {
+    const { dir, session } = await makeSource();
+    const atSeq = await appendToolTurn(session);
     const before = readSessionDir(dir).events;
     const targetDir = path.join(makeTempDir(), "fork");
 
-    const forked = await forkSession(dir, 2, { targetDir, id: "fork-2" });
+    const forked = await forkSession(dir, atSeq, { targetDir, id: "fork-2" });
     await forked.append({ type: "user", payload: { content: "branch" } });
 
-    expect(forked.header.forkedFrom).toEqual({ sessionId: "source", seq: 2 });
+    expect(forked.header.forkedFrom).toEqual({ sessionId: "source", seq: atSeq });
     expect(readSessionDir(dir).events).toEqual(before);
     expect(session.events()).toHaveLength(before.length);
     expect(readSessionDir(targetDir).header.forkedFrom).toEqual({
       sessionId: "source",
-      seq: 2,
+      seq: atSeq,
     });
   });
 
@@ -278,24 +385,27 @@ describe("forkSession", () => {
     mkdirSync(sourceArtifacts, { recursive: true });
     const artifactPath = path.join(sourceArtifacts, "result.txt");
     writeFileSync(artifactPath, "full output", "utf8");
+    const assistantSeq = await appendBatch(session, ["t"]);
     await session.append({
       type: "tool_result",
       payload: { id: "t", ok: true, text: "short", artifactPath },
+      parent: assistantSeq,
     });
     const targetDir = path.join(makeTempDir(), "fork");
 
-    const forked = await forkSession(dir, 0, { targetDir, id: "fork-art" });
+    const forked = await forkSession(dir, assistantSeq + 2, { targetDir, id: "fork-art" });
 
     const copied = path.join(targetDir, "artifacts", "result.txt");
     expect(readFileSync(copied, "utf8")).toBe("full output");
-    expect(forked.events()[0]?.payload.artifactPath).toBe(copied);
-    expect(forked.events()[0]?.payload.detail).toBeUndefined();
-    expect(session.events()[0]?.payload.artifactPath).toBe(artifactPath);
+    expect(forked.events()[4]?.payload.artifactPath).toBe(copied);
+    expect(forked.events()[4]?.payload.detail).toBeUndefined();
+    expect(session.events()[4]?.payload.artifactPath).toBe(artifactPath);
   });
 
   it("artifact 缺失 → 保留原路径并标记 artifactMissing", async () => {
     const { dir, session } = await makeSource();
     const missing = path.join(dir, "artifacts", "gone.txt");
+    const assistantSeq = await appendBatch(session, ["t"]);
     await session.append({
       type: "tool_result",
       payload: {
@@ -305,13 +415,14 @@ describe("forkSession", () => {
         artifactPath: missing,
         detail: { reason: "truncated" },
       },
+      parent: assistantSeq,
     });
     const targetDir = path.join(makeTempDir(), "fork");
 
-    const forked = await forkSession(dir, 0, { targetDir, id: "fork-missing" });
+    const forked = await forkSession(dir, assistantSeq + 2, { targetDir, id: "fork-missing" });
 
-    expect(forked.events()[0]?.payload.artifactPath).toBe(missing);
-    expect(forked.events()[0]?.payload.detail).toEqual({
+    expect(forked.events()[4]?.payload.artifactPath).toBe(missing);
+    expect(forked.events()[4]?.payload.detail).toEqual({
       reason: "truncated",
       artifactMissing: true,
     });
@@ -320,16 +431,18 @@ describe("forkSession", () => {
   it("artifact 缺失且 detail 非对象 → 保留原值并标记 artifactMissing", async () => {
     const { dir, session } = await makeSource();
     const missing = path.join(dir, "artifacts", "gone.txt");
+    const assistantSeq = await appendBatch(session, ["t"]);
     await session.append({
       type: "tool_result",
       payload: { id: "t", ok: true, text: "x", artifactPath: missing, detail: "raw" },
+      parent: assistantSeq,
     });
     const targetDir = path.join(makeTempDir(), "fork");
 
-    const forked = await forkSession(dir, 0, { targetDir, id: "fork-detail" });
+    const forked = await forkSession(dir, assistantSeq + 2, { targetDir, id: "fork-detail" });
 
-    expect(forked.events()[0]?.payload.artifactPath).toBe(missing);
-    expect(forked.events()[0]?.payload.detail).toEqual({
+    expect(forked.events()[4]?.payload.artifactPath).toBe(missing);
+    expect(forked.events()[4]?.payload.detail).toEqual({
       originalDetail: "raw",
       artifactMissing: true,
     });
@@ -337,7 +450,7 @@ describe("forkSession", () => {
 
   it("targetDir 非空 → target_not_empty 且不改动目标", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "user", payload: { content: "u" } });
     const targetDir = makeTempDir();
     writeFileSync(path.join(targetDir, "keep.txt"), "keep", "utf8");
 
@@ -351,7 +464,7 @@ describe("forkSession", () => {
 
   it("targetDir 已存在但为空 → target_not_empty 且不改动目录", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "user", payload: { content: "u" } });
     const emptyTarget = path.join(makeTempDir(), "empty-target");
     mkdirSync(emptyTarget);
 
@@ -364,7 +477,7 @@ describe("forkSession", () => {
 
   it("targetDir 父路径为文件 → invalid_target 且不改动文件", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "user", payload: { content: "u" } });
     const parentFile = path.join(makeTempDir(), "parent-file");
     writeFileSync(parentFile, "keep", "utf8");
     const targetDir = path.join(parentFile, "child");
@@ -378,7 +491,7 @@ describe("forkSession", () => {
 
   it("非法或 Windows 保留 id → invalid_target 且不写文件", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "user", payload: { content: "u" } });
 
     for (const id of ["bad id", "CON", "", "a".repeat(129)]) {
       const targetDir = path.join(makeTempDir(), "fork");
@@ -389,13 +502,44 @@ describe("forkSession", () => {
     }
   });
 
+  it("opts.id 与源会话 id 相同 → invalid_target 且不写文件", async () => {
+    const { dir, session } = await makeSource();
+    await session.append({ type: "user", payload: { content: "u" } });
+    const targetDir = path.join(makeTempDir(), "fork");
+
+    await expect(forkSession(dir, 0, { targetDir, id: "source" })).rejects.toMatchObject({
+      code: "invalid_target",
+    });
+    expect(existsSync(targetDir)).toBe(false);
+  });
+
+  it("targetDir 位于 sourceDir 内 → invalid_target 且不写文件", async () => {
+    const { dir, session } = await makeSource();
+    await session.append({ type: "user", payload: { content: "u" } });
+    const targetDir = path.join(dir, "nested", "fork");
+
+    await expect(forkSession(dir, 0, { targetDir, id: "fork" })).rejects.toMatchObject({
+      code: "invalid_target",
+    });
+    expect(existsSync(targetDir)).toBe(false);
+  });
+
+  it("targetDir 与 sourceDir 相同 → invalid_target", async () => {
+    const { dir, session } = await makeSource();
+    await session.append({ type: "user", payload: { content: "u" } });
+
+    await expect(forkSession(dir, 0, { targetDir: dir, id: "fork" })).rejects.toMatchObject({
+      code: "invalid_target",
+    });
+  });
+
   it("targetDir 缺省为 $HARNESS_HOME/sessions/<id>", async () => {
     const home = makeTempDir();
     const previous = process.env.HARNESS_HOME;
     process.env.HARNESS_HOME = home;
     try {
       const { dir, session } = await makeSource();
-      await session.append({ type: "usage", payload: {} });
+      await session.append({ type: "user", payload: { content: "u" } });
 
       const forked = await forkSession(dir, 0, { id: "fork-default" });
 
@@ -434,6 +578,7 @@ describe("forkSession", () => {
     const { dir, session } = await makeSource();
     mkdirSync(path.join(dir, "artifacts"), { recursive: true });
     writeFileSync(path.join(dir, "artifacts", "rel.txt"), "relative", "utf8");
+    const assistantSeq = await appendBatch(session, ["t"]);
     await session.append({
       type: "tool_result",
       payload: {
@@ -442,14 +587,15 @@ describe("forkSession", () => {
         text: "x",
         artifactPath: path.join("artifacts", "rel.txt"),
       },
+      parent: assistantSeq,
     });
     const targetDir = path.join(makeTempDir(), "fork");
 
-    const forked = await forkSession(dir, 0, { targetDir, id: "fork-rel" });
+    const forked = await forkSession(dir, assistantSeq + 2, { targetDir, id: "fork-rel" });
 
     const copied = path.join(targetDir, "artifacts", "rel.txt");
     expect(readFileSync(copied, "utf8")).toBe("relative");
-    expect(forked.events()[0]?.payload.artifactPath).toBe(copied);
+    expect(forked.events()[4]?.payload.artifactPath).toBe(copied);
   });
 
   it("artifact 路径越界 → 不复制并按缺失标记", async () => {
@@ -460,22 +606,25 @@ describe("forkSession", () => {
     const outsideAbsolute = path.join(root, "absolute.txt");
     writeFileSync(outsideRelative, "outside", "utf8");
     writeFileSync(outsideAbsolute, "outside", "utf8");
+    const assistantSeq = await appendBatch(session, ["t1", "t2"]);
     await session.append({
       type: "tool_result",
       payload: { id: "t1", ok: true, text: "x", artifactPath: "../outside.txt" },
+      parent: assistantSeq,
     });
     await session.append({
       type: "tool_result",
       payload: { id: "t2", ok: true, text: "x", artifactPath: outsideAbsolute },
+      parent: assistantSeq,
     });
     const targetDir = path.join(makeTempDir(), "fork");
 
-    const forked = await forkSession(dir, 1, { targetDir, id: "fork-outside" });
+    const forked = await forkSession(dir, assistantSeq + 3, { targetDir, id: "fork-outside" });
 
-    expect(forked.events()[0]?.payload.artifactPath).toBe("../outside.txt");
-    expect(forked.events()[0]?.payload.detail).toMatchObject({ artifactMissing: true });
-    expect(forked.events()[1]?.payload.artifactPath).toBe(outsideAbsolute);
-    expect(forked.events()[1]?.payload.detail).toMatchObject({ artifactMissing: true });
+    expect(forked.events()[4]?.payload.artifactPath).toBe("../outside.txt");
+    expect(forked.events()[4]?.payload.detail).toMatchObject({ artifactMissing: true });
+    expect(forked.events()[5]?.payload.artifactPath).toBe(outsideAbsolute);
+    expect(forked.events()[5]?.payload.detail).toMatchObject({ artifactMissing: true });
     expect(existsSync(path.join(targetDir, "artifacts"))).toBe(false);
   });
 
@@ -486,22 +635,29 @@ describe("forkSession", () => {
     const second = path.join(dir, "artifacts", "sub", "same.txt");
     writeFileSync(first, "first", "utf8");
     writeFileSync(second, "second", "utf8");
+    const assistantSeq = await appendBatch(session, ["t1", "t2"]);
     await session.append({
       type: "tool_result",
       payload: { id: "t1", ok: true, text: "x", artifactPath: first },
+      parent: assistantSeq,
     });
     await session.append({
       type: "tool_result",
       payload: { id: "t2", ok: true, text: "x", artifactPath: second },
+      parent: assistantSeq,
     });
     const targetDir = path.join(makeTempDir(), "fork");
 
-    const forked = await forkSession(dir, 1, { targetDir, id: "fork-same" });
+    const forked = await forkSession(dir, assistantSeq + 3, { targetDir, id: "fork-same" });
 
     const artifacts = path.join(targetDir, "artifacts");
     expect(readFileSync(path.join(artifacts, "same.txt"), "utf8")).toBe("first");
     expect(readFileSync(path.join(artifacts, "same-1.txt"), "utf8")).toBe("second");
     expect(forked.events().map((event) => event.payload.artifactPath)).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
       path.join(artifacts, "same.txt"),
       path.join(artifacts, "same-1.txt"),
     ]);
@@ -509,7 +665,7 @@ describe("forkSession", () => {
 
   it("header 写失败 → 回滚新建 targetDir 并抛原错误", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "user", payload: { content: "u" } });
     const targetDir = path.join(makeTempDir(), "fork");
     fsFaults.writeFile = (file) => file.endsWith("header.json.tmp");
 
@@ -519,7 +675,7 @@ describe("forkSession", () => {
 
   it("日志写失败 → 回滚已写 header 并抛原错误", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "user", payload: { content: "u" } });
     const targetDir = path.join(makeTempDir(), "fork");
     fsFaults.writeFile = (file) => file.endsWith("session.v1.jsonl");
 
@@ -529,7 +685,7 @@ describe("forkSession", () => {
 
   it("rename 失败 → 回滚新建 targetDir 并抛原错误", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "user", payload: { content: "u" } });
     const targetDir = path.join(makeTempDir(), "fork");
     fsFaults.rename = new Error("rename boom");
 
@@ -542,20 +698,24 @@ describe("forkSession", () => {
     mkdirSync(path.join(dir, "artifacts"), { recursive: true });
     const artifactPath = path.join(dir, "artifacts", "result.txt");
     writeFileSync(artifactPath, "full", "utf8");
+    const assistantSeq = await appendBatch(session, ["t"]);
     await session.append({
       type: "tool_result",
       payload: { id: "t", ok: true, text: "r", artifactPath },
+      parent: assistantSeq,
     });
     const targetDir = path.join(makeTempDir(), "fork");
     fsFaults.copyFile = new Error("copy boom");
 
-    await expect(forkSession(dir, 0, { targetDir, id: "fork" })).rejects.toThrow("copy boom");
+    await expect(forkSession(dir, assistantSeq + 2, { targetDir, id: "fork" })).rejects.toThrow(
+      "copy boom",
+    );
     expect(existsSync(targetDir)).toBe(false);
   });
 
   it("并发 fork 同一 targetDir：一个成功、一个 target_not_empty", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "user", payload: { content: "u" } });
     const targetDir = path.join(makeTempDir(), "fork");
 
     const results = await Promise.allSettled([
@@ -575,7 +735,7 @@ describe("forkSession", () => {
 
   it("两个 fork handle 并发 append 到不同目录互不影响", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "user", payload: { content: "u" } });
     const targetA = path.join(makeTempDir(), "fork-a");
     const targetB = path.join(makeTempDir(), "fork-b");
     const forkA = await forkSession(dir, 0, { targetDir: targetA, id: "fork-a" });
@@ -595,7 +755,7 @@ describe("forkSession", () => {
     expect(forkA.events()).toHaveLength(3);
     expect(forkB.events()).toHaveLength(3);
     expect(readSessionDir(targetA).events.map((event) => event.payload.content)).toEqual([
-      undefined,
+      "u",
       "a1",
       "a2",
     ]);
@@ -609,7 +769,7 @@ describe("forkSession", () => {
 
   it("targetDir 为文件 → invalid_target 且不改动文件", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "tool_result", payload: { id: "t", ok: true, text: "r" } });
+    await session.append({ type: "user", payload: { content: "u" } });
     const targetFile = path.join(makeTempDir(), "target-file");
     writeFileSync(targetFile, "keep", "utf8");
 
@@ -626,7 +786,7 @@ describe("forkSession", () => {
     process.env.HARNESS_HOME = home;
     try {
       const { dir, session } = await makeSource();
-      await session.append({ type: "usage", payload: {} });
+      await session.append({ type: "user", payload: { content: "u" } });
 
       const forked = await forkSession(dir, 0);
 
@@ -645,7 +805,7 @@ describe("forkSession", () => {
     process.env.HARNESS_HOME = home;
     try {
       const { dir, session } = await makeSource();
-      await session.append({ type: "usage", payload: {} });
+      await session.append({ type: "user", payload: { content: "u" } });
 
       const forked = await forkSession(dir, 0, { targetDir: "", id: "empty-target" });
 
@@ -658,7 +818,7 @@ describe("forkSession", () => {
 
   it("fork 后 close 原子更新 header", async () => {
     const { dir, session } = await makeSource();
-    await session.append({ type: "usage", payload: {} });
+    await session.append({ type: "user", payload: { content: "u" } });
     const targetDir = path.join(makeTempDir(), "fork");
     const forked = await forkSession(dir, 0, { targetDir, id: "fork-close" });
 

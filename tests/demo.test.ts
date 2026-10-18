@@ -122,15 +122,37 @@ describe("sanitizeTerminalText", () => {
 });
 
 describe("sessionCost", () => {
-  async function writeEvents(lines: unknown[]): Promise<string> {
+  function sessionHeader(): Record<string, unknown> {
+    return { id: "sess-1", createdAt: "2026-01-01T00:00:00.000Z", status: "closed" };
+  }
+
+  async function writeSession(
+    v1: unknown[],
+    v2?: unknown[],
+  ): Promise<string> {
     const dir = await tempDir();
-    const filePath = path.join(dir, "session.v1.jsonl");
-    await writeFile(filePath, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`, "utf8");
-    return filePath;
+    await writeFile(
+      path.join(dir, "header.json"),
+      `${JSON.stringify(sessionHeader())}\n`,
+      "utf8",
+    );
+    await writeFile(
+      path.join(dir, "session.v1.jsonl"),
+      `${v1.map((line) => JSON.stringify(line)).join("\n")}\n`,
+      "utf8",
+    );
+    if (v2 !== undefined) {
+      await writeFile(
+        path.join(dir, "session.v2.jsonl"),
+        `${v2.map((line) => JSON.stringify(line)).join("\n")}\n`,
+        "utf8",
+      );
+    }
+    return dir;
   }
 
   it("按 usage 事件与价格汇总费用与 token", async () => {
-    const filePath = await writeEvents([
+    const sessionDir = await writeSession([
       { seq: 0, ts: "2026-01-01T00:00:00.000Z", type: "user", payload: { content: "hi" } },
       { seq: 1, ts: "2026-01-01T00:00:01.000Z", type: "usage", payload: { promptTokens: 10, completionTokens: 5 } },
       {
@@ -141,7 +163,28 @@ describe("sessionCost", () => {
       },
     ]);
 
-    const result = sessionCost(filePath, { input: 1, output: 2, cachedInput: 0.5 });
+    const result = sessionCost(sessionDir, { input: 1, output: 2, cachedInput: 0.5 });
+    expect(result).toMatchObject({
+      priced: true,
+      promptTokens: 20,
+      completionTokens: 10,
+      cachedTokens: 4,
+    });
+    expect(result?.cost).toBeCloseTo(0.000038, 12);
+  });
+
+  it("跨代 usage 一并汇总", async () => {
+    const sessionDir = await writeSession(
+      [
+        { seq: 0, ts: "2026-01-01T00:00:00.000Z", type: "user", payload: { content: "hi" } },
+        { seq: 1, ts: "2026-01-01T00:00:01.000Z", type: "usage", payload: { promptTokens: 10, completionTokens: 5 } },
+      ],
+      [
+        { seq: 2, ts: "2026-01-01T00:00:02.000Z", type: "usage", payload: { promptTokens: 10, completionTokens: 5, cachedTokens: 4 } },
+      ],
+    );
+
+    const result = sessionCost(sessionDir, { input: 1, output: 2, cachedInput: 0.5 });
     expect(result).toMatchObject({
       priced: true,
       promptTokens: 20,
@@ -152,11 +195,11 @@ describe("sessionCost", () => {
   });
 
   it("price 缺省时 priced 为 false 并统计 token", async () => {
-    const filePath = await writeEvents([
+    const sessionDir = await writeSession([
       { seq: 0, ts: "2026-01-01T00:00:00.000Z", type: "usage", payload: { promptTokens: 10, completionTokens: 5 } },
     ]);
 
-    expect(sessionCost(filePath)).toEqual({
+    expect(sessionCost(sessionDir)).toEqual({
       cost: 0,
       priced: false,
       promptTokens: 10,
@@ -167,14 +210,18 @@ describe("sessionCost", () => {
 
   it("读取失败返回 undefined", async () => {
     const dir = await tempDir();
-    expect(sessionCost(path.join(dir, "missing.jsonl"), { input: 1, output: 1 })).toBeUndefined();
+    expect(sessionCost(path.join(dir, "missing"), { input: 1, output: 1 })).toBeUndefined();
   });
 
   it("文件损坏返回 undefined", async () => {
     const dir = await tempDir();
-    const filePath = path.join(dir, "broken.jsonl");
-    await writeFile(filePath, "{not-json}\n", "utf8");
-    expect(sessionCost(filePath, { input: 1, output: 1 })).toBeUndefined();
+    await writeFile(
+      path.join(dir, "header.json"),
+      `${JSON.stringify(sessionHeader())}\n`,
+      "utf8",
+    );
+    await writeFile(path.join(dir, "session.v1.jsonl"), "{not-json}\n", "utf8");
+    expect(sessionCost(dir, { input: 1, output: 1 })).toBeUndefined();
   });
 });
 

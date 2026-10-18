@@ -121,11 +121,12 @@ for await (const event of runSession({
 
 前置与校验（均在首个 `next()` 前抛 `SessionResumeError`，失败不写 header/日志）：
 
-- `sessionDir` 缺省、目录或 header 不存在 → `missing_session_dir`。
+- `sessionDir` 缺省、目录或 header 不存在 → `missing_session_dir`；`sessionDir` 为空或路径为文件 → `invalid_target`。
 - `model` 与 `header.model`（存在时）不一致 → `model_mismatch`。
 - 显式传入的 `sessionId` 与 `header.id` 不一致 → `session_id_mismatch`。
 - 提供 `systemPrompt` 且已有 system 事件内容不同 → `system_prompt_mismatch`；非空会话无 system 事件时不允许补写，空会话可补写。
 - 不重复写已有 system/user 事件；resume 后 `header.status` 改回 `open`。
+- 崩溃尾部恢复：若日志最后一个 assistant 批次的 `toolCalls` 缺少 `tool_result`，resume 会按原调用顺序补写 `tool_result_lost`（`detail.crashRecovery = true`）并追加 `interrupted { reason: "crash_recovery" }`；其他投影错误仍 fail-closed。
 
 ### fork（仅库 API）
 
@@ -140,7 +141,8 @@ const child = await forkSession(sourceDir, atSeq, {
 });
 ```
 
-- `atSeq` 必须是 turn 边界：该事件类型为 `tool_result` 或 `usage`，否则 `not_turn_boundary`；前缀含 `atSeq` 并保留原 `seq` / `parent`，新 header 写 `forkedFrom: { sessionId, seq }`。
+- `atSeq` 必须使 `events[0..atSeq]` 可被 `buildMessages` 投影（批次闭合），而非按事件类型判断：批中 `usage`、部分 `tool_result`、未闭合的 assistant 批次均 → `not_turn_boundary`；无工具轮的 `usage` 前缀与普通 user 前缀可通过。前缀含 `atSeq` 并保留原 `seq` / `parent`，新 header 写 `forkedFrom: { sessionId, seq }`。
+- `opts.id` 不得与源会话 id 相同；`targetDir` 不得位于源会话目录内（含相同目录），否则 `invalid_target`。
 - artifact 自包含：前缀中 `tool_result.payload.artifactPath` 指向的文件复制到新会话 `artifacts/` 并重写路径；源文件缺失或越界时保留原路径并标 `detail.artifactMissing = true`，不阻塞 fork。
 - target 目录已存在（含空目录）→ `target_not_empty`；`targetDir` 或其父路径为文件 → `invalid_target`；失败时回滚本次写入。
 - 两个会话可并发追加、互不影响；同一目录的跨进程锁尚未实现（D-039）。

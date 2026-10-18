@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -519,6 +519,56 @@ describe("runSession resume", () => {
       { role: "assistant", content: "done", tool_calls: [] },
       { role: "user", content: "again" },
     ]);
+  });
+
+  it("runSession 拒绝空 sessionDir（create 与 resume）", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+
+    await expect(
+      collect(
+        runSession({
+          input: "x",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir: "",
+        }),
+      ),
+    ).rejects.toMatchObject({ name: "SessionResumeError", code: "invalid_target" });
+    await expect(
+      collect(
+        runSession({
+          input: "x",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir: "",
+          resume: true,
+        }),
+      ),
+    ).rejects.toMatchObject({ name: "SessionResumeError", code: "invalid_target" });
+  });
+
+  it("runSession resume 的 sessionDir 为文件 → invalid_target", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionFile = path.join(home, "session-file");
+    await writeFile(sessionFile, "keep", "utf8");
+
+    await expect(
+      collect(
+        runSession({
+          input: "x",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir: sessionFile,
+          resume: true,
+        }),
+      ),
+    ).rejects.toMatchObject({
+      name: "SessionResumeError",
+      code: "invalid_target",
+      detail: { dir: sessionFile },
+    });
   });
 
   it("resume:true 缺 sessionDir 时首个 next 抛 missing_session_dir", async () => {
