@@ -16,6 +16,7 @@ export function Composer({
 }): JSX.Element {
   const [text, setText] = useState("");
   const [failed, setFailed] = useState(false);
+  const [sending, setSending] = useState(false);
   const field = useRef<HTMLTextAreaElement>(null);
 
   function resize(el: HTMLTextAreaElement): void {
@@ -42,7 +43,7 @@ export function Composer({
   }
 
   async function send(): Promise<void> {
-    if (!canSend) return;
+    if (!canSend || sending) return;
     const value = (field.current?.value ?? text).trim();
     if (!value) return;
     const result = onSend?.(value);
@@ -51,11 +52,14 @@ export function Composer({
       return;
     }
     setFailed(false);
+    setSending(true);
     try {
       await result;
     } catch {
       setFailed(true);
       return;
+    } finally {
+      setSending(false);
     }
     clear();
   }
@@ -97,7 +101,7 @@ export function Composer({
             type="button"
             class="send"
             aria-label="发送"
-            disabled={!canSend || text.trim() === ""}
+            disabled={!canSend || sending || text.trim() === ""}
             onClick={() => {
               void send();
             }}

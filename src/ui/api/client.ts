@@ -54,7 +54,7 @@ async function request<T>(path: string, deps?: FetchDeps): Promise<T> {
       error !== undefined && typeof error.message === "string" ? error.message : `请求失败（${response.status}）`;
     throw new ApiError(code, response.status, message);
   }
-  if (body === undefined) {
+  if (body === undefined || body === null) {
     throw new ApiError("invalid_response", response.status, "接口返回内容无法解析");
   }
   return body as T;

@@ -28,7 +28,7 @@ export function DeviceMonitor({
         <dt>探针</dt>
         <dd>{field(device.probe)}</dd>
         <dt>CPU 状态</dt>
-        <dd class="mono">{field(device.cpu)}</dd>
+        <dd class="mono">{connected ? "已连接" : "未接入"}</dd>
         <dt>仿真后端</dt>
         <dd>{field(device.backend)}</dd>
       </dl>

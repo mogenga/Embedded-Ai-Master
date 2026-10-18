@@ -103,6 +103,39 @@ describe("layout", () => {
     expect(root.textContent).toContain("暂无会话");
   });
 
+  it("会话切换中保留旧标题并禁用发送", () => {
+    const root = mount();
+    render(
+      <App
+        {...makeAppProps({
+          activeSessionId: "s1",
+          switching: true,
+          onSend: () => {},
+        })}
+      />,
+      root,
+    );
+    expect(root.textContent).toContain("s1");
+    expect(root.textContent).toContain("会话加载中");
+    expect(root.querySelector<HTMLButtonElement>(".send")!.disabled).toBe(true);
+  });
+
+  it("会话详情失败只影响对话区，不误报 rail 加载失败", () => {
+    const root = mount();
+    render(<App {...makeAppProps({ connection: "ready", detailError: "会话读取失败" })} />, root);
+    expect(root.textContent).toContain("会话读取失败");
+    expect(root.textContent).not.toContain("会话加载失败");
+    expect(root.textContent).not.toContain("知识库加载失败");
+    expect(root.querySelector(".dock-body")).not.toBeNull();
+  });
+
+  it("事件流错误显示提示且保留已有消息", () => {
+    const root = mount();
+    render(<App {...makeAppProps({ streamError: "实时事件流中断或未建立" })} />, root);
+    expect(root.textContent).toContain("实时事件流中断或未建立");
+    expect(root.querySelector(".turn--user")).not.toBeNull();
+  });
+
   it("StatusBar 展示会话/上下文/费用", () => {
     const root = mount();
     render(<StatusBar sessionId="#128" context="12.4k / 200k" cost="¥0.42" />, root);

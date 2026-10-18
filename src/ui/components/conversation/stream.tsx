@@ -14,7 +14,7 @@ export function ConversationStream({
   return (
     <div class="cnv-stream">
       {view.events.length === 0 ? (
-        <p class="cnv-empty">暂无会话</p>
+        <p class="cnv-empty">{view.sessionId === undefined ? "暂无会话" : "暂无消息"}</p>
       ) : (
         <MessageStream view={view} onGuardConfirm={onGuardConfirm} onGuardReject={onGuardReject} />
       )}

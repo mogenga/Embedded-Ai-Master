@@ -29,6 +29,9 @@ export interface AppProps {
   connection?: "loading" | "ready" | "error";
   errorMessage?: string;
   onRetry?: () => void;
+  switching?: boolean;
+  detailError?: string;
+  streamError?: string;
   onGuardConfirm?: (guard: GuardModel) => void;
   onGuardReject?: (guard: GuardModel) => void;
 }
@@ -75,12 +78,16 @@ export function App({
   connection = "ready",
   errorMessage,
   onRetry,
+  switching = false,
+  detailError,
+  streamError,
   onGuardConfirm,
   onGuardReject,
 }: AppProps): JSX.Element {
   const title = activeSessionId ?? "未选择会话";
   const busy = connection === "loading";
-  const failed = connection === "error";
+  const failed = connection === "error" || detailError !== undefined;
+  const failureText = connection === "error" ? errorMessage ?? "加载失败" : detailError ?? "加载失败";
 
   return (
     <div class="app">
@@ -107,12 +114,18 @@ export function App({
           {busy ? <p class="cnv-state">加载中…</p> : null}
           {failed ? (
             <div class="cnv-state cnv-state--error" role="alert">
-              <p>{errorMessage ?? "加载失败"}</p>
+              <p>{failureText}</p>
               <button type="button" class="btn" onClick={onRetry} disabled={onRetry === undefined}>
                 <span>重试</span>
               </button>
             </div>
           ) : null}
+          {switching && !failed ? <p class="cnv-state">会话加载中…</p> : null}
+          {streamError === undefined ? null : (
+            <p class="cnv-state cnv-state--warn" role="status">
+              {streamError}
+            </p>
+          )}
           {busy || failed ? null : (
             <ConversationStream
               view={view}
@@ -122,9 +135,13 @@ export function App({
           )}
           <Composer
             onSend={onSend}
-            canSend={canSend && connection === "ready"}
+            canSend={onSend !== undefined && canSend && connection === "ready" && !switching}
             disabledReason={
-              connection === "ready" ? "未配置提交端点，输入不会发送" : "会话尚未就绪，暂不能发送"
+              connection === "ready"
+                ? switching
+                  ? "会话切换中，暂不能发送"
+                  : "未配置提交端点，输入不会发送"
+                : "会话尚未就绪，暂不能发送"
             }
           />
         </main>
