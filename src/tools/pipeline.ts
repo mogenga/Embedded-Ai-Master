@@ -33,8 +33,12 @@ const MAX_ARTIFACT_ID_CHARS = 100;
 const MAX_ARTIFACT_ATTEMPTS = 1_000;
 const MAX_NAME_ECHO_CHARS = 200;
 const MAX_SCHEMA_MESSAGE_CHARS = 2_000;
+const MAX_ERROR_MESSAGE_CHARS = 2_000;
 const MAX_ISSUES = 20;
 const MAX_ISSUE_MESSAGE_CHARS = 500;
+const MAX_ISSUE_CODE_CHARS = 100;
+const MAX_ISSUE_PATH_SEGMENTS = 20;
+const MAX_ISSUE_PATH_SEGMENT_CHARS = 100;
 const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
 class ToolTimeoutError extends Error {
@@ -149,7 +153,9 @@ async function finalizeResult(
       : `\n[full output at ${artifactPath}]`;
     return { ...result, text: `${body}${marker}`, artifactPath };
   } catch (error) {
-    const text = truncateText(result.text, MAX_TEXT_CHARS);
+    const truncated = result.text.length > MAX_TEXT_CHARS;
+    const body = truncated ? result.text.slice(0, MAX_TEXT_CHARS) : result.text;
+    const text = truncated ? `${body}\n[truncated; artifact write failed]` : body;
     const artifactError = error instanceof Error ? error.message : String(error);
     return { ...result, text, detail: mergeArtifactError(result.detail, artifactError) };
   }
@@ -187,8 +193,14 @@ async function executeOne(
         .join("; ") || "schema validation failed";
     const message = truncateText(rawMessage, MAX_SCHEMA_MESSAGE_CHARS);
     const issues = parsed.error.issues.slice(0, MAX_ISSUES).map((issue) => ({
-      ...issue,
-      message: truncateText(issue.message, MAX_ISSUE_MESSAGE_CHARS),
+      code: typeof issue.code === "string" ? issue.code.slice(0, MAX_ISSUE_CODE_CHARS) : undefined,
+      path: Array.isArray(issue.path)
+        ? issue.path
+            .slice(0, MAX_ISSUE_PATH_SEGMENTS)
+            .map(String)
+            .map((segment) => segment.slice(0, MAX_ISSUE_PATH_SEGMENT_CHARS))
+        : [],
+      message: String(issue.message).slice(0, MAX_ISSUE_MESSAGE_CHARS),
     }));
     return failure("schema_validation", message, issues);
   }
@@ -230,9 +242,12 @@ async function executeOne(
     if (error instanceof Error && error.name === "AbortError") {
       return failure("tool_aborted", error.message || "tool aborted");
     }
+    const message = error instanceof Error ? error.message : String(error);
     return failure(
       "tool_execution_error",
-      error instanceof Error ? error.message : String(error),
+      truncateText(message, MAX_ERROR_MESSAGE_CHARS),
+      undefined,
+      message,
     );
   } finally {
     if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
@@ -270,7 +285,7 @@ export async function executeBatch(
 ): Promise<BatchResult[]> {
   const seen = new Set<string>();
   const duplicates = calls.map((call) => {
-    if (typeof call.id !== "string" || call.id.length === 0) return false;
+    if (typeof call.id !== "string") return false;
     if (seen.has(call.id)) return true;
     seen.add(call.id);
     return false;
