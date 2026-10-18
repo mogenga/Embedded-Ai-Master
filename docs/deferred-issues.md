@@ -735,7 +735,7 @@
 ### D-088 · `shell` 引号归一不解析 shell 展开
 
 - **发现**: 2026-10-19,第二轮红队审查(Minor 项)。
-- **现象**: 危险判定前会移除 token 内所有 `'`/`"`,但不展开 `$'/'`、`${HOME:?}`、`$(...)`、`~user` 或变量拼接;例如 `rm -rf $'/'`、`rm -rf ${HOME:?}/*` 仍可绕过根目标判断。该缺口与 D-083(`env`/`bash -c`/`xargs` 包装)不同,属 shell 自身展开语义。
+- **现象**: 危险判定前会移除 token 内所有 `'`/`"`,但不展开 `$'/'`、`${HOME:?}`、`$(...)`、`~user` 或变量拼接;例如 `rm -rf $'/'`、`rm -rf ${HOME:?}/*` 仍可绕过根目标判断。该缺口与 D-083(`env`/`bash -c`/`xargs` 包装)不同,属 shell 自身展开语义。此外,先按分隔符/空白切分再移除引号会改变 token 结构:引号内分隔符(如 `echo "safe; shutdown"`)会被误当真实命令边界(保守误拦);带空格的环境变量赋值(如 `FOO="a b" rm -rf /`)会被拆成多个 token,使首词不再是 `rm`,造成漏判。
 - **影响**: 引号拼接类绕过已封堵,但展开类绕过仍在;黑名单不能作为安全边界。
 - **触发升级条件**: 接入不可信输入;P1 权限层接入;出现实际绕过事故。
 - **修复建议**: 不做完整 shell 解析则无法闭合;可引入 shell AST/静态分析,或在 P1 权限层按真实解析结果判定。
@@ -800,3 +800,4 @@
 | 2026-10-18 | 维度4 Task6 收尾:README 补内置工具清单、fs/shell/glob/grep 语义与工具根;补 shell 截断多字节/AbortError 与 grep ENOTDIR/readdir 错误测试,工具行覆盖均 ≥90%;录入 D-077 ~ D-084(glob/grep 不响应取消、grep 先收集后截断、根 symlink 跟随、scanTruncated 保守、隐藏文件匹配、workdir 词法比较、shell 黑名单绕过、上限披露粒度) |
 | 2026-10-19 | 维度4 第一轮整体审查修复:shell 归一化根目标并跟踪 `cd`/`pushd`/`Set-Location`;grep 补 scanTruncated 披露与 1 MiB 单行上限;shell `detail.stdout/stderr` 改为 4096 字符摘要 + 字节数;补 fs write/read 失败、grep 扫描上限、path-safety 每测试 workdir、win32 忽略目录大小写与相对 cwd 归一测试;按实测修正 D-080,录入 D-085(正则 ReDoS/不可中断) |
 | 2026-10-19 | 维度4 第二轮红队修复:shell `rm` 任一 `-r/-f` + 根目标即危险、`--no-preserve-root` 一律危险、token 引号全移除、`chdir` 纳入跟踪、无参 `pushd` 保守、detail 摘要不切断代理对;glob 限制 pattern 长度/段数并折叠连续 `**/`;grep 校验 `glob` 非法、合并不可读目录披露;录入 D-086(glob ReDoS 未完全消除)与 D-087 ~ D-090(改目录方式未跟踪、shell 展开绕过、跳过披露分类、grep glob 重复编译) |
+| 2026-10-19 | 维度4 复审 minor:glob 连续 `**/` 折叠改为只从完整段边界开始(避免 `a**/**/x` 被误折叠),补回归测试;文档补齐无参 `cd`/`chdir`/`pushd` 保守语义;D-088 现象扩充引号内分隔符与带空格环境变量赋值绕过 |

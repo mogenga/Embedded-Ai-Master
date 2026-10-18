@@ -201,7 +201,7 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
 **`shell` 工具语义(P0 实现)**:
 
 - **非沙箱**:只做危险命令启发式拦截,不是沙箱;拦截列表不完备,按 shell 分隔符切段后取首词判断命令名,引号/命令替换等复杂语法可能保守误拦或漏判。判定前先移除 token 内所有 `'`/`"` 再归一目标,覆盖 `rm -rf "/"*`、`rm -rf "$HOME"/*`、`del /s /q "C:\"*` 等引号拼接。
-- **危险命令**:`rm` 带 `-r`/`-R`/`--recursive` 或 `-f`/`--force` 任一且目标为 `/`、`~`、`$HOME`/`${HOME}`、多级 `..`、盘符根(`C:`/`C:\`/`C:\*`);`--no-preserve-root` 一律危险;跟踪 `cd`/`pushd`/`chdir`/`Set-Location` 的根目标(无参 `pushd` 保守视为根),后续 `rm -r *`/`rm -f *` 一并拦截;`mkfs*`、`format <drive>:`、`diskpart`、`bcdedit`、`shutdown`/`reboot`/`poweroff`/`halt`、`dd of=/dev/*`、fork bomb、`del`/`rd` 的 `<drive>:\*` 与 `<drive>:\*.*` 通配、`reg delete HKLM`、`cipher /w`;命中返回 `dangerous_command`,不 spawn。
+- **危险命令**:`rm` 带 `-r`/`-R`/`--recursive` 或 `-f`/`--force` 任一且目标为 `/`、`~`、`$HOME`/`${HOME}`、多级 `..`、盘符根(`C:`/`C:\`/`C:\*`);`--no-preserve-root` 一律危险;跟踪 `cd`/`pushd`/`chdir`/`Set-Location` 的根目标(无参 `cd`/`chdir`/`pushd` 均保守视为根),后续 `rm -r *`/`rm -f *` 一并拦截;`mkfs*`、`format <drive>:`、`diskpart`、`bcdedit`、`shutdown`/`reboot`/`poweroff`/`halt`、`dd of=/dev/*`、fork bomb、`del`/`rd` 的 `<drive>:\*` 与 `<drive>:\*.*` 通配、`reg delete HKLM`、`cipher /w`;命中返回 `dangerous_command`,不 spawn。
 - **cwd**:`resolveInWorkdir` 后校验存在且为目录,失败 `cwd_invalid`。
 - **输出与退出**:stdout/stderr 各 1 MiB 截断并标记;`detail.stdout`/`detail.stderr` 为前 4096 字符摘要(按 UTF-16 码点边界裁剪,不切断代理对),并附 `stdoutBytes`/`stderrBytes` 与截断标记,完整输出在 `text`;非零退出仍 `isError:false`;子进程被系统信号终止返回 `isError:true`、`code:"shell_terminated"`,detail 保留 `exitCode:null` 与实际 `signal`(不把 null 伪装成 1);spawn 失败 `shell_spawn_failed`。
 - **取消**:`execute` 自管 abort——Windows 用 `taskkill /T /F` 杀进程树,POSIX 杀 `detached` 进程组;避免 Node 内置 signal 只杀 shell 导致孙进程残留;调用方中止返回 `shell_aborted`。

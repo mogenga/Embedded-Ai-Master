@@ -94,7 +94,7 @@ annotations = { readOnly: false, destructive: true };
 - 危险命令拦截(大小写不敏感, 仅明显破坏性; **不是沙箱**):
   - 判定前先移除 token 内所有 `'`/`"`, 再按 `\`→`/` 与 `path.posix.normalize` 归一目标(覆盖 `rm -rf "/"*`、`rm -rf "$HOME"/*`、`del /s /q "C:\"*` 等引号拼接绕过);
   - `rm` 带 `-r`/`-R`/`--recursive` **或** `-f`/`--force` 任一, 且目标为 `/`、`~`、`$HOME`/`${HOME}`、多级 `..`、盘符根(`C:`/`C:\`/`C:\*`); `--no-preserve-root` 一律危险;
-  - 跟踪 `cd`/`pushd`/`chdir`/`Set-Location` 的根目标, 后续 `rm -r *`/`rm -f *`、`del`/`rd /s` 通配一并拦截; 无参 `pushd` 保守视为根目标;
+  - 跟踪 `cd`/`pushd`/`chdir`/`Set-Location` 的根目标, 后续 `rm -r *`/`rm -f *`、`del`/`rd /s` 通配一并拦截; 无参 `cd`/`chdir`/`pushd` 均保守视为根目标;
   - `mkfs`、`format <drive>:`、`diskpart`、`shutdown`、`reboot`、`poweroff`、`halt`;
   - `dd ... of=/dev/...`;
   - `:(){ :|:& };:`(fork bomb);

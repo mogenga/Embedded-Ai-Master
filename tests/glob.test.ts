@@ -153,9 +153,17 @@ describe("matchesGlob", () => {
     expect(matchesGlob(tooMany, tooMany)).toBe(false);
   });
 
+  it("连续 **/ 折叠只发生在完整段边界", () => {
+    expect(matchesGlob("aX/b/x", "a**/**/x")).toBe(true);
+    expect(matchesGlob("aX/y", "a**/**/x")).toBe(false);
+    expect(matchesGlob("a/b/x", "**/**/x")).toBe(true);
+    expect(matchesGlob("a/b/c/x", "**/**/**/x")).toBe(true);
+  });
+
   it("折叠连续 **/ 后不长时间回溯", () => {
     const pattern = `${"**/".repeat(10)}x`;
     expect(matchesGlob(`${"a/".repeat(20)}x`, pattern)).toBe(true);
+    expect(matchesGlob("a/b/c/x", "**/**/**/x")).toBe(true);
     const started = Date.now();
     expect(matchesGlob(`${"a/".repeat(20)}y`, pattern)).toBe(false);
     expect(Date.now() - started).toBeLessThan(1000);

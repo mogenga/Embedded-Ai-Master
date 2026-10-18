@@ -35,7 +35,7 @@ function compilePattern(raw: string): RegExp | undefined {
   ) {
     return undefined;
   }
-  const pattern = normalized.replace(/(?:\*\*\/){2,}/g, "**/");
+  const pattern = normalized.replace(/(^|\/)(?:\*\*\/){2,}/g, "$1**/");
   if (pattern.split("/").filter((segment) => segment.length > 0).length > MAX_PATTERN_SEGMENTS) {
     return undefined;
   }
