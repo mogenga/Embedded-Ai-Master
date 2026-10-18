@@ -834,7 +834,7 @@ describe("executeBatch 落盘失败", () => {
     return blocked;
   }
 
-  it("成功结果落盘失败时按 MAX_TEXT_CHARS 截断并追加标记", async () => {
+  it("成功结果落盘失败且未超限时保留全文并追加 retained 标记", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "t".repeat(40000);
     const reg = new ToolRegistry([outputTool("big", text)]);
@@ -846,7 +846,7 @@ describe("executeBatch 落盘失败", () => {
     });
 
     const result = results[0].result;
-    const marker = "\n[truncated; artifact write failed]";
+    const marker = "\n[artifact write failed; full output retained]";
     expect(result.isError).toBe(false);
     expect(result.code).toBe("ok");
     expect(result.text).toBe(text + marker);
@@ -854,7 +854,7 @@ describe("executeBatch 落盘失败", () => {
     expect(result.detail).toMatchObject({ artifactError: expect.any(String) });
   });
 
-  it("错误结果落盘失败时按 MAX_TEXT_CHARS 截断并追加标记", async () => {
+  it("错误结果落盘失败且未超限时保留全文并追加 retained 标记", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "u".repeat(40000);
     const reg = new ToolRegistry([
@@ -872,7 +872,7 @@ describe("executeBatch 落盘失败", () => {
     });
 
     const result = results[0].result;
-    const marker = "\n[truncated; artifact write failed]";
+    const marker = "\n[artifact write failed; full output retained]";
     expect(result.isError).toBe(true);
     expect(result.code).toBe("tool_failed");
     expect(result.text).toBe(text + marker);

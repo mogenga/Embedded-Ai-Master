@@ -256,10 +256,17 @@ async function finalizeResult(
       : `\n[full output at ${artifactPath}]`;
     return { ...result, text: `${body}${marker}`, artifactPath };
   } catch (error) {
-    const body = truncateText(result.text, MAX_TEXT_CHARS);
-    const text = `${body}\n[truncated; artifact write failed]`;
+    const truncated = result.text.length > MAX_TEXT_CHARS;
+    const body = truncated ? result.text.slice(0, MAX_TEXT_CHARS) : result.text;
+    const marker = truncated
+      ? "\n[truncated; artifact write failed]"
+      : "\n[artifact write failed; full output retained]";
     const artifactError = error instanceof Error ? error.message : String(error);
-    return { ...result, text, detail: mergeArtifactError(result.detail, artifactError) };
+    return {
+      ...result,
+      text: `${body}${marker}`,
+      detail: mergeArtifactError(result.detail, artifactError),
+    };
   }
 }
 

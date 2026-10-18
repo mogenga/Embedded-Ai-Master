@@ -108,6 +108,11 @@ describe("sanitizeTerminalText", () => {
     expect(sanitizeTerminalText(input)).toBe("abcde\n\tf");
   });
 
+  it("剥离回车并保留换行", () => {
+    expect(sanitizeTerminalText("\rfirst\nsecond\r\nthird\r")).toBe("first\nsecond\nthird");
+    expect(sanitizeTerminalText("\rline")).toBe("line");
+  });
+
   it("剥离 ESC、OSC 52 与清屏序列的控制字符", () => {
     const input = `before\x1b]52;c;Zm9v\x07\x1b[2Jafter\x1b[3J`;
     const result = sanitizeTerminalText(input);

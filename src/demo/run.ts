@@ -61,7 +61,7 @@ export function withOverrides(
   return next;
 }
 
-const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F]/g;
+const TERMINAL_CONTROL_CHARS = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]/g;
 
 export function sanitizeTerminalText(text: string): string {
   return text.replace(TERMINAL_CONTROL_CHARS, "");
