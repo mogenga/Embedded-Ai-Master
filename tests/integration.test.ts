@@ -10,6 +10,26 @@ import type { LoopEvent } from "../src/loop/events.js";
 import { SessionResumeError } from "../src/session/errors.js";
 import { createSession, readSessionFile } from "../src/session/session.js";
 
+const resumeCloseFailure = vi.hoisted(() => ({ enabled: false }));
+
+vi.mock("../src/session/session.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/session/session.js")>();
+  return {
+    ...actual,
+    resumeSession: async (dir: string, opts?: { generationThresholdBytes?: number }) => {
+      const handle = await actual.resumeSession(dir, opts);
+      if (!resumeCloseFailure.enabled) return handle;
+      return {
+        ...handle,
+        close: async () => {
+          await handle.close();
+          throw new Error("close boom");
+        },
+      };
+    },
+  };
+});
+
 const tempDirs: string[] = [];
 
 async function tempDir(): Promise<string> {
@@ -19,6 +39,7 @@ async function tempDir(): Promise<string> {
 }
 
 afterEach(async () => {
+  resumeCloseFailure.enabled = false;
   vi.unstubAllEnvs();
   for (const dir of tempDirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
@@ -754,5 +775,181 @@ describe("runSession resume", () => {
     expect(secondFetch.calls[0].url).toBe("http://127.0.0.1:7777/v1/chat/completions");
     expect(secondFetch.calls[0].headers.get("authorization")).toBe("Bearer fresh-secret");
     expect(Object.keys(await readHeader(sessionDir))).not.toContain("apiKey");
+  });
+});
+async function readHeaderText(sessionDir: string): Promise<string> {
+  return readFile(path.join(sessionDir, "header.json"), "utf8");
+}
+
+async function logLineCount(sessionDir: string): Promise<number> {
+  return readSessionFile(path.join(sessionDir, "session.v1.jsonl")).length;
+}
+
+async function resumeError(
+  sessionDir: string,
+  extra: { model?: string; systemPrompt?: string; sessionId?: string },
+): Promise<unknown> {
+  return runSession({
+    input: "again",
+    model: "gw/flash",
+    providersText: providersWith({ other: { contextWindow: 8192, maxOutput: 512 } }),
+    sessionDir,
+    resume: true,
+    fetchImpl: mockFetch([EMPTY_RESPONSE]).impl,
+    ...extra,
+  })
+    .next()
+    .then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+}
+
+describe("runSession resume 失败原子性", () => {
+  it("model mismatch 时不改变 header 状态与日志", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "atomic-model");
+    await createSession(sessionDir, { id: "atomic-model", model: "gw/flash" });
+    const beforeHeader = await readHeaderText(sessionDir);
+    const beforeLines = await logLineCount(sessionDir);
+
+    const error = await resumeError(sessionDir, { model: "gw/other" });
+
+    expect(error).toBeInstanceOf(SessionResumeError);
+    expect((error as SessionResumeError).code).toBe("model_mismatch");
+    expect(await readHeaderText(sessionDir)).toBe(beforeHeader);
+    expect(await logLineCount(sessionDir)).toBe(beforeLines);
+  });
+
+  it("systemPrompt mismatch 时不改变 header 状态与日志", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "atomic-system");
+    await createSession(sessionDir, {
+      id: "atomic-system",
+      model: "gw/flash",
+      systemPrompt: "be brief",
+    });
+    const beforeHeader = await readHeaderText(sessionDir);
+    const beforeLines = await logLineCount(sessionDir);
+
+    const error = await resumeError(sessionDir, { systemPrompt: "be verbose" });
+
+    expect(error).toBeInstanceOf(SessionResumeError);
+    expect((error as SessionResumeError).code).toBe("system_prompt_mismatch");
+    expect(await readHeaderText(sessionDir)).toBe(beforeHeader);
+    expect(await logLineCount(sessionDir)).toBe(beforeLines);
+  });
+
+  it("sessionId mismatch 抛 session_id_mismatch 且不改变 header 状态与日志", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "atomic-session-id");
+    await createSession(sessionDir, { id: "real-session-id", model: "gw/flash" });
+    const beforeHeader = await readHeaderText(sessionDir);
+    const beforeLines = await logLineCount(sessionDir);
+
+    const error = await resumeError(sessionDir, { sessionId: "other-session-id" });
+
+    expect(error).toBeInstanceOf(SessionResumeError);
+    expect((error as SessionResumeError).code).toBe("session_id_mismatch");
+    expect(await readHeaderText(sessionDir)).toBe(beforeHeader);
+    expect(await logLineCount(sessionDir)).toBe(beforeLines);
+  });
+
+  it("resume 校验失败时 close 异常不覆盖原 SessionResumeError", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "atomic-close-validate");
+    await createSession(sessionDir, { id: "real-session-id", model: "gw/flash" });
+
+    resumeCloseFailure.enabled = true;
+    const error = await resumeError(sessionDir, { sessionId: "other-session-id" });
+
+    expect(error).toBeInstanceOf(SessionResumeError);
+    expect((error as SessionResumeError).code).toBe("session_id_mismatch");
+  });
+
+  it("运行期主错误时 close 异常不覆盖原错误", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "atomic-close-runtime");
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    resumeCloseFailure.enabled = true;
+    const failingFetch = vi.fn(async () => ({
+      ok: false,
+      status: 400,
+      text: async () => "primary boom",
+    })) as unknown as typeof fetch;
+
+    const error = await collect(
+      runSession({
+        input: "again",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        fetchImpl: failingFetch,
+      }),
+    ).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain("status 400");
+    expect((error as Error).message).not.toContain("close boom");
+  });
+});
+
+describe("runSession resume systemPrompt 幂等", () => {
+  it("已有 system 且 opts.systemPrompt 相同时不重复写 system", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "system-same");
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        systemPrompt: "be brief",
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    const secondFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "again",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        systemPrompt: "be brief",
+        fetchImpl: secondFetch.impl,
+      }),
+    );
+
+    const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(log.filter((event) => event.type === "system")).toHaveLength(1);
+    expect(secondFetch.calls[0].body.messages).toEqual([
+      { role: "system", content: "be brief" },
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "done", tool_calls: [] },
+      { role: "user", content: "again" },
+    ]);
   });
 });

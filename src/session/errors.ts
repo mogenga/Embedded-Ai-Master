@@ -33,6 +33,7 @@ export class SessionForkError extends Error {
 export type SessionResumeCode =
   | "model_mismatch"
   | "system_prompt_mismatch"
+  | "session_id_mismatch"
   | "missing_session_dir";
 
 export class SessionResumeError extends Error {

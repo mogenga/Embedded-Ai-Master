@@ -362,6 +362,22 @@
 - **触发升级条件**: 需要区分 artifact 缺失原因;工具产物可能为目录;出现因 artifact 为目录导致的 fork 失败。
 - **修复建议**: 为越界、缺失、非普通文件定义区分性标记或原因码(如 `artifactRejected`/`artifactMissing`/`artifactUnsupported`);复制前用 `stat().isFile()` 校验,非普通文件按不支持标记并跳过复制。
 
+### D-043 · `header.workdir` 与实际工具 cwd 来源不一致
+
+- **发现**: 2026-10-18,维度6 Task6 审查修复。
+- **现象**: `runSession` create 路径把 `workdir: opts.cwd ?? process.cwd()` 写入 `header.workdir`;但传给 `LoopCtx.cwd` 的仍是 `opts.cwd`(未提供即 `undefined`),工具管线在 `src/tools/pipeline.ts:314` 用 `opts.cwd ?? session.dir` 作为实际执行目录。未显式传 `opts.cwd` 时,header 记录的是启动进程的 cwd,工具实际在 `session.dir` 下执行。
+- **影响**: header 元数据无法用于还原/审计工具真实工作目录;未来若基于 `header.workdir` 重放、fork 或恢复编辑上下文,会得到与执行语义不符的路径。当前工具仅 `echo`,风险低。
+- **触发升级条件**: 出现依赖 `header.workdir` 恢复执行上下文的功能(重放、继续编辑、脚本路径解析);或工具从 `echo` 扩展到文件读写/命令执行。
+- **修复建议**: 统一来源——create 时写入 `opts.cwd ?? session.dir`,或让 `LoopCtx.cwd` 默认取 `header.workdir`;在 design 中明确 `header.workdir` 是「会话工作目录」还是「进程启动目录」。
+
+### D-044 · resume 只校验首个 system 事件
+
+- **发现**: 2026-10-18,维度6 Task6 审查修复。
+- **现象**: `runSession` resume 时用 `events.find((event) => event.type === "system")` 只比较首条 system 事件内容;后续 system 事件既不参与内容比较,也不影响「无 system」判定。当前 P0 仅由 `createSession` 写入一条 system,`query` 只在无 system 时补写一条,不会产生多条。
+- **影响**: 若未来支持多 system 事件(分层提示、运行时追加/替换),resume 可能放行与当前 `systemPrompt` 不一致的会话,空会话补写判定也可能误判。
+- **触发升级条件**: 引入多 system 事件;compaction 或运行时修改 system prompt;多段提示拼接。
+- **修复建议**: 明确 `systemPrompt` 与多 system 的映射策略(拼接、比较全部、或只允许首条),校验所有相关事件并给出确定性规则。
+
 ---
 
 ## 变更记录
@@ -385,3 +401,4 @@
 | 2026-10-18 | 维度6 Task3 审查修复:录入 D-039(同目录并发 resume/append 无跨进程锁);D-035 扩展记录末行缺换行导致续写粘连;`usageTotals` 容错非对象 payload,导出 `openSessionHandle` 供 fork 复用 |
 | 2026-10-18 | 维度6 Task4 审查修复:fork 增加 artifact 词法越界拒绝、失败回滚、非递归 `mkdir` 原子占位、同名 artifact 后缀、targetDir 为文件拒绝;D-039 扩展记录 fork 后 append 仍无跨进程锁,录入 D-040(artifact 路径仅词法校验,未解析链接/短名) |
 | 2026-10-18 | 维度6 Task5:rollover 接线 `create/resume/fork`(默认 50 MiB、非法阈值 `TypeError`、resume/fork 字节校准);补已存在空目录与父路径为文件的 fork 用例;录入 D-041(fork 回滚父目录残留/静默)、D-042(artifact 缺失原因不可区分/目录 artifact 未定义) |
+| 2026-10-18 | 维度6 Task6 审查修复:resume 改为「先读取校验、后 `resumeSession`」,失败不写 header/日志;新增 `session_id_mismatch`;`finally` 的 close 异常不再覆盖主错误;录入 D-043(`header.workdir` 与工具 cwd 来源不一致)、D-044(多 system 只校验首个) |
