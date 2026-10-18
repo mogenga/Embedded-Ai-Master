@@ -27,6 +27,8 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const ARTIFACT_TOKEN_THRESHOLD = 8_000;
 const MAX_TEXT_TOKENS = 25_000;
 const MAX_TEXT_CHARS = MAX_TEXT_TOKENS * 4;
+const MAX_ARTIFACT_ID_CHARS = 100;
+const WINDOWS_RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
 
 class ToolTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -49,8 +51,14 @@ function failure(code: string, message: string, detail?: unknown): ToolResult {
 }
 
 function safeArtifactId(id: string): string {
-  const safe = id.replace(/[^a-zA-Z0-9_-]/g, "_");
-  return safe.length === 0 ? "tool" : safe;
+  const safe = id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, MAX_ARTIFACT_ID_CHARS) || "tool";
+  return WINDOWS_RESERVED_NAME.test(safe) ? `_${safe}` : safe;
+}
+
+function resolveTimeoutMs(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) return DEFAULT_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return DEFAULT_TIMEOUT_MS;
+  return timeoutMs;
 }
 
 async function persistIfLarge(
@@ -93,7 +101,7 @@ async function runOne(
     return { id: call.id, result: failure("tool_aborted", "tool aborted before execution") };
   }
 
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = AbortSignal.any([opts.signal, timeoutSignal]);
   const ctx: ToolCtx = { sessionId: session.id, cwd: opts.cwd ?? session.dir };
