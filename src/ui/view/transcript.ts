@@ -43,6 +43,9 @@ export interface ToolCardModel {
   readout?: ReadoutRow[];
   hits?: HitRow[];
   evidence?: EvidenceRow[];
+  text?: string;
+  artifactPath?: string;
+  pending?: boolean;
   errorCode?: string;
   errorText?: string;
   readOnly?: boolean;
@@ -78,8 +81,13 @@ export interface TranscriptView {
   status: "idle" | "diagnosing" | "done" | "interrupted";
   events: readonly TranscriptEvent[];
   usage?: { prompt: number; completion: number; cached: number; costUsd?: number };
+  context?: { used: number; limit: number };
+  cost?: number;
+  sessionId?: string;
   interruptReason?: string;
 }
+
+export const DEMO_SESSION_ID = "#128";
 
 const ASK_PREFIX = "第 0 步分流";
 
@@ -135,6 +143,7 @@ function createToolCard(id: string, name: string, args: unknown): ToolCardModel 
     name,
     args: formatArgs(args),
     ok: true,
+    pending: true,
     kind: defaultKind(name),
     readOnly: annotations?.readOnly === true,
     destructive: annotations?.destructive === true,
@@ -197,6 +206,8 @@ function evidenceRows(raw: unknown): EvidenceRow[] | undefined {
 
 function applyToolResult(card: ToolCardModel, payload: ToolResultPayload): void {
   card.ok = payload.ok;
+  card.pending = undefined;
+  if (payload.artifactPath !== undefined) card.artifactPath = payload.artifactPath;
   const detail = isRecord(payload.detail) ? payload.detail : undefined;
   if (detail !== undefined) {
     const ms = asNumber(detail.ms);
@@ -214,9 +225,26 @@ function applyToolResult(card: ToolCardModel, payload: ToolResultPayload): void 
     card.errorText = payload.text;
     return;
   }
-  if (card.readout !== undefined) card.kind = "readout";
-  else if (card.hits !== undefined) card.kind = "hitlist";
-  else if (card.evidence !== undefined) card.kind = "evidence";
+  if (card.readout !== undefined) {
+    card.kind = "readout";
+    return;
+  }
+  if (card.hits !== undefined) {
+    card.kind = "hitlist";
+    return;
+  }
+  if (card.evidence !== undefined) {
+    card.kind = "evidence";
+    return;
+  }
+  if (payload.text.length > 0) {
+    card.kind = "readout";
+    card.text = payload.text;
+    return;
+  }
+  card.kind = "error";
+  card.errorCode = "empty_result";
+  card.errorText = "工具未返回读数";
 }
 
 function toToolResultPayload(payload: Record<string, unknown>): ToolResultPayload {
@@ -302,24 +330,34 @@ function pushToolSkeleton(
   tools.set(id, entry);
 }
 
-function buildView(
-  events: TranscriptEvent[],
-  status: TranscriptView["status"],
-  usage: UsageModel | undefined,
-  interruptReason: string | undefined,
-): TranscriptView {
-  const view: TranscriptView = { steps: reduceStep(events), status, events };
-  if (usage !== undefined) view.usage = usage;
-  if (interruptReason !== undefined) view.interruptReason = interruptReason;
+function buildView(events: TranscriptEvent[], meta: ViewMeta): TranscriptView {
+  const view: TranscriptView = { steps: reduceStep(events), status: meta.status, events };
+  if (meta.usage !== undefined) view.usage = meta.usage;
+  if (meta.context !== undefined) view.context = meta.context;
+  if (meta.cost !== undefined) view.cost = meta.cost;
+  if (meta.sessionId !== undefined) view.sessionId = meta.sessionId;
+  if (meta.interruptReason !== undefined) view.interruptReason = meta.interruptReason;
   return view;
+}
+
+interface ViewMeta {
+  status: TranscriptView["status"];
+  usage?: UsageModel;
+  context?: { used: number; limit: number };
+  cost?: number;
+  sessionId?: string;
+  interruptReason?: string;
 }
 
 export function transcriptFromSession(events: readonly SessionEvent[]): TranscriptView {
   const out: TranscriptEvent[] = [];
   const tools = new Map<string, Extract<TranscriptEvent, { kind: "tool" }>>();
   let usage: UsageModel | undefined;
+  let cost: number | undefined;
   let interruptReason: string | undefined;
   let sawVerdict = false;
+  let sawDone = false;
+  let interrupted = false;
 
   for (const event of events) {
     const payload = event.payload;
@@ -357,11 +395,19 @@ export function transcriptFromSession(events: readonly SessionEvent[]): Transcri
       }
       case "usage": {
         usage = mergeUsage(usage, payload);
+        const delta = asNumber(payload.costUsd);
+        if (delta !== undefined) cost = (cost ?? 0) + delta;
+        break;
+      }
+      case "status": {
+        if (payload.status === "done") sawDone = true;
+        else if (payload.status === "usage_missing") interruptReason = "缺少 usage 计费信息";
         break;
       }
       case "interrupted": {
         const reason = asString(payload.reason) ?? "已中断";
         interruptReason = reason;
+        interrupted = true;
         out.push({ id: `ev-${event.seq}`, kind: "interrupted", reason });
         break;
       }
@@ -370,16 +416,23 @@ export function transcriptFromSession(events: readonly SessionEvent[]): Transcri
     }
   }
 
-  const status: TranscriptView["status"] =
-    interruptReason !== undefined ? "interrupted" : sawVerdict ? "done" : out.length > 0 ? "diagnosing" : "idle";
-  return buildView(out, status, usage, interruptReason);
+  const status: TranscriptView["status"] = interrupted
+    ? "interrupted"
+    : sawDone || sawVerdict
+      ? "done"
+      : out.length > 0
+        ? "diagnosing"
+        : "idle";
+  return buildView(out, { status, usage, cost: cost ?? usage?.costUsd, interruptReason });
 }
 
 export function transcriptFromLoop(events: readonly LoopEvent[]): TranscriptView {
   const out: TranscriptEvent[] = [];
   const tools = new Map<string, Extract<TranscriptEvent, { kind: "tool" }>>();
   let interruptReason: string | undefined;
+  let cost: number | undefined;
   let finished = false;
+  let interrupted = false;
 
   events.forEach((event, index) => {
     switch (event.kind) {
@@ -401,8 +454,13 @@ export function transcriptFromLoop(events: readonly LoopEvent[]): TranscriptView
         applyToolResult(card.tool, event);
         break;
       }
+      case "turn_end": {
+        if (event.costUsd !== undefined) cost = (cost ?? 0) + event.costUsd;
+        break;
+      }
       case "interrupted": {
         interruptReason = event.reason;
+        interrupted = true;
         out.push({ id: `loop-${index}`, kind: "interrupted", reason: event.reason });
         break;
       }
@@ -415,9 +473,14 @@ export function transcriptFromLoop(events: readonly LoopEvent[]): TranscriptView
     }
   });
 
-  const status: TranscriptView["status"] =
-    interruptReason !== undefined ? "interrupted" : finished ? "done" : out.length > 0 ? "diagnosing" : "idle";
-  return buildView(out, status, undefined, interruptReason);
+  const status: TranscriptView["status"] = interrupted
+    ? "interrupted"
+    : finished
+      ? "done"
+      : out.length > 0
+        ? "diagnosing"
+        : "idle";
+  return buildView(out, { status, cost, interruptReason });
 }
 
 const TRANSCRIPT_KINDS = new Set(["user", "assistant", "ask", "tool", "verdict", "guard", "interrupted"]);

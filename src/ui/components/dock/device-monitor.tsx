@@ -3,7 +3,7 @@ import { useState } from "preact/hooks";
 import { Icon } from "../../icons.js";
 import type { Register } from "./dock.js";
 
-type ResetState = "idle" | "confirming" | "executed";
+type ResetState = "idle" | "confirming" | "executing";
 
 export function DeviceMonitor({ registers }: { registers: Register[] }): JSX.Element {
   const [reset, setReset] = useState<ResetState>("idle");
@@ -45,10 +45,10 @@ export function DeviceMonitor({ registers }: { registers: Register[] }): JSX.Ele
       {reset === "confirming" ? (
         <div class="confirm">
           <p>
-            复位目标 <strong>STM32F407ZGT6</strong>，写入 <code>AIRCR.SYSRESETREQ = 1</code>。
+            复位目标 <strong>STM32F407ZGT6</strong>，写入 <code>AIRCR @ 0xE000_ED0C = 0x05FA_0004</code>。
           </p>
           <div class="btn-row">
-            <button type="button" class="btn btn--danger" onClick={() => setReset("executed")}>
+            <button type="button" class="btn btn--danger" onClick={() => setReset("executing")}>
               <Icon name="i-check" size={14} />
               <span>确认复位</span>
             </button>
@@ -58,10 +58,10 @@ export function DeviceMonitor({ registers }: { registers: Register[] }): JSX.Ele
           </div>
         </div>
       ) : null}
-      {reset === "executed" ? (
-        <p class="confirm-done">
-          <Icon name="i-check" size={14} />
-          <span>已执行复位</span>
+      {reset === "executing" ? (
+        <p class="confirm-pending" role="status">
+          <Icon name="i-play" size={14} />
+          <span>执行中，等待工具结果</span>
         </p>
       ) : null}
       <table class="reg-table">

@@ -1,8 +1,29 @@
 import { describe, expect, it } from "vitest";
-import { transcriptFromSession, reduceStep } from "../../src/ui/view/transcript.js";
+import { DEMO_SESSION_ID, transcriptFromSession, transcriptFromLoop, reduceStep } from "../../src/ui/view/transcript.js";
 import type { TranscriptEvent } from "../../src/ui/view/transcript.js";
 import type { SessionEvent } from "../../src/session/types.js";
+import type { LoopEvent } from "../../src/loop/events.js";
 import { UART_TRANSCRIPT_EVENTS } from "../../src/ui/demo/fixtures.js";
+
+function toolPair(result: Record<string, unknown>): SessionEvent[] {
+  return [
+    {
+      seq: 1,
+      ts: "t",
+      type: "assistant",
+      payload: {
+        content: "",
+        toolCalls: [{ id: "c1", name: "serial_read", arguments: { port: "COM3" } }],
+      },
+    },
+    { seq: 2, ts: "t", parent: 1, type: "tool_result", payload: { id: "c1", ...result } },
+  ];
+}
+
+function lastTool(events: readonly SessionEvent[]): Extract<TranscriptEvent, { kind: "tool" }> {
+  const view = transcriptFromSession(events);
+  return view.events.filter((e) => e.kind === "tool").at(-1) as Extract<TranscriptEvent, { kind: "tool" }>;
+}
 
 describe("transcript", () => {
   it("user 事件渲染为用户气泡", () => {
@@ -44,5 +65,82 @@ describe("transcript", () => {
   it("五步路径：verdict 后全部 done", () => {
     const steps = reduceStep(UART_TRANSCRIPT_EVENTS);
     expect(steps.map((s) => s.state)).toEqual(["done", "done", "done", "done", "done"]);
+  });
+  it("成功但无 detail 且有 text 时投影为 readout 纯文本", () => {
+    const tool = lastTool(toolPair({ ok: true, text: "0x0000_002E" }));
+    expect(tool.tool.kind).toBe("readout");
+    expect(tool.tool.text).toBe("0x0000_002E");
+    expect(tool.tool.readout).toBeUndefined();
+  });
+  it("成功但无 detail 且 text 为空时投影为空读数错误", () => {
+    const tool = lastTool(toolPair({ ok: true, text: "" }));
+    expect(tool.tool.kind).toBe("error");
+    expect(tool.tool.errorCode).toBe("empty_result");
+    expect(tool.tool.errorText).toBe("工具未返回读数");
+  });
+  it("artifactPath 透传到工具卡", () => {
+    const tool = lastTool(
+      toolPair({
+        ok: true,
+        text: "",
+        artifactPath: "artifacts/read.bin",
+        detail: { readout: [{ label: "读回", value: "0x00" }] },
+      }),
+    );
+    expect(tool.tool.artifactPath).toBe("artifacts/read.bin");
+    expect(tool.tool.kind).toBe("readout");
+  });
+  it("工具骨架 pending，结果到达后清除", () => {
+    const skeleton = transcriptFromSession(toolPair({}).slice(0, 1));
+    const card = skeleton.events[0] as Extract<TranscriptEvent, { kind: "tool" }>;
+    expect(card.tool.pending).toBe(true);
+    expect(card.tool.ok).toBe(true);
+    const settled = lastTool(toolPair({ ok: true, text: "x" }));
+    expect(settled.tool.pending).toBeUndefined();
+  });
+  it("status done 投影为已完成", () => {
+    const events: SessionEvent[] = [
+      { seq: 1, ts: "t", type: "user", payload: { content: "症状" } },
+      { seq: 2, ts: "t", type: "status", payload: { status: "done" } },
+    ];
+    expect(transcriptFromSession(events).status).toBe("done");
+  });
+  it("status usage_missing 保持诊断中并记录中断原因", () => {
+    const events: SessionEvent[] = [
+      { seq: 1, ts: "t", type: "user", payload: { content: "症状" } },
+      { seq: 2, ts: "t", type: "status", payload: { status: "usage_missing" } },
+    ];
+    const view = transcriptFromSession(events);
+    expect(view.status).toBe("diagnosing");
+    expect(view.interruptReason).toBeTruthy();
+    expect(view.events.some((e) => e.kind === "interrupted")).toBe(false);
+  });
+  it("status 未知值忽略", () => {
+    const events: SessionEvent[] = [
+      { seq: 1, ts: "t", type: "user", payload: { content: "症状" } },
+      { seq: 2, ts: "t", type: "status", payload: { status: "unknown_value" } },
+    ];
+    const view = transcriptFromSession(events);
+    expect(view.status).toBe("diagnosing");
+    expect(view.interruptReason).toBeUndefined();
+  });
+  it("usage 事件投影 usage 与累计 cost", () => {
+    const view = transcriptFromSession(UART_TRANSCRIPT_EVENTS);
+    expect(view.usage).toMatchObject({ prompt: 8120, completion: 1460, cached: 2048 });
+    expect(view.cost).toBeCloseTo(0.018);
+  });
+  it("loop 的 turn_end.costUsd 累计到 view.cost", () => {
+    const events: LoopEvent[] = [
+      { kind: "model_message", content: "分析中" },
+      { kind: "turn_end", turn: 1, costUsd: 0.002 },
+      { kind: "turn_end", turn: 2, costUsd: 0.003 },
+      { kind: "done", finishReason: "no_tool_calls" },
+    ];
+    const view = transcriptFromLoop(events);
+    expect(view.cost).toBeCloseTo(0.005);
+    expect(view.status).toBe("done");
+  });
+  it("DEMO_SESSION_ID 为 #128", () => {
+    expect(DEMO_SESSION_ID).toBe("#128");
   });
 });

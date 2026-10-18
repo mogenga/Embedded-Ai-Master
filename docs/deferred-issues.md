@@ -485,6 +485,38 @@
 - **触发升级条件**: CI/开发机仅安装其他 Chromium 发行版;需要无人工配置执行。
 - **修复建议**: 扩展候选路径或读取注册表/常见包管理器安装位置;文档明确 `CHROME_PATH` 为兜底入口。
 
+### D-058 · Dock/设备/日志为静态演示数据
+
+- **发现**: 2026-10-18,Task 11 第一轮整体审查修复。
+- **现象**: `App` 用 `DEMO_REGISTERS` / `DEMO_LOG_LINES` 渲染调试坞;`DeviceMonitor` 的芯片型号、探针连接、CPU 状态为字面量;复位确认后只进入「执行中,等待工具结果」,没有外部事件把它推进到「已执行」。
+- **影响**: 演示态可用,但无法反映真实设备与日志;复位流程在无后端时永久停留执行中(有意的诚实行为,不伪造成功)。
+- **触发升级条件**: 接入设备状态/日志事件;复位动作接 action 端点并回传结果。
+- **修复建议**: Dock 数据改为 props 或事件投影;`DeviceMonitor` 接收设备状态与复位结果事件,由事件驱动「已执行」。
+
+### D-059 · 回放/导出按钮未接行为
+
+- **发现**: 2026-10-18,Task 11 第一轮整体审查修复。
+- **现象**: `ConversationHeader` 的「回放」「导出 transcript」按钮没有 `onClick`,点击无任何反馈或副作用。
+- **影响**: 用户无法从界面触发回放或导出;按钮存在但不可用,可能被误认为已实现。
+- **触发升级条件**: 交付回放/导出能力;验收脚本需要点击验证。
+- **修复建议**: 增加 `onReplay` / `onExport` 回调并由宿主实现(导出 transcript 可序列化 `TranscriptView`);未接线时禁用按钮并给出可见说明。
+
+### D-060 · SSE 无后端时输入处理
+
+- **发现**: 2026-10-18,Task 11 第一轮整体审查修复。
+- **现象**: `main.tsx` 中 `VITE_ACTION_URL` 未配置时 `console.warn` 后返回;配置了 `VITE_EVENT_STREAM_URL` 但无 action 端点时,Composer 仍清空输入且界面无失败提示。D-053 记录的是输入被清空,这里记录的是 SSE 与 action 两条通道不同步时的处理缺口。
+- **影响**: 流式模式下用户误以为消息已提交;无可见失败态,无法重试。
+- **触发升级条件**: 接入真实 SSE 服务端;需要提交中/失败态与重发。
+- **修复建议**: 统一 `onSend` 返回受理结果,Composer 仅在受理后清空;无 action 端点时禁用发送并显示说明;失败时回填原文。
+
+### D-061 · StatusBar context/limit 来源未定
+
+- **发现**: 2026-10-18,Task 11 第一轮整体审查修复。
+- **现象**: `TranscriptView.context` 已在类型与 App 接线中支持(格式化为 `used / limit`),但 `SessionEvent` / `LoopEvent` 没有 context 投影来源;演示态始终显示 `—`。
+- **影响**: 上下文用量无法在状态栏真实呈现;接入后需要确定 used/limit 的统计口径(是否含缓存、是否按模型上限)。
+- **触发升级条件**: 内核提供上下文用量事件;状态栏需要显示真实占用。
+- **修复建议**: 由内核/服务端在 `usage` 或独立 `context` 事件中提供 `used`/`limit`;明确是否包含 cached token,并在 spec 补充投影规则。
+
 ---
 
 ## 变更记录
@@ -513,4 +545,5 @@
 | 2026-10-18 | 第一轮整体审查修复:fork 边界改为前缀可投影;resume 增加崩溃尾部恢复;统一 header 校验;D-042 扩展记录越界/缺失共用 artifactMissing;D-046 补充 close 失败不重试语义 |
 | 2026-10-18 | 第二轮红队修复 C-1/I-1:读取与 append 增加 lstat 普通文件/非链接校验;resume 崩溃恢复改为先 append 后写 header open 并支持失败回滚与幂等补 interrupted;fork source/target/artifact 增加 realpath 边界;录入 D-047(TOCTOU/junction/短名)、D-048(代文件不连续仍被接受);D-040 扩展记录 realpath 接线与残余缺口 |
 | 2026-10-18 | 最终加固:header 临时文件改为 `header.json.<uuid>.tmp` + `wx`,避免预置链接写入越界;补 `readSessionFile` symlink 直达用例与 Windows 无权限 skipIf;design §5 补 symlink/payload/恢复幂等/realpath 条目;录入 D-049(create/resume 跟随目录链接与 fork 不一致)、D-050(payload 非对象 fail-closed 的旧日志兼容性影响);dev-notes 明确恢复补偿分支为防御性 |
+| 2026-10-18 | P0 前端 Task 11 第一轮整体审查修复:录入 D-058 ~ D-061(Dock 静态数据、回放/导出未接线、SSE 无后端输入处理、StatusBar context/limit 来源);V13 改为检查一致性测试文件,验收脚本清理失败不再吞汇总 |
 | 2026-10-18 | P0 前端 Task 10 视觉验收:录入 D-051 ~ D-057(action 端点契约、StatusBar 状态推断、无后端清空输入、717px 树内部滚动、V3 滚动条口径、V11 静态 Tab 范围、Chromium 探测覆盖);设计 v1.2 同步 V2/V3/V6/V11 口径 |

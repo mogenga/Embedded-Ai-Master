@@ -107,4 +107,149 @@ describe("cards", () => {
     expect(root.querySelector(".tool.is-destructive")).not.toBeNull();
     expect(root.querySelector(".tool.is-destructive .tool-head")).not.toBeNull();
   });
+  it("pending 工具卡显示执行中且不显示成功勾", () => {
+    const root = mount();
+    render(
+      <ToolCard tool={{ id: "p", name: "mem_read", args: "0x0", ok: true, kind: "readout", pending: true }} />,
+      root,
+    );
+    expect(root.textContent).toContain("执行中");
+    const flag = root.querySelector(".tool-flag--pending");
+    expect(flag).not.toBeNull();
+    expect(flag?.querySelector('use[href="#i-check"]')).toBeNull();
+  });
+  it("成功无 detail 的 text 工具卡渲染纯文本", () => {
+    const root = mount();
+    render(
+      <ToolCard
+        tool={{ id: "t", name: "serial_read", args: "COM3", ok: true, kind: "readout", text: "0x0000_002E" }}
+      />,
+      root,
+    );
+    expect(root.querySelector(".tool-text")?.textContent).toBe("0x0000_002E");
+  });
+  it("text 折叠区显示行数与字节数并可展开", async () => {
+    const root = mount();
+    const text = Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\n");
+    render(<ToolCard tool={{ id: "t", name: "serial_read", args: "COM3", ok: true, kind: "readout", text }} />, root);
+    const count = root.querySelector(".tool-fold-count")?.textContent ?? "";
+    expect(count).toContain("10 行");
+    expect(count).toContain("B");
+    expect(root.querySelector(".tool-text")).toBeNull();
+    const btn = root.querySelector<HTMLButtonElement>(".tool-fold-btn");
+    btn?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(root.querySelector(".tool-text")?.textContent).toBe(text);
+  });
+  it("errorText 为空时回退固定文案", () => {
+    const root = mount();
+    render(
+      <ToolCard
+        tool={{ id: "e", name: "serial_read", args: "COM3", ok: false, kind: "error", errorCode: "io_timeout", errorText: "" }}
+      />,
+      root,
+    );
+    expect(root.textContent).toContain("工具未返回错误说明");
+  });
+  it("readOnly 工具卡以中性标记消费", () => {
+    const root = mount();
+    render(
+      <ToolCard
+        tool={{ id: "r", name: "mem_read", args: "0x0", ok: true, kind: "readout", readOnly: true, readout: [] }}
+      />,
+      root,
+    );
+    expect(root.querySelector(".tool")?.getAttribute("data-ro")).toBe("true");
+  });
+  it("artifactPath 在无结构化内容时展示", () => {
+    const root = mount();
+    render(
+      <ToolCard
+        tool={{ id: "a", name: "serial_read", args: "COM3", ok: true, kind: "readout", artifactPath: "artifacts/read.bin" }}
+      />,
+      root,
+    );
+    expect(root.textContent).toContain("artifacts/read.bin");
+  });
+  it("GuardNotice 待确认提供确认与拒绝入口，确认后仅执行中", async () => {
+    const root = mount();
+    let confirmed = 0;
+    render(
+      <GuardNotice
+        guard={{ action: "写入", address: "0x40004408", value: "0x0009", state: "待确认" }}
+        onConfirm={() => {
+          confirmed += 1;
+        }}
+      />,
+      root,
+    );
+    const confirm = [...root.querySelectorAll<HTMLButtonElement>(".guard-actions button")].find((b) =>
+      b.textContent?.includes("确认写入"),
+    );
+    expect(confirm).toBeDefined();
+    confirm?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(confirmed).toBe(1);
+    expect(root.querySelector(".guard")?.getAttribute("data-state")).toBe("执行中");
+    expect(root.textContent).toContain("执行中，等待工具结果");
+    expect(root.textContent).not.toContain("已执行");
+    expect(root.querySelector(".guard-actions")).toBeNull();
+  });
+  it("GuardNotice 拒绝后状态为已拒绝", async () => {
+    const root = mount();
+    let rejected = 0;
+    render(
+      <GuardNotice
+        guard={{ action: "写入", address: "0x40004408", value: "0x0009", state: "待确认" }}
+        onReject={() => {
+          rejected += 1;
+        }}
+      />,
+      root,
+    );
+    const reject = [...root.querySelectorAll<HTMLButtonElement>(".guard-actions button")].find((b) =>
+      b.textContent?.includes("拒绝"),
+    );
+    reject?.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(rejected).toBe(1);
+    expect(root.querySelector(".guard")?.getAttribute("data-state")).toBe("已拒绝");
+    expect(root.textContent).not.toContain("已执行");
+  });
+  it("判决卡根因中寄存器与时钟名使用行内代码", () => {
+    const root = mount();
+    render(
+      <VerdictCard
+        verdict={{
+          rootCause: "RCC_CFGR 显示 PCLK1 = 84 MHz，但 HSE 未起振，RCC_CFGR 读回 0x00000000。",
+          evidence: [],
+          prediction: "改 BRR 后复测。",
+          ownership: [],
+          confidence: "高",
+        }}
+      />,
+      root,
+    );
+    const codes = [...root.querySelectorAll(".vc-body .k")].map((el) => el.textContent ?? "");
+    expect(codes).toContain("PCLK1");
+    expect(codes).toContain("HSE");
+    expect(codes.some((text) => text.includes("0x00000000"))).toBe(true);
+  });
+  it("低置信度追加不确定性说明", () => {
+    const root = mount();
+    render(
+      <VerdictCard
+        verdict={{
+          rootCause: "可能为时钟源问题。",
+          evidence: [],
+          prediction: "复测。",
+          ownership: [],
+          confidence: "低",
+        }}
+      />,
+      root,
+    );
+    expect(root.textContent).toContain("低置信度");
+    expect(root.textContent).toContain("不确定");
+  });
 });

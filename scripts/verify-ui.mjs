@@ -504,15 +504,28 @@ async function main() {
       treeClipped.length === 0;
     check("V6", "知识库树完整", v6Ok, `workspace=${tree.workspaceHeight} railTop=${tree.railTopHeight} tree=${tree.treeHeight} 厂商子项=${tree.childrenCount} 各底边=${tree.childrenBottoms.join(",")} 裁剪=${treeClipped.length}`, "workspace=717 且厂商分流子树完整可见");
 
-    check("V13", "回放一致性", true, "由 tests/ui/transcript.test.ts 覆盖（npm run test:ui）", "vitest 覆盖，脚本引用不重复");
+    const consistencyPath = join(ROOT, "tests", "ui", "transcript-consistency.test.ts");
+    const consistencySource = existsSync(consistencyPath) ? readFileSync(consistencyPath, "utf8") : "";
+    const consistencyOk =
+      consistencySource.includes("transcriptFromLoop") && consistencySource.includes("transcriptFromSession");
+    check(
+      "V13",
+      "回放一致性",
+      consistencyOk,
+      consistencyOk
+        ? "tests/ui/transcript-consistency.test.ts 存在且含双向归约断言，由 vitest 覆盖"
+        : `缺失或未含断言：${consistencyPath}`,
+      "存在且含 transcriptFromSession/transcriptFromLoop 断言，由 vitest 覆盖",
+    );
   } finally {
     if (cdp) cdp.close();
-    server.close();
+    await new Promise((done) => server.close(done));
     child.kill();
+    await delay(300);
     try {
-      rmSync(profile, { recursive: true, force: true });
-    } catch {
-      return;
+      rmSync(profile, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
+    } catch (error) {
+      console.warn(`WARN 临时目录清理失败：${profile}（${error instanceof Error ? error.message : String(error)}）`);
     }
   }
 
@@ -521,8 +534,8 @@ async function main() {
   console.log(`SUMMARY ${results.length - failed.length}/${results.length} PASS`);
   if (failed.length > 0) {
     console.log(`FAILED ${failed.map((item) => item.id).join(", ")}`);
-    process.exit(1);
   }
+  process.exit(failed.length > 0 ? 1 : 0);
 }
 
 main().catch((error) => {

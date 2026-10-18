@@ -15,6 +15,11 @@ export function Composer({ onSend }: { onSend: (text: string) => void }): JSX.El
     el.style.height = next + "px";
   }
 
+  function scrollStreamToBottom(): void {
+    const stream = document.querySelector(".cnv-stream");
+    if (stream !== null) stream.scrollTop = stream.scrollHeight;
+  }
+
   function send(): void {
     const value = (field.current?.value ?? text).trim();
     if (!value) return;
@@ -26,6 +31,7 @@ export function Composer({ onSend }: { onSend: (text: string) => void }): JSX.El
       el.style.height = MIN_HEIGHT + "px";
       el.scrollTop = 0;
     }
+    scrollStreamToBottom();
   }
 
   function onKeyDown(event: JSX.TargetedKeyboardEvent<HTMLTextAreaElement>): void {

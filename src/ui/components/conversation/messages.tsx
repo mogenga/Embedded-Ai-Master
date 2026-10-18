@@ -12,8 +12,14 @@ const ASK_PREFIX = "第 0 步分流";
 type UserEvent = Extract<TranscriptEvent, { kind: "user" }>;
 type AssistantEvent = Extract<TranscriptEvent, { kind: "assistant" }>;
 type AskEvent = Extract<TranscriptEvent, { kind: "ask" }>;
+type GuardEvent = Extract<TranscriptEvent, { kind: "guard" }>;
 
 type InterruptedEvent = Extract<TranscriptEvent, { kind: "interrupted" }>;
+
+interface GuardHandlers {
+  onGuardConfirm?: (guard: GuardEvent["guard"]) => void;
+  onGuardReject?: (guard: GuardEvent["guard"]) => void;
+}
 
 function renderInline(text: string): ComponentChildren {
   const parts = text.split(/(`[^`\n]+`)/g);
@@ -82,7 +88,7 @@ function InterruptedNotice({ entry }: { entry: InterruptedEvent }): JSX.Element 
   );
 }
 
-function renderEvent(entry: TranscriptEvent): JSX.Element {
+function renderEvent(entry: TranscriptEvent, handlers: GuardHandlers): JSX.Element {
   switch (entry.kind) {
     case "user":
       return <UserTurn key={entry.id} entry={entry} />;
@@ -95,12 +101,24 @@ function renderEvent(entry: TranscriptEvent): JSX.Element {
     case "verdict":
       return <VerdictCard key={entry.id} verdict={entry.verdict} />;
     case "guard":
-      return <GuardNotice key={entry.id} guard={entry.guard} />;
+      return (
+        <GuardNotice
+          key={entry.id}
+          guard={entry.guard}
+          onConfirm={handlers.onGuardConfirm}
+          onReject={handlers.onGuardReject}
+        />
+      );
     case "interrupted":
       return <InterruptedNotice key={entry.id} entry={entry} />;
   }
 }
 
-export function MessageStream({ view }: { view: TranscriptView }): JSX.Element {
-  return <div class="messages">{view.events.map(renderEvent)}</div>;
+export function MessageStream({
+  view,
+  onGuardConfirm,
+  onGuardReject,
+}: { view: TranscriptView } & GuardHandlers): JSX.Element {
+  const handlers: GuardHandlers = { onGuardConfirm, onGuardReject };
+  return <div class="messages">{view.events.map((entry) => renderEvent(entry, handlers))}</div>;
 }

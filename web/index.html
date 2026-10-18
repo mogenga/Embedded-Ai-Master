@@ -8,7 +8,8 @@
 (function () {
   var theme = "system";
   try {
-    theme = localStorage.getItem("eam-theme") || "system";
+    var stored = localStorage.getItem("eam-theme");
+    if (stored === "light" || stored === "system" || stored === "dark") theme = stored;
   } catch (e) {
     theme = "system";
   }

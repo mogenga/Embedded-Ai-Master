@@ -18,6 +18,9 @@ const FOLD_LIMIT: Record<ToolKind, number> = {
   error: Number.POSITIVE_INFINITY,
 };
 
+const TEXT_FOLD_LINES = 6;
+const TEXT_FOLD_BYTES = 240;
+
 const VERDICT_META = {
   bad: { icon: "i-x", text: "与预期不符" },
   warn: { icon: "i-alert", text: "需关注" },
@@ -37,6 +40,10 @@ function rowCount(tool: ToolCardModel, kind: ToolKind): number {
   }
 }
 
+function textBytes(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
 function flagText(tool: ToolCardModel): string {
   const parts: string[] = [];
   if (tool.kind === "hitlist" && tool.hits !== undefined) parts.push(`命中 ${tool.hits.length}`);
@@ -45,6 +52,9 @@ function flagText(tool: ToolCardModel): string {
 }
 
 function summary(tool: ToolCardModel, kind: ToolKind): string {
+  if (kind === "readout" && tool.readout === undefined && tool.text !== undefined) {
+    return tool.text.split("\n")[0] ?? "";
+  }
   switch (kind) {
     case "readout": {
       const first = tool.readout?.[0];
@@ -59,6 +69,13 @@ function summary(tool: ToolCardModel, kind: ToolKind): string {
     default:
       return "";
   }
+}
+
+function foldCount(tool: ToolCardModel, count: number): string {
+  if (tool.text !== undefined && count === 0) {
+    return `${tool.text.split("\n").length} 行 · ${textBytes(tool.text)} B`;
+  }
+  return `${count} 行`;
 }
 
 function Readout({ rows }: { rows: readonly ReadoutRow[] }): JSX.Element {
@@ -118,12 +135,19 @@ export function EvidenceTable({ rows }: { rows: readonly EvidenceRow[] }): JSX.E
 function ToolBody({ tool, kind }: { tool: ToolCardModel; kind: ToolKind }): JSX.Element | null {
   switch (kind) {
     case "readout":
-      return (
-        <Fragment>
-          {tool.readout === undefined ? <div class="tool-empty">无读数返回</div> : <Readout rows={tool.readout} />}
-          {tool.evidence === undefined ? null : <EvidenceTable rows={tool.evidence} />}
-        </Fragment>
-      );
+      if (tool.readout !== undefined) {
+        return (
+          <Fragment>
+            <Readout rows={tool.readout} />
+            {tool.evidence === undefined ? null : <EvidenceTable rows={tool.evidence} />}
+          </Fragment>
+        );
+      }
+      if (tool.text !== undefined) return <pre class="tool-text">{tool.text}</pre>;
+      if (tool.artifactPath !== undefined) {
+        return <div class="tool-empty">结果已落盘：{tool.artifactPath}</div>;
+      }
+      return <div class="tool-empty">无读数返回</div>;
     case "hitlist":
       return tool.hits === undefined ? <div class="tool-empty">无命中结果</div> : <HitList rows={tool.hits} />;
     case "evidence":
@@ -135,20 +159,33 @@ function ToolBody({ tool, kind }: { tool: ToolCardModel; kind: ToolKind }): JSX.
 
 export function ToolCard({ tool }: { tool: ToolCardModel }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
+  const pending = tool.pending === true;
   const failed = !tool.ok || tool.kind === "error";
   const kind: ToolKind = failed ? "error" : tool.kind;
   const count = rowCount(tool, kind);
-  const collapsible = kind !== "error" && count > FOLD_LIMIT[kind];
-  const showBody = kind !== "error" && (!collapsible || expanded);
+  const textFoldable =
+    tool.text !== undefined &&
+    (tool.text.split("\n").length > TEXT_FOLD_LINES || textBytes(tool.text) > TEXT_FOLD_BYTES);
+  const collapsible = kind !== "error" && (count > FOLD_LIMIT[kind] || textFoldable);
+  const showBody = kind !== "error" && !pending && (!collapsible || expanded);
+  const errorText =
+    tool.errorText !== undefined && tool.errorText.length > 0 ? tool.errorText : "工具未返回错误说明";
 
   return (
-    <article class={tool.destructive === true ? "tool is-destructive" : "tool"} data-kind={kind}>
+    <article
+      class={tool.destructive === true ? "tool is-destructive" : "tool"}
+      data-kind={kind}
+      data-ro={tool.readOnly === true ? "true" : undefined}
+      data-pending={pending ? "true" : undefined}
+    >
       <header class="tool-head">
         <Icon name={KIND_ICON[kind]} size={14} />
         <span class="tool-name">{tool.name}</span>
         <span class="tool-args">{tool.args}</span>
         <span class="spacer" />
-        {failed ? (
+        {pending ? (
+          <span class="tool-flag tool-flag--pending">执行中</span>
+        ) : failed ? (
           <span class="tool-flag tool-flag--error">
             <Icon name="i-alert" size={12} />
             {tool.errorCode ?? "调用失败"}
@@ -160,11 +197,11 @@ export function ToolCard({ tool }: { tool: ToolCardModel }): JSX.Element {
           </span>
         )}
       </header>
-      {kind === "error" ? (
+      {pending ? null : kind === "error" ? (
         <div class="tool-body">
           <div class="tool-error" role="alert">
             <code>{tool.errorCode ?? "error"}</code>
-            <p>{tool.errorText ?? "工具未返回错误说明"}</p>
+            <p>{errorText}</p>
           </div>
         </div>
       ) : (
@@ -172,7 +209,7 @@ export function ToolCard({ tool }: { tool: ToolCardModel }): JSX.Element {
           {collapsible ? (
             <div class="tool-fold">
               <span class="tool-fold-sum">摘要：{summary(tool, kind)}</span>
-              <span class="tool-fold-count">{count} 行</span>
+              <span class="tool-fold-count">{foldCount(tool, count)}</span>
               <button
                 type="button"
                 class="tool-fold-btn"

@@ -1036,3 +1036,92 @@ git commit -m "feat(ui): 视觉验收脚本与收尾文档"
 **4. Review Focus**：六条风险逐条有归属任务（T1 依赖、T4-9 happy-dom 边界、T3 确定性、T4 repeated 投影防护、T3+T7 错误渲染、T7+T8 V14 确认）。额外检查：V5 文本截断在 T10 探针覆盖；`prefers-reduced-motion`（§9 交互）在 T10 V12 覆盖与样式遵守。
 
 **5. 比例**：plan 约 450 行，spec 约 260 行，比例 ~1.7:1，处于“计划略长于规格”的合理区间；代码块均为测试断言与接口签名，无函数体实现抄写。
+---
+
+### Task 11: 第一轮整体审查修复（P1 + 关键 P2）
+
+**Files:**
+- Modify: `src/ui/view/transcript.ts`
+- Modify: `src/ui/components/conversation/tool-card.tsx`
+- Modify: `src/ui/components/conversation/guard-notice.tsx`
+- Modify: `src/ui/components/conversation/messages.tsx`
+- Modify: `src/ui/components/conversation/verdict-card.tsx`
+- Modify: `src/ui/components/conversation/composer.tsx`
+- Modify: `src/ui/components/conversation/pathline.tsx`（仅样式）
+- Modify: `src/ui/components/dock/device-monitor.tsx`
+- Modify: `src/ui/components/dock/dock.tsx`
+- Modify: `src/ui/components/rail/knowledge-pane.tsx`（样式与 active 色）
+- Modify: `src/ui/app.tsx`
+- Modify: `src/ui/styles.css`
+- Modify: `scripts/verify-ui.mjs`
+- Modify: `web/index.html`
+- Modify: `tests/ui/transcript.test.ts`
+- Modify: `tests/ui/theme.test.ts`（拆分纯函数/DOM 用例）
+- Modify: `tests/ui/components/conversation.test.tsx`
+- Create: `tests/ui/transcript-consistency.test.ts`
+- Modify: `docs/superpowers/specs/2026-10-18-ui-workbench-design.md`
+- Modify: `docs/deferred-issues.md`
+
+**Interfaces:**
+- Consumes: Task 1-10 全部产物。
+- Produces:
+  - `ToolCardModel` 增 `text?: string`、`artifactPath?: string`、`pending?: boolean`。
+  - `TranscriptView` 增 `context?: { used: number; limit: number }`、`sessionId?: string`。
+  - `GuardNotice({ guard, onConfirm?, onReject? })`：待确认态渲染「确认写入」「拒绝」按钮；点击确认后本地状态为「执行中」（不得显示「已执行」）；`onReject` 后状态为「已拒绝」。
+  - `MessageStream` 将 `onGuardConfirm/onGuardReject` 透传给 GuardNotice；App 传入回调（无后端时回调仅记录，不伪造成功）。
+  - `verify-ui.mjs`：清理失败仅 warning，汇总与 exit code 必然执行；V13 读取 `tests/ui/transcript-consistency.test.ts` 的存在并明确标注「由 vitest 覆盖」，不得写死 PASS 值而不检查测试文件。
+
+- [ ] **Step 1: 修复投影契约（P1-4 / P1-5 / P2-1 / P2-2）**
+
+`transcript.ts`：
+1. 成功 `tool_result` 分支：`detail` 存在 → 结构化形态；否则 `text` 非空 → `kind:"readout"`，把 text 放入 `text` 字段并渲染纯文本；`text` 为空 → `kind:"error"` 且 `errorCode:"empty_result"`、`errorText:"工具未返回读数"`。
+2. 骨架创建时 `ok:true, pending:true`；收到结果后清 `pending`。
+3. 新增 `status` 分支：`payload.status === "done"` → view.status = "done"；`payload.status === "usage_missing"` → 保持 "diagnosing" 并记录 interruptReason（或 view.status = "diagnosing"）；未知值忽略。
+4. `usage` 事件投影 `view.usage`；`cost` 取 `payload.costUsd` 或 view.usage.costUsd 累计。
+5. `transcriptFromLoop` 处理 `turn_end.costUsd`（累加）与 `done`/`interrupted` 状态；与 `transcriptFromSession` 的组件序列保持一致。
+6. 导出 `DEMO_SESSION_ID = "#128"` 或在 fixture 里提供 sessionId，供 StatusBar 使用。
+
+`app.tsx`：StatusBar 接 `view.usage` / `view.context` / `view.cost` / `view.sessionId`（无值显示 `—`）。
+
+- [ ] **Step 2: 修复安全与工具卡 UI（P1-3 / P2-9 / Minor）**
+
+1. `GuardNotice` 增加确认/拒绝按钮与回调；确认后显示「执行中，等待工具结果」；仅 state 为「已执行」才显示已执行。
+2. `DeviceMonitor` 复位确认展示 `AIRCR @ 0xE000_ED0C = 0x05FA_0004`；点击确认后显示「执行中，等待工具结果」，不显示「已执行复位」。
+3. `ToolCard`：`pending` 时不显示成功勾，显示「执行中」；成功无 detail 时渲染 `text`；折叠区显示行数/字节数并从 `text` 展开；`readOnly` 显式消费（中性色）；`errorText === ""` 时回退固定文案。
+4. `VerdictCard` 根因文本中的寄存器/值用 `.k` 行内代码样式（对匹配 `/[A-Z_]+.{0,4}0x[0-9A-F_]+|PCLK1|HSI|HSE/` 的片段包 `<code>`）；低置信度追加不确定性说明。
+5. `Composer` 发送后滚动消息流到底部（通过 `onSend` 后由父级或内部 `scrollIntoView` 实现）。
+6. `styles.css`：PathLine 上下 padding 10px；`.hit[data-s="4"] .bar` 用 `--wave-4`；`.tree-row.is-active` 文字色 `--accent`；`.dock-sec-head .count` 计数胶囊样式。
+
+- [ ] **Step 3: 修复验收脚本与测试（P1-1 / P1-2 / P2-5 / Minor）**
+
+1. 新建 `tests/ui/transcript-consistency.test.ts`：以同一会话语义构造成对的 `SessionEvent[]` 与 `LoopEvent[]`（user → assistant(ask) → assistant(toolCalls) → tool_result → assistant(verdict) → guard），断言 `transcriptFromSession(a).events` 与 `transcriptFromLoop(b).events` 的 `kind` 序列和工具名序列一致；并断言两次归约结果稳定。
+2. `verify-ui.mjs`：删除 `finally` 中的 `return`；清理失败 `console.warn`；汇总与 `process.exit(hasFail ? 1 : 0)` 必达；V13 改为读取 `tests/ui/transcript-consistency.test.ts` 文件存在且包含 `transcriptFromLoop` 断言，缺失则 FAIL。
+3. `conversation.test.tsx` 的 checkpoint 断言改为构造含真实 `checkpoint` 事件（`type:"checkpoint"`）后断言不渲染。
+4. `theme.test.ts` 拆分：`tests/ui/theme.test.ts` 保留纯函数用例（node 环境），`tests/ui/theme-dom.test.ts`（happy-dom）保留 `readStoredTheme/applyTheme` 用例。
+5. `web/index.html` 首屏脚本校验 localStorage 值仅接受 `light|system|dark`，否则 `system`。
+
+- [ ] **Step 4: 文档回填**
+
+1. spec §3.1 默认导出改为命名导出（与实现一致）。
+2. spec §5 补 `status` / usage / context / cost 投影规则与 `ToolCardModel.text/artifactPath/pending`。
+3. spec §7.9 补确认/拒绝回调契约；§7.7 补 text-only 与 pending。
+4. `docs/deferred-issues.md` 新增：D-058 Dock/设备/日志为静态演示数据、D-059 回放/导出按钮未接行为、D-060 SSE 无后端时输入处理、D-061 StatusBar context/limit 来源未定；更新变更记录。
+
+- [ ] **Step 5: 全量验证**
+
+```bash
+node ./node_modules/vitest/vitest.mjs run
+node ./node_modules/typescript/bin/tsc --noEmit
+node ./node_modules/typescript/bin/tsc -p tsconfig.web.json --noEmit
+node ./node_modules/vite/bin/vite.js build
+node scripts/verify-ui.mjs
+node ./node_modules/typescript/bin/tsc -p tsconfig.build.json
+```
+Expected: 全绿；verify-ui 14/14 且打印 SUMMARY；V13 非硬编码。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add -A
+git commit -m "fix(ui): 修复整体审查的投影安全与验收缺陷"
+```

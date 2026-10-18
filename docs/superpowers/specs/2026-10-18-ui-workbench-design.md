@@ -86,6 +86,10 @@ src/ui/
     fixtures.ts               # 演示会话数据（与原型内容一致，供回放/开发态）
 tests/
   ui/                         # 前端测试（组件用 happy-dom 环境注释，纯逻辑 node 环境）
+    transcript.test.ts        # 归约与投影规则
+    transcript-consistency.test.ts # Session/Loop 双向归约一致性（V13）
+    theme.test.ts             # 主题纯函数
+    theme-dom.test.ts         # 主题 DOM 副作用（happy-dom）
 
 scripts/
   verify-ui.mjs               # 无头 Chromium 视觉验收脚本（V1-V14，探针注入）
@@ -97,7 +101,7 @@ scripts/
 - `theme.ts` 分离纯解析（`resolveTheme(choice, media)` → `"light" | "dark"`）与副作用（apply/persist）。
 - `sse.ts` 提供 `createEventStream(url, handlers)`，内部持 `EventSource`，处理重连与 `interrupted`/`done` 分派；`postAction(url, body)` 走 HTTP POST。二者均为独立纯逻辑/薄封装，可注入 `fetch` 与 `EventSource` 以便测试。
 - `icons.tsx` 暴露 `<Icon name="i-logo" size={16}/>`，内部 `<use href="#<name>">`；sprite 声明为受控 SVG（`aria-hidden` + `focusable=false`）。
-- 每个组件文件一个默认导出组件；无内部私有状态（除 Composer 输入框、Dock 分区折叠等**纯 UI 局部态**，与业务状态无关）。
+- 每个组件文件使用**命名导出**（`export function Xxx`），不提供默认导出；无内部私有状态（除 Composer 输入框、Dock 分区折叠、GuardNotice 本地确认态等**纯 UI 局部态**，与业务状态无关）。
 
 ### 3.2 构建与测试命令（合并进根 package.json）
 
@@ -144,6 +148,7 @@ export interface TranscriptView {
   usage?: { prompt: number; completion: number; cached: number; costUsd?: number };
   context?: { used: number; limit: number };
   cost?: number;
+  sessionId?: string;
   interruptReason?: string;
 }
 export type TranscriptEvent =
@@ -158,8 +163,14 @@ export type TranscriptEvent =
 
 规则（对齐 frontend-design §8.2 投影表）：
 
-- `user` 事件 → 用户气泡；`assistant`（content 非空）→ agent 气泡；`assistant`（toolCalls 非空）→ 工具卡骨架；`tool_result` → 对应工具卡结果区（以 `detail` > `text` > 错误占位为渲染优先级）；`usage` → 状态栏与费用；`status` → 状态胶囊；`interrupted` → 中断提示（danger）并保留既有证据；`checkpoint` / `compaction` 不直接渲染。
+- `user` 事件 → 用户气泡；`assistant`（content 非空）→ agent 气泡；`assistant`（toolCalls 非空）→ 工具卡骨架；`tool_result` → 对应工具卡结果区；`usage` → `view.usage` 与费用；`status` → 状态胶囊；`interrupted` → 中断提示（danger）并保留既有证据；`checkpoint` / `compaction` 不直接渲染。
+- 工具结果优先级：`detail` 可映射结构化行（readout / hits / evidence）时用结构化形态；否则 `text` 非空时 `kind:"readout"` 并把原文放入 `ToolCardModel.text`；`text` 为空时 `kind:"error"`、`errorCode:"empty_result"`、`errorText:"工具未返回读数"`。`artifactPath` 原样保留到 `ToolCardModel.artifactPath`。
+- 工具骨架创建时 `ok:true, pending:true`；收到结果后清除 `pending`。
+- `ToolCardModel` 在既有字段上新增 `text?: string`、`artifactPath?: string`、`pending?: boolean`。
 - 工具结果 `ok=false` 必须渲染 `code` 与错误文本，不得渲染空白读数。
+- `status` 事件：`payload.status === "done"` → `view.status = "done"`；`"usage_missing"` → 保持 `"diagnosing"` 并记录 `interruptReason`（不产生中断事件）；未知值忽略。
+- `usage` 事件累加 `prompt/completion/cached` 与 `costUsd`；`view.cost` 取累加后的 `costUsd`（无 usage 时不推断）。`LoopEvent.turn_end.costUsd` 同样累加，`done`/`interrupted` 与 Session 归约终态一致。
+- `view.context` 与 `view.sessionId` 由宿主提供；演示态使用 `DEMO_SESSION_ID = "#128"`，缺失时 StatusBar 显示 `—`。
 - 写类工具（destructive）默认进入"待确认"，未确认不显示已执行。
 - 归约必须是纯函数、确定性；同一事件序列输入两次必须得同一 `TranscriptView`（V13 一致性前提）。
 - 组件只消费 `TranscriptView`。
@@ -178,9 +189,9 @@ export type TranscriptEvent =
 | 7.4 | ConversationHeader | 40px 高；左右对齐 20px；回放/导出次级按钮 |
 | 7.5 | PathLine | 五步固定序列；done/now/todo 三态样式；步间连线 14×1px `--border-strong` |
 | 7.6 | MessageStream | 容器 20px 内边距、条目 20px gap；用户靠右 max 540px；AskBlock 左 2px `--info` 竖条 |
-| 7.7 | ToolCard | 卡头 34px `--bg-inset`；三种卡体形态；失败标记 `--danger`；大输出折叠「摘要 + 行数 + 展开」 |
+| 7.7 | ToolCard | 卡头 34px `--bg-inset`；三种卡体形态；text-only 渲染纯文本并按行数/字节数折叠；骨架 `pending` 显示「执行中」不显示成功勾；`readOnly` 以中性色标记；失败标记 `--danger`；大输出折叠「摘要 + 行数 + 展开」 |
 | 7.8 | VerdictCard | `--accent-line` 1px 边；四区块；动作归属三列等宽；置信度高/中/低 |
-| 7.9 | GuardNotice | `--warn` 1px 边 + `--warn-soft` 底；写明操作类型/目标地址/写入值/当前状态 |
+| 7.9 | GuardNotice | `--warn` 1px 边 + `--warn-soft` 底；写明操作类型/目标地址/写入值/当前状态；待确认渲染「确认写入」「拒绝」，`onConfirm`/`onReject` 由宿主提供；确认后本地仅「执行中」，仅当外部 state 为「已执行」才显示已执行 |
 | 7.10 | Composer | 22px 起随内容长到 120px；Enter 发送 Shift+Enter 换行；空输入禁用发送 |
 | 7.11 | Dock | 404px（<1180 340px）；分区头 38px 可折叠 `aria-expanded` |
 | 7.12 | DeviceMonitor | 标签列 96px；复位按钮 danger 语义进确认流程；寄存器异常值 `--warn` 保留原文本 |
@@ -229,7 +240,7 @@ frontend-design §12 的 14 项验收由 `scripts/verify-ui.mjs` 在无头 Chrom
 | V10 无 emoji | 页面文本扫描无 emoji 码点 |
 | V11 焦点可见 | Tab 遍历控件均有可见焦点环 |
 | V12 减少动效 | 开启 reduce 后无过渡与平滑滚动 |
-| V13 回放一致性 | 同一会话 fixture 实时渲染与回放渲染组件序列一致（vitest 断言补充） |
+| V13 回放一致性 | `tests/ui/transcript-consistency.test.ts` 断言同一会话的 `SessionEvent[]`/`LoopEvent[]` 归约组件序列与工具名序列一致；验收脚本检查该文件存在且含双向归约断言，不写死 PASS |
 | V14 写操作确认 | 未确认时界面不显示"已执行" |
 
 运行 `npm run build:web` 后执行 `npm run verify:ui`（依赖系统 Chromium 可执行文件，见脚本 TOCTOU 探测：找不到可执行文件时报明确错误）。
@@ -239,7 +250,7 @@ frontend-design §12 的 14 项验收由 `scripts/verify-ui.mjs` 在无头 Chrom
 ## 9. 测试策略
 
 - **内核测试**：`tests/` 现状不动，node 环境。
-- **前端逻辑测试**（node 环境）：`tests/ui/transcript.test.ts`（归约、投影规则、ok=false 错误渲染、V13 fixture 一致性）、`tests/ui/theme.test.ts`（三态解析、边界值）、`tests/ui/sse.test.ts`（重连、close、POST 错误）。
+- **前端逻辑测试**（node 环境）：`tests/ui/transcript.test.ts`（归约、投影规则、pending/text/status/usage/cost 投影、ok=false 错误渲染）、`tests/ui/transcript-consistency.test.ts`（Session/Loop 双向归约一致性）、`tests/ui/theme.test.ts`（三态解析纯函数）、`tests/ui/sse.test.ts`（重连、close、POST 错误）。
 - **组件测试**（happy-dom，文件头 `// @vitest-environment happy-dom`）：`tests/ui/components/` 下对齐每个组件文件，断言渲染结果与交互（点击折叠、aria 属性、禁用态、`use` 引用图标、无硬编码颜色断言通过 spot check）。
 - **验收**：`scripts/verify-ui.mjs` 无头 Chromium 实测 V1-V14。
 - 每任务 TDD：先写失败测试（RED）→ 最小实现（GREEN）→ 全量验证 → 提交。

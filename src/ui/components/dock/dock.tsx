@@ -49,7 +49,13 @@ export function Dock({
     log: true,
   });
 
-  function head(key: SectionKey, icon: string, title: string, dot: "ok" | "warn"): JSX.Element {
+  function head(
+    key: SectionKey,
+    icon: string,
+    title: string,
+    dot: "ok" | "warn",
+    count?: number,
+  ): JSX.Element {
     const open = expanded[key];
     return (
       <button
@@ -64,6 +70,7 @@ export function Dock({
         <Icon name={icon} size={15} />
         <span class="t">{title}</span>
         <span class="spacer" />
+        {count === undefined ? null : <span class="count">{count}</span>}
         <span class="dot" data-s={dot} aria-hidden="true" />
         <Icon name="i-chevron-down" size={14} className="chev" />
       </button>
@@ -79,7 +86,7 @@ export function Dock({
       </header>
       <div class="dock-body">
         <section class="dock-sec">
-          {head("device", "i-cpu", "设备监控", "ok")}
+          {head("device", "i-cpu", "设备监控", "ok", registers.length)}
           <div class="dock-sec-body">
             <DeviceMonitor registers={registers} />
           </div>
@@ -91,7 +98,7 @@ export function Dock({
           </div>
         </section>
         <section class="dock-sec">
-          {head("log", "i-log", "调试日志", "warn")}
+          {head("log", "i-log", "调试日志", "warn", logLines.length)}
           <div class="dock-sec-body">
             <DebugLog lines={logLines} />
           </div>

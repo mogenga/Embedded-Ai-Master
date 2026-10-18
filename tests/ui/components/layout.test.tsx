@@ -71,6 +71,29 @@ describe("layout", () => {
     expect(dots[1].getAttribute("data-s")).toBe("idle");
     expect(dots[2].getAttribute("data-s")).toBe("warn");
   });
+  it("App 状态栏接投影的会话/上下文/费用", () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const view = {
+      ...transcriptFromSession(UART_TRANSCRIPT_EVENTS),
+      context: { used: 12400, limit: 200000 },
+      cost: 0.018,
+      sessionId: "#128",
+    };
+    render(<App view={view} />, root);
+    const text = root.querySelector(".statusbar")?.textContent ?? "";
+    expect(text).toContain("#128");
+    expect(text).toContain("12.4k / 200k");
+    expect(text).toContain("$0.018");
+  });
+  it("App 状态栏缺 context/cost 时显示 —", () => {
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const view = { ...transcriptFromSession(UART_TRANSCRIPT_EVENTS), usage: undefined, cost: undefined };
+    render(<App view={view} />, root);
+    const values = [...root.querySelectorAll(".statusbar .sb.mono")].map((el) => el.textContent);
+    expect(values).toContain("—");
+  });
   it("无 emoji：App 文案不含 emoji 码点", () => {
     const root = document.createElement("div");
     document.body.appendChild(root);
