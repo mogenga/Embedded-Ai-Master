@@ -130,7 +130,7 @@ schema = z.object({
   path: z.string().optional(),
   glob: z.string().optional(),
   ignoreCase: z.boolean().optional(),
-  maxResults: z.number().int().positive().max(1000).optional(),
+  maxResults: z.number().int().min(1).max(1000).optional(),
 });
 annotations = { readOnly: true };
 ```
@@ -138,9 +138,12 @@ annotations = { readOnly: true };
 - 根同 glob; 遍历同一忽略列表; 不跟随 symlink; 只读 ≤2 MiB 的文件; 含 NUL 的文件跳过(二进制)。
 - `new RegExp(pattern, ignoreCase ? "i" : "")`; 无效正则 → `invalid_pattern`。
 - `glob` 可选, 用 4.4 的同一匹配器过滤文件。
-- 每行匹配输出 `<relpath>:<line>:<text>`, `<relpath>` 相对 **workdir**(可直接喂回 `fs`); 默认最多 200, 可到 1000; 超出加 `[truncated]`。
-- 跳过二进制/超大/不可读文件时在 `text` 末尾加 `[skipped N files (binary/too large/unreadable)]`, 并写 `detail.skipped`(R3: 不静默)。
-- 无匹配 → `(no matches)`; 不报错。
+- 每行匹配输出 `<relpath>:<line>:<text>`, `<relpath>` 相对 **workdir**(可直接喂回 `fs`); 结果按 relpath 字典序、行号升序输出; 行号 1-based; CRLF 按行切分且输出不含 `\r`。
+- 默认最多 200, 可到 1000; 超出加 `[truncated]`。
+- 跳过二进制/超大/不可读文件时在 `text` 末尾加 `[skipped N files (binary/too large/unreadable)]`, 并写 `detail.skipped = { binary, tooLarge, unreadable }`(R3: 不静默)。
+- 无匹配 → `(no matches)`; 不报错; 若同时有跳过文件, 跳过披露仍追加在末尾。
+- 错误码: `invalid_pattern`、`not_found`、`not_a_directory`、`path_invalid`、`path_outside_workdir`、`read_failed`。
+- `detail`: `{ scanned, matched, returned, skipped, truncated, scanTruncated }`。
 
 ### 4.6 注册与装配
 
