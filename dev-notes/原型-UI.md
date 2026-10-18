@@ -97,3 +97,15 @@
 - **被拒绝或纠偏**：V13 不接受「读测试文件源码含函数名」的文本断言，必须实跑；V14 不接受 `.confirm-done.length === 0` 这类恒真子断言；列表读取失败不允许静默返回空数组；不把 `header.id` 当列表 id（会导致目录 `dirA` 无法打开）。
 - **翻车与返工**：新测试首跑 8 failed（预期 RED）。补测试时符号链接用例漏建目标目录、POST 带 body 与静态穿越用例出现 ECONNRESET（keep-alive 连接复用 + 服务端未消费请求体），分别修正测试数据与在错误分支 `req.resume()` 后转绿。实现后目标测试 33 passed，全量 592 passed / 1 skipped。
 - **验证**：`vitest run` 592 passed / 1 skipped；`tsc --noEmit` 与 `tsc -p tsconfig.web.json --noEmit` 0 error；`vite build` 与 `tsc -p tsconfig.build.json` 成功；`node scripts/verify-ui.mjs` V1-V14 全 PASS、V0 PASS，SUMMARY 14/14。
+
+## 2026-10-18 · Task 17：真实数据改造第二轮红队修复与最终复验
+
+- **用户关键原话**："不要mock数据"；方向选择"新增最小只读 API 并接真实数据（推荐）"。
+- **关键产出**：
+  1. 覆盖缺口闭合：`tests/server/api.test.ts` 新增「坏事件日志会话仍出现在列表（header-only）」与「有效 header 但无日志文件 → invalid_header」；变异探针证明把列表改回 `readSessionDir` / 删除日志存在性校验均会 RED。
+  2. 状态机：`applySessionLoaded(state,id,view,source?)` 在 live 态切换会话后保持 live，不再永久静默；replay 态保持 replay；显式 source 优先。
+  3. `errors` 透传：`loadWorkbench.errors → state.sessionErrors → App → SessionPane`，底部显示「N 个会话目录不可读」；sessions 根下符号链接/junction 记录 `skipped_link`。
+  4. 文档：README 目录树补 `src/server/`；spec §7.1 删除"复用 readSessionDir"表述、寄存器来源改为 `detail.evidence/rows/readout`；D-068 按实测重写；新增 D-069（Windows 大小写别名）、D-070（ACL 未验证）；D-065 标注已解决。
+- **被拒绝或纠偏**：不接受列表读取全部事件；不接受状态点在设备 unknown 时显示绿色正常；不接受 V13 文本断言。
+- **翻车与返工**：无生产逻辑返工；TDD RED 6 failed → GREEN。最终复验：变异探针 2/2 被杀且文件逐字还原；全量 604 passed / 1 skipped；双 tsc 0 error；`verify-ui` V1-V14 14/14 + V0 1/1。
+- **最终状态**：提交 `89f3a06`（Task 17）。真实数据链路：`dist/server/serve.js` 读 `$HARNESS_HOME` 的会话与 KB，前端 `/api/*` 加载，写操作与 SSE 诚实 501，设备状态 unknown，无数据空态。
