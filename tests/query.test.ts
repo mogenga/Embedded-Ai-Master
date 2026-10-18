@@ -121,6 +121,27 @@ const echoCall = (id: string, text = "hi"): CompletionResult["toolCalls"][number
 });
 
 describe("query 主循环", () => {
+  it("每轮 complete 前落 checkpoint,且不进入事件流", async () => {
+    const provider = scriptedProvider([reply("用 echo", [echoCall("c1")]), reply("完成")]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events.some((event) => (event.kind as string) === "checkpoint")).toBe(false);
+
+    const logged = session.events();
+    const checkpoints = logged.filter((event) => event.type === "checkpoint");
+    expect(checkpoints.map((event) => event.payload)).toStrictEqual([{ turn: 1 }, { turn: 2 }]);
+
+    const user = logged.find((event) => event.type === "user");
+    const assistants = logged.filter((event) => event.type === "assistant");
+    expect(assistants).toHaveLength(2);
+    expect(user?.seq).toBeLessThan(checkpoints[0].seq);
+    expect(checkpoints[0].seq).toBeLessThan(assistants[0].seq);
+    expect(assistants[0].seq).toBeLessThan(checkpoints[1].seq);
+    expect(checkpoints[1].seq).toBeLessThan(assistants[1].seq);
+  });
+
   it("闭环: user→model→tool_use→tool_result→model→done(no_tool_calls)", async () => {
     const provider = scriptedProvider([reply("用 echo", [echoCall("c1")]), reply("完成")]);
     const { ctx, session } = await makeCtx(provider);
@@ -137,9 +158,11 @@ describe("query 主循环", () => {
     expect(provider.calls).toHaveLength(2);
     expect(session.events().map((event) => event.type)).toEqual([
       "user",
+      "checkpoint",
       "assistant",
       "status",
       "tool_result",
+      "checkpoint",
       "assistant",
       "status",
       "status",
@@ -263,6 +286,7 @@ describe("query 主循环", () => {
     expect(provider.calls).toHaveLength(1);
     expect(session.events().map((event) => event.type)).toEqual([
       "user",
+      "checkpoint",
       "assistant",
       "status",
       "tool_result",
@@ -332,6 +356,36 @@ describe("query 主循环", () => {
     expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
     expect(provider.calls).toHaveLength(3);
     expect(session.events().filter((event) => event.type === "usage")).toHaveLength(3);
+  });
+
+  it("历史 usage 计入 maxCostUsd,首轮前即熔断", async () => {
+    const provider = scriptedProvider([]);
+    const { ctx, session } = await makeCtx(provider, {
+      pricePerMillion: { input: 1_000_000, output: 1_000_000 },
+    });
+    await session.append({ type: "usage", payload: { promptTokens: 1, completionTokens: 0 } });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10, maxCostUsd: 0.5 }));
+
+    expect(events.at(-2)).toEqual({ kind: "interrupted", reason: "max_cost_usd" });
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "max_cost_usd" });
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("price 缺省时历史 usage 仍不熔断", async () => {
+    const provider = scriptedProvider([
+      reply("done", [], false, { promptTokens: 1_000_000, completionTokens: 1_000_000 }),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+    await session.append({
+      type: "usage",
+      payload: { promptTokens: 1_000_000, completionTokens: 1_000_000 },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10, maxCostUsd: 0 }));
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(provider.calls).toHaveLength(1);
   });
 
   it("price 缺省 → 只计 token 不熔断", async () => {
@@ -503,6 +557,7 @@ describe("query 主循环", () => {
     expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
     expect(session.events().map((event) => event.type)).toEqual([
       "user",
+      "checkpoint",
       "assistant",
       "status",
       "interrupted",
@@ -631,6 +686,7 @@ describe("query 主循环", () => {
     expect(executed).toBe(0);
     expect(session.events().map((event) => event.type)).toStrictEqual([
       "user",
+      "checkpoint",
       "assistant",
       "usage",
       "tool_result",
@@ -686,6 +742,7 @@ describe("query 主循环", () => {
 
     expect(session.events().map((event) => event.type)).toStrictEqual([
       "user",
+      "checkpoint",
       "assistant",
       "usage",
       "interrupted",
@@ -711,7 +768,11 @@ describe("query 主循环", () => {
 
     expect(events.map((event) => event.kind)).toEqual(["interrupted", "done"]);
     expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
-    expect(session.events().map((event) => event.type)).toEqual(["user", "interrupted"]);
+    expect(session.events().map((event) => event.type)).toEqual([
+      "user",
+      "checkpoint",
+      "interrupted",
+    ]);
   });
 
   it("signal 已中止 → 不调用模型", async () => {
@@ -737,7 +798,11 @@ describe("query 主循环", () => {
 
     expect(events.map((event) => event.kind)).toEqual(["interrupted", "done"]);
     expect(events.at(-1)).toEqual({ kind: "done", finishReason: "aborted" });
-    expect(session.events().map((event) => event.type)).toEqual(["user", "interrupted"]);
+    expect(session.events().map((event) => event.type)).toEqual([
+      "user",
+      "checkpoint",
+      "interrupted",
+    ]);
   });
 
   it("非 AbortError 的模型异常直接上抛,不伪造 done", async () => {
@@ -748,6 +813,7 @@ describe("query 主循环", () => {
 
     expect(session.events().map((event) => event.type)).toStrictEqual([
       "user",
+      "checkpoint",
       "interrupted",
     ]);
     expect(
@@ -767,6 +833,7 @@ describe("query 主循环", () => {
 
     expect(session.events().map((event) => event.type)).toStrictEqual([
       "user",
+      "checkpoint",
       "interrupted",
     ]);
     expect(session.events().at(-1)?.payload).toStrictEqual({ reason: "error" });
@@ -833,7 +900,7 @@ describe("query 主循环", () => {
       header: session.header,
       append: async (event) => {
         count += 1;
-        if (count === 4) throw new Error("append boom");
+        if (count === 5) throw new Error("append boom");
         return session.append(event);
       },
       events: () => session.events(),
@@ -848,6 +915,7 @@ describe("query 主循环", () => {
 
     expect(session.events().map((event) => event.type)).toStrictEqual([
       "user",
+      "checkpoint",
       "assistant",
       "usage",
       "tool_result",

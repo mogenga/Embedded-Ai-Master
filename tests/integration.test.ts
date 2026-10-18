@@ -11,12 +11,14 @@ import { SessionResumeError } from "../src/session/errors.js";
 import { createSession, readSessionFile } from "../src/session/session.js";
 
 const resumeCloseFailure = vi.hoisted(() => ({ enabled: false }));
+const resumeCallCounter = vi.hoisted(() => ({ count: 0 }));
 
 vi.mock("../src/session/session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/session/session.js")>();
   return {
     ...actual,
     resumeSession: async (dir: string, opts?: { generationThresholdBytes?: number }) => {
+      resumeCallCounter.count += 1;
       const handle = await actual.resumeSession(dir, opts);
       if (!resumeCloseFailure.enabled) return handle;
       return {
@@ -40,6 +42,7 @@ async function tempDir(): Promise<string> {
 
 afterEach(async () => {
   resumeCloseFailure.enabled = false;
+  resumeCallCounter.count = 0;
   vi.unstubAllEnvs();
   for (const dir of tempDirs.splice(0)) await rm(dir, { recursive: true, force: true });
 });
@@ -818,6 +821,7 @@ describe("runSession resume 失败原子性", () => {
 
     expect(error).toBeInstanceOf(SessionResumeError);
     expect((error as SessionResumeError).code).toBe("model_mismatch");
+    expect(resumeCallCounter.count).toBe(0);
     expect(await readHeaderText(sessionDir)).toBe(beforeHeader);
     expect(await logLineCount(sessionDir)).toBe(beforeLines);
   });
@@ -838,6 +842,7 @@ describe("runSession resume 失败原子性", () => {
 
     expect(error).toBeInstanceOf(SessionResumeError);
     expect((error as SessionResumeError).code).toBe("system_prompt_mismatch");
+    expect(resumeCallCounter.count).toBe(0);
     expect(await readHeaderText(sessionDir)).toBe(beforeHeader);
     expect(await logLineCount(sessionDir)).toBe(beforeLines);
   });
@@ -854,21 +859,9 @@ describe("runSession resume 失败原子性", () => {
 
     expect(error).toBeInstanceOf(SessionResumeError);
     expect((error as SessionResumeError).code).toBe("session_id_mismatch");
+    expect(resumeCallCounter.count).toBe(0);
     expect(await readHeaderText(sessionDir)).toBe(beforeHeader);
     expect(await logLineCount(sessionDir)).toBe(beforeLines);
-  });
-
-  it("resume 校验失败时 close 异常不覆盖原 SessionResumeError", async () => {
-    const home = await tempDir();
-    vi.stubEnv("HARNESS_HOME", home);
-    const sessionDir = path.join(home, "atomic-close-validate");
-    await createSession(sessionDir, { id: "real-session-id", model: "gw/flash" });
-
-    resumeCloseFailure.enabled = true;
-    const error = await resumeError(sessionDir, { sessionId: "other-session-id" });
-
-    expect(error).toBeInstanceOf(SessionResumeError);
-    expect((error as SessionResumeError).code).toBe("session_id_mismatch");
   });
 
   it("运行期主错误时 close 异常不覆盖原错误", async () => {
@@ -910,6 +903,7 @@ describe("runSession resume 失败原子性", () => {
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toContain("status 400");
     expect((error as Error).message).not.toContain("close boom");
+    expect(resumeCallCounter.count).toBe(1);
   });
 });
 
