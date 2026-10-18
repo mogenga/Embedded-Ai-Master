@@ -206,6 +206,40 @@ describe("query 主循环", () => {
     });
   });
 
+  it("tool_result payload 写入 toolName 与 evidence", async () => {
+    const evidenceTool: ToolDef<{ text: string }> = {
+      name: "evidence",
+      description: "返回取证结果",
+      schema: z.object({ text: z.string() }),
+      annotations: { readOnly: true, evidence: true },
+      execute: async (input) => ({
+        isError: false,
+        code: "ok",
+        message: "",
+        text: input.text,
+      }),
+    };
+    const provider = scriptedProvider([
+      reply("取证", [{ id: "e1", name: "evidence", arguments: { text: "proof" } }]),
+      reply("完成"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([evidenceTool]),
+    });
+
+    await collect(query(ctx, "取证", { maxTurns: 10 }));
+
+    const logged = session.events().find((event) => event.type === "tool_result");
+    expect(logged?.payload).toStrictEqual({
+      id: "e1",
+      ok: true,
+      text: "proof",
+      code: "ok",
+      toolName: "evidence",
+      evidence: true,
+    });
+  });
+
   it("model-visible means logged: 投影含 tool 消息", async () => {
     const provider = scriptedProvider([reply("用 echo", [echoCall("c1")]), reply("完成")]);
     const { ctx, session } = await makeCtx(provider);
@@ -623,12 +657,14 @@ describe("query 主循环", () => {
         ok: false,
         text: "tool aborted before execution",
         code: "tool_aborted",
+        toolName: "echo",
       },
       {
         id: "c2",
         ok: false,
         text: "tool aborted before execution",
         code: "tool_aborted",
+        toolName: "echo",
       },
     ]);
     expect(logged.map((event) => event.parent)).toStrictEqual([
@@ -705,12 +741,14 @@ describe("query 主循环", () => {
         ok: false,
         text: "tool aborted before execution",
         code: "tool_aborted",
+        toolName: "echo",
       },
       {
         id: "c2",
         ok: false,
         text: "tool aborted before execution",
         code: "tool_aborted",
+        toolName: "echo",
       },
     ]);
     expect(logged.map((event) => event.parent)).toStrictEqual([
@@ -865,12 +903,14 @@ describe("query 主循环", () => {
         ok: false,
         text: "tool result not recorded due to error",
         code: "tool_result_lost",
+        toolName: "echo",
       },
       {
         id: "c2",
         ok: false,
         text: "tool result not recorded due to error",
         code: "tool_result_lost",
+        toolName: "echo",
       },
     ]);
     expect(results.map((event) => event.parent)).toStrictEqual([
@@ -929,12 +969,14 @@ describe("query 主循环", () => {
         ok: false,
         text: "tool result not recorded due to error",
         code: "tool_result_lost",
+        toolName: "echo",
       },
       {
         id: "c2",
         ok: false,
         text: "tool result not recorded due to error",
         code: "tool_result_lost",
+        toolName: "echo",
       },
     ]);
     expect(

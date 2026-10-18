@@ -45,4 +45,11 @@ export interface ToolResultPayload {
   artifactPath?: string;
   code?: string;
   detail?: unknown;
+  evidence?: boolean;
+  toolName?: string;
 }
+
+export type CompactionPayload =
+  | { kind: "microcompact"; elidedSeqs: number[]; note: string }
+  | { kind: "summary"; summary: string; coversUpToSeq: number }
+  | { kind: "failed"; reason: string; stage: "microcompact" | "summary" };

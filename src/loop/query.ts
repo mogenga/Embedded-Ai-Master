@@ -137,15 +137,21 @@ function splitToolUses(toolCalls: CompletionResult["toolCalls"]): {
   return { calls, slots };
 }
 
-function toResultPayload(id: string, result: ToolResult): Record<string, unknown> {
+function toResultPayload(
+  id: string,
+  toolName: string,
+  result: ToolResult,
+): Record<string, unknown> {
   const payload: ToolResultPayload = {
     id,
     ok: !result.isError,
     text: result.text,
     code: result.code,
+    toolName,
   };
   if (result.artifactPath !== undefined) payload.artifactPath = result.artifactPath;
   if (result.detail !== undefined) payload.detail = result.detail;
+  if (result.evidence !== undefined) payload.evidence = result.evidence;
   return { ...payload };
 }
 
@@ -284,7 +290,7 @@ export async function* query(
           const result = abortedToolResult();
           await session.append({
             type: "tool_result",
-            payload: toResultPayload(call.id, result),
+            payload: toResultPayload(call.id, call.name, result),
             parent: assistantEvent.seq,
           });
           pending = consumePending(pending);
@@ -324,7 +330,7 @@ export async function* query(
         const result = "marker" in slot ? slot.marker : batchResults[slot.index].result;
         await session.append({
           type: "tool_result",
-          payload: toResultPayload(call.id, result),
+          payload: toResultPayload(call.id, call.name, result),
           parent: assistantEvent.seq,
         });
         pending = consumePending(pending);
@@ -341,7 +347,7 @@ export async function* query(
         try {
           await session.append({
             type: "tool_result",
-            payload: toResultPayload(call.id, lostToolResult()),
+            payload: toResultPayload(call.id, call.name, lostToolResult()),
             parent: pending.assistantSeq,
           });
         } catch {}
@@ -359,7 +365,7 @@ export async function* query(
           try {
             await session.append({
               type: "tool_result",
-              payload: toResultPayload(call.id, abortedToolResult()),
+              payload: toResultPayload(call.id, call.name, abortedToolResult()),
               parent: pending.assistantSeq,
             });
           } catch {}

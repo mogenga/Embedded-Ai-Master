@@ -62,6 +62,60 @@ interface ActiveBatch {
   seen: Set<string>;
 }
 
+interface SummaryDirective {
+  summary: string;
+  coversUpToSeq: number;
+}
+
+const ELIDED_FIRST_LINE_CHARS = 120;
+
+function collectElidedSeqs(events: readonly SessionEvent[]): Set<number> {
+  const elided = new Set<number>();
+  for (const event of events) {
+    if (event.type !== "compaction" || event.payload.kind !== "microcompact") continue;
+    const seqs = event.payload.elidedSeqs;
+    if (!Array.isArray(seqs)) continue;
+    for (const seq of seqs) {
+      if (typeof seq === "number") elided.add(seq);
+    }
+  }
+  return elided;
+}
+
+function findLastSummary(events: readonly SessionEvent[]): SummaryDirective | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type !== "compaction" || event.payload.kind !== "summary") continue;
+    const summary = event.payload.summary;
+    const coversUpToSeq = event.payload.coversUpToSeq;
+    if (typeof summary !== "string" || typeof coversUpToSeq !== "number") return undefined;
+    return { summary, coversUpToSeq };
+  }
+  return undefined;
+}
+
+function summaryBoundaryComplete(
+  events: readonly SessionEvent[],
+  coversUpToSeq: number,
+): boolean {
+  for (const event of events) {
+    if (event.type !== "tool_result") continue;
+    if (event.seq <= coversUpToSeq) continue;
+    if (event.parent !== undefined && event.parent <= coversUpToSeq) return false;
+  }
+  return true;
+}
+
+function formatElided(payload: Record<string, unknown>, text: string): string {
+  const artifactPath = payload.artifactPath;
+  if (typeof artifactPath === "string") {
+    return `[tool result elided; full output at ${artifactPath}]`;
+  }
+  const toolName = typeof payload.toolName === "string" ? payload.toolName : "tool";
+  const firstLine = text.split(/\r?\n/, 1)[0];
+  return `[tool result elided; ${toolName}: ${firstLine.slice(0, ELIDED_FIRST_LINE_CHARS)}]`;
+}
+
 export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage[] {
   const bySeq = new Map<number, SessionEvent>();
   let previousSeq: number | undefined;
@@ -76,8 +130,22 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
   }
 
   const messages: ModelChatMessage[] = [];
+  const elidedSeqs = collectElidedSeqs(events);
+  const summary = findLastSummary(events);
+  const effectiveSummary =
+    summary !== undefined && summaryBoundaryComplete(events, summary.coversUpToSeq)
+      ? summary
+      : undefined;
+  const projected =
+    effectiveSummary === undefined
+      ? events
+      : events.filter(
+          (event) =>
+            event.type === "system" || event.seq > effectiveSummary.coversUpToSeq,
+        );
+
   let activeBatch: ActiveBatch | undefined;
-  for (const event of events) {
+  for (const event of projected) {
     if (
       activeBatch !== undefined &&
       (event.type === "user" || event.type === "system" || event.type === "assistant")
@@ -177,7 +245,11 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
         if (activeBatch.remaining.length === 0) {
           activeBatch = undefined;
         }
-        messages.push({ role: "tool", content: text, tool_call_id: id });
+        const content =
+          elidedSeqs.has(event.seq) && event.payload.evidence !== true
+            ? formatElided(event.payload, text)
+            : text;
+        messages.push({ role: "tool", content, tool_call_id: id });
         break;
       }
       case "tool_call":
@@ -197,6 +269,13 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
     throw new TypeError(
       `assistant event ${activeBatch.assistantSeq} has ${activeBatch.remaining.length} missing tool_result events`,
     );
+  }
+  if (effectiveSummary !== undefined) {
+    const lastSystemIndex = messages.findLastIndex((message) => message.role === "system");
+    messages.splice(lastSystemIndex + 1, 0, {
+      role: "system",
+      content: `[Conversation summary]\n${effectiveSummary.summary}`,
+    });
   }
   return messages;
 }
