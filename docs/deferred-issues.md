@@ -610,6 +610,14 @@
 - **触发升级条件**: 实测需要重叠匹配语义,或模型反复因该差异产生错误编辑。
 - **修复建议**: 若需重叠计数,用滑动窗口统计所有起点并在 `>1` 时返回 `edit_not_unique`;否则保持并补一条固化非重叠语义的测试。
 
+### D-073 · 保留设备名未覆盖上标数字变体(`COM¹`/`LPT¹` 等)
+
+- **发现**: 2026-10-18,维度4 Task1 收尾修复。
+- **现象**: Windows 同时把 `COM¹`/`COM²`/`COM³`、`LPT¹`/`LPT²`/`LPT³` 等上标数字形式视为保留设备名,当前 `WINDOWS_RESERVED` 仅匹配 ASCII `1-9`,这类路径会放行到 `writeFile`/`edit`。`CONIN$`/`CONOUT$` 等控制台别名也未覆盖。
+- **影响**: 在 Windows 上写入这些名称可能落到设备而非工作区文件;行为依赖系统,跨平台一致性差。
+- **触发升级条件**: 出现模型/用户使用上标设备名写文件,或权限层要求 Windows 路径语义完备。
+- **修复建议**: 将保留名匹配扩展为 Unicode 上标数字(`¹²³`)并显式列出 `CONIN$`/`CONOUT$`;补对应测试,保持现有规范化流程不变。
+
 ---
 
 ## 变更记录
@@ -645,3 +653,4 @@
 | 2026-10-18 | P0 前端 Task 15 真实数据验收:验收脚本改为启动 `dist/server/serve.js`(临时 `HARNESS_HOME` 写入真实会话与 KB),V14 断言真实 guard 文案并新增 V0 空态附加检查;修复 V11 以坐标区分同文案控件(设备 unknown 下三个「未接入」chip 曾导致遍历提前终止);README 改为真实数据流程与 API 表;D-053/D-060 标记已解决,D-058 标记数据来源已解决,D-051 补 501 现状;录入 D-063(API 只读、actions/events 未实现)、D-064(KB 深度/条目上限)、D-065(坏目录 errors 未展示) |
 | 2026-10-18 | Task 16 审查修复:会话列表改 header-only 读取(id 取目录名,`id_mismatch`/`unreadable`)、静态路径 NUL/穿越 400、Dock 状态点与日志 mark 由真实数据派生、V13 改实跑一致性测试、V14 删除恒真断言;D-053 验证描述修正;录入 D-066(列表不解析事件)、D-067(Host/Origin 未校验)、D-068(Windows 尾随点 id 别名) |
 | 2026-10-18 | 维度4 Task1 审查修复:fs read 改流式读取、edit 按 CRLF/LF 风格映射、拒绝 Windows 保留设备名、offset 越界显式返回;design §4.2 补齐 read_failed/invalid_input/reserved_name/internal_error;拟用 D-051/D-052 与前端冲突,改录 D-071(fs 不响应 AbortSignal)、D-072(edit 非重叠匹配) |
+| 2026-10-18 | 维度4 Task1 收尾:空文件 offset 显式返回、混合换行按 LF 处理并保留未命中行原始字节、保留名先规范化(trim/:stream/尾部点空格)、5MB 用例改名并明确流式仅代码审查、junction 改为真实探测;录入 D-073(上标设备名变体) |

@@ -87,6 +87,27 @@ describe("fs read", () => {
     expect(r.detail).toMatchObject({ lines: 0 });
   });
 
+  it("空文件 offset:0 → (no lines at offset) 且 detail.lines=0", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "empty.txt"), "", "utf8");
+
+    const r = await run(workdir, { op: "read", path: "empty.txt", offset: 0 });
+
+    expect(r.isError).toBe(false);
+    expect(r.text).toBe("(no lines at offset)");
+    expect(r.detail).toMatchObject({ lines: 0 });
+  });
+
+  it("非空文件 offset 小于行数时正常返回", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "a.txt"), "a\nb\n", "utf8");
+
+    const r = await run(workdir, { op: "read", path: "a.txt", offset: 1 });
+
+    expect(r.text).toContain("   2| b");
+    expect(r.text).not.toContain("(no lines at offset)");
+  });
+
   it("默认最多 2000 行并标记截断", async () => {
     const workdir = makeWorkdir();
     const lines = Array.from({ length: 2005 }, (_, i) => `line-${i + 1}`);
@@ -113,7 +134,7 @@ describe("fs read", () => {
     expect(Buffer.byteLength(r.text, "utf8")).toBeLessThan(256 * 1024 + 32);
   });
 
-  it("5MB 文件流式读取:≤256KiB+标记、不抛、行号正确", async () => {
+  it("5MB 文件读取:输出 ≤256KiB+标记且行号正确", async () => {
     const workdir = makeWorkdir();
     const line = "0123456789".repeat(20);
     const content = Array.from({ length: 26215 }, () => line).join("\n");
@@ -262,6 +283,66 @@ describe("fs edit", () => {
     expect(readFileSync(path.join(workdir, "lf.txt"), "utf8")).toBe("x\ny\nc\n");
   });
 
+  it("混合换行按 LF 处理:newText 写回 LF 且未触及行保留原换行", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "mixed.txt"), "a\r\nb\nc\r\n", "utf8");
+
+    const r = await run(workdir, {
+      op: "edit",
+      path: "mixed.txt",
+      oldText: "b",
+      newText: "x\ny",
+    });
+
+    expect(r.isError).toBe(false);
+    expect(readFileSync(path.join(workdir, "mixed.txt"), "utf8")).toBe("a\r\nx\ny\nc\r\n");
+  });
+
+  it("混合换行:跨 CRLF 边界的 LF oldText 仍可匹配", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "mixed.txt"), "a\r\nb\r\nc", "utf8");
+
+    const r = await run(workdir, {
+      op: "edit",
+      path: "mixed.txt",
+      oldText: "a\nb\nc",
+      newText: "z",
+    });
+
+    expect(r.isError).toBe(false);
+    expect(readFileSync(path.join(workdir, "mixed.txt"), "utf8")).toBe("z");
+  });
+
+  it("CRLF 文件:多处匹配 → edit_not_unique", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "crlf.txt"), "a\r\nx\r\nx\r\n", "utf8");
+
+    const r = await run(workdir, {
+      op: "edit",
+      path: "crlf.txt",
+      oldText: "x",
+      newText: "y",
+    });
+
+    expect(r).toMatchObject({ isError: true, code: "edit_not_unique" });
+    expect(readFileSync(path.join(workdir, "crlf.txt"), "utf8")).toBe("a\r\nx\r\nx\r\n");
+  });
+
+  it("非重叠匹配:oldText=\"aa\" 在 \"aaa\" 中只计一次(D-072 语义)", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "overlap.txt"), "aaa", "utf8");
+
+    const r = await run(workdir, {
+      op: "edit",
+      path: "overlap.txt",
+      oldText: "aa",
+      newText: "b",
+    });
+
+    expect(r.isError).toBe(false);
+    expect(readFileSync(path.join(workdir, "overlap.txt"), "utf8")).toBe("ba");
+  });
+
   it("newText 可为空(删除)", async () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "note.txt"), "keep drop", "utf8");
@@ -348,7 +429,7 @@ describe("fs edit", () => {
   });
 });
 describe("fs Windows 保留设备名", () => {
-  it.each(["CON", "con.txt", "NUL", "COM1", "lpt9.log", "sub/AUX.txt"])(
+  it.each(["CON", "CON ", "CON:", "CON:stream", "CON. ", "con.txt", "NUL", "COM1", "lpt9.log", "sub/AUX.txt"])(
     "write %s → reserved_name 且不落盘",
     async (target) => {
       const workdir = makeWorkdir();
@@ -360,7 +441,7 @@ describe("fs Windows 保留设备名", () => {
     },
   );
 
-  it.each(["CON", "aux", "COM1.txt", "sub/NUL"])("edit %s → reserved_name", async (target) => {
+  it.each(["CON", "CON ", "CON:", "CON:stream", "aux", "COM1.txt", "sub/NUL", "NUL."])("edit %s → reserved_name", async (target) => {
     const workdir = makeWorkdir();
 
     const r = await run(workdir, {

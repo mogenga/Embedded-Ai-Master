@@ -27,7 +27,30 @@ function detectSymlinkSupport(): boolean {
 }
 
 const fileSymlinkSupported = detectSymlinkSupport();
-const dirLinkSupported = process.platform === "win32" ? true : fileSymlinkSupported;
+
+function detectDirLinkSupport(): boolean {
+  const dir = makeTempDir("eam-dirlink-probe-");
+  try {
+    const target = path.join(dir, "target");
+    mkdirSync(target);
+    symlinkSync(target, path.join(dir, "link"), process.platform === "win32" ? "junction" : "dir");
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (
+      code === "EPERM" ||
+      code === "EACCES" ||
+      code === "ENOTSUP" ||
+      code === "ENOSYS" ||
+      code === "EINVAL"
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+const dirLinkSupported = detectDirLinkSupport();
 
 function catchPathError(fn: () => unknown): ToolPathError {
   try {

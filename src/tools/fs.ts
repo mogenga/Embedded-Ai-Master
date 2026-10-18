@@ -60,9 +60,41 @@ function applyFileStyle(text: string, crlf: boolean): string {
   return crlf ? normalized.replace(/\n/g, "\r\n") : normalized;
 }
 
+function isCrlfContent(content: string): boolean {
+  return content.includes("\r\n") && !content.replace(/\r\n/g, "").includes("\n");
+}
+
+function normalizeWithMap(content: string): { text: string; map: number[] } {
+  let text = "";
+  const map: number[] = [];
+  for (let index = 0; index < content.length; index++) {
+    const char = content[index]!;
+    if (char === "\r" && content[index + 1] === "\n") {
+      map.push(index);
+      text += "\n";
+      index++;
+      continue;
+    }
+    map.push(index);
+    text += char;
+  }
+  map.push(content.length);
+  return { text, map };
+}
+
+function normalizedDeviceName(input: string): string {
+  let name = path.win32.basename(input).trim();
+  const colon = name.indexOf(":");
+  if (colon !== -1) name = name.slice(0, colon).trimEnd();
+  while (name.endsWith(".") || name.endsWith(" ")) {
+    name = name.slice(0, -1).trimEnd();
+  }
+  return name;
+}
+
 function reservedDeviceName(input: string): string | undefined {
-  const base = path.win32.basename(input);
-  return WINDOWS_RESERVED.test(base) ? base : undefined;
+  const name = normalizedDeviceName(input);
+  return WINDOWS_RESERVED.test(name) ? name : undefined;
 }
 
 async function ensureRegularFile(absolute: string, inputPath: string): Promise<ToolResult | undefined> {
@@ -125,7 +157,7 @@ async function readOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
   }
 
   const relative = toRelative(ctx.cwd, absolute);
-  if (output.length === 0 && start > 0) {
+  if (output.length === 0) {
     return success("(no lines at offset)", { path: relative, lines: 0, truncated: false });
   }
   const body = output.join("\n");
@@ -172,18 +204,22 @@ async function editOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
     return failure("read_failed", `failed to read ${input.path}: ${errorMessage(error)}`);
   }
 
-  const crlf = content.includes("\r\n");
+  const crlf = isCrlfContent(content);
+  const mapped = crlf ? undefined : normalizeWithMap(content);
+  const haystack = mapped ? mapped.text : content;
   const needle = applyFileStyle(input.oldText, crlf);
   const replacement = applyFileStyle(input.newText, crlf);
-  const first = content.indexOf(needle);
+  const first = haystack.indexOf(needle);
   if (first === -1) {
     return failure("edit_not_found", `oldText not found in ${input.path}`);
   }
-  if (content.indexOf(needle, first + needle.length) !== -1) {
+  if (haystack.indexOf(needle, first + needle.length) !== -1) {
     return failure("edit_not_unique", `oldText matches multiple times in ${input.path}`);
   }
 
-  const next = content.slice(0, first) + replacement + content.slice(first + needle.length);
+  const start = mapped ? mapped.map[first]! : first;
+  const end = mapped ? mapped.map[first + needle.length]! : first + needle.length;
+  const next = content.slice(0, start) + replacement + content.slice(end);
   try {
     await writeFile(absolute, next, "utf8");
   } catch (error) {
