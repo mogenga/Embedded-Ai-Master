@@ -140,6 +140,26 @@ describe("matchesGlob", () => {
     expect(matchesGlob("src/.env", "*")).toBe(false);
     expect(matchesGlob("A.TS", "*.ts")).toBe(false);
   });
+
+  it("pattern 长度超过 256 返回 false", () => {
+    expect(matchesGlob("a".repeat(256), "a".repeat(256))).toBe(true);
+    expect(matchesGlob("a".repeat(257), "a".repeat(257))).toBe(false);
+  });
+
+  it("pattern 段数超过 64 返回 false", () => {
+    const allowed = Array.from({ length: 64 }, () => "a").join("/");
+    const tooMany = Array.from({ length: 65 }, () => "a").join("/");
+    expect(matchesGlob(allowed, allowed)).toBe(true);
+    expect(matchesGlob(tooMany, tooMany)).toBe(false);
+  });
+
+  it("折叠连续 **/ 后不长时间回溯", () => {
+    const pattern = `${"**/".repeat(10)}x`;
+    expect(matchesGlob(`${"a/".repeat(20)}x`, pattern)).toBe(true);
+    const started = Date.now();
+    expect(matchesGlob(`${"a/".repeat(20)}y`, pattern)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
 });
 
 describe("glob 执行", () => {
@@ -279,6 +299,16 @@ describe("glob 执行", () => {
     const nul = await run(workdir, { pattern: "a\0b" });
     expect(nul.isError).toBe(true);
     expect(nul.code).toBe("invalid_pattern");
+
+    const tooLong = await run(workdir, { pattern: "a".repeat(257) });
+    expect(tooLong.isError).toBe(true);
+    expect(tooLong.code).toBe("invalid_pattern");
+
+    const tooManySegments = await run(workdir, {
+      pattern: Array.from({ length: 65 }, () => "a").join("/"),
+    });
+    expect(tooManySegments.isError).toBe(true);
+    expect(tooManySegments.code).toBe("invalid_pattern");
   });
 
   it("path 越界 → path_outside_workdir", async () => {

@@ -97,7 +97,7 @@ function commandOf(tokens: string[]): { name: string; args: string[] } {
 }
 
 function unquote(value: string): string {
-  return value.replace(/^['"]+/, "").replace(/['"]+$/, "");
+  return value.replace(/['"]/g, "").trim();
 }
 
 function normalizeTarget(value: string): string | undefined {
@@ -146,9 +146,14 @@ function isWildcardTarget(value: string): boolean {
   return target !== undefined && /^\*+(?:\.\*+)?$/.test(target);
 }
 
+function isCurrentTarget(value: string): boolean {
+  return normalizeTarget(value) === ".";
+}
+
 function isRecursiveForceRm(args: string[], atRoot: boolean): boolean {
   let recursive = false;
   let force = false;
+  let preserveRoot = false;
   const targets: string[] = [];
   for (const arg of args) {
     const value = arg.toLowerCase();
@@ -161,6 +166,10 @@ function isRecursiveForceRm(args: string[], atRoot: boolean): boolean {
       force = true;
       continue;
     }
+    if (value === "--no-preserve-root") {
+      preserveRoot = true;
+      continue;
+    }
     if (value.startsWith("--")) continue;
     if (value.startsWith("-") && value.length > 1) {
       if (value.includes("r")) recursive = true;
@@ -169,10 +178,14 @@ function isRecursiveForceRm(args: string[], atRoot: boolean): boolean {
     }
     targets.push(value);
   }
+  if (preserveRoot) return true;
   return (
-    recursive
-    && force
-    && targets.some((target) => isRootTarget(target) || (atRoot && isWildcardTarget(target)))
+    (recursive || force)
+    && targets.some(
+      (target) =>
+        isRootTarget(target)
+        || (atRoot && (isWildcardTarget(target) || isCurrentTarget(target))),
+    )
   );
 }
 
@@ -209,7 +222,7 @@ function isCipherWipe(name: string, args: string[]): boolean {
   return args.some((arg) => /^\/w(:|$)/.test(unquote(arg.toLowerCase())));
 }
 
-const CD_COMMANDS = new Set(["cd", "pushd", "set-location"]);
+const CD_COMMANDS = new Set(["cd", "pushd", "chdir", "set-location"]);
 
 function cdTarget(args: string[]): string | undefined {
   for (const arg of args) {
@@ -225,12 +238,12 @@ export function isDangerousCommand(command: string): boolean {
   if (FORK_BOMB.test(command)) return true;
   let atRoot = false;
   for (const segment of command.split(/[\n\r;|&()]+/)) {
-    const tokens = segment.trim().split(/\s+/).filter(Boolean);
+    const tokens = segment.trim().split(/\s+/).map(unquote).filter(Boolean);
     if (tokens.length === 0) continue;
     const { name, args } = commandOf(tokens);
     if (CD_COMMANDS.has(name)) {
       const target = cdTarget(args);
-      atRoot = target === undefined ? name !== "pushd" : isRootTarget(target);
+      atRoot = target === undefined ? true : isRootTarget(target);
       continue;
     }
     if (name === "mkfs" || name.startsWith("mkfs.")) return true;
@@ -333,7 +346,10 @@ function composeText(
 }
 
 function summarize(text: string): string {
-  return text.length <= DETAIL_TEXT_CHARS ? text : text.slice(0, DETAIL_TEXT_CHARS);
+  if (text.length <= DETAIL_TEXT_CHARS) return text;
+  const last = text.charCodeAt(DETAIL_TEXT_CHARS - 1);
+  const end = last >= 0xd800 && last <= 0xdbff ? DETAIL_TEXT_CHARS - 1 : DETAIL_TEXT_CHARS;
+  return text.slice(0, end);
 }
 
 function streamDetail(

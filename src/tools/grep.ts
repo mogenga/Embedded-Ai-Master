@@ -2,7 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { walkFiles, MAX_SCANNED_FILES } from "./fs-walk.js";
-import { matchesGlob } from "./glob.js";
+import { isValidGlob, matchesGlob } from "./glob.js";
 import { resolveInWorkdir, ToolPathError } from "./path-safety.js";
 import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
 
@@ -65,6 +65,9 @@ export const grepTool: ToolDef<GrepInput> = {
     const regex = compileRegex(input.pattern, input.ignoreCase ?? false);
     if (!regex) {
       return failure("invalid_pattern", `invalid pattern: ${JSON.stringify(input.pattern)}`);
+    }
+    if (input.glob !== undefined && !isValidGlob(input.glob)) {
+      return failure("invalid_pattern", `invalid glob pattern: ${JSON.stringify(input.glob)}`);
     }
 
     const limit = input.maxResults ?? DEFAULT_MAX_RESULTS;
@@ -138,6 +141,8 @@ export const grepTool: ToolDef<GrepInput> = {
     if (outcome.error !== undefined) {
       return failure("read_failed", `cannot read directory: ${errorMessage(outcome.error)}`);
     }
+
+    skipped.unreadable += outcome.state.skipped;
 
     matches.sort((a, b) => {
       if (a.file !== b.file) return a.file < b.file ? -1 : 1;

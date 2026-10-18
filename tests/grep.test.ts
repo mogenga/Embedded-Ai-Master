@@ -151,6 +151,21 @@ describe("grep 执行", () => {
     expect(r.text).toBe("a.ts:1:needle\nsrc/c.ts:1:needle");
   });
 
+  it.each([
+    "",
+    "a\0b",
+    "a".repeat(257),
+    Array.from({ length: 65 }, () => "a").join("/"),
+  ])("非法 glob %j → invalid_pattern", async (glob) => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "a.txt", "needle\n");
+
+    const r = await run(workdir, { pattern: "needle", glob });
+
+    expect(r.isError).toBe(true);
+    expect(r.code).toBe("invalid_pattern");
+  });
+
   it("无匹配 → (no matches) 且不报错", async () => {
     const workdir = makeWorkdir();
     writeAt(workdir, "a.txt", "alpha\nbeta\n");
@@ -268,6 +283,49 @@ describe("grep 执行", () => {
         throw error;
       }
       return passthrough ? passthrough(target) : Buffer.alloc(0);
+    });
+
+    const r = await run(workdir, { pattern: "needle" });
+
+    expect(r.isError).toBe(false);
+    expect(r.text).toBe("ok.txt:1:needle\n[skipped 1 files (binary/too large/unreadable)]");
+    expect(r.detail).toMatchObject({
+      skipped: { binary: 0, tooLarge: 0, unreadable: 1 },
+    });
+  });
+
+  it("根目录不可读 → 合并披露并计入 detail", async () => {
+    const workdir = makeWorkdir();
+    readdirMock.mockImplementation(async (dir) => {
+      if (path.resolve(dir) === path.resolve(workdir)) {
+        const error = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+        error.code = "EACCES";
+        throw error;
+      }
+      return [];
+    });
+
+    const r = await run(workdir, { pattern: "needle" });
+
+    expect(r.isError).toBe(false);
+    expect(r.text).toBe("(no matches)\n[skipped 1 files (binary/too large/unreadable)]");
+    expect(r.detail).toMatchObject({
+      skipped: { binary: 0, tooLarge: 0, unreadable: 1 },
+    });
+  });
+
+  it("嵌套目录不可读 → 合并披露并计入 detail", async () => {
+    const workdir = makeWorkdir();
+    mkdirSync(path.join(workdir, "locked"));
+    writeAt(workdir, "ok.txt", "needle\n");
+
+    readdirMock.mockImplementation(async (dir, options) => {
+      if (path.basename(dir) === "locked") {
+        const error = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+        error.code = "EACCES";
+        throw error;
+      }
+      return passthroughReaddir ? passthroughReaddir(dir, options) : [];
     });
 
     const r = await run(workdir, { pattern: "needle" });

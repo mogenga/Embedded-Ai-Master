@@ -23,9 +23,22 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const MAX_PATTERN_LENGTH = 256;
+const MAX_PATTERN_SEGMENTS = 64;
+
 function compilePattern(raw: string): RegExp | undefined {
-  const pattern = raw.replace(/\\/g, "/");
-  if (pattern.length === 0 || pattern.includes("\0")) return undefined;
+  const normalized = raw.replace(/\\/g, "/");
+  if (
+    normalized.length === 0
+    || normalized.length > MAX_PATTERN_LENGTH
+    || normalized.includes("\0")
+  ) {
+    return undefined;
+  }
+  const pattern = normalized.replace(/(?:\*\*\/){2,}/g, "**/");
+  if (pattern.split("/").filter((segment) => segment.length > 0).length > MAX_PATTERN_SEGMENTS) {
+    return undefined;
+  }
   let source = "";
   for (let index = 0; index < pattern.length; index++) {
     const char = pattern[index]!;
@@ -54,6 +67,10 @@ function compilePattern(raw: string): RegExp | undefined {
     source += REGEX_SPECIAL.test(char) ? `\\${char}` : char;
   }
   return new RegExp(`^${source}$`, "u");
+}
+
+export function isValidGlob(pattern: string): boolean {
+  return compilePattern(pattern) !== undefined;
 }
 
 export function matchesGlob(relPath: string, pattern: string): boolean {

@@ -714,6 +714,51 @@
 - **触发升级条件**: 接入不可信 pattern/仓库;出现 grep 期间事件循环长时间无响应;需要硬性匹配超时。
 - **修复建议**: 用 `worker_threads`/子进程隔离正则并支持终止,或引入线性时间正则引擎;至少在 `description` 与 README 标注「正则同步执行、ReDoS 不可中断」,并限制单次匹配时间或行数。
 
+### D-086 · `glob` 编译仍可能触发正则回溯(ReDoS)
+
+- **发现**: 2026-10-19,第二轮红队审查(I-1)。
+- **现象**: `compilePattern` 把 `**/` 编译为 `(?:.*/)?`;本轮已限制 pattern 长度 ≤256、段数 ≤64,并把连续 `**/` 折叠为一个,但含多个可选 `.*` 段的模式在长路径失败匹配时仍可能多项式/指数回溯;`matchesGlob` 同步执行且不可中断,`grep` 的 `glob` 过滤对每个候选文件调用一次。
+- **影响**: 恶意或失控 glob 可长时间占用 CPU、阻塞事件循环;`glob` 与带 `glob` 的 `grep` 均受影响,与 D-085(正则 ReDoS)、D-077(不响应取消)叠加。
+- **触发升级条件**: 接入不可信 pattern/超深目录;出现 glob 匹配长时间无响应;需要硬性匹配超时。
+- **修复建议**: 改用非回溯 glob 匹配器(按段 DP/贪心),或在 worker 中执行并限时;缓存/预编译 `grep` 的 glob。
+- **状态**: 未解决;本轮仅做长度/段数上限与连续 `**/` 折叠。
+
+### D-087 · `shell` 的 `atRoot` 只跟踪显式目录切换命令
+
+- **发现**: 2026-10-19,第二轮红队审查(Minor 项)。
+- **现象**: `isDangerousCommand` 只根据 `cd`/`pushd`/`chdir`/`Set-Location` 更新 `atRoot`;初始 `cwd` 若为根、或通过 `env -C /`、`sudo -D /`、`git -C /` 等改变目录时,后续 `rm -r *`/`rm -f *` 不会被判为根目标。`cd / && rm -rf .` 已按当前目录目标拦截,但其他改目录方式未覆盖。
+- **影响**: 组合命令可能漏判根目标,拦截结果依赖命令书写形式;属启发式黑名单的已知边界。
+- **触发升级条件**: 出现实际绕过;P1 权限层接入;需要把 shell 拦截当作安全边界。
+- **修复建议**: 维护更完整的 cwd 语义,或在真实 cwd 上解析目标(需文件系统访问);最终由 P1 权限层兜底。
+- **状态**: 未解决。
+
+### D-088 · `shell` 引号归一不解析 shell 展开
+
+- **发现**: 2026-10-19,第二轮红队审查(Minor 项)。
+- **现象**: 危险判定前会移除 token 内所有 `'`/`"`,但不展开 `$'/'`、`${HOME:?}`、`$(...)`、`~user` 或变量拼接;例如 `rm -rf $'/'`、`rm -rf ${HOME:?}/*` 仍可绕过根目标判断。该缺口与 D-083(`env`/`bash -c`/`xargs` 包装)不同,属 shell 自身展开语义。
+- **影响**: 引号拼接类绕过已封堵,但展开类绕过仍在;黑名单不能作为安全边界。
+- **触发升级条件**: 接入不可信输入;P1 权限层接入;出现实际绕过事故。
+- **修复建议**: 不做完整 shell 解析则无法闭合;可引入 shell AST/静态分析,或在 P1 权限层按真实解析结果判定。
+- **状态**: 未解决。
+
+### D-089 · `grep` 跳过披露把目录计为 files 且不区分来源
+
+- **发现**: 2026-10-19,第二轮红队审查(I-2)。
+- **现象**: `walkFiles` 的 `state.skipped`(不可读目录)已并入 `detail.skipped.unreadable` 与总数披露,但 `text` 仍写 `[skipped N files (binary/too large/unreadable)]`,无法区分文件与目录;根/嵌套不可读只给总数,不列路径。
+- **影响**: 模型可能把不可读目录误判为文件;排障时无法定位具体不可读位置,与 D-084(披露粒度不足)叠加。
+- **触发升级条件**: 需要精确定位不可读路径;权限问题频发;调用方依赖跳过分类做决策。
+- **修复建议**: 拆分 `skippedFiles`/`skippedDirectories`,文案改为 entries 或分别披露;在受上限约束下记录前 N 个路径。
+- **状态**: 未解决;本轮已完成目录跳过计入总数与 `detail.skipped`。
+
+### D-090 · `grep` 的 `glob` 过滤每个文件重新编译正则
+
+- **发现**: 2026-10-19,第二轮红队审查(Minor 项)。
+- **现象**: `grep` 在遍历回调中对每个候选文件调用 `matchesGlob(relative, input.glob)`,而 `matchesGlob` 每次都会执行 `compilePattern`;`glob` 工具本身已在 `execute` 中编译一次后复用。
+- **影响**: 大仓带 `glob` 过滤时产生重复编译开销;与 D-086 的回溯风险叠加,放大 CPU 占用。
+- **触发升级条件**: 大仓/频繁 glob 过滤导致可观测性能下降;需要降低单次 grep 成本。
+- **修复建议**: 预编译一次并把 `RegExp` 传入遍历回调,或导出编译函数/增加缓存。
+- **状态**: 未解决;本轮仅保证非法 glob 返回 `invalid_pattern`。
+
 ---
 
 ## 变更记录
@@ -754,3 +799,4 @@
 | 2026-10-18 | 维度4 Task2 复审:危险 execute 用例补前置识别断言(截断用例);design §4.3 同步 shell 非沙箱/自管 abort/`shell_terminated`/`del`/`rd` 通配与错误码表;录入 D-075(abort 无升级兜底)、D-076(`exitSignal`/`code=null` 平台边缘) |
 | 2026-10-18 | 维度4 Task6 收尾:README 补内置工具清单、fs/shell/glob/grep 语义与工具根;补 shell 截断多字节/AbortError 与 grep ENOTDIR/readdir 错误测试,工具行覆盖均 ≥90%;录入 D-077 ~ D-084(glob/grep 不响应取消、grep 先收集后截断、根 symlink 跟随、scanTruncated 保守、隐藏文件匹配、workdir 词法比较、shell 黑名单绕过、上限披露粒度) |
 | 2026-10-19 | 维度4 第一轮整体审查修复:shell 归一化根目标并跟踪 `cd`/`pushd`/`Set-Location`;grep 补 scanTruncated 披露与 1 MiB 单行上限;shell `detail.stdout/stderr` 改为 4096 字符摘要 + 字节数;补 fs write/read 失败、grep 扫描上限、path-safety 每测试 workdir、win32 忽略目录大小写与相对 cwd 归一测试;按实测修正 D-080,录入 D-085(正则 ReDoS/不可中断) |
+| 2026-10-19 | 维度4 第二轮红队修复:shell `rm` 任一 `-r/-f` + 根目标即危险、`--no-preserve-root` 一律危险、token 引号全移除、`chdir` 纳入跟踪、无参 `pushd` 保守、detail 摘要不切断代理对;glob 限制 pattern 长度/段数并折叠连续 `**/`;grep 校验 `glob` 非法、合并不可读目录披露;录入 D-086(glob ReDoS 未完全消除)与 D-087 ~ D-090(改目录方式未跟踪、shell 展开绕过、跳过披露分类、grep glob 重复编译) |

@@ -146,6 +146,30 @@ describe("isDangerousCommand 正例", () => {
     "cd C:\\ && rd /s /q *",
     "Set-Location C:\\ && del /s /q *",
     'rm -rf "/"',
+    "rm -r ~",
+    "rm -R ~",
+    "rm --recursive ~",
+    "rm -f /",
+    "rm --force /",
+    "rm -r ../*",
+    "rm -f /*",
+    "rm -f C:/",
+    "rm -f C:\\",
+    "cd / && rm -r *",
+    "cd / && rm -f *",
+    "cd / && rm -rf .",
+    "cd / && rm -r .",
+    "rm --no-preserve-root -rf /",
+    "rm --no-preserve-root -r build",
+    'rm -rf "/"*',
+    'rm -rf "$HOME"/*',
+    'rm -rf "$HOME"/',
+    'rm -rf "~"/*',
+    'del /s /q "C:\\"*',
+    'cd "$HOME"/ && rm -rf *',
+    '"rm" -rf /',
+    "chdir / && rm -rf *",
+    "pushd && rm -rf *",
     "mkfs /dev/sda",
     "mkfs.ext4 /dev/sda",
     "mkfs -t ext4 /dev/sda",
@@ -183,6 +207,16 @@ describe("isDangerousCommand 反例", () => {
   it.each([
     "rm -rf ./build",
     "rm -rf build",
+    "rm -r build",
+    "rm -R ./build",
+    "rm --recursive build",
+    "rm -f build/*",
+    "rm -r ../build",
+    "rm -f C:/temp/*",
+    "cd \"$HOME\"/build && rm -rf *",
+    "chdir build && rm -rf *",
+    "pushd build && rm -rf *",
+    "cd build && rm -rf .",
     "rm -rf /tmp/build",
     "rm -rf ../build",
     "rm -rf ../../build",
@@ -246,6 +280,15 @@ describe("shellTool 危险命令", () => {
     "del /s /q C:\\*.*",
     "format C:\\",
     "rd /s /q D:\\*",
+    "rm -r ~",
+    "rm -f /*",
+    'rm -rf "/"*',
+    'rm -rf "$HOME"/*',
+    'del /s /q "C:\\"*',
+    "chdir / && rm -rf *",
+    "cd / && rm -rf .",
+    "pushd && rm -rf *",
+    "rm --no-preserve-root -r build",
   ])("不执行 %s", async (command) => {
     expect(isDangerousCommand(command)).toBe(true);
     const workdir = makeWorkdir();
@@ -528,6 +571,53 @@ describe("shellTool 执行", () => {
     expect(r.text).not.toContain("\uFFFD");
     expect(r.text).toContain("a".repeat(1024 * 1024 - 2));
     expect(r.text).toContain("[stdout truncated at 1 MiB]");
+  });
+
+  it("stdout 截断落在 4 字节字符中间时按字符边界裁剪", async () => {
+    const workdir = makeWorkdir();
+    const child = fakeChild();
+    const payload = Buffer.concat([
+      Buffer.alloc(1024 * 1024 - 3, 0x61),
+      Buffer.from("😀", "utf8"),
+    ]);
+    spawnMock.mockImplementationOnce(() => {
+      process.nextTick(() => {
+        child.stdout?.emit("data", payload);
+        child.emit("close", 0, null);
+      });
+      return child;
+    });
+
+    const r = await run(workdir, "echo hi");
+
+    const detail = r.detail as { stdout: string; stdoutBytes: number; stdoutTruncated: boolean };
+    expect(r.isError).toBe(false);
+    expect(detail.stdoutTruncated).toBe(true);
+    expect(detail.stdout).not.toContain("\uFFFD");
+    expect(r.text).not.toContain("\uFFFD");
+    expect(r.text).toContain("a".repeat(1024 * 1024 - 3));
+    expect(r.text).toContain("[stdout truncated at 1 MiB]");
+  });
+
+  it("detail 摘要不切断代理对", async () => {
+    const workdir = makeWorkdir();
+    const child = fakeChild();
+    const payload = Buffer.from(`a${"a".repeat(4094)}😀${"b".repeat(100)}`, "utf8");
+    spawnMock.mockImplementationOnce(() => {
+      process.nextTick(() => {
+        child.stdout?.emit("data", payload);
+        child.emit("close", 0, null);
+      });
+      return child;
+    });
+
+    const r = await run(workdir, "echo hi");
+
+    const detail = r.detail as { stdout: string };
+    expect(r.isError).toBe(false);
+    expect(detail.stdout).toHaveLength(4095);
+    expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(detail.stdout)).toBe(false);
+    expect(detail.stdout).not.toContain("\uFFFD");
   });
 
   it("spawn 同步抛 AbortError → shell_aborted", async () => {

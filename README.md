@@ -95,18 +95,18 @@ docs/             设计、计划与已知问题
 ### `shell`
 
 - **非沙箱**：命令交给系统 shell（`spawn(command, { shell: true })`）执行，仅对已知高危命令做黑名单拦截，不限制其余命令的读写范围；`cwd` 必须位于工具根内，越界 / 不存在 / 非目录 → `cwd_invalid`。
-- 拦截：`rm -rf` 打 `/`、`~`、`$HOME`、多级 `..`、盘符根及其归一化变体（如 `../*`、`~/..`、`/tmp/../*`、`C:/..`）；跟踪 `cd` / `pushd` / `Set-Location` 的根目标，后续 `rm -rf *` / `del /s /q *` 一并拦截；`mkfs*`、`format <盘符>:`、`diskpart`、`bcdedit`、`shutdown` / `reboot` / `poweroff` / `halt`、`dd of=/dev/*`、`del|erase|rd|rmdir /s` 打盘符根、`reg delete HKLM`、`cipher /w`、fork bomb；命中返回 `dangerous_command` 且不 spawn。
+- 拦截：判定前移除 token 内所有 `'`/`"` 再归一目标（覆盖 `rm -rf "/"*`、`rm -rf "$HOME"/*`、`del /s /q "C:\"*`）；`rm` 带 `-r`/`-R`/`--recursive` **或** `-f`/`--force` 任一且打 `/`、`~`、`$HOME`、多级 `..`、盘符根及其归一化变体（如 `../*`、`~/..`、`/tmp/../*`、`C:/..`）即拦截，`--no-preserve-root` 一律危险；跟踪 `cd` / `pushd` / `chdir` / `Set-Location` 的根目标（无参 `pushd` 保守视为根），后续 `rm -r *` / `rm -f *` / `del /s /q *` 一并拦截；`mkfs*`、`format <盘符>:`、`diskpart`、`bcdedit`、`shutdown` / `reboot` / `poweroff` / `halt`、`dd of=/dev/*`、`del|erase|rd|rmdir /s` 打盘符根、`reg delete HKLM`、`cipher /w`、fork bomb；命中返回 `dangerous_command` 且不 spawn。
 - 退出语义：命令跑完即 `isError:false`，`text` 首行 `exit=<code>`；**非零退出码不算工具错误**，由模型读 `detail.exitCode` 判断。被信号终止 → `shell_terminated`（`detail.exitCode` 可能为 `null`）；`spawn` 失败 → `shell_spawn_failed`。
-- 取消：`signal` abort 后 Windows 用 `taskkill /T /F`、POSIX 杀 detached 进程组；结果码 `shell_aborted`。stdout / stderr 各截断到 1 MiB 并标记；`detail.stdout` / `detail.stderr` 只保留前 4096 字符摘要，完整输出在 `text`，由管线按需截断或落盘；`detail` 另含 `stdoutBytes` / `stderrBytes` 与截断标记。
-- 黑名单是启发式（`env`、`bash -c`、`xargs` 等可绕过），不能当作安全边界（D-083）。
+- 取消：`signal` abort 后 Windows 用 `taskkill /T /F`、POSIX 杀 detached 进程组；结果码 `shell_aborted`。stdout / stderr 各截断到 1 MiB 并标记；`detail.stdout` / `detail.stderr` 只保留前 4096 字符摘要（不切断代理对），完整输出在 `text`，由管线按需截断或落盘；`detail` 另含 `stdoutBytes` / `stderrBytes` 与截断标记。
+- 黑名单是启发式（`env`、`bash -c`、`xargs` 等可绕过；改目录方式与 shell 展开仍未覆盖，D-083/D-087/D-088），不能当作安全边界。
 
 ### `glob` / `grep`
 
-- `glob`：`pattern` 匹配**相对工具根**的 POSIX 路径（不是 `path` 根）；`*` 不跨 `/`、`?` 匹配单字符、`**/` 匹配任意层目录、段尾 `**` 匹配剩余路径，其余字符按字面量；反斜杠按 `/` 处理；大小写敏感。返回字典序路径，最多 200 条，超出 `[truncated]`；扫描上限 5000 个文件，超出 `[scan truncated at 5000 files]`。
-- `grep`：`pattern` 为正则（`ignoreCase` 可选），可加 `glob` 过滤、`maxResults`（1–1000，默认 200）；输出 `<相对路径>:<行号>:<文本>`，按路径与行号排序，超出 `[truncated]`。扫描达到 5000 个文件时追加 `[scan truncated at 5000 files]`；单行超过 1 MiB 时跳过并追加 `[skipped N lines longer than 1 MiB]`。
+- `glob`：`pattern` 匹配**相对工具根**的 POSIX 路径（不是 `path` 根）；`*` 不跨 `/`、`?` 匹配单字符、`**/` 匹配任意层目录、段尾 `**` 匹配剩余路径，其余字符按字面量；反斜杠按 `/` 处理；大小写敏感。pattern 长度 ≤256、段数 ≤64，连续 `**/` 会折叠；超限视为非法。返回字典序路径，最多 200 条，超出 `[truncated]`；扫描上限 5000 个文件，超出 `[scan truncated at 5000 files]`。
+- `grep`：`pattern` 为正则（`ignoreCase` 可选），可加 `glob` 过滤、`maxResults`（1–1000，默认 200）；`glob` 非法（空 / NUL / 超长 / 超段数）→ `invalid_pattern`，不静默无匹配。输出 `<相对路径>:<行号>:<文本>`，按路径与行号排序，超出 `[truncated]`。扫描达到 5000 个文件时追加 `[scan truncated at 5000 files]`；单行超过 1 MiB 时跳过并追加 `[skipped N lines longer than 1 MiB]`。
 - 两者都只遍历工具根内：跳过 `.git`、`node_modules`、`.harness`、`dist`、`coverage`、`build`、`out`、`target`、`.pio`、`cmake-build-*`；遍历中遇到的 symlink 文件 / 目录都不跟随（显式 `path` 根为 symlink 时仍会跟随，D-079）。
-- `grep` 只读 ≤2 MiB 的文件，含 NUL 视为二进制；跳过文件只给计数 `[skipped N files (binary/too large/unreadable)]`，不列具体路径（D-084）。
-- 两者都不响应 `AbortSignal`（D-077）；`grep` 先收集全部命中再截断，命中集很大时内存占用随结果增长（D-078）。
+- `grep` 只读 ≤2 MiB 的文件，含 NUL 视为二进制；跳过文件与不可读目录合并计数 `[skipped N files (binary/too large/unreadable)]`，不列具体路径（D-084/D-089）。
+- 两者都不响应 `AbortSignal`（D-077）；`grep` 先收集全部命中再截断，命中集很大时内存占用随结果增长（D-078）；`grep` 正则同步执行，ReDoS 不可中断（D-085），glob 编译仍有回溯风险（D-086）。
 
 ## headless demo
 
@@ -261,7 +261,8 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 内置工具：
 
 - `glob` / `grep` 不响应取消，`grep` 先收集全部命中再截断（D-077、D-078）。
-- `shell` 危险命令拦截是启发式、非沙箱，`env` / `bash -c` / `xargs` 等可绕过（D-083）。
+- `shell` 危险命令拦截是启发式、非沙箱，`env` / `bash -c` / `xargs` 等可绕过（D-083）；改目录方式与 shell 展开未覆盖（D-087、D-088）。
+- `glob` 编译仍有正则回溯风险（D-086）；`grep` 的 `glob` 过滤每文件重新编译（D-090）；跳过披露不区分文件与目录（D-089）。
 - 工具根与 resume 的 workdir 只做词法比较，不解析 symlink / 8.3 短名（D-082）。
 
 前端工作台：

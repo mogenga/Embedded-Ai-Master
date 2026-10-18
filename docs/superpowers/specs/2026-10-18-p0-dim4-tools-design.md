@@ -92,7 +92,9 @@ annotations = { readOnly: false, destructive: true };
 
 - `cwd = resolveInWorkdir(ctx.cwd, cwd ?? ".")`; 不存在/非目录 → `cwd_invalid`。
 - 危险命令拦截(大小写不敏感, 仅明显破坏性; **不是沙箱**):
-  - `rm` 带 `-r`/`-f` 且目标为 `/`、`~`、`$HOME`/`${HOME}`、多级 `..`、盘符根(`C:`/`C:\`/`C:\*`);
+  - 判定前先移除 token 内所有 `'`/`"`, 再按 `\`→`/` 与 `path.posix.normalize` 归一目标(覆盖 `rm -rf "/"*`、`rm -rf "$HOME"/*`、`del /s /q "C:\"*` 等引号拼接绕过);
+  - `rm` 带 `-r`/`-R`/`--recursive` **或** `-f`/`--force` 任一, 且目标为 `/`、`~`、`$HOME`/`${HOME}`、多级 `..`、盘符根(`C:`/`C:\`/`C:\*`); `--no-preserve-root` 一律危险;
+  - 跟踪 `cd`/`pushd`/`chdir`/`Set-Location` 的根目标, 后续 `rm -r *`/`rm -f *`、`del`/`rd /s` 通配一并拦截; 无参 `pushd` 保守视为根目标;
   - `mkfs`、`format <drive>:`、`diskpart`、`shutdown`、`reboot`、`poweroff`、`halt`;
   - `dd ... of=/dev/...`;
   - `:(){ :|:& };:`(fork bomb);
@@ -100,7 +102,7 @@ annotations = { readOnly: false, destructive: true };
   - 命中 → `{isError:true, code:"dangerous_command", message, text}`，**不 spawn**。
 - 执行: `spawn(command, { shell: true, cwd, env: process.env })`; 收集 stdout/stderr 各最多 1 MiB(超出截断并标记); 等待 close。
 - 取消: `execute` 自管 abort——Windows 用 `taskkill /T /F` 杀进程树, POSIX 杀 `detached` 进程组; 不传 Node 内置 `signal`(避免只杀 shell 留下孙进程); 调用方中止返回 `shell_aborted`。
-- 返回 `isError:false` + `detail: { exitCode, signal, stdout, stderr, stdoutTruncated, stderrTruncated }`; `text` 包含 `exit=<n>`、stdout、stderr(便于模型直接读)。
+- 返回 `isError:false` + `detail: { exitCode, signal, stdout, stderr, stdoutBytes, stderrBytes, stdoutTruncated, stderrTruncated }`; `stdout`/`stderr` 为前 4096 字符摘要(按 UTF-16 码点边界裁剪, 不切断代理对), `stdoutBytes`/`stderrBytes` 为实际收集字节数; `text` 保留完整输出(≤1 MiB), 包含 `exit=<n>`、stdout、stderr(便于模型直接读)。
 - 非零退出码不算工具错误; spawn 失败 `shell_spawn_failed`; 子进程被系统信号终止 → `isError:true`, `code:"shell_terminated"`, `detail.exitCode:null` + 实际 `signal`(不把 null 伪装成 1)。
 - 错误码: `ok`、`dangerous_command`、`cwd_invalid`、`shell_spawn_failed`、`shell_aborted`、`shell_terminated`。
 - 明确文档: 拦截列表不完备; P1 权限层再收紧。
@@ -116,10 +118,11 @@ annotations = { readOnly: true };
 - 忽略目录: `.git`/`node_modules`/`.harness`/`dist`/`coverage`/`build`/`out`/`target`/`.pio`, 以及前缀 `cmake-build-`(如 `cmake-build-debug`)。
 - 仅遍历中不跟随 symlink(目录与文件均跳过); 显式 `path` 根若为 symlink 目录, `stat`/`readdir` 会跟随并遍历其目标。
 - pattern 先按 Windows 习惯把 `\` 规范化为 `/`; 仅完整路径段(前后为 `/` 或边界)的 `**` 特殊: `**/` → `(?:.*/)?`(使 `**/*.ts` 匹配根级), 段尾 `**` → `.*`; 段内 `**`(如 `a**b`)按 `*` 处理; `*` → `[^/]*`, `?` → `[^/]`, 其余字符转义; 正则加 `u` 标志。匹配相对 **workdir**(不是 `path` 根)的 POSIX 路径; 大小写敏感; `*` 也匹配以点开头的隐藏文件(不实现 dot:false)。
+- ReDoS 缓解: pattern 归一后长度 >256、段数 >64 视为非法; 连续 `**/` 折叠为一个后再编译; 同步正则回溯风险未完全消除(D-086)。
 - 上限: 扫描 5000 个文件、返回 200 条结果; 返回按字典序排序的、相对 workdir 的 POSIX 路径, 每行一条; 结果超出 200 追加 `[truncated]`, 扫描达到 5000 且仍有未处理条目追加 `[scan truncated at 5000 files]`。
 - 无匹配 → `text: "(no matches)"`, `isError:false`。
 - `readdir` 的 `EACCES`/`EPERM`/`ENOENT` 计为不可读, 跳过并在 `text` 末尾加 `[skipped N unreadable entries]`(R3: 不静默); 其他资源错误(`EMFILE`/`ENOMEM` 等) → `read_failed`, 不静默。
-- 非法 pattern(空/含 NUL) → `invalid_pattern`; 根不存在 → `not_found`; 根不是目录 → `not_a_directory`; 路径非法 → `path_invalid`; 越界 → `path_outside_workdir`。
+- 非法 pattern(空/含 NUL/超长/超段数) → `invalid_pattern`; 根不存在 → `not_found`; 根不是目录 → `not_a_directory`; 路径非法 → `path_invalid`; 越界 → `path_outside_workdir`。
 - `detail`: `{ scanned, matched, returned, skipped, truncated, scanTruncated }`。
 
 ### 4.5 `grep` 工具
@@ -136,14 +139,14 @@ annotations = { readOnly: true };
 ```
 
 - 根同 glob; 遍历同一忽略列表; 不跟随 symlink; 只读 ≤2 MiB 的文件; 含 NUL 的文件跳过(二进制)。
-- `new RegExp(pattern, ignoreCase ? "i" : "")`; 无效正则 → `invalid_pattern`。
-- `glob` 可选, 用 4.4 的同一匹配器过滤文件。
+- `new RegExp(pattern, ignoreCase ? "i" : "")`; 无效正则 → `invalid_pattern`; 正则同步执行, 长行 ReDoS 会阻塞事件循环且不可中断(D-085), 因此单行 >1 MiB 直接跳过并计入 `skippedLongLines`。
+- `glob` 可选, 用 4.4 的同一匹配器过滤文件; `glob` 为空/含 NUL/超长/超段数 → `invalid_pattern`, 不静默退化为无匹配。
 - 每行匹配输出 `<relpath>:<line>:<text>`, `<relpath>` 相对 **workdir**(可直接喂回 `fs`); 结果按 relpath 字典序、行号升序输出; 行号 1-based; CRLF 按行切分且输出不含 `\r`。
 - 默认最多 200, 可到 1000; 超出加 `[truncated]`。
-- 跳过二进制/超大/不可读文件时在 `text` 末尾加 `[skipped N files (binary/too large/unreadable)]`, 并写 `detail.skipped = { binary, tooLarge, unreadable }`(R3: 不静默)。
+- 跳过二进制/超大/不可读文件时在 `text` 末尾加 `[skipped N files (binary/too large/unreadable)]`, 并写 `detail.skipped = { binary, tooLarge, unreadable }`(R3: 不静默); `walkFiles` 跳过的不可读目录也并入 `unreadable` 与同一披露。
 - 无匹配 → `(no matches)`; 不报错; 若同时有跳过文件, 跳过披露仍追加在末尾。
 - 错误码: `invalid_pattern`、`not_found`、`not_a_directory`、`path_invalid`、`path_outside_workdir`、`read_failed`。
-- `detail`: `{ scanned, matched, returned, skipped, truncated, scanTruncated }`。
+- `detail`: `{ scanned, matched, returned, skipped, skippedLongLines, truncated, scanTruncated }`。
 
 ### 4.6 注册与装配
 
