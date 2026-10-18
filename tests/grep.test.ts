@@ -1,5 +1,6 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import type { Dirent, Stats } from "node:fs";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,13 +9,24 @@ import type { ToolCtx } from "../src/tools/types.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
-  return { ...actual, readFile: vi.fn(actual.readFile) };
+  return {
+    ...actual,
+    readFile: vi.fn(actual.readFile),
+    readdir: vi.fn(actual.readdir),
+    stat: vi.fn(actual.stat),
+  };
 });
 
 type ReadFileFn = (target: string) => Promise<Buffer>;
+type ReaddirWithTypes = (dir: string, options: { withFileTypes: true }) => Promise<Dirent[]>;
+type StatFn = (target: string) => Promise<Stats>;
 
 const readFileMock = vi.mocked(readFile as unknown as ReadFileFn);
 const passthrough = readFileMock.getMockImplementation();
+const readdirMock = vi.mocked(readdir as unknown as ReaddirWithTypes);
+const passthroughReaddir = readdirMock.getMockImplementation();
+const statMock = vi.mocked(stat as unknown as StatFn);
+const passthroughStat = statMock.getMockImplementation();
 
 const tempDirs: string[] = [];
 const signal = new AbortController().signal;
@@ -42,6 +54,8 @@ function run(workdir: string, input: Parameters<typeof grepTool.execute>[0]) {
 
 afterEach(() => {
   if (passthrough) readFileMock.mockImplementation(passthrough);
+  if (passthroughReaddir) readdirMock.mockImplementation(passthroughReaddir);
+  if (passthroughStat) statMock.mockImplementation(passthroughStat);
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -352,5 +366,32 @@ describe("grep 执行", () => {
 
     expect(r.isError).toBe(false);
     expect(r.text).toBe("(no matches)\n[skipped 1 files (binary/too large/unreadable)]");
+  });
+
+  it("根 stat 报 ENOTDIR → not_a_directory", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "a.txt", "needle\n");
+    statMock.mockRejectedValueOnce(
+      Object.assign(new Error("ENOTDIR: not a directory"), { code: "ENOTDIR" }),
+    );
+
+    const r = await run(workdir, { pattern: "needle", path: "a.txt/child" });
+
+    expect(r.isError).toBe(true);
+    expect(r.code).toBe("not_a_directory");
+  });
+
+  it("遍历遇到非权限类错误 → read_failed 并保留原始信息", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "a.txt", "needle\n");
+    readdirMock.mockImplementationOnce(async () => {
+      throw "boom";
+    });
+
+    const r = await run(workdir, { pattern: "needle" });
+
+    expect(r.isError).toBe(true);
+    expect(r.code).toBe("read_failed");
+    expect(r.text).toContain("boom");
   });
 });

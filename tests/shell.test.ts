@@ -116,6 +116,8 @@ describe("isDangerousCommand 正例", () => {
     "rm -fr /",
     "rm -r -f /",
     "rm --recursive --force /",
+    "rm -rf -- /",
+    "rm -rf --one-file-system /",
     "sudo rm -rf /",
     "sudo -u root rm -rf /",
     "sudo -g wheel rm -rf ~",
@@ -184,6 +186,7 @@ describe("isDangerousCommand 反例", () => {
     "rd /s /q build",
     "rd /s /q D:\\temp",
     "mkfslike /dev/sda",
+    ";;;",
   ])("放行 %s", (command) => {
     expect(isDangerousCommand(command)).toBe(false);
   });
@@ -443,5 +446,41 @@ describe("shellTool 执行", () => {
     expect(r.detail).toMatchObject({ exitCode: null, signal: "SIGTERM" });
     expect(r.message).toContain("SIGTERM");
     expect(r.text).toContain("SIGTERM");
+  });
+
+  it("stdout 截断落在多字节字符中间时按字符边界裁剪", async () => {
+    const workdir = makeWorkdir();
+    const child = fakeChild();
+    const payload = Buffer.concat([Buffer.alloc(1024 * 1024 - 2, 0x61), Buffer.from("中", "utf8")]);
+    spawnMock.mockImplementationOnce(() => {
+      process.nextTick(() => {
+        child.stdout?.emit("data", payload);
+        child.emit("close", 0, null);
+      });
+      return child;
+    });
+
+    const r = await run(workdir, "echo hi");
+
+    const detail = r.detail as { stdout: string; stdoutTruncated: boolean };
+    expect(r.isError).toBe(false);
+    expect(detail.stdoutTruncated).toBe(true);
+    expect(detail.stdout.length).toBe(1024 * 1024 - 2);
+    expect(detail.stdout.endsWith("a")).toBe(true);
+    expect(detail.stdout).not.toContain("\uFFFD");
+    expect(r.text).toContain("[stdout truncated at 1 MiB]");
+  });
+
+  it("spawn 同步抛 AbortError → shell_aborted", async () => {
+    const workdir = makeWorkdir();
+    spawnMock.mockImplementationOnce(() => {
+      throw Object.assign(new Error("spawn aborted"), { name: "AbortError" });
+    });
+
+    const r = await run(workdir, "echo hi");
+
+    expect(r.isError).toBe(true);
+    expect(r.code).toBe("shell_aborted");
+    expect(r.text).toContain("spawn aborted");
   });
 });
