@@ -1125,3 +1125,70 @@ Expected: 全绿；verify-ui 14/14 且打印 SUMMARY；V13 非硬编码。
 git add -A
 git commit -m "fix(ui): 修复整体审查的投影安全与验收缺陷"
 ```
+
+---
+
+### Task 12: 第二轮红队审查修复（P2 + 可修 Minor）
+
+**Files:**
+- Modify: `src/ui/view/transcript.ts`
+- Modify: `src/ui/view/sse.ts`
+- Modify: `src/ui/components/conversation/tool-card.tsx`
+- Modify: `src/ui/styles.css`
+- Modify: `tests/ui/transcript.test.ts`
+- Modify: `tests/ui/sse.test.ts`
+- Modify: `tests/ui/components/cards.test.tsx`
+- Modify: `docs/deferred-issues.md`
+
+**Interfaces:**
+- Consumes: Task 1-11 全部产物。
+- Produces:
+  - `ToolCardModel.text` 允许为空且 `artifactPath` 存在时保留 `kind:"readout"`（不降级为 error），UI 显示「结果已落盘」与路径。
+  - `createEventStream` 维护单一重连 timer；同一 source 的重复 `error` 只调度一次；`close()` 后不再调用 `onError`；构造抛错转 `onError`。
+  - `transcriptFromLoop`/`transcriptFromSession` 的 costUsd 均经有限数校验（非有限或负数忽略）。
+  - 折叠摘要首行截断到 120 字符。
+
+- [ ] **Step 1: 写失败测试**
+
+1. `tests/ui/transcript.test.ts`：
+   - `text` 为空但 `artifactPath` 存在 → 投影为 `kind:"readout"` 且保留 `artifactPath`（非 `empty_result`）。
+   - session costUsd 为负数 / NaN → `view.cost` 缺失；loop costUsd 为 NaN / 负数 → `view.cost` 缺失。
+2. `tests/ui/sse.test.ts`：
+   - 连续两次 `error`（retryMs=5）→ 实例数 ≤ 2（初始 + 1 次重连），不得出现 3 个。
+   - `close()` 后 `error` → `onError` 不被调用。
+   - 构造抛错 → `onError` 被调用且不逃逸。
+3. `tests/ui/components/cards.test.tsx`：
+   - `text` 为 100000 字符且 `kind:"readout"` → 折叠摘要文本长度 ≤ 130。
+   - `kind:"readout"` + `artifactPath` + 空 text → 渲染「结果已落盘」与路径。
+
+- [ ] **Step 2: 运行确认 RED**
+
+Run: `node ./node_modules/vitest/vitest.mjs run tests/ui/transcript.test.ts tests/ui/sse.test.ts tests/ui/components/cards.test.tsx`
+Expected: 新增用例失败（当前实现行为不符）。
+
+- [ ] **Step 3: 实现修复**
+
+1. `transcript.ts`：成功结果分支——`detail` → 结构化；否则 `text` 非空 → readout 纯文本；否则 `artifactPath` 非空 → readout + artifactPath + `text:""`（不置 error）；三者皆空 → `empty_result`。`applyCost` 统一校验 `Number.isFinite(v) && v >= 0`。
+2. `sse.ts`：`let retryTimer: ReturnType<typeof setTimeout> | null`；`scheduleReconnect()` 若 timer 已存在则不再调度；`close()` 置 closed 并清 timer；`error` 回调内先判 `closed`；`new ctor(url)` 包 try/catch → `onError`。
+3. `tool-card.tsx`：折叠摘要 `firstLine.slice(0, 120)`，超长加省略号；新增 artifact 展示分支。
+4. `styles.css`：删除重复 `.dock` 定义（保留合并后的单条，`overflow:hidden`，`dock-body` 负责滚动）与重复 `@media (max-width:819.98px)` 规则。
+5. `docs/deferred-issues.md`：登记 Minor-4（usage 缺字段补 0）为 D-062；变更记录追加。
+
+- [ ] **Step 4: 全量验证**
+
+```bash
+node ./node_modules/vitest/vitest.mjs run
+node ./node_modules/typescript/bin/tsc --noEmit
+node ./node_modules/typescript/bin/tsc -p tsconfig.web.json --noEmit
+node ./node_modules/vite/bin/vite.js build
+node scripts/verify-ui.mjs
+node ./node_modules/typescript/bin/tsc -p tsconfig.build.json
+```
+Expected: 全绿；verify-ui 14/14 + SUMMARY。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add -A
+git commit -m "fix(ui): 修复红队审查的边界与SSE重连缺陷"
+```

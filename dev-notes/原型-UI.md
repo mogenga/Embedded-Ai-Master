@@ -51,3 +51,25 @@
 - **被拒绝或纠偏**：初版 V2 依设计原文"视口 − 664"期望主区 936，实测 932；核实 264 + 404 = 668，判定设计公式为笔误，改文档与断言而非改布局。V6 初版探针取到未展开子树的 `bottom=0`，属假阳性，改为只取厂商分流展开子树的 4 项。V7 的 track 计算值为 `rgba(0, 0, 0, 0)` 而非字面 `transparent`，按透明接受。V3 主区内容宽按滚动条占位扣除后判定（882 = 932 − 40 − 10），已在设计 v1.2 明确口径。
 - **翻车与返工**：首轮 5 项 FAIL（V2 口径、V7 透明值、V9 system 态、V11 原生控件焦点、V12 减少动效）。V11 首次只修好 textarea：`.port-grid select:focus` 与新增 `:focus-visible` 规则特异性相同且后置，覆盖了焦点环；把规则移到文件末尾后 41 个控件 0 无环。未改任何布局几何，仅补样式、主题语义与脚本口径。
 - **验证**：`npm run typecheck:web` 0 error；`npm run test:ui` 55 passed；`npm run build:web` 成功；`npm run verify:ui` V1-V12/V14 全 PASS；`npm run lint` 0 error；`npm test` 483 passed / 1 skipped；`npm run build` 成功。
+
+## 2026-10-18 · 前端工程 spec/plan 与 Task 1-8 交付
+
+- **用户关键原话**："依据产品原型 prototypes\index.html 和前端设计规范文档 docs\frontend-design.md，推进前端工程任务"。
+- **关键产出**：新建 `docs/superpowers/specs/2026-10-18-ui-workbench-design.md`（工程结构、模块边界、类型接线、投影契约、V1-V14 映射、UI-SPEC-01~04 决策）与 `docs/superpowers/plans/2026-10-18-ui-workbench.md`（Task 1-10，TDD）。Context7 查证 Preact preset-vite 配置、jsxImportSource、vitest happy-dom 用法；npm registry 核实版本并确认 Preact v11 仍是开发线、v10.x 为稳定线。交付：脚手架（Vite 根配置 + tsconfig.web + vitest tsx/preact 插件）、主题三态与 30 个 SVG symbol、TranscriptView 归约与 fixture、App 栅格/TopBar/StatusBar、左栏知识库与会话、主区会话头/路径条/消息流、工具卡/判决卡/安全提示、Composer 与调试坞四分区。
+- **被拒绝或纠偏**：Preact 不采用 npm latest（11.0.1），坚持 ^10.29.8；组件不使用默认导出（由 Task 11 回填 spec 统一为命名导出）；知识库树与调试坞局部态允许组件内 useState。
+- **翻车与返工**：Task 1 首版 smoke 测试用 `.ts` 承载 JSX，导致 tsc 解析失败（TS1005），改名 `.tsx`；根 tsconfig 未排除前端导致既有 `typecheck` 回归，且 Vitest 未加载 preact 插件会把 JSX 编译成 react/jsx-runtime——两处在 Task 1 审查后修复（`2d3289a`）；smoke 测试用 `fileURLToPath(import.meta.url)` 在 happy-dom 下报 URL scheme 错误，改为 `path.resolve(process.cwd(), ...)`（`390b9b4`）。Task 6 首次派发子代理异常中止无产出，重新派发后完成。
+- **验证**：Task 1 完成后全量 438 passed / 1 skipped；Task 8 后 478 passed / 1 skipped；typecheck 与双构建通过。
+
+## 2026-10-18 · 第一轮整体审查与修复
+
+- **用户关键原话**："推进前端工程任务"；既定要求按 Superpowers 流程两轮审查核验。
+- **关键产出**：独立整体审查（契约与设计一致性）结论 BLOCK，提出 5 项 P1：V13 恒真断言、verify-ui 的 finally 吞退出码、R2 写内存无确认入口、工具结果丢失 text/artifactPath、status/usage/context/cost 未投影；另有 10 项 P2 与多项 Minor。修复落为 plan Task 11：投影补齐 text/artifact/pending/status/usage/cost、GuardNotice 确认与拒绝入口（确认后仅"执行中"）、复位确认展示 `AIRCR @ 0xE000_ED0C = 0x05FA_0004`、StatusBar 接线、PathLine 10px、checkpoint 真实事件断言、主题测试拆分、首屏主题值校验、verify-ui 退出码必经、V13 改为检查一致性测试文件。提交 `2d483f0`。
+- **被拒绝或纠偏**：不允许把"等待工具结果"渲染成"已执行"；不允许 V13 硬编码 PASS；Dock/回放按钮等未实现项改为登记（D-058~D-061）而非假装完成。
+- **翻车与返工**：第一轮审查实测发现 verify-ui 在 `%TEMP%` 清理失败时走 `catch { return }`，导致无 SUMMARY 且失败退出被吞——属真实假绿路径，修复后复现为挂起（探针证明）。全量由 483 增至 513 passed / 1 skipped。
+
+## 2026-10-18 · 第二轮红队审查与修复
+
+- **用户关键原话**：按既定两轮审查流程推进。
+- **关键产出**：红队审查结论 PASS_WITH_CONCERNS。6 个变异探针全部被杀（costUsd 累加、status 分支、text-only 回退、pending、verify-ui finally return、GuardNotice 直接置已执行），7 次还原均逐字一致。发现 4 项 P2：artifact-only 结果被投成 empty_result、SSE 重复 error 并发重连（实测 3 实例）、超长 text 折叠摘要仍渲染全首行、loop costUsd 未做有限数校验；另 4 项 Minor。修复落为 plan Task 12：artifact 保留 readout、SSE 单 timer 去重与 close 静默/构造异常转 onError、折叠摘要截断 120 字符、`asCost` 统一校验、清理 styles.css 重复 `.dock` 与重复 media 查询；Usage 缺字段补 0 登记 D-062。提交 `f34f696`。
+- **被拒绝或纠偏**：未改 usage 缺字段补 0 的语义（仅登记）；未提交工作区既有的 README.md 无关改动。
+- **翻车与返工**：无生产逻辑返工；Task 12 首跑 RED 9 failed 后一次转绿。全量 522 passed / 1 skipped；V1-V14 全 PASS。
