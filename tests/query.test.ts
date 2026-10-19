@@ -1237,6 +1237,25 @@ describe("query 主循环", () => {
     expect(provider.calls).toHaveLength(0);
   });
 
+  it("compactor 抛非取消错误时上抛并落 interrupted(error)", async () => {
+    const provider = scriptedProvider([reply("done")]);
+    const { ctx, session } = await makeCtx(provider, {
+      budget: () => ({ over: true, tokens: 100, softLimit: 10 }),
+      compactor: async () => {
+        throw new Error("boom");
+      },
+    });
+
+    await expect(collect(query(ctx, "x", { maxTurns: 10 }))).rejects.toThrow("boom");
+
+    expect(provider.calls).toHaveLength(0);
+    expect(
+      session.events().some(
+        (event) => event.type === "interrupted" && event.payload.reason === "error",
+      ),
+    ).toBe(true);
+  });
+
   it("complete 后 observe 更新测量,使下一轮 budget 超限并触发 compactor", async () => {
     let ratio = 1;
     const observed: Array<{ promptTokens: number; messages: ModelChatMessage[] }> = [];

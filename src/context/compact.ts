@@ -178,7 +178,6 @@ function measureWith(meter: TokenMeter | undefined, messages: ModelChatMessage[]
   return meter === undefined ? heuristicCountTokens(messages) : meter.measure(messages);
 }
 
-
 function failureReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

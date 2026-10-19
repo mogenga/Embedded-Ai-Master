@@ -137,6 +137,8 @@ for await (const event of runSession({
 }
 ```
 
+`compaction.enabled` 必须是布尔值，其他类型在入口抛 `TypeError`；配置校验发生在迭代器首次 `next()`（`runSession` 为 AsyncGenerator），未开始迭代时不会抛出。
+
 `compaction.enabled: false` 不注入 compactor / TokenMeter，只保留原有 `checkBudget` 启发式预算检查，也不校验压缩比例与 `keepRecentTurns`。
 
 压缩事件可回放：同一日志经 `buildMessages` 产生同一视图；同一会话重复调用不会重复 elide 已处理的 seq。`compacted` 循环事件只表示“本轮压缩尝试结束”，即使日志追加了 `failed` 也会发出；需要区分成功/失败时读取 `compaction` 事件（D-097）。

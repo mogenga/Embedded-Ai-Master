@@ -148,6 +148,9 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
 export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   if (opts.sessionId !== undefined) assertSessionId(opts.sessionId);
   const compaction = opts.compaction;
+  if (compaction?.enabled !== undefined && typeof compaction.enabled !== "boolean") {
+    throw new TypeError(`compaction.enabled must be a boolean; got ${typeof compaction.enabled}`);
+  }
   const compactionEnabled = compaction?.enabled !== false;
   if (compactionEnabled) {
     assertCompactionRatios(compaction?.keepTailRatio ?? 0.16, compaction?.softRatio ?? 0.8);
