@@ -409,6 +409,66 @@ describe("createPermissionGate", () => {
     expect(prompter.request).toHaveBeenCalledTimes(3);
   });
 
+  it("settles with approval_error when the rejection's message getter throws", async () => {
+    const poisoned = new Error("seed");
+    Object.defineProperty(poisoned, "message", {
+      get() {
+        throw new Error("message getter boom");
+      },
+    });
+    let calls = 0;
+    const prompter: PermissionPrompter = {
+      request: vi.fn(() => {
+        calls += 1;
+        return calls === 1
+          ? Promise.reject(poisoned)
+          : Promise.resolve<"allow">("allow");
+      }),
+    };
+    const gate = createPermissionGate({ preset: "diagnose", rules: [], prompter });
+
+    const first = check(gate, "c1");
+    const second = check(gate, "c2");
+
+    await expect(first).resolves.toMatchObject({
+      callId: "c1",
+      action: "ask",
+      effective: "deny",
+      reason: expect.stringContaining("approval_error"),
+    });
+    await expect(second).resolves.toMatchObject({ callId: "c2", effective: "allow" });
+    expect(prompter.request).toHaveBeenCalledTimes(2);
+  });
+
+  it("settles with approval_error when describing an invalid result throws", async () => {
+    const poisoned = Object.defineProperty({}, Symbol.toStringTag, {
+      get() {
+        throw new Error("toStringTag getter boom");
+      },
+    });
+    let calls = 0;
+    const prompter: PermissionPrompter = {
+      request: vi.fn(() => {
+        calls += 1;
+        return calls === 1
+          ? Promise.resolve(poisoned as unknown as "allow")
+          : Promise.resolve<"allow">("allow");
+      }),
+    };
+    const gate = createPermissionGate({ preset: "diagnose", rules: [], prompter });
+
+    const first = check(gate, "c1");
+    const second = check(gate, "c2");
+
+    await expect(first).resolves.toMatchObject({
+      callId: "c1",
+      effective: "deny",
+      reason: expect.stringContaining("approval_error"),
+    });
+    await expect(second).resolves.toMatchObject({ callId: "c2", effective: "allow" });
+    expect(prompter.request).toHaveBeenCalledTimes(2);
+  });
+
   it("propagates rule source and ruleIndex into the decision", async () => {
     const rules: SourcedRule[] = [
       { rule: { tool: "shell", action: "ask", reason: "custom-reason" }, source: "project" },

@@ -75,8 +75,16 @@ export function toolAccess(tool: ToolDef<any>, args: unknown): ToolAccess {
   return "unknown";
 }
 
+// 抛出的值可能来自任意代码:Error 子类或 Proxy 的 message/toString 也可能再抛。
+// 这里必须兜底,否则异常路径本身抛错会把 fail-closed 变成启动期崩溃或队列卡死。
+const UNKNOWN_ERROR_MESSAGE = "unknown error";
+
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  try {
+    return error instanceof Error ? error.message : String(error);
+  } catch {
+    return UNKNOWN_ERROR_MESSAGE;
+  }
 }
 
 function errorReason(error: unknown): string {

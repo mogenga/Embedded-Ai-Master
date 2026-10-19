@@ -399,6 +399,29 @@ describe("evaluatePolicy errors", () => {
     expect(result.reason.startsWith("permission_error:")).toBe(true);
   });
 
+  it("falls back to a fixed reason when the thrown error's message getter throws", () => {
+    const poisoned = new Error("seed");
+    Object.defineProperty(poisoned, "message", {
+      get() {
+        throw new Error("message getter boom");
+      },
+    });
+    const result = evaluate(
+      "diagnose",
+      [],
+      tool({
+        name: "poisoned-error",
+        access: () => {
+          throw poisoned;
+        },
+      }),
+    );
+    expect(result.action).toBe("deny");
+    expect(result.source).toBe("builtin");
+    expect(result.ruleIndex).toBeUndefined();
+    expect(result.reason).toBe("permission_error:unknown error");
+  });
+
   it("uses String() for non-Error throwables", () => {
     const result = evaluate(
       "diagnose",

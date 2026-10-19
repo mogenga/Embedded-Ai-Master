@@ -42,12 +42,27 @@ function describeValue(value: unknown): string {
   if (typeof value === "symbol" || typeof value === "bigint") return String(value);
   if (value === undefined) return "undefined";
   if (value === null) return "null";
-  if (typeof value === "object") return Object.prototype.toString.call(value);
+  if (typeof value === "object") {
+    // 不可信对象可能自定义 Symbol.toStringTag 并在其中抛错;描述本身不得抛。
+    try {
+      return Object.prototype.toString.call(value);
+    } catch {
+      return "[object]";
+    }
+  }
   return String(value);
 }
 
+// 与 policy.ts 同理:prompter 的 rejection 值不可信,读取 message/toString 本身
+// 可能抛错。若在此处再抛,settle 不会执行,审批队列会永久占用 active 槽位。
+const UNKNOWN_ERROR_MESSAGE = "unknown error";
+
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  try {
+    return error instanceof Error ? error.message : String(error);
+  } catch {
+    return UNKNOWN_ERROR_MESSAGE;
+  }
 }
 
 function approvalErrorReason(message: string): string {
