@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { mkdir, open, rm, stat } from "node:fs/promises";
+import { appendFile, lstat, mkdir, open, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { buildMessages } from "../context/build.js";
 import { SessionResumeError } from "./errors.js";
@@ -12,6 +12,7 @@ import {
   validateHeader,
   writeHeaderAtomic,
 } from "./handle.js";
+import { acquireSessionLock } from "./lock.js";
 import type { SessionHandle } from "./handle.js";
 import {
   assertRegularEventFile,
@@ -179,6 +180,14 @@ async function assertSessionExists(dir: string, headerPath: string): Promise<voi
     }
     throw error;
   }
+  // create/resume/fork 统一拒绝目录符号链接,避免同一会话经不同路径打开(D-049)。
+  if ((await lstat(dir)).isSymbolicLink()) {
+    throw new SessionResumeError(
+      "invalid_target",
+      `Session directory must not be a symbolic link: ${dir}`,
+      { dir },
+    );
+  }
   if (!info.isDirectory()) {
     throw new SessionResumeError("invalid_target", `Session path is not a directory: ${dir}`, {
       dir,
@@ -223,10 +232,24 @@ export async function createSession(
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  if (dirInfo !== undefined && !dirInfo.isDirectory()) {
-    throw new SessionResumeError("invalid_target", `Session path is not a directory: ${dir}`, {
-      dir,
-    });
+  if (dirInfo !== undefined) {
+    // create 与 resume 一致:拒绝目录符号链接,避免同一会话经不同路径创建/打开(D-049)。
+    const linkInfo = await lstat(dir);
+    if (linkInfo.isSymbolicLink()) {
+      throw new SessionResumeError(
+        "invalid_target",
+        `Session directory must not be a symbolic link: ${dir}`,
+        { dir },
+      );
+    }
+    if (!dirInfo.isDirectory()) {
+      throw new SessionResumeError("invalid_target", `Session path is not a directory: ${dir}`, {
+        dir,
+      });
+    }
+  }
+  if (dirInfo !== undefined && hasSessionLog(dir)) {
+    throw new Error(`Session already exists or initialization failed: existing session log in ${dir}`);
   }
   const id = opts.id ?? randomUUID();
   const header = validateHeader({
@@ -238,35 +261,51 @@ export async function createSession(
     ...(opts.workdir === undefined ? {} : { workdir: opts.workdir }),
   });
   await mkdir(dir, { recursive: true });
+  const lock = await acquireSessionLock(dir);
   const headerPath = path.join(dir, "header.json");
   const logPath = path.join(dir, "session.v1.jsonl");
   let headerCreated = false;
   let logCreated = false;
+  let handle: SessionHandle | undefined;
   try {
     const headerFile = await open(headerPath, "wx");
     headerCreated = true;
     try {
       await headerFile.writeFile(`${JSON.stringify(header)}\n`, "utf8");
+      await headerFile.sync();
     } finally {
       await headerFile.close();
     }
     const logFile = await open(logPath, "wx");
     logCreated = true;
-    await logFile.close();
+    try {
+      await logFile.sync();
+    } finally {
+      await logFile.close();
+    }
+    handle = createHandle(dir, header, [], logPath, {
+      generationThresholdBytes,
+      lock,
+    });
+    if (opts.systemPrompt !== undefined) {
+      await handle.append({ type: "system", payload: { content: opts.systemPrompt } });
+    }
+    return handle;
   } catch (error) {
+    await handle?.close().catch(() => undefined);
     if (logCreated) await rm(logPath, { force: true });
     if (headerCreated) await rm(headerPath, { force: true });
+    await lock.release();
     throw new Error(`Session already exists or initialization failed: ${String(error)}`, { cause: error });
   }
+}
 
-  const handle = openSessionHandle(dir, header, [], {
-    generationThresholdBytes,
-  });
-
-  if (opts.systemPrompt !== undefined) {
-    await handle.append({ type: "system", payload: { content: opts.systemPrompt } });
+function hasSessionLog(dir: string): boolean {
+  try {
+    return listSessionLogFiles(dir).length > 0;
+  } catch {
+    return false;
   }
-  return handle;
 }
 
 export async function resumeSession(
@@ -291,11 +330,16 @@ export async function resumeSession(
   const lastLogPath = path.join(dir, lastLog);
   const { size } = await stat(lastLogPath);
   for (const event of events) deepFreeze(event);
+  const lock = await acquireSessionLock(dir);
   const appendHandle = createHandle(dir, header, events, lastLogPath, {
     generationThresholdBytes,
     currentBytes: size,
+    lock,
   });
+  let handedOff = false;
   try {
+    // 崩溃恢复前先补齐日志末行换行,避免续写与上一行粘连(D-035)。
+    await ensureTrailingNewline(lastLogPath);
     if (recovery !== undefined) {
       for (const missing of recovery.missing) {
         await appendHandle.append({
@@ -315,13 +359,15 @@ export async function resumeSession(
     const currentLogPath = path.join(dir, currentLog);
     const { size: currentBytes } = await stat(currentLogPath);
     const openHeader = await writeHeaderAtomic(headerPath, { ...header, status: "open" });
-    return createHandle(
+    const handle = createHandle(
       dir,
       openHeader,
       appendHandle.events().slice(),
       currentLogPath,
-      { generationThresholdBytes, currentBytes },
+      { generationThresholdBytes, currentBytes, lock },
     );
+    handedOff = true;
+    return handle;
   } catch (error) {
     if (originalStatus === "closed") {
       await writeHeaderAtomic(headerPath, { ...header, status: originalStatus }).catch(
@@ -329,7 +375,26 @@ export async function resumeSession(
       );
     }
     throw error;
+  } finally {
+    if (!handedOff) {
+      // 失败路径释放本次持有的锁;成功路径由返回的 handle 负责释放。
+      await lock.release().catch(() => undefined);
+    }
   }
+}
+
+// 日志末行缺少换行时补一个,保证后续 append 不会与上一行粘连(D-035)。
+async function ensureTrailingNewline(logPath: string): Promise<void> {
+  let text: string;
+  try {
+    text = readFileSync(logPath, "utf8");
+  } catch {
+    return;
+  }
+  if (text.length === 0 || text.endsWith("\n")) {
+    return;
+  }
+  await appendFile(logPath, "\n", "utf8");
 }
 
 export function readSessionFile(filePath: string): SessionEvent[] {

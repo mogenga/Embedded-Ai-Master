@@ -12,6 +12,7 @@ import {
   validateHeader,
   writeHeaderAtomic,
 } from "./handle.js";
+import { acquireSessionLock } from "./lock.js";
 import type { SessionHandle } from "./handle.js";
 import type { EventType, SessionEvent, SessionHeader } from "./types.js";
 
@@ -110,6 +111,21 @@ export function listSessionLogFiles(dir: string): string[] {
   return files;
 }
 
+// 代文件必须从 v1 连续递增;缺档可能是删除、截断或同步失败,静默接受会破坏审计链(D-048)。
+function assertGenerationsContiguous(files: readonly string[], dir: string): void {
+  for (let index = 0; index < files.length; index += 1) {
+    const expected = index + 1;
+    const actual = parseGeneration(files[index]!);
+    if (actual !== expected) {
+      throw new SessionCorruptionError(
+        "invalid_event_line",
+        `Session generation gap: expected session.v${expected}.jsonl, found ${files[index]}`,
+        { dir, expectedGeneration: expected, actualGeneration: actual },
+      );
+    }
+  }
+}
+
 function readEvents(dir: string, files: string[]): SessionEvent[] {
   const events: SessionEvent[] = [];
   for (const name of files) {
@@ -177,6 +193,7 @@ export function readSessionDir(dir: string): {
       dir,
     });
   }
+  assertGenerationsContiguous(files, dir);
   return { header, events: readEvents(dir, files), logFiles: files };
 }
 
@@ -235,12 +252,17 @@ async function realpathAllowMissing(value: string): Promise<string> {
   }
 }
 
-function markArtifactMissing(event: SessionEvent): void {
+type ArtifactIssue = "missing" | "rejected";
+
+function markArtifactMissing(event: SessionEvent, issue: ArtifactIssue = "missing"): void {
   if (!isRecord(event.payload)) return;
   const detail = event.payload.detail;
+  const marker = issue === "rejected"
+    ? { artifactRejected: true }
+    : { artifactMissing: true };
   event.payload.detail = isRecord(detail)
-    ? { ...detail, artifactMissing: true }
-    : { originalDetail: detail, artifactMissing: true };
+    ? { ...detail, ...marker }
+    : { originalDetail: detail, ...marker };
 }
 
 async function copyArtifactExclusive(sourcePath: string, artifactsDir: string): Promise<string> {
@@ -273,7 +295,7 @@ async function relocateArtifact(
   const sourcePath = path.resolve(sourceRoot, artifactPath);
   const rootPrefix = sourceRoot.endsWith(path.sep) ? sourceRoot : `${sourceRoot}${path.sep}`;
   if (!normalizePathForCompare(sourcePath).startsWith(normalizePathForCompare(rootPrefix))) {
-    markArtifactMissing(event);
+    markArtifactMissing(event, "rejected");
     return;
   }
   let realSourcePath: string;
@@ -286,14 +308,20 @@ async function relocateArtifact(
     return;
   }
   if (!isPathInside(realSourceRoot, realSourcePath)) {
-    markArtifactMissing(event);
+    markArtifactMissing(event, "rejected");
     return;
   }
+  let sourceInfo;
   try {
-    await stat(sourcePath);
+    sourceInfo = await stat(sourcePath);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     markArtifactMissing(event);
+    return;
+  }
+  if (!sourceInfo.isFile()) {
+    // 目录或特殊文件无法复制,按不支持跳过而不是让整个 fork 失败(D-042)。
+    markArtifactMissing(event, "rejected");
     return;
   }
   const artifactsDir = path.join(targetDir, "artifacts");
@@ -392,6 +420,7 @@ export async function forkSession(
     );
   }
   const createdTargetDir = await claimTargetDir(targetDir);
+  const lock = await acquireSessionLock(targetDir);
 
   try {
     const prefix = source.events.slice(0, atSeq + 1).map((event) => structuredClone(event));
@@ -414,11 +443,14 @@ export async function forkSession(
     await writeFile(logPath, `${prefix.map((event) => JSON.stringify(event)).join("\n")}\n`, "utf8");
     const { size } = await stat(logPath);
 
-    return openSessionHandle(targetDir, header, prefix, {
+    const handle = openSessionHandle(targetDir, header, prefix, {
       generationThresholdBytes,
       currentBytes: size,
+      lock,
     });
+    return handle;
   } catch (error) {
+    await lock.release();
     await cleanupTargetDir(targetDir, createdTargetDir);
     throw error;
   }

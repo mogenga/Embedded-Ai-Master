@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { appendFile, lstat, rename, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, open, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { SessionCorruptionError } from "./errors.js";
+import type { SessionLock } from "./lock.js";
 import type { SessionEvent, SessionHeader } from "./types.js";
 
 const DEFAULT_GENERATION_THRESHOLD_BYTES = 50 * 1024 * 1024;
@@ -93,6 +94,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+// 追加后尽力 fsync。同步失败不影响已写入的日志行,否则调用方重试会造成重复行;
+// 因此这里吞掉错误,持久化仍由 header 的临时文件 + rename 兜底(D-035)。
+async function syncBestEffort(logPath: string): Promise<void> {
+  try {
+    const handle = await open(logPath, "r+");
+    try {
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    void 0;
+  }
+}
+
+async function appendLineSynced(
+  logPath: string,
+  line: string,
+  flag?: "wx",
+): Promise<void> {
+  await appendFile(logPath, line, flag === undefined ? "utf8" : { encoding: "utf8", flag });
+  await syncBestEffort(logPath);
+}
+
 async function assertRegularLogFile(logPath: string): Promise<void> {
   let info;
   try {
@@ -121,7 +146,14 @@ export async function writeHeaderAtomic(
   const next = deepFreeze({ ...header });
   const tmpPath = `${headerPath}.${randomUUID()}.tmp`;
   try {
+    // 先写入临时文件并 fsync,再 rename;断电后要么看到旧 header,要么看到新 header。
     await writeFile(tmpPath, `${JSON.stringify(next)}\n`, { encoding: "utf8", flag: "wx" });
+    const file = await open(tmpPath, "r+");
+    try {
+      await file.sync();
+    } finally {
+      await file.close();
+    }
     await rename(tmpPath, headerPath);
   } catch (error) {
     await rm(tmpPath, { force: true }).catch(() => undefined);
@@ -149,6 +181,7 @@ export interface SessionHandle {
 export interface SessionHandleOptions {
   generationThresholdBytes?: number;
   currentBytes?: number;
+  lock?: SessionLock;
 }
 
 export function createHandle(
@@ -162,6 +195,7 @@ export function createHandle(
   const generationThresholdBytes = resolveGenerationThresholdBytes(
     opts.generationThresholdBytes,
   );
+  const lock = opts.lock;
   let currentLogPath = logPath;
   let currentBytes = opts.currentBytes ?? 0;
   let pending = Promise.resolve();
@@ -194,10 +228,10 @@ export function createHandle(
             ? nextGenerationPath(currentLogPath)
             : undefined;
         if (nextLogPath === undefined) {
-          await appendFile(currentLogPath, line, "utf8");
+          await appendLineSynced(currentLogPath, line);
           currentBytes += lineBytes;
         } else {
-          await appendFile(nextLogPath, line, { encoding: "utf8", flag: "wx" });
+          await appendLineSynced(nextLogPath, line, "wx");
           currentLogPath = nextLogPath;
           currentBytes = lineBytes;
         }
@@ -224,11 +258,16 @@ export function createHandle(
       if (!closePromise) {
         accepting = false;
         closePromise = (async () => {
-          await pending;
-          currentHeader = await writeHeaderAtomic(headerPath, {
-            ...currentHeader,
-            status: "closed",
-          });
+          try {
+            await pending;
+            currentHeader = await writeHeaderAtomic(headerPath, {
+              ...currentHeader,
+              status: "closed",
+            });
+          } finally {
+            // 锁必须在 handle 关闭时释放;释放失败不覆盖主错误。
+            await lock?.release().catch(() => undefined);
+          }
         })();
       }
       return closePromise;

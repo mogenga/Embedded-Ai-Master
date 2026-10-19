@@ -36,6 +36,7 @@ export type SessionResumeCode =
   | "session_id_mismatch"
   | "workdir_mismatch"
   | "missing_session_dir"
+  | "session_locked"
   | "invalid_target";
 
 export class SessionResumeError extends Error {

@@ -73,6 +73,27 @@ function detectFileSymlinkSupport(): boolean {
 
 const symlinkSupported = detectFileSymlinkSupport();
 
+function detectDirLinkSupport(): boolean {
+  const dir = mkdtempSync(path.join(tmpdir(), "session-dirlink-probe-"));
+  try {
+    mkdirSync(path.join(dir, "target"));
+    symlinkSync(
+      path.join(dir, "target"),
+      path.join(dir, "link"),
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EPERM" || code === "EACCES" || code === "ENOTSUP") return false;
+    throw error;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const dirLinkSupported = detectDirLinkSupport();
+
 function makeTempDir(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "session-test-"));
   tempDirs.push(dir);
@@ -240,6 +261,75 @@ describe("会话持久化", () => {
       code: "invalid_target",
     });
     expect(readFileSync(file, "utf8")).toBe("keep");
+  });
+
+  it.skipIf(!dirLinkSupported)("createSession 拒绝目录符号链接（D-049）", async () => {
+    const root = makeTempDir();
+    const real = path.join(root, "real-session");
+    mkdirSync(real);
+    const link = path.join(root, "session-link");
+    symlinkSync(real, link, process.platform === "win32" ? "junction" : "dir");
+
+    await expect(createSession(link)).rejects.toMatchObject({
+      name: "SessionResumeError",
+      code: "invalid_target",
+    });
+    expect(existsSync(path.join(real, "header.json"))).toBe(false);
+  });
+
+  it("同一目录重复 createSession 被拒绝且不清空既有日志", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "keep" } });
+
+    await expect(createSession(dir)).rejects.toThrow(/already exists|初始化失败/);
+    expect(readSessionFile(path.join(dir, "session.v1.jsonl")).map((event) => event.payload.content))
+      .toEqual(["keep"]);
+  });
+
+  it("同进程内 create 后 resume 允许（引用计数重入，D-039）", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "a" } });
+
+    const resumed = await resumeSession(dir);
+    expect(resumed.events().map((event) => event.payload.content)).toEqual(["a"]);
+    await session.close();
+    await resumed.close();
+  });
+
+  it("close 后释放锁文件，后续 resume 可获取新锁", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "a" } });
+    expect(existsSync(path.join(dir, "session.lock"))).toBe(true);
+    await session.close();
+    expect(existsSync(path.join(dir, "session.lock"))).toBe(false);
+
+    const resumed = await resumeSession(dir);
+    await resumed.close();
+    expect(existsSync(path.join(dir, "session.lock"))).toBe(false);
+  });
+
+  it("进程已退出的陈旧锁可被回收", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "a" } });
+    const lockPath = path.join(dir, "session.lock");
+    const resumed = await resumeSession(dir);
+    // 模拟另一个进程留下的锁:关闭 handle 后写入一个不存在的 PID。
+    await session.close();
+    await resumed.close();
+    writeFileSync(
+      lockPath,
+      `${JSON.stringify({ pid: 2147483646, createdAt: "2026-10-19T00:00:00.000Z" })}\n`,
+      "utf8",
+    );
+
+    const again = await resumeSession(dir);
+    expect(again.events().map((event) => event.payload.content)).toEqual(["a"]);
+    await again.close();
+    expect(existsSync(lockPath)).toBe(false);
   });
 
   it("Promise.all 追加顺序与 JSONL 持久化顺序一致", async () => {
@@ -750,7 +840,7 @@ describe("会话持久化", () => {
     });
   });
 
-  it("closed 会话末行缺换行时 resume 仍成功续写（当前行为，D-035 扩展）", async () => {
+  it("closed 会话末行缺换行时 resume 先补换行再续写（D-035 修复）", async () => {
     const dir = makeTempDir();
     const session = await createSession(dir);
     await session.append({ type: "user", payload: { content: "a" } });
@@ -763,8 +853,22 @@ describe("会话持久化", () => {
     const appended = await resumed.append({ type: "user", payload: { content: "b" } });
 
     expect(appended.seq).toBe(1);
-    expect(readFileSync(logPath, "utf8")).toBe(`${before}${JSON.stringify(appended)}\n`);
-    expect(() => readSessionDir(dir)).toThrow(SessionCorruptionError);
+    expect(readFileSync(logPath, "utf8")).toBe(`${before}\n${JSON.stringify(appended)}\n`);
+    expect(readSessionDir(dir).events.map((event) => event.payload.content)).toEqual(["a", "b"]);
+  });
+
+  it("createSession 初始化 systemPrompt 写入失败时回滚 header 与日志", async () => {
+    const dir = path.join(makeTempDir(), "init-rollback");
+    fsFaults.appendFile = () => true;
+
+    try {
+      await expect(createSession(dir, { systemPrompt: "be brief" })).rejects.toThrow("append boom");
+    } finally {
+      fsFaults.appendFile = null;
+    }
+
+    expect(existsSync(path.join(dir, "header.json"))).toBe(false);
+    expect(existsSync(path.join(dir, "session.v1.jsonl"))).toBe(false);
   });
 
   it("resume 补齐崩溃尾部的缺失 tool_result 并追加 interrupted", async () => {
