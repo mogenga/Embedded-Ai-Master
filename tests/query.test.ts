@@ -155,6 +155,20 @@ describe("query 主循环", () => {
     expect(checkpoints[1].seq).toBeLessThan(assistants[1].seq);
   });
 
+  it("同一会话第二次 query 的 checkpoint.turn 从上次续编（D-045）", async () => {
+    const provider = scriptedProvider([reply("完成"), reply("完成")]);
+    const { ctx, session } = await makeCtx(provider);
+
+    await collect(query(ctx, "first", { maxTurns: 10 }));
+    await collect(query(ctx, "second", { maxTurns: 10 }));
+
+    const turns = session
+      .events()
+      .filter((event) => event.type === "checkpoint")
+      .map((event) => event.payload.turn);
+    expect(turns).toStrictEqual([1, 2]);
+  });
+
   it("闭环: user→model→tool_use→tool_result→model→done(no_tool_calls)", async () => {
     const provider = scriptedProvider([reply("用 echo", [echoCall("c1")]), reply("完成")]);
     const { ctx, session } = await makeCtx(provider);

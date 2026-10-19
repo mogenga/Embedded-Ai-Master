@@ -90,13 +90,23 @@ function isAbortError(error: unknown): boolean {
   );
 }
 
+const MAX_INVALID_JSON_RAW_CHARS = 8_000;
+
+// 坏参数原文来自模型输出,必须限长;否则一次超长坏参数会放大日志与下一轮上下文(D-028)。
+function capInvalidJsonRaw(raw: string): string {
+  return raw.length > MAX_INVALID_JSON_RAW_CHARS
+    ? `${raw.slice(0, MAX_INVALID_JSON_RAW_CHARS)}[truncated]`
+    : raw;
+}
+
 function markerResult(raw: string): ToolResult {
+  const capped = capInvalidJsonRaw(raw);
   return {
     isError: true,
     code: "invalid_json",
     message: "tool arguments are not valid JSON",
-    detail: { raw },
-    text: `tool arguments are not valid JSON: ${raw}`,
+    detail: { raw: capped },
+    text: `tool arguments are not valid JSON: ${capped}`,
   };
 }
 
@@ -182,6 +192,21 @@ async function* emitInterrupted(
   yield { kind: "done", finishReason: reason };
 }
 
+// checkpoint.turn 必须在会话内单调递增;resume 后从最后一条 checkpoint 续编,
+// 否则同一目录会出现重复 turn,未来按 turn 定位断点会歧义(D-045)。
+function lastCheckpointTurn(session: SessionHandle): number {
+  const events = session.events();
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type !== "checkpoint") continue;
+    const turn = event.payload.turn;
+    if (typeof turn === "number" && Number.isFinite(turn) && turn >= 0) {
+      return turn;
+    }
+  }
+  return 0;
+}
+
 export async function* query(
   ctx: LoopCtx,
   input: string,
@@ -204,7 +229,7 @@ export async function* query(
 
 
   const costTracked = ctx.pricePerMillion !== undefined;
-  let turn = 0;
+  let turn = lastCheckpointTurn(session);
   let costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
   let pending: PendingBatch | undefined;
   let exitReason: ExitReason | undefined;

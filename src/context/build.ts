@@ -46,7 +46,10 @@ function projectAssistant(
       const args = raw.arguments;
       let serialized: string;
       if (raw.invalidJson === true && isInvalidJsonMarker(args)) {
-        serialized = args.raw;
+        // 双层防御:query 落日志前已限长;投影层再兜底旧日志或外部构造事件(D-028)。
+        serialized = args.raw.length > MAX_INVALID_JSON_RAW_CHARS
+          ? `${args.raw.slice(0, MAX_INVALID_JSON_RAW_CHARS)}[truncated]`
+          : args.raw;
       } else if (isRecord(args)) {
         serialized = JSON.stringify(args);
       } else {
@@ -56,6 +59,8 @@ function projectAssistant(
     }),
   };
 }
+
+const MAX_INVALID_JSON_RAW_CHARS = 8_000;
 
 interface ActiveBatch {
   assistantSeq: number;

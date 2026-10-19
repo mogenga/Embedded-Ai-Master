@@ -90,6 +90,21 @@ describe("buildMessages 投影重组", () => {
     expect(messages[0].tool_calls?.[0].function.arguments).toBe("{bad");
   });
 
+  it("invalid_json raw 超长时截断并标记（D-028）", () => {
+    const raw = `{bad${"x".repeat(10_000)}`;
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: { error: "invalid_json", raw }, invalidJson: true }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: false, text: "bad" }, 0),
+    ]);
+
+    const serialized = messages[0].tool_calls?.[0].function.arguments ?? "";
+    expect(serialized.length).toBeLessThan(raw.length);
+    expect(serialized.endsWith("[truncated]")).toBe(true);
+  });
+
   it("未标记 invalidJson 的同形 arguments 按普通对象序列化(D-038)", () => {
     const messages = buildMessages([
       mk(0, "assistant", {
