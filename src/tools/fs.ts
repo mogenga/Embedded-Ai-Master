@@ -38,6 +38,10 @@ function errorCode(error: unknown): string | undefined {
   return (error as NodeJS.ErrnoException).code;
 }
 
+function isAbortError(error: unknown): boolean {
+  return (error as { name?: string } | null)?.name === "AbortError";
+}
+
 function toRelative(workdir: string, absolute: string): string {
   return path.relative(path.resolve(workdir), absolute).split(path.sep).join("/");
 }
@@ -114,10 +118,12 @@ async function ensureRegularFile(absolute: string, inputPath: string): Promise<T
   return undefined;
 }
 
-async function readOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
+async function readOp(input: FsInput, ctx: ToolCtx, signal: AbortSignal): Promise<ToolResult> {
+  if (signal.aborted) return failure("aborted", "read aborted");
   const absolute = resolveInWorkdir(ctx.cwd, input.path);
   const invalid = await ensureRegularFile(absolute, input.path);
   if (invalid) return invalid;
+  if (signal.aborted) return failure("aborted", "read aborted");
 
   const start = input.offset ?? 0;
   const maxLines = input.limit ?? MAX_READ_LINES;
@@ -125,10 +131,11 @@ async function readOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
   let used = 0;
   let linesSeen = 0;
   let truncated = false;
-  const stream = createReadStream(absolute, { encoding: "utf8" });
+  const stream = createReadStream(absolute, { encoding: "utf8", signal });
   const reader = createInterface({ input: stream, crlfDelay: Infinity });
   try {
     for await (const line of reader) {
+      if (signal.aborted) return failure("aborted", "read aborted");
       linesSeen++;
       if (linesSeen <= start) continue;
       if (output.length >= maxLines) {
@@ -150,6 +157,9 @@ async function readOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
       used += cost;
     }
   } catch (error) {
+    if (signal.aborted || isAbortError(error)) {
+      return failure("aborted", "read aborted");
+    }
     return failure("read_failed", `failed to read ${input.path}: ${errorMessage(error)}`);
   } finally {
     reader.close();
@@ -165,7 +175,12 @@ async function readOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
   return success(text, { path: relative, lines: output.length, truncated });
 }
 
-async function writeOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
+async function writeOp(
+  input: FsInput,
+  ctx: ToolCtx,
+  signal: AbortSignal,
+): Promise<ToolResult> {
+  if (signal.aborted) return failure("aborted", "write aborted");
   if (typeof input.content !== "string") {
     return failure("invalid_input", "write requires content");
   }
@@ -176,8 +191,12 @@ async function writeOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
   const absolute = resolveInWorkdir(ctx.cwd, input.path);
   try {
     await mkdir(path.dirname(absolute), { recursive: true });
-    await writeFile(absolute, input.content, "utf8");
+    if (signal.aborted) return failure("aborted", "write aborted");
+    await writeFile(absolute, input.content, { encoding: "utf8", signal });
   } catch (error) {
+    if (signal.aborted || isAbortError(error)) {
+      return failure("aborted", "write aborted; file may be partial");
+    }
     return failure("write_failed", `failed to write ${input.path}: ${errorMessage(error)}`);
   }
   const bytes = Buffer.byteLength(input.content, "utf8");
@@ -185,7 +204,12 @@ async function writeOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
   return success(`wrote ${bytes} bytes to ${relative}`, { path: relative, bytes });
 }
 
-async function editOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
+async function editOp(
+  input: FsInput,
+  ctx: ToolCtx,
+  signal: AbortSignal,
+): Promise<ToolResult> {
+  if (signal.aborted) return failure("aborted", "edit aborted");
   if (typeof input.oldText !== "string" || input.oldText.length === 0 || typeof input.newText !== "string") {
     return failure("invalid_input", "edit requires non-empty oldText and newText");
   }
@@ -196,11 +220,15 @@ async function editOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
   const absolute = resolveInWorkdir(ctx.cwd, input.path);
   const invalid = await ensureRegularFile(absolute, input.path);
   if (invalid) return invalid;
+  if (signal.aborted) return failure("aborted", "edit aborted");
 
   let content: string;
   try {
-    content = await readFile(absolute, "utf8");
+    content = await readFile(absolute, { encoding: "utf8", signal });
   } catch (error) {
+    if (signal.aborted || isAbortError(error)) {
+      return failure("aborted", "edit aborted");
+    }
     return failure("read_failed", `failed to read ${input.path}: ${errorMessage(error)}`);
   }
 
@@ -220,9 +248,13 @@ async function editOp(input: FsInput, ctx: ToolCtx): Promise<ToolResult> {
   const start = mapped ? mapped.map[first]! : first;
   const end = mapped ? mapped.map[first + needle.length]! : first + needle.length;
   const next = content.slice(0, start) + replacement + content.slice(end);
+  if (signal.aborted) return failure("aborted", "edit aborted");
   try {
-    await writeFile(absolute, next, "utf8");
+    await writeFile(absolute, next, { encoding: "utf8", signal });
   } catch (error) {
+    if (signal.aborted || isAbortError(error)) {
+      return failure("aborted", "edit aborted; file may be partial");
+    }
     return failure("write_failed", `failed to write ${input.path}: ${errorMessage(error)}`);
   }
   const relative = toRelative(ctx.cwd, absolute);
@@ -234,15 +266,16 @@ export const fsTool: ToolDef<FsInput> = {
   description: "在 workdir 内读取、写入或编辑文本文件",
   schema: fsInputSchema,
   annotations: { readOnly: false, destructive: true },
-  execute: async (input, ctx) => {
+  execute: async (input, ctx, signal) => {
+    if (signal.aborted) return failure("aborted", "fs aborted before execution");
     try {
       switch (input.op) {
         case "read":
-          return await readOp(input, ctx);
+          return await readOp(input, ctx, signal);
         case "write":
-          return await writeOp(input, ctx);
+          return await writeOp(input, ctx, signal);
         case "edit":
-          return await editOp(input, ctx);
+          return await editOp(input, ctx, signal);
       }
       return failure("invalid_input", `unknown op: ${String(input.op)}`);
     } catch (error) {

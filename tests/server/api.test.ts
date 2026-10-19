@@ -31,6 +31,7 @@ function rawRequest(
   port: number,
   urlPath: string,
   method = "GET",
+  headers: Record<string, string> = {},
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = request({
@@ -39,7 +40,7 @@ function rawRequest(
       path: urlPath,
       method,
       agent: false,
-      headers: { connection: "close" },
+      headers: { connection: "close", ...headers },
     }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -262,5 +263,43 @@ describe("ui api", () => {
     close = s.close;
     expect((await fetch(`http://127.0.0.1:${s.port}/api/actions`, { method: "POST", body: "{}" })).status).toBe(501);
     expect((await fetch(`http://127.0.0.1:${s.port}/api/events`)).status).toBe(501);
+  });
+
+  it("拒绝非 loopback Host", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    const res = await rawRequest(s.port, "/api/sessions", "GET", { host: "evil.example" });
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body)).toMatchObject({ error: { code: "forbidden_host" } });
+  });
+
+  it("拒绝 Host 端口与监听端口不一致", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    const res = await rawRequest(s.port, "/api/sessions", "GET", {
+      host: `127.0.0.1:${s.port + 1}`,
+    });
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body)).toMatchObject({ error: { code: "forbidden_host" } });
+  });
+
+  it("拒绝跨源 Origin", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    const res = await rawRequest(s.port, "/api/actions", "POST", {
+      origin: "http://evil.example",
+    });
+    expect(res.status).toBe(403);
+    expect(JSON.parse(res.body)).toMatchObject({ error: { code: "forbidden_origin" } });
+  });
+
+  it("允许 loopback Host 与同源 Origin", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    const res = await rawRequest(s.port, "/api/sessions", "GET", {
+      host: `localhost:${s.port}`,
+      origin: `http://127.0.0.1:${s.port}`,
+    });
+    expect(res.status).toBe(200);
   });
 });

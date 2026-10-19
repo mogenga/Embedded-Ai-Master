@@ -14,6 +14,8 @@ const ProviderConfigSchema = z.object({
   baseUrl: z.string().url(),
   apiKeyEnv: z.string().optional(),
   models: z.record(z.string(), ModelConfigSchema),
+  requestTimeoutMs: z.number().int().positive().optional(),
+  maxResponseBytes: z.number().int().positive().optional(),
   pricePerMillion: z.object({
     input: PriceSchema,
     output: PriceSchema,

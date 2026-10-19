@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { globTool, matchesGlob } from "../src/tools/glob.js";
-import { MAX_SCANNED_FILES } from "../src/tools/fs-walk.js";
+import { MAX_SCANNED_FILES, walkFiles } from "../src/tools/fs-walk.js";
 import type { ToolCtx } from "../src/tools/types.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
@@ -37,8 +37,12 @@ function writeAt(workdir: string, relative: string, content = ""): void {
   writeFileSync(absolute, content, "utf8");
 }
 
-function run(workdir: string, input: Parameters<typeof globTool.execute>[0]) {
-  return globTool.execute(input, makeCtx(workdir), signal);
+function run(
+  workdir: string,
+  input: Parameters<typeof globTool.execute>[0],
+  signalOverride: AbortSignal = signal,
+) {
+  return globTool.execute(input, makeCtx(workdir), signalOverride);
 }
 
 function fakeFile(name: string): Dirent {
@@ -450,5 +454,40 @@ describe("glob 执行", () => {
     const r = await run(workdir, { pattern: "**/*.ts", path: "link" });
 
     expect(r.text).toBe("link/a.ts");
+  });
+
+  it("已取消 signal 时返回 aborted", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "a.ts");
+    const controller = new AbortController();
+    controller.abort();
+
+    const r = await run(workdir, { pattern: "**/*.ts" }, controller.signal);
+
+    expect(r).toMatchObject({ isError: true, code: "aborted" });
+  });
+});
+
+describe("walkFiles 取消", () => {
+  it("遍历中 abort 会中断并抛 AbortError", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "a.ts");
+    writeAt(workdir, "b.ts");
+    const controller = new AbortController();
+    const seen: string[] = [];
+
+    await expect(
+      walkFiles(
+        workdir,
+        workdir,
+        (_absolute, relative) => {
+          seen.push(relative);
+          controller.abort();
+        },
+        5000,
+        controller.signal,
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+    expect(seen).toHaveLength(1);
   });
 });

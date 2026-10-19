@@ -216,6 +216,18 @@ async function main() {
   );
 
   server.registerTool(
+    "vanish-destructive",
+    {
+      description: "Exit without replying (destructive)",
+      annotations: { destructiveHint: true },
+    },
+    async () => {
+      setTimeout(() => process.exit(1), 10);
+      return new Promise(() => {});
+    },
+  );
+
+  server.registerTool(
     "crash",
     {
       description: "Exit the server process shortly after replying",
@@ -227,7 +239,46 @@ async function main() {
     },
   );
 
+  server.registerTool(
+    "huge",
+    { description: "Return a very large text result" },
+    async () => textResult("x".repeat(2 * 1024 * 1024)),
+  );
+
+  server.registerTool(
+    "structured-huge",
+    { description: "Return a very large structured result" },
+    async () => ({
+      content: [],
+      structuredContent: { blob: "x".repeat(2 * 1024 * 1024) },
+    }),
+  );
+
+  if (process.env.BIG_SCHEMA === "1") {
+    server.registerTool(
+      "huge-schema",
+      {
+        description: "Expose a very large input schema",
+        inputSchema: z.object({ big: z.string().describe("x".repeat(70_000)) }),
+      },
+      async () => textResult("huge-schema"),
+    );
+  }
+
+  server.registerTool(
+    "huge-description",
+    { description: "d".repeat(10_000) },
+    async () => textResult("huge-description"),
+  );
+
+  if (process.env.TOOLS_HANG === "1") {
+    server.server.setRequestHandler("tools/list", () => new Promise(() => {}));
+  }
+
   await server.connect(new StdioServerTransport());
+  if (process.env.TOOLS_HANG === "1" && process.env.CONNECTED_FILE) {
+    fs.writeFileSync(process.env.CONNECTED_FILE, "connected", "utf8");
+  }
 }
 
 if (process.env.SILENT === "1") {

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1733,6 +1733,7 @@ async function writeMcpConfig(
   name = "mcp.json",
 ): Promise<string> {
   const file = path.join(dir, name);
+  await mkdir(dir, { recursive: true });
   await writeFile(file, JSON.stringify({ mcpServers: servers }), "utf8");
   return file;
 }
@@ -1792,6 +1793,69 @@ describe("runSession MCP 装配", () => {
       (event) => event.kind === "tool_result" && event.id === "mcp-call",
     );
     expect(result).toMatchObject({ ok: true, text: "hello-mcp" });
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_connected", server: "echo" }),
+    );
+  });
+
+  it("项目级 mcp.json 默认不加载并记录 skipped", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const workdir = await tempDir();
+    const pidFile = path.join(workdir, "mcp.pid");
+    await writeMcpConfig(path.join(workdir, ".harness"), {
+      echo: mcpEchoServer({ env: { PID_FILE: pidFile } }),
+    });
+    const sessionDir = path.join(home, "mcp-project-skipped");
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: workdir,
+      }),
+    );
+
+    const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+    expect(tools.map((tool) => tool.function.name).some((name) => name.startsWith("mcp__"))).toBe(
+      false,
+    );
+    expect(existsSync(pidFile)).toBe(false);
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_project_config_skipped" }),
+    );
+  });
+
+  it("trustProjectConfig:true 时加载项目级 mcp.json", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const workdir = await tempDir();
+    const pidFile = path.join(workdir, "mcp.pid");
+    await writeMcpConfig(path.join(workdir, ".harness"), {
+      echo: mcpEchoServer({ env: { PID_FILE: pidFile } }),
+    });
+    const sessionDir = path.join(home, "mcp-project-trusted");
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: workdir,
+        mcp: { trustProjectConfig: true },
+      }),
+    );
+
+    const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+    expect(tools.map((tool) => tool.function.name)).toContain("mcp__echo__echo");
+    expect(existsSync(pidFile)).toBe(true);
     expect(mcpStatusPayloads(sessionDir)).toContainEqual(
       expect.objectContaining({ status: "mcp_connected", server: "echo" }),
     );

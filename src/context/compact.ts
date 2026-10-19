@@ -330,6 +330,39 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
 
   const afterSummary = measure();
   if (afterSummary.tokens > softLimit) {
+    const latestEvents = session.events();
+    const boundary = lastSummaryBoundary(latestEvents);
+    const elidedNow = collectElidedSeqs(latestEvents);
+    const emergencyCandidates: number[] = [];
+    for (const event of latestEvents) {
+      if (event.type !== "tool_result") continue;
+      if (
+        event.payload.evidence === true
+        && typeof event.payload.artifactPath !== "string"
+      ) {
+        continue;
+      }
+      if (elidedNow.has(event.seq)) continue;
+      if (boundary !== undefined && event.seq <= boundary) continue;
+      const text = event.payload.text;
+      if (typeof text !== "string" || elidedContent(event.payload, text) === undefined) {
+        continue;
+      }
+      emergencyCandidates.push(event.seq);
+    }
+    if (emergencyCandidates.length > 0) {
+      await session.append({
+        type: "compaction",
+        payload: {
+          kind: "microcompact",
+          elidedSeqs: emergencyCandidates,
+          note: `elided ${emergencyCandidates.length} tool results (emergency)`,
+        },
+      });
+      if (measure().tokens <= softLimit) {
+        return;
+      }
+    }
     await session.append({
       type: "compaction",
       payload: { kind: "failed", reason: "still_over_budget", stage: "summary" },

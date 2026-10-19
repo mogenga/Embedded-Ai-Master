@@ -22,9 +22,11 @@ export interface BatchOptions {
   artifactDir: string;
   cwd?: string;
   timeoutMs?: number;
+  settleGraceMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
+const DEFAULT_SETTLE_GRACE_MS = 2_000;
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const ARTIFACT_TOKEN_THRESHOLD = 8_000;
 const MAX_TEXT_TOKENS = 25_000;
@@ -277,21 +279,28 @@ function resolveTimeoutMs(timeoutMs: number | undefined): number {
   return Math.min(Math.max(Math.floor(timeoutMs), 1), MAX_TIMEOUT_MS);
 }
 
+interface ExecuteOutcome {
+  result: unknown;
+  pending?: Promise<unknown>;
+}
+
 async function executeOne(
   session: SessionHandle,
   tools: ToolRegistry,
   call: BatchCall,
   opts: BatchOptions,
-): Promise<unknown> {
+): Promise<ExecuteOutcome> {
   const tool = tools.lookup(call.name);
   if (!tool) {
     const displayName = truncateText(call.name, MAX_NAME_ECHO_CHARS);
-    return failure(
-      "tool_not_found",
-      `tool not found: ${displayName}`,
-      undefined,
-      `tool not found: ${displayName}`,
-    );
+    return {
+      result: failure(
+        "tool_not_found",
+        `tool not found: ${displayName}`,
+        undefined,
+        `tool not found: ${displayName}`,
+      ),
+    };
   }
 
   const parsed = tool.schema.safeParse(call.input);
@@ -301,11 +310,13 @@ async function executeOne(
         .map((issue) => `${issue.path.join(".") || "<root>"}: ${issue.message}`)
         .join("; ") || "schema validation failed";
     const message = truncateText(rawMessage, MAX_SCHEMA_MESSAGE_CHARS);
-    return failure("schema_validation", message, sanitizeIssues(parsed.error.issues));
+    return {
+      result: failure("schema_validation", message, sanitizeIssues(parsed.error.issues)),
+    };
   }
 
   if (opts.signal.aborted) {
-    return failure("tool_aborted", "tool aborted before execution");
+    return { result: failure("tool_aborted", "tool aborted before execution") };
   }
 
   const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
@@ -324,35 +335,54 @@ async function executeOne(
     opts.signal.addEventListener("abort", abortListener, { once: true });
   });
 
+  let execution: Promise<unknown> | undefined;
+  let settled = false;
+  const stillPending = (): Pick<ExecuteOutcome, "pending"> =>
+    settled || execution === undefined ? {} : { pending: execution };
   try {
-    const execution = Promise.resolve().then(() => tool.execute(parsed.data, ctx, signal));
-    void execution.catch(() => undefined);
-    return await Promise.race([execution, timeout, aborted]);
+    execution = Promise.resolve().then(() => tool.execute(parsed.data, ctx, signal));
+    const tracked = execution;
+    void tracked.then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+    void tracked.catch(() => undefined);
+    const value = await Promise.race([tracked, timeout, aborted]);
+    return { result: value };
   } catch (error) {
     if (error instanceof ToolTimeoutError) {
-      return failure("tool_timeout", error.message);
+      return { result: failure("tool_timeout", error.message), ...stillPending() };
     }
     if (error instanceof ToolAbortedError) {
-      return failure("tool_aborted", error.message);
+      return { result: failure("tool_aborted", error.message), ...stillPending() };
     }
     if (timeoutSignal.aborted && !opts.signal.aborted) {
-      return failure("tool_timeout", `tool timed out after ${timeoutMs}ms`);
+      return {
+        result: failure("tool_timeout", `tool timed out after ${timeoutMs}ms`),
+        ...stillPending(),
+      };
     }
     if (error instanceof Error && error.name === "AbortError") {
-      return failure("tool_aborted", error.message || "tool aborted");
+      return { result: failure("tool_aborted", error.message || "tool aborted"), ...stillPending() };
     }
     const message = error instanceof Error ? error.message : String(error);
     const truncated = truncateText(message, MAX_ERROR_MESSAGE_CHARS);
-    return failure(
-      "tool_execution_error",
-      truncated,
-      undefined,
-      truncated,
-    );
+    return {
+      result: failure(
+        "tool_execution_error",
+        truncated,
+        undefined,
+        truncated,
+      ),
+    };
   } finally {
     if (timeoutTimer !== undefined) clearTimeout(timeoutTimer);
     if (abortListener !== undefined) opts.signal.removeEventListener("abort", abortListener);
   }
+}
+
+interface RunOutcome extends BatchResult {
+  pending?: Promise<unknown>;
 }
 
 async function runOne(
@@ -360,10 +390,56 @@ async function runOne(
   tools: ToolRegistry,
   call: BatchCall,
   opts: BatchOptions,
+): Promise<RunOutcome> {
+  const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
+  const outcome = await executeOne(session, tools, call, opts);
+  const result = await finalizeResult(outcome.result, call.id, opts.artifactDir);
+  return {
+    id: call.id,
+    result: { ...result, evidence },
+    ...(outcome.pending !== undefined ? { pending: outcome.pending } : {}),
+  };
+}
+
+function resolveSettleGraceMs(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) {
+    return DEFAULT_SETTLE_GRACE_MS;
+  }
+  return Math.min(Math.max(Math.floor(value), 1), MAX_TIMEOUT_MS);
+}
+
+function waitForSettled(promise: Promise<unknown>, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    let done = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (value: boolean): void => {
+      if (done) return;
+      done = true;
+      if (timer !== undefined) clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => finish(false), timeoutMs);
+    void promise.then(
+      () => finish(true),
+      () => finish(true),
+    );
+  });
+}
+
+async function skippedResult(
+  call: BatchCall,
+  opts: BatchOptions,
+  tools: ToolRegistry,
 ): Promise<BatchResult> {
   const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
-  const value = await executeOne(session, tools, call, opts);
-  const result = await finalizeResult(value, call.id, opts.artifactDir);
+  const result = await finalizeResult(
+    failure(
+      "tool_skipped_after_timeout",
+      "not executed because the previous tool timed out and may still be running",
+    ),
+    call.id,
+    opts.artifactDir,
+  );
   return { id: call.id, result: { ...result, evidence } };
 }
 
@@ -395,19 +471,35 @@ export async function executeBatch(
     seen.add(call.id);
     return false;
   });
-  const run = (call: BatchCall, duplicate: boolean): Promise<BatchResult> =>
+  const run = (call: BatchCall, duplicate: boolean): Promise<RunOutcome> =>
     duplicate ? duplicateResult(call, opts, tools) : runOne(session, tools, call, opts);
 
   const concurrent = calls.every(
     (call) => tools.lookup(call.name)?.annotations?.readOnly === true,
   );
   if (concurrent) {
-    return Promise.all(calls.map((call, index) => run(call, duplicates[index])));
+    const outcomes = await Promise.all(
+      calls.map((call, index) => run(call, duplicates[index])),
+    );
+    return outcomes.map(({ id, result }) => ({ id, result }));
   }
 
+  const settleGraceMs = resolveSettleGraceMs(opts.settleGraceMs);
   const results: BatchResult[] = [];
   for (let index = 0; index < calls.length; index += 1) {
-    results.push(await run(calls[index], duplicates[index]));
+    const outcome = await run(calls[index], duplicates[index]);
+    results.push({ id: outcome.id, result: outcome.result });
+    if (outcome.pending === undefined) {
+      continue;
+    }
+    const settled = await waitForSettled(outcome.pending, settleGraceMs);
+    if (settled) {
+      continue;
+    }
+    for (let rest = index + 1; rest < calls.length; rest += 1) {
+      results.push(await skippedResult(calls[rest], opts, tools));
+    }
+    break;
   }
   return results;
 }

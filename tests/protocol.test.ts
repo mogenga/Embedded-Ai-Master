@@ -28,7 +28,9 @@ describe("模型消息契约", () => {
         ok: true,
         status: 200,
         json: async () => ({ choices: [{ message: { content: "ok" }, finish_reason: "stop" }] }),
-        text: async () => "{}",
+        text: async () => JSON.stringify({
+          choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        }),
       };
     }) as unknown as typeof fetch;
     const assistant: ModelChatMessage = {

@@ -267,8 +267,10 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
         if (activeBatch.remaining.length === 0) {
           activeBatch = undefined;
         }
+        const canElideEvidence =
+          event.payload.evidence !== true || typeof event.payload.artifactPath === "string";
         const replacement =
-          elidedSeqs.has(event.seq) && event.payload.evidence !== true
+          elidedSeqs.has(event.seq) && canElideEvidence
             ? elidedContent(event.payload, text)
             : undefined;
         messages.push({ role: "tool", content: replacement ?? text, tool_call_id: id });

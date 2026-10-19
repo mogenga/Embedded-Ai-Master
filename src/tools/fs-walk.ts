@@ -51,11 +51,13 @@ export async function walkFiles(
   workdir: string,
   visit: FileVisitor,
   maxScanned = MAX_SCANNED_FILES,
+  signal?: AbortSignal,
 ): Promise<WalkResult> {
   const state: WalkState = { scanned: 0, skipped: 0, scanTruncated: false };
 
   const walk = async (dir: string, entries: Dirent[]): Promise<unknown | undefined> => {
     for (const entry of entries) {
+      signal?.throwIfAborted();
       if (state.scanned >= maxScanned) {
         state.scanTruncated = true;
         return undefined;
@@ -80,11 +82,13 @@ export async function walkFiles(
       }
       if (!entry.isFile()) continue;
       state.scanned += 1;
+      signal?.throwIfAborted();
       await visit(absolute, toPosix(path.relative(workdir, absolute)));
     }
     return undefined;
   };
 
+  signal?.throwIfAborted();
   let rootEntries: Dirent[];
   try {
     rootEntries = await readdir(root, { withFileTypes: true });

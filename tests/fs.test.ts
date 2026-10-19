@@ -32,9 +32,13 @@ function makeWorkdir(): string {
   return dir;
 }
 
-function run(workdir: string, input: Parameters<typeof fsTool.execute>[0]) {
+function run(
+  workdir: string,
+  input: Parameters<typeof fsTool.execute>[0],
+  signalOverride: AbortSignal = signal,
+) {
   const ctx: ToolCtx = { sessionId: "test", cwd: workdir };
-  return fsTool.execute(input, ctx, signal);
+  return fsTool.execute(input, ctx, signalOverride);
 }
 
 afterEach(() => {
@@ -507,5 +511,49 @@ describe("fs Windows 保留设备名", () => {
 
     expect(r.isError).toBe(false);
     expect(readFileSync(path.join(workdir, "console.txt"), "utf8")).toBe("ok");
+  });
+});
+
+describe("fs 取消", () => {
+  it("已取消 signal 时 read 返回 aborted", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "a.txt"), "hello", "utf8");
+    const controller = new AbortController();
+    controller.abort();
+
+    const r = await run(workdir, { op: "read", path: "a.txt" }, controller.signal);
+
+    expect(r).toMatchObject({ isError: true, code: "aborted" });
+  });
+
+  it("已取消 signal 时 write 不落盘", async () => {
+    const workdir = makeWorkdir();
+    const controller = new AbortController();
+    controller.abort();
+
+    const r = await run(
+      workdir,
+      { op: "write", path: "x.txt", content: "x" },
+      controller.signal,
+    );
+
+    expect(r).toMatchObject({ isError: true, code: "aborted" });
+    expect(existsSync(path.join(workdir, "x.txt"))).toBe(false);
+  });
+
+  it("已取消 signal 时 edit 不改文件", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "a.txt"), "hello", "utf8");
+    const controller = new AbortController();
+    controller.abort();
+
+    const r = await run(
+      workdir,
+      { op: "edit", path: "a.txt", oldText: "hello", newText: "bye" },
+      controller.signal,
+    );
+
+    expect(r).toMatchObject({ isError: true, code: "aborted" });
+    expect(readFileSync(path.join(workdir, "a.txt"), "utf8")).toBe("hello");
   });
 });

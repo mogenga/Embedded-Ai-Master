@@ -6,6 +6,7 @@ import type { ModelCfg } from "../src/config/providers.js";
 import { buildMessages } from "../src/context/build.js";
 import { compactSession, SUMMARY_PROMPT } from "../src/context/compact.js";
 import type { CompactOptions } from "../src/context/compact.js";
+import { heuristicCountTokens } from "../src/model/count.js";
 import type { CompletionResult, ModelChatMessage, ModelProtocol } from "../src/model/protocol.js";
 import { createSession } from "../src/session/session.js";
 import type { SessionHandle } from "../src/session/session.js";
@@ -240,8 +241,8 @@ describe("compactSession", () => {
     const session = await makeSession();
     await addUser(session, "start");
     await addBatch(session, "e1", "E".repeat(1200), { evidence: true });
-    await addBatch(session, "c2", "a".repeat(1200));
-    await addBatch(session, "c3", "b".repeat(1200));
+    await addBatch(session, "c2", "a".repeat(1200), { evidence: true });
+    await addBatch(session, "c3", "b".repeat(1200), { evidence: true });
     const { calls, model } = createFakeModel(async () => ok("SUMMARY_EVIDENCE_ONLY"));
 
     await compactSession(makeOptions(session, model, cfg(1000)));
@@ -435,7 +436,11 @@ describe("compactSession", () => {
     const microcompactions = session
       .events()
       .filter((event) => event.type === "compaction" && event.payload.kind === "microcompact");
-    expect(microcompactions).toHaveLength(1);
+    expect(microcompactions.length).toBeGreaterThan(0);
+    const elided = microcompactions.flatMap(
+      (event) => event.payload.elidedSeqs as number[],
+    );
+    expect(new Set(elided).size).toBe(elided.length);
   });
 
   it("已有 summary 后可追加新 summary", async () => {
@@ -551,10 +556,10 @@ describe("compactSession", () => {
     ).rejects.toBeInstanceOf(TypeError);
   });
 
-  it("无 evidence 时批次中间边界回退到 assistant 之前且可投影", async () => {
+  it("evidence 时批次中间边界回退到 assistant 之前且可投影", async () => {
     const session = await makeSession();
     const user = await addUser(session, "start");
-    const first = await addBatch(session, "c1", "a".repeat(4000));
+    const first = await addBatch(session, "c1", "a".repeat(4000), { evidence: true });
     await addBatch(session, "c2", "b".repeat(400));
     const { calls, model } = createFakeModel(async () => ok("SUMMARY_BATCH"));
 
@@ -636,10 +641,10 @@ describe("compactSession", () => {
     expect(transcript.length).toBeGreaterThan(2000);
   });
 
-  it("近期批次过大导致摘要后仍超阈值时 failed(still_over_budget)", async () => {
+  it("近期 evidence 批次过大导致摘要后仍超阈值时 failed(still_over_budget)", async () => {
     const session = await makeSession();
     await addUser(session, "start");
-    await addBatch(session, "c1", "a".repeat(4000));
+    await addBatch(session, "c1", "a".repeat(4000), { evidence: true });
     const { calls, model } = createFakeModel(async () => ok("SUMMARY_STILL_OVER"));
 
     await compactSession(makeOptions(session, model, cfg(1000)));
@@ -661,6 +666,95 @@ describe("compactSession", () => {
         (message) => message.role === "tool" && message.content === "a".repeat(4000),
       ),
     ).toBe(true);
+  });
+
+  it("近期非 evidence 大结果超窗时 emergency microcompact 降到阈值内", async () => {
+    const session = await makeSession();
+    await addUser(session, "start");
+    await addBatch(session, "c1", "a".repeat(4000));
+    const { calls, model } = createFakeModel(async () => ok("SUMMARY_EMERGENCY"));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    expect(calls).toHaveLength(1);
+    const events = session.events();
+    expect(
+      events.some(
+        (event) => event.type === "compaction" && event.payload.kind === "summary",
+      ),
+    ).toBe(true);
+    const emergency = events.find(
+      (event) =>
+        event.type === "compaction"
+        && event.payload.kind === "microcompact"
+        && typeof event.payload.note === "string"
+        && /emergency/.test(event.payload.note),
+    );
+    expect(emergency).toBeDefined();
+    expect(
+      events.some(
+        (event) =>
+          event.type === "compaction"
+          && event.payload.kind === "failed"
+          && event.payload.reason === "still_over_budget",
+      ),
+    ).toBe(false);
+    const messages = buildMessages(events);
+    expect(
+      messages.some((message) => message.role === "tool" && message.content === "a".repeat(4000)),
+    ).toBe(false);
+    expect(
+      messages.some(
+        (message) => message.role === "tool" && message.content.includes("[tool result elided; echo:"),
+      ),
+    ).toBe(true);
+    expect(heuristicCountTokens(messages)).toBeLessThanOrEqual(800);
+  });
+
+  it("evidence 带 artifact 时 emergency 降级为 artifact 引用", async () => {
+    const session = await makeSession();
+    await addUser(session, "start");
+    await addBatch(session, "e1", "E".repeat(4000), {
+      evidence: true,
+      artifactPath: "/tmp/evidence-e1.txt",
+    });
+    const { calls, model } = createFakeModel(async () => ok("SUMMARY_EVIDENCE_ARTIFACT"));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    expect(calls).toHaveLength(1);
+    const events = session.events();
+    expect(
+      events.some(
+        (event) => event.type === "compaction" && event.payload.kind === "summary",
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "compaction"
+          && event.payload.kind === "microcompact"
+          && typeof event.payload.note === "string"
+          && /emergency/.test(event.payload.note),
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "compaction"
+          && event.payload.kind === "failed"
+          && event.payload.reason === "still_over_budget",
+      ),
+    ).toBe(false);
+    const messages = buildMessages(events);
+    expect(
+      messages.some(
+        (message) =>
+          message.role === "tool"
+          && message.content === "[tool result elided; full output at /tmp/evidence-e1.txt]",
+      ),
+    ).toBe(true);
+    expect(heuristicCountTokens(messages)).toBeLessThanOrEqual(800);
   });
 
   it("摘要结果缺 usage 时落 status 而非零 usage", async () => {

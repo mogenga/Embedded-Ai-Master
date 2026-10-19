@@ -81,6 +81,7 @@ annotations = { readOnly: false, destructive: true };
 - `edit`: `oldText`/`newText` 必填; 读取全文; 按文件换行风格(`\r\n` / `\n`)归一 `oldText`/`newText` 后匹配与替换, CRLF 文件保持 CRLF; `oldText` 必须**恰好出现一次**(非重叠匹配), 否则 `edit_not_unique`/`edit_not_found`; 替换后写回; 返回 `replaced 1 occurrence in <relpath>`; 同样拒绝 Windows 保留设备名。
 - 错误码: `path_outside_workdir`、`path_invalid`、`not_found`、`not_a_file`、`read_failed`、`edit_not_found`、`edit_not_unique`、`write_failed`、`invalid_input`、`reserved_name`、`internal_error`。
 - 读失败/文件不存在必须显式报错(R3), 不返回空内容。
+- 取消: `fs` 的 read/write/edit 均响应 `AbortSignal`(read 流与 readFile/writeFile 接 signal, 循环内检查); 取消返回 `aborted`, write/edit 文案提示可能留下部分文件。`glob`/`grep` 的 `walkFiles` 在每个条目/递归/访问前检查 signal, `grep` 在文件读取前与每 256 行检查, 取消返回 `aborted`。
 - `COM¹`/`COM²`/`COM³` 等上标设备名变体暂不覆盖, 见 D-073。
 
 ### 4.3 `shell` 工具
@@ -101,7 +102,7 @@ annotations = { readOnly: false, destructive: true };
   - `del`/`erase`/`rd`/`rmdir /s` 打 `<drive>:\`、`<drive>:\*`、`<drive>:\*.*`、`reg delete HKLM`、`bcdedit`、`cipher /w`.
   - 命中 → `{isError:true, code:"dangerous_command", message, text}`，**不 spawn**。
 - 执行: `spawn(command, { shell: true, cwd, env: process.env })`; 收集 stdout/stderr 各最多 1 MiB(超出截断并标记); 等待 close。
-- 取消: `execute` 自管 abort——Windows 用 `taskkill /T /F` 杀进程树, POSIX 杀 `detached` 进程组; 不传 Node 内置 `signal`(避免只杀 shell 留下孙进程); 调用方中止返回 `shell_aborted`。
+- 取消: `execute` 自管 abort——Windows 用 `taskkill /T /F` 杀进程树, POSIX 杀 `detached` 进程组; 不传 Node 内置 `signal`(避免只杀 shell 留下孙进程); 调用方中止返回 `shell_aborted`。abort 后 1s 升级 `SIGKILL`/再次 `taskkill`, 3s 仍未确认进程退出则兜底返回 `shell_aborted`, `detail` 写 `abortEscalated`/`terminateFailed`, 文本明确“process termination not confirmed”; Promise 必定 settle。
 - 返回 `isError:false` + `detail: { exitCode, signal, stdout, stderr, stdoutBytes, stderrBytes, stdoutTruncated, stderrTruncated }`; `stdout`/`stderr` 为前 4096 字符摘要(按 UTF-16 码点边界裁剪, 不切断代理对), `stdoutBytes`/`stderrBytes` 为实际收集字节数; `text` 保留完整输出(≤1 MiB), 包含 `exit=<n>`、stdout、stderr(便于模型直接读)。
 - 非零退出码不算工具错误; spawn 失败 `shell_spawn_failed`; 子进程被系统信号终止 → `isError:true`, `code:"shell_terminated"`, `detail.exitCode:null` + 实际 `signal`(不把 null 伪装成 1)。
 - 错误码: `ok`、`dangerous_command`、`cwd_invalid`、`shell_spawn_failed`、`shell_aborted`、`shell_terminated`。

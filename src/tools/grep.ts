@@ -40,6 +40,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isAbortError(error: unknown): boolean {
+  return (error as { name?: string } | null)?.name === "AbortError";
+}
+
 function compileRegex(pattern: string, ignoreCase: boolean): RegExp | undefined {
   if (pattern.length === 0) return undefined;
   try {
@@ -61,7 +65,10 @@ export const grepTool: ToolDef<GrepInput> = {
     "在 workdir 内按正则搜索文件内容；输出 <相对 workdir 路径>:<行号>:<文本>，默认最多 200 条",
   schema: grepInputSchema,
   annotations: { readOnly: true },
-  execute: async (input, ctx: ToolCtx) => {
+  execute: async (input, ctx: ToolCtx, signal) => {
+    if (signal.aborted) {
+      return failure("aborted", "grep aborted");
+    }
     const regex = compileRegex(input.pattern, input.ignoreCase ?? false);
     if (!regex) {
       return failure("invalid_pattern", `invalid pattern: ${JSON.stringify(input.pattern)}`);
@@ -99,44 +106,54 @@ export const grepTool: ToolDef<GrepInput> = {
     const skipped: SkippedCounts = { binary: 0, tooLarge: 0, unreadable: 0 };
     let skippedLongLines = 0;
 
-    const outcome = await walkFiles(root, workdir, async (absolute, relative) => {
-      if (input.glob !== undefined && !matchesGlob(relative, input.glob)) return;
+    let outcome;
+    try {
+      outcome = await walkFiles(root, workdir, async (absolute, relative) => {
+        signal.throwIfAborted();
+        if (input.glob !== undefined && !matchesGlob(relative, input.glob)) return;
 
-      let info;
-      try {
-        info = await stat(absolute);
-      } catch {
-        skipped.unreadable += 1;
-        return;
-      }
-      if (!info.isFile()) return;
-      if (info.size > MAX_FILE_BYTES) {
-        skipped.tooLarge += 1;
-        return;
-      }
-
-      let buffer: Buffer;
-      try {
-        buffer = await readFile(absolute);
-      } catch {
-        skipped.unreadable += 1;
-        return;
-      }
-      if (buffer.includes(0)) {
-        skipped.binary += 1;
-        return;
-      }
-
-      const lines = splitLines(buffer.toString("utf8"));
-      for (let index = 0; index < lines.length; index++) {
-        const text = lines[index]!;
-        if (Buffer.byteLength(text, "utf8") > MAX_LINE_BYTES) {
-          skippedLongLines += 1;
-          continue;
+        let info;
+        try {
+          info = await stat(absolute);
+        } catch {
+          skipped.unreadable += 1;
+          return;
         }
-        if (regex.test(text)) matches.push({ file: relative, line: index + 1, text });
+        if (!info.isFile()) return;
+        if (info.size > MAX_FILE_BYTES) {
+          skipped.tooLarge += 1;
+          return;
+        }
+
+        let buffer: Buffer;
+        try {
+          buffer = await readFile(absolute);
+        } catch {
+          skipped.unreadable += 1;
+          return;
+        }
+        if (buffer.includes(0)) {
+          skipped.binary += 1;
+          return;
+        }
+
+        const lines = splitLines(buffer.toString("utf8"));
+        for (let index = 0; index < lines.length; index++) {
+          if ((index & 255) === 0) signal.throwIfAborted();
+          const text = lines[index]!;
+          if (Buffer.byteLength(text, "utf8") > MAX_LINE_BYTES) {
+            skippedLongLines += 1;
+            continue;
+          }
+          if (regex.test(text)) matches.push({ file: relative, line: index + 1, text });
+        }
+      }, MAX_SCANNED_FILES, signal);
+    } catch (error) {
+      if (signal.aborted || isAbortError(error)) {
+        return failure("aborted", "grep aborted");
       }
-    });
+      return failure("read_failed", `cannot read directory: ${errorMessage(error)}`);
+    }
 
     if (outcome.error !== undefined) {
       return failure("read_failed", `cannot read directory: ${errorMessage(outcome.error)}`);

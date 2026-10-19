@@ -8,7 +8,12 @@ export interface OpenAIProviderCfg {
   model: string;
   fetchImpl?: typeof fetch;
   retry?: Partial<Omit<RetryConfig, "isRetryable">>;
+  requestTimeoutMs?: number;
+  maxResponseBytes?: number;
 }
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 class ModelFatalError extends Error {
   readonly code = "api_4xx";
@@ -53,6 +58,15 @@ class ModelResponseError extends Error {
   }
 }
 
+class RequestTimeoutError extends Error {
+  readonly code = "request_timeout";
+
+  constructor(timeoutMs: number) {
+    super(`Model API request timed out after ${timeoutMs}ms`);
+    this.name = "RequestTimeoutError";
+  }
+}
+
 function isCancellationError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
@@ -71,6 +85,79 @@ function resolveChatCompletionsUrl(baseUrl: string): string {
   return url.toString();
 }
 
+async function readBodyPreview(response: Response, maxBytes = 512): Promise<string> {
+  const body = response.body;
+  if (body === null || body === undefined) {
+    return (await response.text()).slice(0, maxBytes);
+  }
+  const reader = body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value === undefined) continue;
+      const take = Math.min(value.byteLength, maxBytes - total);
+      chunks.push(Buffer.from(value.subarray(0, take)));
+      total += take;
+      if (take < value.byteLength || total >= maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        break;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return Buffer.concat(chunks).toString("utf8").slice(0, maxBytes);
+}
+
+async function readJsonBody(
+  response: Response,
+  maxBytes: number,
+): Promise<Record<string, any>> {
+  const declared = response.headers?.get?.("content-length");
+  if (declared !== null && declared !== undefined) {
+    const length = Number(declared);
+    if (Number.isFinite(length) && length > maxBytes) {
+      throw new ModelResponseError(`Model API response exceeds ${maxBytes} bytes`);
+    }
+  }
+  const body = response.body;
+  let text: string;
+  if (body === null || body === undefined) {
+    text = await response.text();
+    if (Buffer.byteLength(text, "utf8") > maxBytes) {
+      throw new ModelResponseError(`Model API response exceeds ${maxBytes} bytes`);
+    }
+  } else {
+    const reader = body.getReader();
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value === undefined) continue;
+        total += value.byteLength;
+        if (total > maxBytes) {
+          await reader.cancel().catch(() => undefined);
+          throw new ModelResponseError(`Model API response exceeds ${maxBytes} bytes`);
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    text = Buffer.concat(chunks).toString("utf8");
+  }
+  try {
+    return JSON.parse(text) as Record<string, any>;
+  } catch (error) {
+    throw new ModelResponseError("Model API returned invalid JSON", error);
+  }
+}
+
 export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
   const fetchImpl = cfg.fetchImpl ?? fetch;
   const chatCompletionsUrl = resolveChatCompletionsUrl(cfg.baseUrl);
@@ -79,8 +166,13 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
     baseDelayMs: cfg.retry?.baseDelayMs ?? 1000,
     sleep: cfg.retry?.sleep,
     rand: cfg.retry?.rand,
-    isRetryable: (err) => err instanceof RetryableHttpError || err instanceof NetworkError,
+    isRetryable: (err) =>
+      err instanceof RetryableHttpError
+      || err instanceof NetworkError
+      || err instanceof RequestTimeoutError,
   };
+  const requestTimeoutMs = cfg.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const maxResponseBytes = cfg.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
 
   return {
     async complete(messages: ModelChatMessage[], tools: ModelToolSchema[], opts): Promise<CompletionResult> {
@@ -100,33 +192,50 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
           throw new DOMException("The operation was aborted", "AbortError");
         }
         isFirstAttempt = false;
-        let response: Response;
+        const timeoutController = new AbortController();
+        let timedOut = false;
+        const timer = setTimeout(() => {
+          timedOut = true;
+          timeoutController.abort();
+        }, requestTimeoutMs);
+        const signal = AbortSignal.any([opts.signal, timeoutController.signal]);
         try {
-          response = await fetchImpl(chatCompletionsUrl, {
-            method: "POST",
-            headers,
-            body: JSON.stringify(requestBody),
-            signal: opts.signal,
-          });
-        } catch (err) {
-          if (isCancellationError(err) || opts.signal.aborted) throw err;
-          throw new NetworkError(err);
-        }
-        if (!response.ok) {
-          const bodyPreview = (await response.text()).slice(0, 512);
-          if (response.status >= 400 && response.status < 500 && response.status !== 429) {
-            throw new ModelFatalError(response.status, bodyPreview);
+          let response: Response;
+          try {
+            response = await fetchImpl(chatCompletionsUrl, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(requestBody),
+              signal,
+            });
+          } catch (err) {
+            if (timedOut) throw new RequestTimeoutError(requestTimeoutMs);
+            if (isCancellationError(err) || opts.signal.aborted) throw err;
+            throw new NetworkError(err);
           }
-          if (response.status === 429 || response.status >= 500) {
-            throw new RetryableHttpError(response.status, bodyPreview);
+          if (!response.ok) {
+            const bodyPreview = await readBodyPreview(response);
+            if (timedOut) throw new RequestTimeoutError(requestTimeoutMs);
+            if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+              throw new ModelFatalError(response.status, bodyPreview);
+            }
+            if (response.status === 429 || response.status >= 500) {
+              throw new RetryableHttpError(response.status, bodyPreview);
+            }
+            throw new UnexpectedHttpError(response.status, bodyPreview);
           }
-          throw new UnexpectedHttpError(response.status, bodyPreview);
-        }
-        try {
-          return await response.json() as Record<string, any>;
+          try {
+            return await readJsonBody(response, maxResponseBytes);
+          } catch (err) {
+            if (timedOut) throw new RequestTimeoutError(requestTimeoutMs);
+            if (isCancellationError(err) || opts.signal.aborted) throw err;
+            throw err;
+          }
         } catch (err) {
-          if (isCancellationError(err) || opts.signal.aborted) throw err;
-          throw new ModelResponseError("Model API returned invalid JSON", err);
+          if (timedOut) throw new RequestTimeoutError(requestTimeoutMs);
+          throw err;
+        } finally {
+          clearTimeout(timer);
         }
       }, retryConfig);
 
