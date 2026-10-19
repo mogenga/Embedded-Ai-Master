@@ -26,12 +26,14 @@ export type McpStatusKind =
   | "connect_failed"
   | "tools_changed"
   | "tools_refresh_failed"
+  | "tool_invalid_schema"
   | "listener_failed"
   | "call_failed";
 
 export interface McpStatusEvent {
   kind: McpStatusKind;
   server: string;
+  tool?: string;
   toolCount?: number;
   message?: string;
 }
@@ -69,6 +71,15 @@ function messageOf(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function isObjectSchema(schema: unknown): boolean {
+  return (
+    typeof schema === "object" &&
+    schema !== null &&
+    !Array.isArray(schema) &&
+    (schema as { type?: unknown }).type === "object"
+  );
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -421,7 +432,17 @@ export class McpManager {
 
   private async loadTools(client: Client, server: string): Promise<McpToolInfo[]> {
     const { tools } = await client.listTools();
-    return tools.map((tool) => {
+    const loaded: McpToolInfo[] = [];
+    for (const tool of tools) {
+      if (!isObjectSchema(tool.inputSchema)) {
+        this.emit({
+          kind: "tool_invalid_schema",
+          server,
+          tool: tool.name,
+          message: `MCP 工具 inputSchema 根必须是 object: ${server}/${tool.name}`,
+        });
+        continue;
+      }
       const info: McpToolInfo = {
         server,
         tool: tool.name,
@@ -437,8 +458,9 @@ export class McpManager {
       if (tool._meta?.evidence === true) {
         info.evidence = true;
       }
-      return info;
-    });
+      loaded.push(info);
+    }
+    return loaded;
   }
 
   private async refreshTools(state: ServerState): Promise<void> {

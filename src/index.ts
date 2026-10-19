@@ -62,12 +62,14 @@ interface McpSessionStatus {
     | "mcp_connect_failed"
     | "mcp_tools_changed"
     | "mcp_tools_refresh_failed"
+    | "mcp_tool_invalid_schema"
     | "mcp_tool_name_renamed"
     | "mcp_config_failed";
   server?: string;
   tool?: string;
   name?: string;
   originalName?: string;
+  scope?: "global";
   toolCount?: number;
   message?: string;
 }
@@ -84,6 +86,13 @@ function toSessionMcpStatus(event: McpStatusEvent): McpSessionStatus | undefined
       return {
         status: "mcp_tools_refresh_failed",
         server: event.server,
+        message: event.message,
+      };
+    case "tool_invalid_schema":
+      return {
+        status: "mcp_tool_invalid_schema",
+        server: event.server,
+        tool: event.tool,
         message: event.message,
       };
     default:
@@ -200,6 +209,9 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   if (compaction?.enabled !== undefined && typeof compaction.enabled !== "boolean") {
     throw new TypeError(`compaction.enabled must be a boolean; got ${typeof compaction.enabled}`);
   }
+  if (opts.mcp?.enabled !== undefined && typeof opts.mcp.enabled !== "boolean") {
+    throw new TypeError(`mcp.enabled must be a boolean; got ${typeof opts.mcp.enabled}`);
+  }
   const compactionEnabled = compaction?.enabled !== false;
   if (compactionEnabled) {
     assertCompactionRatios(compaction?.keepTailRatio ?? 0.16, compaction?.softRatio ?? 0.8);
@@ -272,6 +284,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   let hasPrimaryError = false;
   let mcpManager: McpManager | undefined;
   let statusQueue: Promise<void> = Promise.resolve();
+  const seenMcpStatuses = new Set<string>();
   const appendMcpStatus = (status: McpSessionStatus): void => {
     statusQueue = statusQueue
       .then(() => session.append({ type: "status", payload: { ...status } }))
@@ -279,6 +292,13 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
         () => undefined,
         () => undefined,
       );
+  };
+  const appendMcpStatusOnce = (key: string, status: McpSessionStatus): void => {
+    if (seenMcpStatuses.has(key)) {
+      return;
+    }
+    seenMcpStatuses.add(key);
+    appendMcpStatus(status);
   };
 
   try {
@@ -344,20 +364,34 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
           const rebuildMcpTools = (): void => {
             try {
               const mcpTools = createMcpTools(manager, {
+                reservedNames: builtinTools.map((tool) => tool.name),
                 onStatus: (status) => {
-                  appendMcpStatus({
-                    status: "mcp_tool_name_renamed",
-                    server: status.server,
-                    tool: status.tool,
-                    name: status.name,
-                    originalName: status.originalName,
-                  });
+                  if (status.kind === "mcp_tool_invalid_schema") {
+                    appendMcpStatusOnce(`invalid:${status.server}\u0000${status.tool}`, {
+                      status: "mcp_tool_invalid_schema",
+                      server: status.server,
+                      tool: status.tool,
+                      message: status.message,
+                    });
+                    return;
+                  }
+                  appendMcpStatusOnce(
+                    `renamed:${status.server}\u0000${status.tool}\u0000${status.name}`,
+                    {
+                      status: "mcp_tool_name_renamed",
+                      server: status.server,
+                      tool: status.tool,
+                      name: status.name,
+                      originalName: status.originalName,
+                    },
+                  );
                 },
               });
               registry.replace([...builtinTools, ...mcpTools]);
             } catch (error) {
               appendMcpStatus({
                 status: "mcp_tools_refresh_failed",
+                scope: "global",
                 message: messageOf(error),
               });
             }

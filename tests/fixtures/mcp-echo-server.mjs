@@ -158,6 +158,33 @@ async function main() {
   );
 
   server.registerTool(
+    "bad-schema",
+    { description: "Expose a tool whose inputSchema root is not object" },
+    async () => {
+      server.server.setRequestHandler("tools/list", async () => ({
+        tools: [
+          {
+            name: "echo",
+            description: "Echo the provided text",
+            inputSchema: {
+              type: "object",
+              properties: { text: { type: "string" } },
+              required: ["text"],
+            },
+          },
+          {
+            name: "invalid",
+            description: "Invalid inputSchema root",
+            inputSchema: { type: "string" },
+          },
+        ],
+      }));
+      server.sendToolListChanged();
+      return textResult("bad-schema-set");
+    },
+  );
+
+  server.registerTool(
     "vanish",
     { description: "Exit without replying" },
     async () => {

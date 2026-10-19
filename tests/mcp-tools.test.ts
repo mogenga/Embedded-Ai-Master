@@ -177,6 +177,51 @@ describe("createMcpTools", () => {
     ]);
   });
 
+  it("inputSchema 根非 object 的工具被跳过并记录 invalid_schema，registry 可构建", () => {
+    const statuses: McpToolAdapterStatus[] = [];
+    const tools = createMcpTools(
+      makeManager([
+        makeInfo("s", "good"),
+        makeInfo("s", "bad", { inputSchema: { type: "string" } }),
+      ]).manager,
+      { onStatus: (status) => statuses.push(status) },
+    );
+
+    expect(tools.map((tool) => tool.name)).toEqual(["mcp__s__good"]);
+    expect(statuses).toEqual([
+      {
+        kind: "mcp_tool_invalid_schema",
+        server: "s",
+        tool: "bad",
+        message: "MCP 工具 inputSchema 根必须是 object: s/bad",
+      },
+    ]);
+    expect(() => new ToolRegistry(tools)).not.toThrow();
+    expect(toModelToolSchemas(tools).map((schema) => schema.function.name)).toEqual([
+      "mcp__s__good",
+    ]);
+  });
+
+  it("reservedNames 中的名称被占用时确定性改名并记录 renamed", () => {
+    const statuses: McpToolAdapterStatus[] = [];
+    const tools = createMcpTools(makeManager([makeInfo("s", "echo")]).manager, {
+      reservedNames: ["mcp__s__echo"],
+      onStatus: (status) => statuses.push(status),
+    });
+
+    expect(tools).toHaveLength(1);
+    expect(tools[0].name).toMatch(/^mcp__s__echo_[0-9a-f]{6}$/);
+    expect(statuses).toEqual([
+      {
+        kind: "mcp_tool_name_renamed",
+        server: "s",
+        tool: "echo",
+        name: tools[0].name,
+        originalName: "mcp__s__echo",
+      },
+    ]);
+  });
+
   it("跨 server sanitize 冲突时确定性改名，且不阻塞其他 server", () => {
     const statuses: McpToolAdapterStatus[] = [];
     const tools = createMcpTools(

@@ -241,7 +241,7 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
   - 会话间**零共享**:无全局连接池(PLAT-2"会话间上下文与 MCP 连接隔离"的直接落点)。
   - 健康检查:启动握手超时(默认 30s)→ 该 server 标记失败,工具以结构化"server 不可用"回传(不静默);运行中进程退出 → 自动重启一次,再失败降级为不可用并**通知会话**(工具列表变更事件)。
   - 工具列表变更:重连后 tool list 变化以事件进会话日志并同步给模型(下轮请求的工具目录更新)。
-- **命名空间**:工具名 `mcp__<server>__<tool>` 全局唯一,进工具系统(#4)后与内置工具同管线;权限规则(P1)与 UI 展示都按此名寻址。sanitize/64 截断导致的名称冲突不再丢弃工具,而是基于原 `mcp__<server>__<tool>` 追加 `_<hash6>` 确定性消歧,并以 `mcp_tool_name_renamed` status 记录原名与最终名;工具 `_meta.evidence === true` 映射为证据标注。消歧占用可能使后续工具基础名连环改名,结果对同一 `tools()` 输入列表确定,但依赖 server 返回顺序(D-100)。
+- **命名空间**:工具名 `mcp__<server>__<tool>` 全局唯一,进工具系统(#4)后与内置工具同管线;权限规则(P1)与 UI 展示都按此名寻址。sanitize/64 截断导致的名称冲突不再丢弃工具,而是基于原 `mcp__<server>__<tool>` 追加 `_<hash6>` 确定性消歧,并以 `mcp_tool_name_renamed` status 记录原名与最终名;工具 `_meta.evidence === true` 映射为证据标注。消歧占用可能使后续工具基础名连环改名,结果对同一 `tools()` 输入列表确定,但依赖 server 返回顺序(D-100)。`inputSchema` 根非 object 的工具在装配层跳过并记 `mcp_tool_invalid_schema`,不因单个坏工具导致整批 registry 重建失败。
 - **作用域两级**:`user`(~/.harness/mcp.json)/ `project`(<project>/.harness/mcp.json),project 覆盖 user 同名 server。母本的 local/project/user/managed 四级收敛为两级,managed(企业托管)砍掉。
 - **server instructions**:server 声明的 instructions 注入系统提示词的 MCP 分节(组装机制属 P1 #8,P0 先按固定分节拼接)。
 - **不做**:OAuth/PKCE(无远程认证 server)、roots、sampling、资源订阅(资源按需 list/read 即可,Phase 0 同款)。

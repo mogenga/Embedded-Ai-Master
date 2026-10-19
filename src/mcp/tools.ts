@@ -8,16 +8,24 @@ export interface McpToolSource {
   call(server: string, tool: string, args: unknown, signal?: AbortSignal): Promise<McpCallResult>;
 }
 
-export type McpToolAdapterStatus = {
-  kind: "mcp_tool_name_renamed";
-  server: string;
-  tool: string;
-  name: string;
-  originalName: string;
-};
+export type McpToolAdapterStatus =
+  | {
+      kind: "mcp_tool_name_renamed";
+      server: string;
+      tool: string;
+      name: string;
+      originalName: string;
+    }
+  | {
+      kind: "mcp_tool_invalid_schema";
+      server: string;
+      tool: string;
+      message: string;
+    };
 
 export interface CreateMcpToolsOptions {
   onStatus?: (status: McpToolAdapterStatus) => void;
+  reservedNames?: Iterable<string>;
 }
 
 const MAX_TOOL_NAME_LENGTH = 64;
@@ -35,6 +43,15 @@ function hashHex(value: string): string {
 
 function clippedName(name: string, seed: string): string {
   return `${name.slice(0, MAX_TOOL_NAME_LENGTH - HASH_SUFFIX_LENGTH)}_${hashHex(seed)}`;
+}
+
+function isObjectSchema(schema: unknown): boolean {
+  return (
+    typeof schema === "object" &&
+    schema !== null &&
+    !Array.isArray(schema) &&
+    (schema as { type?: unknown }).type === "object"
+  );
 }
 
 export function mcpToolName(server: string, tool: string): string {
@@ -61,9 +78,18 @@ export function createMcpTools(
   options: CreateMcpToolsOptions = {},
 ): ToolDef<unknown>[] {
   const tools: ToolDef<unknown>[] = [];
-  const usedNames = new Set<string>();
+  const usedNames = new Set<string>(options.reservedNames ?? []);
 
   for (const info of manager.tools()) {
+    if (!isObjectSchema(info.inputSchema)) {
+      options.onStatus?.({
+        kind: "mcp_tool_invalid_schema",
+        server: info.server,
+        tool: info.tool,
+        message: `MCP 工具 inputSchema 根必须是 object: ${info.server}/${info.tool}`,
+      });
+      continue;
+    }
     const baseName = mcpToolName(info.server, info.tool);
     let name = baseName;
     if (usedNames.has(baseName)) {

@@ -513,6 +513,22 @@ describe("McpManager list_changed 与关闭", () => {
     expect(manager.tools().map((tool) => tool.tool)).toEqual(before);
   });
 
+  it("坏 schema 导致 tools/list 校验失败时保留旧缓存并记录 tools_refresh_failed", async () => {
+    const events: McpStatusEvent[] = [];
+    const manager = track(new McpManager([config("echo")], { logger: (event) => events.push(event) }));
+    await manager.connectAll();
+    const before = manager.tools().map((tool) => tool.tool);
+
+    await manager.call("echo", "bad-schema", {}, signal());
+    await waitFor(() => events.some((event) => event.kind === "tools_refresh_failed"));
+
+    expect(events).toContainEqual(
+      expect.objectContaining({ kind: "tools_refresh_failed", server: "echo" }),
+    );
+    expect(manager.tools().map((tool) => tool.tool)).toEqual(before);
+    expect(manager.tools().map((tool) => tool.tool)).not.toContain("invalid");
+  });
+
   it("close 关闭 client 并回收子进程", async () => {
     const root = tempRoot();
     const pidFile = path.join(root, "pid");
