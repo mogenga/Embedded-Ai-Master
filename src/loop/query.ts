@@ -202,7 +202,7 @@ export async function* query(
   }
   await session.append({ type: "user", payload: { content: input } });
 
-  const toolSchemas = toModelToolSchemas(ctx.tools.all());
+
   const costTracked = ctx.pricePerMillion !== undefined;
   let turn = 0;
   let costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
@@ -250,6 +250,7 @@ export async function* query(
       }
 
       let response: CompletionResult;
+      const toolSchemas = toModelToolSchemas(ctx.tools.all());
       try {
         response = await ctx.model.complete(messages, toolSchemas, {
           signal: ctx.signal,

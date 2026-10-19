@@ -40,6 +40,7 @@ src/
 ├── context/      日志投影（buildMessages）与上下文预算
 ├── demo/         headless CLI 入口
 ├── loop/         事件类型、熔断、query 主循环
+├── mcp/          MCP stdio 客户端：配置合并、连接生命周期、工具适配
 ├── model/        模型协议、OpenAI 兼容适配器、重试、token 估算
 ├── session/      append-only JSONL 会话
 ├── server/       只读 HTTP API（会话 / 知识库 / 设备）与静态资源服务
@@ -108,6 +109,49 @@ docs/             设计、计划与已知问题
 - `grep` 只读 ≤2 MiB 的文件，含 NUL 视为二进制；跳过文件与不可读目录合并计数 `[skipped N files (binary/too large/unreadable)]`，不列具体路径（D-084/D-089）。
 - 两者都不响应 `AbortSignal`（D-077）；`grep` 先收集全部命中再截断，命中集很大时内存占用随结果增长（D-078）；`grep` 正则同步执行，ReDoS 不可中断（D-085），glob 编译仍有回溯风险（D-086）。
 
+## MCP 客户端
+
+`runSession` 默认启用 MCP（stdio），启动时读取两级配置并连接所有未禁用的 server：
+
+- 用户级：`$HARNESS_HOME/mcp.json`
+- 项目级：`<工具根>/.harness/mcp.json`（新建会话取 `opts.cwd` 或进程 cwd；resume 未传 `opts.cwd` 时取 `header.workdir`，缺失则回退进程 cwd）
+
+```json
+{
+  "mcpServers": {
+    "probe": {
+      "command": "node",
+      "args": ["C:/tools/probe-mcp/server.js"],
+      "env": { "PROBE_PORT": "COM3" },
+      "cwd": "C:/tools/probe-mcp",
+      "timeoutMs": 15000
+    }
+  }
+}
+```
+
+- 字段级合并：同名 server 以 project 覆盖 user，`env` 按键合并；project 只写 `disabled: true` 时沿用 user 的 command/args。`cwd` 相对配置文件所在目录解析，缺省为当前 workdir；`timeoutMs` 缺省 15000 ms。未知字段忽略，可选字段拼写错误会按缺省值继续，`command` 必填且缺失时报 `McpConfigError`，名称须匹配 `^[a-zA-Z0-9_-]{1,64}$`。
+- 连接失败只影响该 server：记录 `mcp_connect_failed`，其余 server 与主会话继续；配置 JSON/schema 非法记录 `mcp_config_failed` 并跳过全部 MCP。`mcp.enabled: false` 或未配置任何 server 时完全不启动客户端。
+- 工具暴露为 `mcp__<server>__<tool>`；非 `[a-zA-Z0-9_-]` 字符替换为 `_`，超过 64 字符时截断并追加 `_<hash6>`；与内置/其他 MCP 工具冲突时同样以 `_<hash6>` 确定性改名并记 `mcp_tool_name_renamed`（仅冲突记录状态）。工具的 `_meta.evidence === true` 映射为证据结果，参与上下文压缩保护。
+- 调用：文本内容拼接，非文本内容 JSON 化；`isError` 映射为工具失败；超时/取消分别返回 `mcp_timeout` / `mcp_aborted`。实际调用超时取 `min(timeoutMs, 120000)`，连接握手固定 15s；外层工具管线默认 120s（可被 `runSession.timeoutMs` 覆盖）竞争，可能先返回 `tool_timeout`。同一 server 的调用串行，不同 server 可并行；超时只停止等待，不保证 server 端终止（D-022）。
+- `list_changed`：工具列表变化后刷新 registry，后续轮次使用新集合；刷新失败保留旧集合并记 `mcp_tools_refresh_failed`（`scope: "global"` 表示整体重建失败）。会话结束时统一关闭全部子进程。
+
+```ts
+for await (const event of runSession({
+  input: "读取目标寄存器",
+  model: "local-gw/flash",
+  mcp: {
+    enabled: true,
+    userConfigPath: "C:/Users/me/.harness/mcp.json",
+    projectConfigPath: "C:/work/project/.harness/mcp.json",
+  },
+})) {
+  // ...
+}
+```
+
+`mcp.enabled` 必须是布尔值，`mcp` 必须是普通对象，否则在入口抛 `TypeError`。MCP server 由用户自行安装并在配置中给出 `command`；MCP SDK 包（`@modelcontextprotocol/client`，测试夹具用 `@modelcontextprotocol/server`）已写入 `package.json`，随用户执行 `npm install` 安装；本仓库的 agent 不执行任何依赖安装命令。运行期状态写入会话 `status` 事件（`mcp_connected` / `mcp_connect_failed` / `mcp_tools_changed` / `mcp_tools_refresh_failed` / `mcp_tool_name_renamed` / `mcp_tool_invalid_schema` / `mcp_config_failed`）。
+
 ## 上下文压缩
 
 长会话按三级处理，**只改变模型视图，不删除或改写会话日志与 artifacts**：
@@ -118,7 +162,7 @@ docs/             设计、计划与已知问题
    投影层只采用非空、`0 <= coversUpToSeq < summary 事件自身 seq`（因此 `coversUpToSeq === 最后 seq` 非法）、不切断工具批次且不覆盖 evidence 的 summary；非法 summary 回退上一条有效 summary。摘要调用缺 `usage` 时写 `status{status:"usage_missing",stage:"summary"}`，不写零 usage。
    `keepTailRatio` 与 `softRatio` 必须满足 `0 < keepTailRatio < softRatio < 1`，`keepRecentTurns` 必须是非负整数；启用压缩时在 `runSession` / `compactSession` 入口抛 `TypeError`。
 
-evidence 保护：`ToolResultPayload.evidence === true` 的结果不会被二级/三级修剪；投影层会拒绝覆盖 evidence 的 summary（回退上一条有效 summary 或原视图）。旧日志中没有 `evidence` 字段的 `tool_result` 按非 evidence 处理（P0 未发布，不做迁移）。摘要请求的 usage 作为独立 `usage` 事件落日志（cached 字段经 `normalizeUsage` 归一化），`query` 在压缩后按会话累计 usage 重算 `costUsd`，因此计入 `maxCostUsd` 熔断。
+evidence 保护：`ToolResultPayload.evidence === true` 的结果不会被二级/三级修剪；投影层会拒绝覆盖 evidence 的 summary（回退上一条有效 summary 或原视图）。MCP 工具可在注册时通过 `_meta: { evidence: true }` 声明证据工具；适配层将其映射为 `annotations.evidence`，与内置工具走同一保护路径。旧日志中没有 `evidence` 字段的 `tool_result` 按非 evidence 处理（P0 未发布，不做迁移）。摘要请求的 usage 作为独立 `usage` 事件落日志（cached 字段经 `normalizeUsage` 归一化），`query` 在压缩后按会话累计 usage 重算 `costUsd`，因此计入 `maxCostUsd` 熔断。
 
 `RunOptions.compaction`（缺省全开）：
 
@@ -306,6 +350,14 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 - `shell` 危险命令拦截是启发式、非沙箱，`env` / `bash -c` / `xargs` 等可绕过（D-083）；改目录方式与 shell 展开未覆盖（D-087、D-088）。
 - `glob` 编译仍有正则回溯风险（D-086）；`grep` 的 `glob` 过滤每文件重新编译（D-090）；跳过披露不区分文件与目录（D-089）。
 - 工具根与 resume 的 workdir 只做词法比较，不解析 symlink / 8.3 短名（D-082）。
+
+MCP：
+
+- 超时/取消只停止等待，不强制终止 server 端执行，也不保证与后续调用串行（D-022）。
+- 子进程继承完整 `process.env`，第三方 server 可读取会话进程的敏感变量（D-102）。
+- 配置未知字段（含 typo）静默忽略（D-103）；刷新失败保留旧缓存且不自动重试（D-104）。
+- 工具名消歧依赖 server 返回顺序，跨会话稳定性未保证（D-100）；会话结束与 list_changed 重叠时可能丢失最后一条 status 审计（D-101）。
+- 仅支持 stdio；未启用 2026-07-28 协议的 `subscriptions/listen`。
 
 前端工作台：
 

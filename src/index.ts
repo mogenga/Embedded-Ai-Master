@@ -14,6 +14,12 @@ import type { TokenMeter } from "./context/token-meter.js";
 import type { LoopEvent } from "./loop/events.js";
 import { query } from "./loop/query.js";
 import type { LoopCtx } from "./loop/query.js";
+import { loadMcpConfig } from "./mcp/config.js";
+import { McpConfigError } from "./mcp/errors.js";
+import { McpManager } from "./mcp/manager.js";
+import type { McpStatusEvent } from "./mcp/manager.js";
+import { createMcpTools } from "./mcp/tools.js";
+import type { McpToolAdapterStatus } from "./mcp/tools.js";
 import { heuristicCountTokens } from "./model/count.js";
 import { createOpenAIProvider } from "./model/openai.js";
 import { SessionResumeError } from "./session/errors.js";
@@ -44,6 +50,59 @@ export interface RunOptions {
     keepTailRatio?: number;
     softRatio?: number;
   };
+  mcp?: {
+    enabled?: boolean;
+    userConfigPath?: string;
+    projectConfigPath?: string;
+  };
+}
+
+interface McpSessionStatus {
+  status:
+    | "mcp_connected"
+    | "mcp_connect_failed"
+    | "mcp_tools_changed"
+    | "mcp_tools_refresh_failed"
+    | "mcp_tool_invalid_schema"
+    | "mcp_tool_name_renamed"
+    | "mcp_config_failed";
+  server?: string;
+  tool?: string;
+  name?: string;
+  originalName?: string;
+  scope?: "global";
+  toolCount?: number;
+  message?: string;
+}
+
+function toSessionMcpStatus(event: McpStatusEvent): McpSessionStatus | undefined {
+  switch (event.kind) {
+    case "connected":
+      return { status: "mcp_connected", server: event.server, toolCount: event.toolCount };
+    case "connect_failed":
+      return { status: "mcp_connect_failed", server: event.server, message: event.message };
+    case "tools_changed":
+      return { status: "mcp_tools_changed", server: event.server, toolCount: event.toolCount };
+    case "tools_refresh_failed":
+      return {
+        status: "mcp_tools_refresh_failed",
+        server: event.server,
+        message: event.message,
+      };
+    case "tool_invalid_schema":
+      return {
+        status: "mcp_tool_invalid_schema",
+        server: event.server,
+        tool: event.tool,
+        message: event.message,
+      };
+    default:
+      return undefined;
+  }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -151,6 +210,23 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   if (compaction?.enabled !== undefined && typeof compaction.enabled !== "boolean") {
     throw new TypeError(`compaction.enabled must be a boolean; got ${typeof compaction.enabled}`);
   }
+
+  const rawMcp: unknown = opts.mcp;
+  if (rawMcp !== undefined) {
+    const proto =
+      typeof rawMcp === "object" && rawMcp !== null ? Object.getPrototypeOf(rawMcp) : undefined;
+    if (
+      typeof rawMcp !== "object" ||
+      rawMcp === null ||
+      Array.isArray(rawMcp) ||
+      (proto !== Object.prototype && proto !== null)
+    ) {
+      throw new TypeError(`mcp must be an object; got ${rawMcp === null ? "null" : typeof rawMcp}`);
+    }
+  }
+  if (opts.mcp?.enabled !== undefined && typeof opts.mcp.enabled !== "boolean") {
+    throw new TypeError(`mcp.enabled must be a boolean; got ${typeof opts.mcp.enabled}`);
+  }
   const compactionEnabled = compaction?.enabled !== false;
   if (compactionEnabled) {
     assertCompactionRatios(compaction?.keepTailRatio ?? 0.16, compaction?.softRatio ?? 0.8);
@@ -221,6 +297,31 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   }
 
   let hasPrimaryError = false;
+  let mcpManager: McpManager | undefined;
+  let statusQueue: Promise<void> = Promise.resolve();
+  let statusWriteFailure: unknown;
+  const seenMcpStatuses = new Set<string>();
+  const appendMcpStatus = (status: McpSessionStatus): void => {
+    statusQueue = statusQueue
+      .then(() => session.append({ type: "status", payload: { ...status } }))
+      .then(
+        () => undefined,
+        (error: unknown) => {
+          if (statusWriteFailure === undefined) {
+            statusWriteFailure = error;
+            console.error(`[mcp] status event append failed: ${messageOf(error)}`);
+          }
+        },
+      );
+  };
+  const appendMcpStatusOnce = (key: string, status: McpSessionStatus): void => {
+    if (seenMcpStatuses.has(key)) {
+      return;
+    }
+    seenMcpStatuses.add(key);
+    appendMcpStatus(status);
+  };
+
   try {
     if (systemPromptToAppend !== undefined) {
       await session.append({ type: "system", payload: { content: systemPromptToAppend } });
@@ -258,11 +359,87 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       budget = (messages) => checkBudget(messages, model.contextWindow);
     }
 
+    const builtinTools = createBuiltinTools();
+    const registry = new ToolRegistry(builtinTools);
+
+    if (opts.mcp?.enabled !== false) {
+      try {
+        const servers = loadMcpConfig({
+          home,
+          workdir: runCwd,
+          ...(opts.mcp?.userConfigPath !== undefined
+            ? { userConfigPath: opts.mcp.userConfigPath }
+            : {}),
+          ...(opts.mcp?.projectConfigPath !== undefined
+            ? { projectConfigPath: opts.mcp.projectConfigPath }
+            : {}),
+        });
+        if (servers.length > 0) {
+          const manager = new McpManager(servers, {
+            logger: (event) => {
+              const status = toSessionMcpStatus(event);
+              if (status !== undefined) appendMcpStatus(status);
+            },
+          });
+          mcpManager = manager;
+          const emitAdapterStatus = (status: McpToolAdapterStatus): void => {
+            if (status.kind === "mcp_tool_invalid_schema") {
+              appendMcpStatusOnce(`invalid:${status.server}\u0000${status.tool}`, {
+                status: "mcp_tool_invalid_schema",
+                server: status.server,
+                tool: status.tool,
+                message: status.message,
+              });
+              return;
+            }
+            appendMcpStatusOnce(
+              `renamed:${status.server}\u0000${status.tool}\u0000${status.name}`,
+              {
+                status: "mcp_tool_name_renamed",
+                server: status.server,
+                tool: status.tool,
+                name: status.name,
+                originalName: status.originalName,
+              },
+            );
+          };
+          const rebuildMcpTools = (): void => {
+            const pendingStatuses: McpToolAdapterStatus[] = [];
+            try {
+              const mcpTools = createMcpTools(manager, {
+                reservedNames: builtinTools.map((tool) => tool.name),
+                onStatus: (status) => pendingStatuses.push(status),
+              });
+
+              registry.replace([...builtinTools, ...mcpTools]);
+            } catch (error) {
+              appendMcpStatus({
+                status: "mcp_tools_refresh_failed",
+                scope: "global",
+                message: messageOf(error),
+              });
+              return;
+            }
+            for (const status of pendingStatuses) emitAdapterStatus(status);
+          };
+          manager.onToolsChanged(() => rebuildMcpTools());
+          await manager.connectAll();
+          rebuildMcpTools();
+        }
+      } catch (error) {
+        if (error instanceof McpConfigError) {
+          appendMcpStatus({ status: "mcp_config_failed", message: error.message });
+        } else {
+          throw error;
+        }
+      }
+    }
+
     const ctx: LoopCtx = {
       session,
       model: modelProtocol,
       modelCfg: model,
-      tools: new ToolRegistry(createBuiltinTools()),
+      tools: registry,
       budget,
       signal,
       artifactDir: path.join(session.dir, "artifacts"),
@@ -281,10 +458,19 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     hasPrimaryError = true;
     throw error;
   } finally {
+    await statusQueue;
+
+    let closeError: unknown;
+    try {
+      await mcpManager?.close();
+    } catch (error) {
+      if (!hasPrimaryError) closeError = error;
+    }
     try {
       await session.close();
     } catch (error) {
-      if (!hasPrimaryError) throw error;
+      if (!hasPrimaryError && closeError === undefined) closeError = error;
     }
+    if (closeError !== undefined && !hasPrimaryError) throw closeError;
   }
 }

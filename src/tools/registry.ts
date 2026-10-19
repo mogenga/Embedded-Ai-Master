@@ -6,31 +6,55 @@ import type { ToolDef } from "./types.js";
 // 在注册期 fail-fast,避免 MCP 工具名到网关才 400。
 const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
+function rootTypeOf(schema: unknown): unknown {
+  if (typeof schema !== "object" || schema === null) {
+    return undefined;
+  }
+  return (schema as { type?: unknown }).type;
+}
+
 function toParametersSchema(tool: ToolDef<any>): unknown {
+  if (tool.modelSchema !== undefined) {
+    const rootType = rootTypeOf(tool.modelSchema);
+    if (rootType !== "object") {
+      throw new Error(`tool "${tool.name}" modelSchema root must be an object, got ${String(rootType ?? "none")}`);
+    }
+    return tool.modelSchema;
+  }
   const parameters = z.toJSONSchema(tool.schema, { io: "input" });
-  const rootType = (parameters as { type?: unknown }).type;
+  const rootType = rootTypeOf(parameters);
   if (rootType !== "object") {
     throw new Error(`tool "${tool.name}" parameters root must be an object, got ${String(rootType ?? "none")}`);
   }
   return parameters;
 }
 
+function buildToolMap(tools: ToolDef<any>[]): Map<string, ToolDef<any>> {
+  const map = new Map<string, ToolDef<any>>();
+  for (const tool of tools) {
+    if (!TOOL_NAME_PATTERN.test(tool.name)) {
+      throw new Error(`invalid tool name "${tool.name}": must match ${TOOL_NAME_PATTERN.source}`);
+    }
+    if (map.has(tool.name)) {
+      throw new Error(`tool already registered: ${tool.name}`);
+    }
+
+    toParametersSchema(tool);
+    map.set(tool.name, tool);
+  }
+  return map;
+}
+
 export class ToolRegistry {
-  private readonly tools = new Map<string, ToolDef<any>>();
+  private tools: Map<string, ToolDef<any>>;
 
   constructor(tools: ToolDef<any>[]) {
-    for (const tool of tools) {
-      if (!TOOL_NAME_PATTERN.test(tool.name)) {
-        throw new Error(`invalid tool name "${tool.name}": must match ${TOOL_NAME_PATTERN.source}`);
-      }
-      if (this.tools.has(tool.name)) {
-        throw new Error(`tool already registered: ${tool.name}`);
-      }
-      // 构造期即验证 schema 可转换且根为 object: fail-fast,
-      // 同时把 zod 的 unrepresentable 错误提前到装配期。
-      toParametersSchema(tool);
-      this.tools.set(tool.name, tool);
-    }
+    this.tools = buildToolMap(tools);
+  }
+
+
+  replace(tools: ToolDef<any>[]): void {
+    this.tools = buildToolMap(tools);
   }
 
   lookup(name: string): ToolDef<any> | undefined {

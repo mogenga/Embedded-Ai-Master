@@ -8,16 +8,35 @@ import { SUMMARY_PROMPT } from "../src/context/compact.js";
 import { ConfigLoadError, ModelReferenceError } from "../src/config/providers.js";
 import { runSession } from "../src/index.js";
 import type { LoopEvent } from "../src/loop/events.js";
+import { McpManager } from "../src/mcp/manager.js";
 import { SessionResumeError } from "../src/session/errors.js";
 import { createSession, readSessionFile } from "../src/session/session.js";
+import { ToolRegistry } from "../src/tools/registry.js";
 
 const resumeCloseFailure = vi.hoisted(() => ({ enabled: false }));
 const resumeCallCounter = vi.hoisted(() => ({ count: 0 }));
+const statusAppendFailure = vi.hoisted(() => ({ enabled: false }));
 
 vi.mock("../src/session/session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/session/session.js")>();
   return {
     ...actual,
+    createSession: async (
+      dir: string,
+      opts?: Parameters<typeof actual.createSession>[1],
+    ) => {
+      const handle = await actual.createSession(dir, opts);
+      if (!statusAppendFailure.enabled) return handle;
+      statusAppendFailure.enabled = false;
+      const originalAppend = handle.append.bind(handle);
+      let failed = false;
+      handle.append = (event) => {
+        if (failed) return originalAppend(event);
+        failed = true;
+        return Promise.reject(new Error("status append boom"));
+      };
+      return handle;
+    },
     resumeSession: async (dir: string, opts?: { generationThresholdBytes?: number }) => {
       resumeCallCounter.count += 1;
       const handle = await actual.resumeSession(dir, opts);
@@ -44,9 +63,24 @@ async function tempDir(): Promise<string> {
 afterEach(async () => {
   resumeCloseFailure.enabled = false;
   resumeCallCounter.count = 0;
+  statusAppendFailure.enabled = false;
   vi.unstubAllEnvs();
-  for (const dir of tempDirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  for (const dir of tempDirs.splice(0)) await removeTempDir(dir);
 });
+
+
+async function removeTempDir(dir: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOTEMPTY" || attempt >= 4) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
 
 interface FetchCall {
   url: string;
@@ -1683,5 +1717,788 @@ describe("runSession resume systemPrompt 幂等", () => {
       { role: "assistant", content: "done", tool_calls: [] },
       { role: "user", content: "again" },
     ]);
+  });
+});
+
+
+const MCP_FIXTURE = path.join(import.meta.dirname, "fixtures", "mcp-echo-server.mjs");
+
+function mcpEchoServer(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { command: process.execPath, args: [MCP_FIXTURE], ...extra };
+}
+
+async function writeMcpConfig(
+  dir: string,
+  servers: Record<string, unknown>,
+  name = "mcp.json",
+): Promise<string> {
+  const file = path.join(dir, name);
+  await writeFile(file, JSON.stringify({ mcpServers: servers }), "utf8");
+  return file;
+}
+
+function mcpStatusPayloads(sessionDir: string): Record<string, unknown>[] {
+  return readSessionFile(path.join(sessionDir, "session.v1.jsonl"))
+    .filter((event) => event.type === "status")
+    .map((event) => event.payload)
+    .filter((payload) => typeof payload.status === "string" && payload.status.startsWith("mcp_"));
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`等待条件超时（${timeoutMs}ms）`);
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe("runSession MCP 装配", () => {
+  it("MCP echo server 工具出现在请求 tools 中，调用闭环", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-echo-session");
+    const { impl, calls } = mockFetch([
+      toolCallResponseNoUsage("mcp-call", "mcp__echo__echo", { text: "hello-mcp" }),
+      EMPTY_RESPONSE,
+    ]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const firstTools = calls[0].body.tools as Array<{ function: { name: string } }>;
+    expect(firstTools.map((tool) => tool.function.name)).toContain("mcp__echo__echo");
+    const result = events.find(
+      (event) => event.kind === "tool_result" && event.id === "mcp-call",
+    );
+    expect(result).toMatchObject({ ok: true, text: "hello-mcp" });
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_connected", server: "echo" }),
+    );
+  });
+
+  it("mcp.enabled:false 时不加载也不连接", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const pidFile = path.join(configDir, "mcp.pid");
+    const userConfigPath = await writeMcpConfig(configDir, {
+      echo: mcpEchoServer({ env: { PID_FILE: pidFile } }),
+    });
+    const sessionDir = path.join(home, "mcp-disabled-session");
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { enabled: false, userConfigPath },
+      }),
+    );
+
+    const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+    expect(tools.map((tool) => tool.function.name).some((name) => name.startsWith("mcp__"))).toBe(
+      false,
+    );
+    expect(existsSync(pidFile)).toBe(false);
+    expect(mcpStatusPayloads(sessionDir)).toEqual([]);
+  });
+
+  it("无配置或全部 disabled 时不连接、不写 status", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const configPath = await writeMcpConfig(configDir, {
+      echo: mcpEchoServer({ disabled: true }),
+    });
+    const cases: Array<{ name: string; mcp?: { projectConfigPath?: string } }> = [
+      { name: "no-config" },
+      { name: "all-disabled", mcp: { projectConfigPath: configPath } },
+    ];
+
+    for (const entry of cases) {
+      const sessionDir = path.join(home, entry.name);
+      const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+      await collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir,
+          fetchImpl: impl,
+          cwd: configDir,
+          ...(entry.mcp !== undefined ? { mcp: entry.mcp } : {}),
+        }),
+      );
+      const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+      expect(tools.map((tool) => tool.function.name).some((name) => name.startsWith("mcp__"))).toBe(
+        false,
+      );
+      expect(mcpStatusPayloads(sessionDir)).toEqual([]);
+    }
+  });
+
+  it("单 server 连接失败记 status 且会话继续", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, {
+      echo: mcpEchoServer(),
+      broken: { command: "definitely-not-a-real-command-embedded-ai" },
+    });
+    const sessionDir = path.join(home, "mcp-partial-session");
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+    expect(tools.map((tool) => tool.function.name)).toContain("mcp__echo__echo");
+    expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_connect_failed", server: "broken" }),
+    );
+  });
+
+  it("status 写入失败时输出错误且会话继续", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, {
+      broken: { command: "definitely-not-a-real-command-embedded-ai" },
+    });
+    const sessionDir = path.join(home, "mcp-status-append-failure");
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    statusAppendFailure.enabled = true;
+    try {
+      const events = await collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir,
+          fetchImpl: impl,
+          cwd: configDir,
+          mcp: { userConfigPath },
+        }),
+      );
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[mcp] status event append failed: status append boom"),
+      );
+      expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
+    } finally {
+      errorSpy.mockRestore();
+      statusAppendFailure.enabled = false;
+    }
+  });
+
+  it("配置坏 JSON 记 mcp_config_failed 且会话继续", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = path.join(configDir, "broken.json");
+    await writeFile(userConfigPath, "{ not json", "utf8");
+    const sessionDir = path.join(home, "mcp-config-failed-session");
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+    expect(tools.map((tool) => tool.function.name).some((name) => name.startsWith("mcp__"))).toBe(
+      false,
+    );
+    expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_config_failed" }),
+    );
+  });
+
+  it("list_changed 后新工具出现在后续请求", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-list-changed-session");
+    const grownCall = {
+      id: "grow-call",
+      type: "function",
+      function: { name: "mcp__echo__grow", arguments: "{}" },
+    };
+    const grownToolCall = {
+      id: "grown-call",
+      type: "function",
+      function: { name: "mcp__echo__grown-1", arguments: "{}" },
+    };
+    const { impl, calls } = mockFetch([
+      { choices: [{ message: { content: "", tool_calls: [grownCall] }, finish_reason: "tool_calls" }] },
+      { choices: [{ message: { content: "", tool_calls: [grownToolCall] }, finish_reason: "tool_calls" }] },
+      { choices: [{ message: { content: "", tool_calls: [grownToolCall] }, finish_reason: "tool_calls" }] },
+      EMPTY_RESPONSE,
+    ]);
+    let fetchCount = 0;
+    const wrapped: typeof fetch = async (input, init) => {
+      if (fetchCount === 1) {
+        await waitFor(() =>
+          mcpStatusPayloads(sessionDir).some(
+            (payload) => payload.status === "mcp_tools_changed",
+          ),
+        );
+      }
+      fetchCount += 1;
+      return impl(input, init);
+    };
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: wrapped,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const laterTools = calls.slice(1).map((call) =>
+      (call.body.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name),
+    );
+    expect(
+      laterTools.some(
+        (names) => names.includes("mcp__echo__grown-1") && names.includes("echo"),
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) => event.kind === "tool_result" && event.id === "grown-call" && event.ok,
+      ),
+    ).toBe(true);
+    const logged = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(logged).toContainEqual(
+      expect.objectContaining({
+        type: "tool_result",
+        payload: expect.objectContaining({
+          toolName: "mcp__echo__grown-1",
+          ok: true,
+        }),
+      }),
+    );
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_tools_changed", server: "echo" }),
+    );
+  });
+
+  it("onStatus renamed 落到会话 status 事件", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-renamed-session");
+    const { impl } = mockFetch([
+      toolCallResponseNoUsage("grow-call", "mcp__echo__grow", {}),
+      EMPTY_RESPONSE,
+    ]);
+    let fetchCount = 0;
+    const wrapped: typeof fetch = async (input, init) => {
+      if (fetchCount === 1) {
+        await waitFor(() =>
+          mcpStatusPayloads(sessionDir).some(
+            (payload) => payload.status === "mcp_tools_changed",
+          ),
+        );
+      }
+      fetchCount += 1;
+      return impl(input, init);
+    };
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: wrapped,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const renamed = mcpStatusPayloads(sessionDir).filter(
+      (payload) => payload.status === "mcp_tool_name_renamed",
+    );
+    expect(renamed).toHaveLength(1);
+    expect(renamed[0]).toMatchObject({
+      server: "echo",
+      tool: "dup_a",
+      originalName: "mcp__echo__dup_a",
+    });
+    expect(renamed[0].name).toMatch(/^mcp__echo__dup_a_[0-9a-f]{6}$/);
+  });
+
+  it("刷新失败记 mcp_tools_refresh_failed 且旧工具仍可用", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-refresh-failed-session");
+    const { impl, calls } = mockFetch([
+      toolCallResponseNoUsage("broken-call", "mcp__echo__grow-broken", {}),
+      toolCallResponseNoUsage("echo-call", "mcp__echo__echo", { text: "still-alive" }),
+      EMPTY_RESPONSE,
+    ]);
+    let fetchCount = 0;
+    const wrapped: typeof fetch = async (input, init) => {
+      if (fetchCount === 1) {
+        await waitFor(() =>
+          mcpStatusPayloads(sessionDir).some(
+            (payload) => payload.status === "mcp_tools_refresh_failed",
+          ),
+        );
+      }
+      fetchCount += 1;
+      return impl(input, init);
+    };
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: wrapped,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_tools_refresh_failed", server: "echo" }),
+    );
+    expect(
+      events.some(
+        (event) => event.kind === "tool_result" && event.id === "echo-call" && event.ok,
+      ),
+    ).toBe(true);
+    const secondTools = (calls[1].body.tools as Array<{ function: { name: string } }>).map(
+      (tool) => tool.function.name,
+    );
+    expect(secondTools).toContain("mcp__echo__echo");
+  });
+
+  it("坏 schema 触发刷新失败时保留旧集合", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-bad-schema-session");
+    const { impl, calls } = mockFetch([
+      toolCallResponseNoUsage("bad-call", "mcp__echo__bad-schema", {}),
+      toolCallResponseNoUsage("echo-call", "mcp__echo__echo", { text: "still-alive" }),
+      EMPTY_RESPONSE,
+    ]);
+    let fetchCount = 0;
+    const wrapped: typeof fetch = async (input, init) => {
+      if (fetchCount === 1) {
+        await waitFor(() =>
+          mcpStatusPayloads(sessionDir).some(
+            (payload) => payload.status === "mcp_tools_refresh_failed",
+          ),
+        );
+      }
+      fetchCount += 1;
+      return impl(input, init);
+    };
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: wrapped,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_tools_refresh_failed", server: "echo" }),
+    );
+    expect(
+      events.some(
+        (event) => event.kind === "tool_result" && event.id === "echo-call" && event.ok,
+      ),
+    ).toBe(true);
+    const secondTools = (calls[1].body.tools as Array<{ function: { name: string } }>).map(
+      (tool) => tool.function.name,
+    );
+    expect(secondTools).toContain("mcp__echo__echo");
+
+  });
+
+  it("registry 全局重建失败记 scope:global 且会话继续", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-global-refresh-session");
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+    const replaceSpy = vi
+      .spyOn(ToolRegistry.prototype, "replace")
+      .mockImplementationOnce(() => {
+        throw new Error("registry replace boom");
+      });
+    try {
+      const events = await collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir,
+          fetchImpl: impl,
+          cwd: configDir,
+          mcp: { userConfigPath },
+        }),
+      );
+
+      expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+        expect.objectContaining({
+          status: "mcp_tools_refresh_failed",
+          scope: "global",
+          message: expect.stringContaining("registry replace boom"),
+        }),
+      );
+      expect(
+        mcpStatusPayloads(sessionDir).some(
+          (payload) =>
+            payload.status === "mcp_tool_name_renamed"
+            || payload.status === "mcp_tool_invalid_schema",
+        ),
+      ).toBe(false);
+      expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
+      const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+      expect(tools.map((tool) => tool.function.name).some((name) => name.startsWith("mcp__"))).toBe(
+        false,
+      );
+    } finally {
+      replaceSpy.mockRestore();
+    }
+  });
+
+  it("adapter 过滤坏 schema 工具并落 mcp_tool_invalid_schema status", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-invalid-schema-session");
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+    const originalTools = McpManager.prototype.tools;
+    const toolsSpy = vi
+      .spyOn(McpManager.prototype, "tools")
+      .mockImplementation(function (this: McpManager) {
+        return [
+          ...originalTools.call(this),
+          {
+            server: "echo",
+            tool: "invalid",
+            description: "Invalid inputSchema root",
+            inputSchema: { type: "string" },
+          },
+        ];
+      });
+    try {
+      await collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir,
+          fetchImpl: impl,
+          cwd: configDir,
+          mcp: { userConfigPath },
+        }),
+      );
+
+      expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+        expect.objectContaining({
+          status: "mcp_tool_invalid_schema",
+          server: "echo",
+          tool: "invalid",
+        }),
+      );
+      const tools = (calls[0].body.tools as Array<{ function: { name: string } }>).map(
+        (tool) => tool.function.name,
+      );
+      expect(tools).toContain("mcp__echo__echo");
+      expect(tools).not.toContain("mcp__echo__invalid");
+    } finally {
+      toolsSpy.mockRestore();
+    }
+  });
+
+  it("list_changed 移除工具后不再出现在后续请求", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-shrink-session");
+    const { impl, calls } = mockFetch([
+      toolCallResponseNoUsage("shrink-call", "mcp__echo__shrink", {}),
+      toolCallResponseNoUsage("echo-call", "mcp__echo__echo", { text: "still-alive" }),
+      EMPTY_RESPONSE,
+    ]);
+    let fetchCount = 0;
+    const wrapped: typeof fetch = async (input, init) => {
+      if (fetchCount === 1) {
+        await waitFor(() =>
+          mcpStatusPayloads(sessionDir).some(
+            (payload) => payload.status === "mcp_tools_changed",
+          ),
+        );
+      }
+      fetchCount += 1;
+      return impl(input, init);
+    };
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: wrapped,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const firstTools = (calls[0].body.tools as Array<{ function: { name: string } }>).map(
+      (tool) => tool.function.name,
+    );
+    const secondTools = (calls[1].body.tools as Array<{ function: { name: string } }>).map(
+      (tool) => tool.function.name,
+    );
+    expect(firstTools).toContain("mcp__echo__multi");
+    expect(firstTools).toContain("mcp__echo__shrink");
+    expect(secondTools).toContain("mcp__echo__echo");
+    expect(secondTools).not.toContain("mcp__echo__multi");
+    expect(secondTools).not.toContain("mcp__echo__shrink");
+    expect(
+      events.some(
+        (event) => event.kind === "tool_result" && event.id === "echo-call" && event.ok,
+      ),
+    ).toBe(true);
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_tools_changed", server: "echo" }),
+    );
+  });
+
+  it("mcp.enabled 非布尔时抛 TypeError", async () => {
+    await expect(
+      collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          mcp: { enabled: "yes" as unknown as boolean },
+        }),
+      ),
+    ).rejects.toThrow(/mcp\.enabled must be a boolean/);
+  });
+
+  it.each(["yes", 42, null, [], new Date()])("mcp 非对象时抛 TypeError: %j", async (value) => {
+    await expect(
+      collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          mcp: value as unknown as { enabled?: boolean },
+        }),
+      ),
+    ).rejects.toThrow(/mcp must be an object/);
+  });
+
+  it("MCP close 异常不覆盖运行期主错误", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-close-error-session");
+    const first = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: first.impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const originalClose = McpManager.prototype.close;
+    const closeSpy = vi
+      .spyOn(McpManager.prototype, "close")
+      .mockImplementationOnce(async function (this: McpManager): Promise<void> {
+        await originalClose.call(this);
+        throw new Error("mcp close boom");
+      });
+    try {
+      const failingFetch = vi.fn(async () => ({
+        ok: false,
+        status: 400,
+        text: async () => "primary boom",
+      })) as unknown as typeof fetch;
+      const error = await collect(
+        runSession({
+          input: "again",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir,
+          resume: true,
+          fetchImpl: failingFetch,
+          cwd: configDir,
+          mcp: { userConfigPath },
+        }),
+      ).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain("status 400");
+      expect((error as Error).message).not.toContain("mcp close boom");
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it("无主错误时 MCP close 异常冒泡", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-close-bubble-session");
+    const first = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: first.impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const originalClose = McpManager.prototype.close;
+    const closeSpy = vi
+      .spyOn(McpManager.prototype, "close")
+      .mockImplementationOnce(async function (this: McpManager): Promise<void> {
+        await originalClose.call(this);
+        throw new Error("mcp close boom");
+      });
+    try {
+      const { impl } = mockFetch([EMPTY_RESPONSE]);
+      const error = await collect(
+        runSession({
+          input: "again",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir,
+          resume: true,
+          fetchImpl: impl,
+          cwd: configDir,
+          mcp: { userConfigPath },
+        }),
+      ).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toContain("mcp close boom");
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      closeSpy.mockRestore();
+    }
+  });
+
+  it("关闭后 MCP 子进程退出", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const pidFile = path.join(configDir, "close.pid");
+    const userConfigPath = await writeMcpConfig(configDir, {
+      echo: mcpEchoServer({ env: { PID_FILE: pidFile } }),
+    });
+    const sessionDir = path.join(home, "mcp-close-session");
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    expect(existsSync(pidFile)).toBe(true);
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(Number.isInteger(pid)).toBe(true);
+    await waitFor(() => !isAlive(pid));
   });
 });

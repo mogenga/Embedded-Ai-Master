@@ -196,7 +196,7 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
 
 ### 4.3 方案简述
 
-工具系统是一个泛型接口加一条五阶段管线:每个工具用 Zod 声明输入、用 annotations 声明读写/证据/破坏性三类语义标注,执行统一走"查找 → 验证 → 权限(P0 占位)→ 执行 → 后处理"。三个设计决定值得强调:错误是结构化数据而非异常文本(R3 的类型化落点,模型拿到 `code/detail` 才能决策重试还是绕行);超时分级且超时本身是结构化回传(Phase 0 教训:防 hang 必须做到工具级);大输出出口统一截断并接落盘。母本 Claude Code 的八阶段流水线与 60+ 工具生态被收缩为五阶段 + 4 个内置工具(fs/shell/glob/grep),嵌入式取证完全外置给 MCP——领域不入内核的边界在这里被物理保证。
+工具系统是一个泛型接口加一条五阶段管线:每个工具用 Zod 声明输入、用 annotations 声明读写/证据/破坏性三类语义标注,执行统一走"查找 → 验证 → 权限(P0 占位)→ 执行 → 后处理"。三个设计决定值得强调:错误是结构化数据而非异常文本(R3 的类型化落点,模型拿到 `code/detail` 才能决策重试还是绕行);超时分级且超时本身是结构化回传(Phase 0 教训:防 hang 必须做到工具级);大输出出口统一截断并接落盘。母本 Claude Code 的八阶段流水线与 60+ 工具生态被收缩为五阶段 + 4 个内置工具(fs/shell/glob/grep),嵌入式取证完全外置给 MCP——领域不入内核的边界在这里被物理保证。标准 MCP `Tool.annotations` 不含 evidence 字段,适配层约定读取工具 `_meta.evidence === true` 并映射为 `annotations.evidence`,使探针/寄存器读结果同样参与证据链保护(§3.2)。
 
 **`shell` 工具语义(P0 实现)**:
 
@@ -241,7 +241,7 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
   - 会话间**零共享**:无全局连接池(PLAT-2"会话间上下文与 MCP 连接隔离"的直接落点)。
   - 健康检查:启动握手超时(默认 30s)→ 该 server 标记失败,工具以结构化"server 不可用"回传(不静默);运行中进程退出 → 自动重启一次,再失败降级为不可用并**通知会话**(工具列表变更事件)。
   - 工具列表变更:重连后 tool list 变化以事件进会话日志并同步给模型(下轮请求的工具目录更新)。
-- **命名空间**:工具名 `mcp__<server>__<tool>` 全局唯一,进工具系统(#4)后与内置工具同管线;权限规则(P1)与 UI 展示都按此名寻址。
+- **命名空间**:工具名 `mcp__<server>__<tool>` 全局唯一,进工具系统(#4)后与内置工具同管线;权限规则(P1)与 UI 展示都按此名寻址。sanitize/64 截断导致的名称冲突不再丢弃工具,而是基于原 `mcp__<server>__<tool>` 追加 `_<hash6>` 确定性消歧,并以 `mcp_tool_name_renamed` status 记录原名与最终名;工具 `_meta.evidence === true` 映射为证据标注。消歧占用可能使后续工具基础名连环改名,结果对同一 `tools()` 输入列表确定,但依赖 server 返回顺序(D-100)。`inputSchema` 根非 object 的工具在装配层跳过并记 `mcp_tool_invalid_schema`,不因单个坏工具导致整批 registry 重建失败。
 - **作用域两级**:`user`(~/.harness/mcp.json)/ `project`(<project>/.harness/mcp.json),project 覆盖 user 同名 server。母本的 local/project/user/managed 四级收敛为两级,managed(企业托管)砍掉。
 - **server instructions**:server 声明的 instructions 注入系统提示词的 MCP 分节(组装机制属 P1 #8,P0 先按固定分节拼接)。
 - **不做**:OAuth/PKCE(无远程认证 server)、roots、sampling、资源订阅(资源按需 list/read 即可,Phase 0 同款)。

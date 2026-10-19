@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { createMcpTools } from "../src/mcp/tools.js";
 import type { SessionHandle } from "../src/session/session.js";
 import { echoTool } from "../src/tools/echo.js";
 import { executeBatch, sanitizeIssues } from "../src/tools/pipeline.js";
@@ -275,6 +276,33 @@ describe("executeBatch 并发策略", () => {
 
     expect(results[0].result.evidence).toBe(true);
     expect(results[1].result.evidence).toBe(false);
+  });
+
+  it("MCP 适配工具的 evidence 注解经管线保留", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const [mcpTool] = createMcpTools({
+      tools: () => [
+        {
+          server: "probe",
+          tool: "mem_read",
+          description: "读取内存",
+          inputSchema: { type: "object", properties: {} },
+          evidence: true,
+        },
+      ],
+      call: async () => ok("proof"),
+    });
+    const reg = new ToolRegistry([mcpTool]);
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("mcp", "mcp__probe__mem_read")],
+      { signal: new AbortController().signal, artifactDir: artifactDir() },
+    );
+
+    expect(results[0].result.evidence).toBe(true);
+    expect(results[0].result.text).toBe("proof");
   });
 
   it("重复 id 的 evidence 工具结果也写入 evidence 标记", async () => {

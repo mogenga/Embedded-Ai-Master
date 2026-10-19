@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createBuiltinTools } from "../src/tools/builtin.js";
 import { echoTool } from "../src/tools/echo.js";
 import { ToolRegistry, toModelToolSchemas } from "../src/tools/registry.js";
 import type { ToolDef } from "../src/tools/types.js";
+
+vi.mock("zod", { spy: true });
 
 const otherTool: ToolDef<{ count: number }> = {
   name: "other",
@@ -75,6 +77,36 @@ describe("ToolRegistry", () => {
 
   it("重复工具名构造抛错", () => {
     expect(() => new ToolRegistry([echoTool, echoTool])).toThrow(/tool already registered/);
+  });
+
+  it("replace 成功后全量替换工具集合", () => {
+    const reg = new ToolRegistry([echoTool]);
+
+    reg.replace([otherTool]);
+
+    expect(reg.all().map((tool) => tool.name)).toEqual(["other"]);
+    expect(reg.lookup("echo")).toBeUndefined();
+  });
+
+  it("replace 重复名失败时保留旧集合", () => {
+    const reg = new ToolRegistry([echoTool]);
+
+    expect(() => reg.replace([otherTool, otherTool])).toThrow(/tool already registered/);
+    expect(reg.all().map((tool) => tool.name)).toEqual(["echo"]);
+  });
+
+  it("replace 坏 modelSchema 失败时保留旧集合", () => {
+    const reg = new ToolRegistry([echoTool]);
+    const bad: ToolDef<unknown> = {
+      name: "bad",
+      description: "坏 modelSchema",
+      schema: z.unknown(),
+      modelSchema: { type: "string" },
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+
+    expect(() => reg.replace([bad])).toThrow(/modelSchema root must be an object/);
+    expect(reg.all().map((tool) => tool.name)).toEqual(["echo"]);
   });
 });
 
@@ -167,6 +199,83 @@ describe("toModelToolSchemas", () => {
     const parameters = toModelToolSchemas([tool])[0].function.parameters as Record<string, unknown>;
 
     expect(parameters.required).toBeUndefined();
+  });
+
+  it("modelSchema 优先透传且不调用 z.toJSONSchema", () => {
+    const spy = vi.mocked(z.toJSONSchema);
+    spy.mockClear();
+    const modelSchema = {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    };
+    const tool: ToolDef<unknown> = {
+      name: "mcp_like",
+      description: "透传 MCP schema",
+      schema: z.unknown(),
+      modelSchema,
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+
+    expect(toModelToolSchemas([tool])[0].function.parameters).toBe(modelSchema);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("ToolRegistry 接受带 modelSchema 的 z.unknown 工具", () => {
+    const tool: ToolDef<unknown> = {
+      name: "mcp_like",
+      description: "透传 MCP schema",
+      schema: z.unknown(),
+      modelSchema: { type: "object", properties: {} },
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+
+    expect(new ToolRegistry([tool]).lookup("mcp_like")).toBe(tool);
+  });
+
+  it("modelSchema 为 undefined 时回退 z.toJSONSchema 并校验根 object", () => {
+    const tool: ToolDef<unknown> = {
+      name: "unknown_root",
+      description: "",
+      schema: z.unknown(),
+      modelSchema: undefined,
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+
+    expect(() => new ToolRegistry([tool])).toThrow(/parameters root must be an object/);
+  });
+
+  it("非法 modelSchema 根类型在注册期失败", () => {
+    const nonObject: ToolDef<unknown> = {
+      name: "bad_model_schema",
+      description: "",
+      schema: z.unknown(),
+      modelSchema: { type: "string" },
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+    const nullSchema: ToolDef<unknown> = {
+      name: "null_model_schema",
+      description: "",
+      schema: z.unknown(),
+      modelSchema: null,
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+
+    expect(() => new ToolRegistry([nonObject])).toThrow(/modelSchema root must be an object/);
+    expect(() => toModelToolSchemas([nullSchema])).toThrow(/modelSchema root must be an object/);
+  });
+
+  it("内置工具无 modelSchema 时行为不变", () => {
+    const schemas = toModelToolSchemas(createBuiltinTools());
+
+    expect(schemas.map((schema) => schema.function.name)).toEqual([
+      "echo",
+      "fs",
+      "shell",
+      "glob",
+      "grep",
+    ]);
+    expect(schemas[0].function.parameters).toMatchObject({ type: "object" });
   });
 
   it("不修改输入工具数组", () => {

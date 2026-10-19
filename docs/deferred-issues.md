@@ -181,6 +181,7 @@
 
 ### D-021 · MCP 工具名字符集与注册表校验不一致
 
+- **状态**: 已解决(2026-10-19;维度5 Task3 `createMcpTools` 统一映射为 `mcp__<server>__<tool>`,sanitize 非 `[a-zA-Z0-9_-]` 字符,超长/冲突确定性改名,注册表保持 OpenAI 契约;`tests/mcp-tools.test.ts` 覆盖 `a.b`/`a_b` 跨 server 冲突与同 server `dup` 改名,`tests/integration.test.ts` 覆盖 fixture `dup.a`/`dup_a`)。
 - **发现**: 2026-10-18,Task 7 交付核验。
 - **现象**: `ToolRegistry` 现按 OpenAI function 名契约校验(`a-z/A-Z/0-9/_/-`,1-64 字符)。经 Context7 查证 MCP SEP-986,工具名**额外允许 `.` 和 `/`**(用于命名空间,如 `user-profile/update`)。即 MCP 合法名可能被注册表直接拒绝。
 - **影响**: 当前 P0 只有内置 echo,无影响;接入 MCP 客户端(设计稿 #5)时,带 `/` 或 `.` 的 server 工具会构造期抛错。且这类名字本就不能原样发给 OpenAI,必须在挂载层做**名称映射**(如 `mcp__server__tool`),而不是放宽注册表校验。
@@ -190,10 +191,10 @@
 ### D-022 · 超时只保证管线返回,不保证工具停止
 
 - **发现**: 2026-10-18,Task 8 第三轮红队审查(I6)。原请求编号 D-021 已被 Task 7 占用,故顺延为 D-022。
-- **现象**: `executeBatch` 以 `Promise.race` 在超时后返回 `tool_timeout`,但不监听 signal 的工具不会停止;串行分支在超时返回后立即发起下一次调用,前一个写工具可能仍在运行,实际形成并发写。
-- **影响**: 当前 P0 只有只读 echo,无影响;接入探针写内存、复位或文件写入工具后,超时后的残留调用可能与下一次写调用重叠,破坏串行写假设并造成设备状态竞争。
-- **触发升级条件**: P1 接入首个非只读工具(写内存/复位/文件写入)前。
-- **修复建议**: 写工具接入前引入可等待的终止或隔离机制(进程级 worker、MCP 会话级取消并等待服务端确认);或在超时后拒绝启动同批次后续写工具,并把会话标记为需人工确认。
+- **现象**: `executeBatch` 以 `Promise.race` 在超时后返回 `tool_timeout`,但不监听 signal 的工具不会停止;串行分支在超时返回后立即发起下一次调用,前一个写工具可能仍在运行,实际形成并发写。**MCP 层同源**: `McpManager` 的 per-server 串行队列以 `callOnce` 返回为释放条件,而 `invoke` 用 `Promise.race` 提前返回 `mcp_timeout`/`mcp_aborted`;底层 `client.callTool` 仍可能 pending,队列已释放,后续调用可与残留调用重叠。该限制已写入 design §4.2(2026-10-19 Task2 第二轮 review)。
+- **影响**: 当前 P0 只有只读 echo,无影响;接入探针写内存、复位或文件写入工具后,超时后的残留调用可能与下一次写调用重叠,破坏串行写假设并造成设备状态竞争。MCP 侧同理:超时/取消后的串行保证不再成立。
+- **触发升级条件**: P1 接入首个非只读工具(写内存/复位/文件写入)前;MCP 侧为接入首个非只读 MCP 工具前。
+- **修复建议**: 写工具接入前引入可等待的终止或隔离机制(进程级 worker、MCP 会话级取消并等待服务端确认);或在超时后拒绝启动同批次后续写工具,并把会话标记为需人工确认。MCP 侧可维护"孤儿调用"屏障:超时/取消后暂停同 server 队列,直到原 promise settle、连接重置或人工确认。
 
 ### D-023 · 非字符串 `call.id` 绕过重复检测
 
@@ -841,6 +842,46 @@
 - **修复建议**: 一级截断按单条结果强制落盘并进一步缩短模型视图;允许把最近批次中的非 evidence 结果降级为占位;或在 `still_over_budget` 时触发更小尾部/更强摘要策略。
 - **状态**: 未解决;当前只保证首轮显式记录 `still_over_budget`、后续轮 `no_progress`,不重复摘要。
 
+### D-100 · MCP 工具名消歧依赖 server 返回顺序
+
+- **发现**: 2026-10-19,维度5 Task3 复核(N-4)。
+- **现象**: `createMcpTools` 按 `manager.tools()` 顺序逐个占用名称。若 A 工具的基础名被 B 的确定性改名占用,后续工具会被连锁改名;同一批工具仅因 `listTools()` 返回顺序不同,最终暴露名可能不同。结果为全局唯一,且对同一输入列表确定。
+- **影响**: 模型看到的工具名可能随 server 实现/升级改变,历史会话中的工具名与权限规则(P1 按名寻址)可能失配;不改名工具不受影响。
+- **触发升级条件**: P1 权限规则按工具名持久化;跨会话回放依赖工具名稳定性;server 返回顺序被观察到变化并导致自动化脚本失败。
+- **修复建议**: 消歧前先按 `(server, tool)` 字典序排序稳定输入,或改为「先检测全部冲突、再按排序分配」;把最终映射写入会话/配置以便审计。
+
+### D-101 · MCP status 写入与 close 的迟到竞态
+
+- **发现**: 2026-10-19,维度5 Task4 第二轮复核(N-5)。
+- **现象**: `runSession` 在 `finally` 中先 `await statusQueue` 再 `manager.close()`/`session.close()`。若某个 refresh 任务在 `await statusQueue` 之后才同步触发 listener 并入队 status,该写入会落在已关闭的 session 上;`appendMcpStatus` 在首个失败时立即输出 `[mcp] status event append failed`(迟到入队同样会输出)并继续关闭,但该条审计事件仍会丢失,且不重试。
+- **影响**: list_changed 与会话结束高度重叠时可能丢失最后一条 `mcp_tools_changed`/`mcp_tools_refresh_failed` 审计;不影响工具调用结果与主会话退出码。
+- **触发升级条件**: 自动化依赖会话日志完整审计 MCP 工具变更;观察到 close 与 list_changed 并发导致 status 缺失;需要强一致事件序列。
+- **修复建议**: close 前先停止接收 refresh/listener(关闭标志或取消 token),再 flush 一次 status 队列;或为 status 写入增加有界重试/独立 sink。
+
+### D-102 · MCP server 继承完整进程环境变量
+
+- **发现**: 2026-10-19,维度5 Task2。
+- **现象**: `McpManager` 以 `{...process.env, ...config.env}` 启动子进程(PATH/HOME 必需),因此 provider API key、代理凭据等敏感变量对第三方 MCP server 可见;配置只能覆盖,不能移除单个继承变量。
+- **影响**: 不可信或供应链被污染的 server 可读取会话进程的密钥;不影响本仓库自身密钥管理,但扩大了信任边界。
+- **触发升级条件**: 接入首个非自研/第三方 MCP server;安全评审要求最小环境;需要按 server 配置 allowlist。
+- **修复建议**: 为 server 配置增加 `envAllowlist`/`envPassthrough`,默认仅传 PATH/HOME 等白名单;或提供显式 `inheritEnv: false`。
+
+### D-103 · MCP 配置未知字段被静默忽略
+
+- **发现**: 2026-10-19,维度5 Task1。
+- **现象**: `parseServer` 只校验已知字段,可选字段的拼写错误(如 `timeoutMS`、`arg`)不报错,直接按缺省值继续;若必填的 `command` 拼错(如 `commandd`),单级配置会因 `merged.command === undefined` 抛 `McpConfigError` 并跳过全部 MCP(另一级仍提供 command 时合并后不会报错)。
+- **影响**: 配置 typo 不会 fail-fast,可能表现为超时/参数与预期不符;与 `command` 严格校验的风格不一致。
+- **触发升级条件**: 配置由用户手写且出错难定位;需要配置 lint/诊断;出现因 typo 导致的现场问题。
+- **修复建议**: 对未知字段输出 warning 或严格模式报错;在配置加载结果中保留原始 key 供 `mcp_config_failed` 诊断。
+
+### D-104 · list_changed 刷新失败不自动重试
+
+- **发现**: 2026-10-19,维度5 Task2/Task4。
+- **现象**: 刷新 `listTools()` 失败时保留旧缓存并记 `mcp_tools_refresh_failed`,不安排退避重试;只有下一次 list_changed 通知或连接重建才会再次刷新。
+- **影响**: server 短暂抖动后工具集合可能长期停留在旧版本;模型继续看到已移除的工具或看不到新增工具,调用时以工具执行错误暴露。
+- **触发升级条件**: server 侧工具频繁热更新;观察到刷新失败后长时间不恢复;需要工具目录强一致。
+- **修复建议**: 失败后按指数退避重试有限次,并在 status 中记录 attempt;或在每轮请求前按 TTL 做一次惰性刷新。
+
 ---
 
 ## 变更记录
@@ -889,3 +930,6 @@
 | 2026-10-19 | 维度3 最后小修:移除 transcript 手动 `[Previous summary]` 前置(由 `buildMessages(prefix)` 注入一次);summary 投影按事件顺序只采信边界不倒退的有效 summary;D-099 补充首轮 `still_over_budget`、后续轮 `no_progress` 的轮次语义 |
 | 2026-10-19 | 维度3 Task3 第一轮 review 修复:补长 evidence 候选变异守卫、transcript 60% 边界、摘要 messages 两条与投影失败 catch 用例;compact 的 `elidedSeqs` 改用 `Number.isInteger`;design §4.4/§4.6 删除 `pricePerMillion` 并同步 brief;D-097/D-099 补 `still_over_budget` 与 `no_progress` 边界语义 |
 | 2026-10-19 | 维度3 Task5 第一轮 review 修复:README 更正 `tool_calls` 计数口径(D-033 已解决)、补 summary `covers < summary.seq`、二级候选排除旧 summary 覆盖范围、前缀投影失败、8000/25000 估算口径与无 system 回退;D-093 交叉引用 D-005;D-095 修复建议改为 rollover/归档层限定元数据、不删除既有事件;dev-notes 修正 Task1 提交信息与 task-5-brief 说明 |
+| 2026-10-19 | 维度5 Task4:runSession 装配 MCP 与 list_changed 刷新;status 事件接入、配置错误隔离、finally close;spec §4.3/§4.4/§4.5 同步确定性消歧与 status 枚举;录入 D-100(消歧依赖 server 返回顺序) |
+| 2026-10-19 | 维度5 Task4 第二轮复核修复:坏 schema 集成断言改为完整工具名、补 replace 原子性/scope global/invalid_schema status/移除工具/close 冒泡/mcp 非对象用例;`appendMcpStatus` 不再静默吞写入失败;spec 目标 3 同步确定性改名;录入 D-101(status 写入与 close 迟到竞态) |
+| 2026-10-19 | 维度5 Task5 收尾:D-021 标记已解决(命名空间映射与确定性改名);录入 D-102(继承完整 env)、D-103(未知字段静默忽略)、D-104(list_changed 刷新失败不重试);README 补 MCP 配置/命名/隔离/刷新与依赖安装说明 |

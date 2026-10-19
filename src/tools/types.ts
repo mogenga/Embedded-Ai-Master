@@ -25,6 +25,7 @@ export interface ToolDef<I> {
   name: string;
   description: string;
   schema: z.ZodType<I>;
+  modelSchema?: unknown;
   annotations?: ToolAnnotations;
   execute(input: I, ctx: ToolCtx, signal: AbortSignal): Promise<ToolResult>;
 }
