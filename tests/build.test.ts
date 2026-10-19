@@ -359,7 +359,7 @@ describe("buildMessages 投影重组", () => {
       mk(
         3,
         "tool_result",
-        { id: "c2", ok: true, text: "first line\nsecond line", toolName: "echo" },
+        { id: "c2", ok: true, text: `first line\nsecond line${"x".repeat(100)}`, toolName: "echo" },
         1,
       ),
       mk(4, "compaction", { kind: "microcompact", elidedSeqs: [2, 3], note: "trim" }),
@@ -388,7 +388,7 @@ describe("buildMessages 投影重组", () => {
       mk(
         1,
         "tool_result",
-        { id: "c1", ok: true, text: "big output", toolName: "echo", artifactPath: "/tmp/a.txt" },
+        { id: "c1", ok: true, text: `big output ${"x".repeat(100)}`, toolName: "echo", artifactPath: "/tmp/a.txt" },
         0,
       ),
       mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
@@ -411,9 +411,9 @@ describe("buildMessages 投影重组", () => {
           { id: "c3", name: "echo", arguments: {} },
         ],
       }),
-      mk(1, "tool_result", { id: "c1", ok: true, text: "one", toolName: "echo" }, 0),
+      mk(1, "tool_result", { id: "c1", ok: true, text: `one\n${"x".repeat(100)}`, toolName: "echo" }, 0),
       mk(2, "tool_result", { id: "c2", ok: true, text: "two", toolName: "echo" }, 0),
-      mk(3, "tool_result", { id: "c3", ok: true, text: "three", toolName: "echo" }, 0),
+      mk(3, "tool_result", { id: "c3", ok: true, text: `three\n${"x".repeat(100)}`, toolName: "echo" }, 0),
       mk(4, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "a" }),
       mk(5, "compaction", { kind: "microcompact", elidedSeqs: [3], note: "b" }),
     ]);
@@ -424,7 +424,7 @@ describe("buildMessages 投影重组", () => {
   });
 
   it("microcompact 首行截断不切断代理对", () => {
-    const firstLine = "a".repeat(119) + "😀" + "tail";
+    const firstLine = "a".repeat(119) + "😀" + "tail" + "z".repeat(100);
     const messages = buildMessages([
       mk(0, "assistant", {
         content: "",
@@ -491,6 +491,91 @@ describe("buildMessages 投影重组", () => {
       { role: "tool", tool_call_id: "c1", content: "a" },
       { role: "tool", tool_call_id: "c2", content: "b" },
     ]);
+  });
+
+  it("summary 覆盖 evidence 时忽略 summary 并保留 evidence 原文", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "old" }),
+      mk(1, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(2, "tool_result", { id: "c1", ok: true, text: "EVIDENCE-BODY", evidence: true }, 1),
+      mk(3, "compaction", { kind: "summary", summary: "BAD", coversUpToSeq: 2 }),
+      mk(4, "user", { content: "new" }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "user", content: "old" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "c1", type: "function", function: { name: "echo", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "c1", content: "EVIDENCE-BODY" },
+      { role: "user", content: "new" },
+    ]);
+  });
+
+  it("无效 summary 回退到上一条有效 summary", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "old" }),
+      mk(1, "compaction", { kind: "summary", summary: "OLD-VALID", coversUpToSeq: 0 }),
+      mk(2, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(3, "tool_result", { id: "c1", ok: true, text: "EV", evidence: true }, 2),
+      mk(4, "compaction", { kind: "summary", summary: "NEW-BAD", coversUpToSeq: 3 }),
+      mk(5, "user", { content: "new" }),
+    ]);
+
+    expect(messages[0]).toStrictEqual({
+      role: "system",
+      content: "[Conversation summary]\nOLD-VALID",
+    });
+    expect(
+      messages.some((message) => message.role === "tool" && message.content === "EV"),
+    ).toBe(true);
+    expect(messages.some((message) => message.content.includes("NEW-BAD"))).toBe(false);
+  });
+
+  it.each<[string, Record<string, unknown>]>([
+    ["空摘要", { kind: "summary", summary: "  ", coversUpToSeq: 2 }],
+    ["负边界", { kind: "summary", summary: "BAD", coversUpToSeq: -1 }],
+    ["超过末条", { kind: "summary", summary: "BAD", coversUpToSeq: 99 }],
+    ["非整数边界", { kind: "summary", summary: "BAD", coversUpToSeq: 1.5 }],
+  ])("%s 的 summary 无效并回退到上一条", (_label, invalid) => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "old" }),
+      mk(1, "compaction", { kind: "summary", summary: "OLD-VALID", coversUpToSeq: 0 }),
+      mk(2, "user", { content: "middle" }),
+      mk(3, "compaction", invalid),
+      mk(4, "user", { content: "new" }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "system", content: "[Conversation summary]\nOLD-VALID" },
+      { role: "user", content: "middle" },
+      { role: "user", content: "new" },
+    ]);
+  });
+
+  it("microcompact 不替换占位更长的短结果", () => {
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: true, text: "ok", toolName: "echo" }, 0),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
+    ]);
+
+    expect(messages[1]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "ok",
+    });
   });
 
   it("compaction 事件本身不产生消息", () => {

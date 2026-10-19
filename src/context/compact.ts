@@ -1,9 +1,11 @@
 import type { ModelCfg } from "../config/providers.js";
+import { normalizeUsage } from "../loop/breakers.js";
 import { heuristicCountTokens } from "../model/count.js";
 import type { CompletionResult, ModelChatMessage, ModelProtocol } from "../model/protocol.js";
 import type { SessionHandle } from "../session/session.js";
 import type { SessionEvent } from "../session/types.js";
 import { buildMessages } from "./build.js";
+import { elidedContent } from "./microcompact.js";
 import { truncateSurrogateSafe } from "./text.js";
 import type { TokenMeter } from "./token-meter.js";
 
@@ -29,6 +31,14 @@ export function assertCompactionRatios(keepTailRatio: number, softRatio: number)
   }
 }
 
+export function assertKeepRecentTurns(keepRecentTurns: number): void {
+  if (!Number.isInteger(keepRecentTurns) || keepRecentTurns < 0) {
+    throw new TypeError(
+      `keepRecentTurns must be a finite non-negative integer; got ${keepRecentTurns}`,
+    );
+  }
+}
+
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
 }
@@ -47,11 +57,23 @@ function collectElidedSeqs(events: readonly SessionEvent[]): Set<number> {
 }
 
 function lastSummaryBoundary(events: readonly SessionEvent[]): number | undefined {
+  return lastSummaryEvent(events)?.coversUpToSeq;
+}
+
+interface PreviousSummary {
+  seq: number;
+  summary: string;
+  coversUpToSeq: number;
+}
+
+function lastSummaryEvent(events: readonly SessionEvent[]): PreviousSummary | undefined {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index];
     if (event.type !== "compaction" || event.payload.kind !== "summary") continue;
+    const summary = event.payload.summary;
     const coversUpToSeq = event.payload.coversUpToSeq;
-    if (typeof coversUpToSeq === "number") return coversUpToSeq;
+    if (typeof summary !== "string" || typeof coversUpToSeq !== "number") continue;
+    return { seq: event.seq, summary, coversUpToSeq };
   }
   return undefined;
 }
@@ -156,9 +178,6 @@ function measureWith(meter: TokenMeter | undefined, messages: ModelChatMessage[]
   return meter === undefined ? heuristicCountTokens(messages) : meter.measure(messages);
 }
 
-function toCount(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.trunc(value)) : 0;
-}
 
 function failureReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -176,6 +195,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
     signal,
   } = opts;
   assertCompactionRatios(keepTailRatio, softRatio);
+  assertKeepRecentTurns(keepRecentTurns);
   const softLimit = Math.floor(modelCfg.contextWindow * softRatio);
   const measure = () => {
     const messages = buildMessages(session.events());
@@ -196,6 +216,8 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
     if (event.parent !== undefined && recent.has(event.parent)) continue;
     if (elided.has(event.seq)) continue;
     if (boundary !== undefined && event.seq <= boundary) continue;
+    const text = event.payload.text;
+    if (typeof text !== "string" || elidedContent(event.payload, text) === undefined) continue;
     candidates.push(event.seq);
   }
 
@@ -215,8 +237,8 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   const latest = session.events();
   let coversUpToSeq = computeTailBoundary(latest, modelCfg.contextWindow, keepTailRatio);
   coversUpToSeq = adjustSummaryBoundary(latest, coversUpToSeq);
-  const previousBoundary = lastSummaryBoundary(latest);
-  if (previousBoundary !== undefined && coversUpToSeq <= previousBoundary) {
+  const previousSummary = lastSummaryEvent(latest);
+  if (previousSummary !== undefined && coversUpToSeq <= previousSummary.seq) {
     await session.append({
       type: "compaction",
       payload: { kind: "failed", reason: "no_progress", stage: "summary" },
@@ -247,7 +269,12 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   }
 
   const maxChars = Math.floor(modelCfg.contextWindow * 0.6 * 4);
-  const transcript = truncateSurrogateSafe(toTranscript(prefixMessages), maxChars);
+  const transcriptBody = toTranscript(prefixMessages);
+  const transcriptWithHistory =
+    previousSummary === undefined
+      ? transcriptBody
+      : `[Previous summary]\n${previousSummary.summary}\n\n${transcriptBody}`;
+  const transcript = truncateSurrogateSafe(transcriptWithHistory, maxChars);
 
   let result: CompletionResult;
   try {
@@ -283,16 +310,35 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
     return;
   }
 
-  const usage: Record<string, unknown> = {
-    promptTokens: toCount(result.usage?.promptTokens),
-    completionTokens: toCount(result.usage?.completionTokens),
-  };
-  if (result.usage?.cachedTokens !== undefined) {
-    usage.cachedTokens = toCount(result.usage.cachedTokens);
+  if (result.usage === undefined) {
+    await session.append({
+      type: "status",
+      payload: { status: "usage_missing", stage: "summary" },
+    });
+  } else {
+    const normalized = normalizeUsage(result.usage);
+    const usage: Record<string, unknown> = {
+      promptTokens: normalized.promptTokens,
+      completionTokens: normalized.completionTokens,
+    };
+    if (normalized.cachedTokens !== undefined) {
+      usage.cachedTokens = normalized.cachedTokens;
+    }
+    if (normalized.cachedTokensRaw !== undefined) {
+      usage.cachedTokensRaw = normalized.cachedTokensRaw;
+    }
+    await session.append({ type: "usage", payload: usage });
   }
-  await session.append({ type: "usage", payload: usage });
   await session.append({
     type: "compaction",
     payload: { kind: "summary", summary: result.content, coversUpToSeq },
   });
+
+  const afterSummary = measure();
+  if (afterSummary.tokens > softLimit) {
+    await session.append({
+      type: "compaction",
+      payload: { kind: "failed", reason: "still_over_budget", stage: "summary" },
+    });
+  }
 }

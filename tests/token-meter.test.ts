@@ -99,4 +99,16 @@ describe("TokenMeter", () => {
     expect(meter.ratio()).toBe(1.875);
     expect(meter.measure(messages)).toBe(188);
   });
+
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY])(
+    "heuristic 返回 %s 时 measure 归零且 observe 不产生非有限 ratio",
+    (value) => {
+      const meter = createTokenMeter(() => value);
+
+      expect(meter.measure(messages)).toBe(0);
+      meter.observe(100, messages);
+      expect(Number.isFinite(meter.ratio())).toBe(true);
+      expect(meter.measure(messages)).toBe(0);
+    },
+  );
 });

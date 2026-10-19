@@ -27,6 +27,15 @@ function ok(content = "SUMMARY", truncatedByMaxTokens = false): CompletionResult
   };
 }
 
+function okNoUsage(content = "SUMMARY"): CompletionResult {
+  return {
+    content,
+    toolCalls: [],
+    truncatedByMaxTokens: false,
+    stopReason: "stop",
+  };
+}
+
 function createFakeModel(
   respond: (call: ModelCall) => Promise<CompletionResult> = async () => ok(),
 ): { calls: ModelCall[]; model: ModelProtocol } {
@@ -350,11 +359,13 @@ describe("compactSession", () => {
     await addBatch(session, "c3", "c".repeat(40));
     let count = 0;
     const { calls, model } = createFakeModel(async () => ok(`SUMMARY_${(count += 1)}`));
-    const options = () => makeOptions(session, model, cfg(1000));
+    const options = () =>
+      makeOptions(session, model, cfg(1000), { keepRecentTurns: 15 });
 
     await compactSession(options());
-    await addUser(session, "y".repeat(6000));
-    await addBatch(session, "c4", "d".repeat(40));
+    for (let index = 0; index < 15; index += 1) {
+      await addBatch(session, `d${index}`, "d".repeat(400));
+    }
     await compactSession(options());
 
     const summaries = session
@@ -522,5 +533,149 @@ describe("compactSession", () => {
     expect(transcript.length).toBeLessThanOrEqual(2400);
     expect(/[\uD800-\uDBFF]$/.test(transcript)).toBe(false);
     expect(/^[\uDC00-\uDFFF]/.test(transcript.slice(-1))).toBe(false);
+  });
+
+  it("近期批次过大导致摘要后仍超阈值时 failed(still_over_budget)", async () => {
+    const session = await makeSession();
+    await addUser(session, "start");
+    await addBatch(session, "c1", "a".repeat(4000));
+    const { calls, model } = createFakeModel(async () => ok("SUMMARY_STILL_OVER"));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    expect(calls).toHaveLength(1);
+    const events = session.events();
+    expect(
+      events.some(
+        (event) => event.type === "compaction" && event.payload.kind === "summary",
+      ),
+    ).toBe(true);
+    expect(events[events.length - 1].payload).toMatchObject({
+      kind: "failed",
+      stage: "summary",
+      reason: "still_over_budget",
+    });
+    expect(
+      buildMessages(events).some(
+        (message) => message.role === "tool" && message.content === "a".repeat(4000),
+      ),
+    ).toBe(true);
+  });
+
+  it("摘要结果缺 usage 时落 status 而非零 usage", async () => {
+    const session = await makeSession();
+    await addHeavyHistory(session);
+    const { model } = createFakeModel(async () => okNoUsage("SUMMARY_NO_USAGE"));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    const events = session.events();
+    expect(events.some((event) => event.type === "usage")).toBe(false);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "status"
+          && event.payload.status === "usage_missing"
+          && event.payload.stage === "summary",
+      ),
+    ).toBe(true);
+    expect(
+      events.some(
+        (event) => event.type === "compaction" && event.payload.kind === "summary",
+      ),
+    ).toBe(true);
+  });
+
+  it("摘要 usage 的 cachedTokens 归一化", async () => {
+    const session = await makeSession();
+    await addHeavyHistory(session);
+    const { model } = createFakeModel(async () => ({
+      content: "SUMMARY_CACHED",
+      toolCalls: [],
+      truncatedByMaxTokens: false,
+      usage: { promptTokens: 10, completionTokens: 5, cachedTokens: 20 },
+      stopReason: "stop",
+    }));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    const usage = session.events().find((event) => event.type === "usage");
+    expect(usage?.payload).toStrictEqual({
+      promptTokens: 10,
+      completionTokens: 5,
+      cachedTokens: 10,
+      cachedTokensRaw: 20,
+    });
+  });
+
+  it("再次摘要时 transcript 前置旧 summary 并要求覆盖旧 summary 事件", async () => {
+    const session = await makeSession();
+    await addUser(session, "old");
+    const assistant = await session.append({
+      type: "assistant",
+      payload: {
+        content: "",
+        toolCalls: [{ id: "old", name: "echo", arguments: {} }],
+      },
+    });
+    const result = await session.append({
+      type: "tool_result",
+      payload: { id: "old", ok: true, text: "r".repeat(40), toolName: "echo" },
+      parent: assistant.seq,
+    });
+    const oldSummary = await session.append({
+      type: "compaction",
+      payload: { kind: "summary", summary: "OLD-SUM", coversUpToSeq: result.seq },
+    });
+    for (let index = 0; index < 15; index += 1) {
+      await addBatch(session, `b${index}`, "x".repeat(400));
+    }
+    const { calls, model } = createFakeModel(async () => ok("NEW-SUM"));
+
+    await compactSession(
+      makeOptions(session, model, cfg(1000), { keepRecentTurns: 15 }),
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].messages[1].content.startsWith("[Previous summary]\nOLD-SUM")).toBe(true);
+    expect(calls[0].messages[1].content).toContain("[Conversation summary]\nOLD-SUM");
+    const summaries = session
+      .events()
+      .filter((event) => event.type === "compaction" && event.payload.kind === "summary");
+    expect(summaries).toHaveLength(2);
+    expect(Number(summaries[1].payload.coversUpToSeq)).toBeGreaterThan(oldSummary.seq);
+  });
+
+  it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    "非法 keepRecentTurns=%s 抛 TypeError",
+    async (keepRecentTurns) => {
+      const session = await makeSession();
+      const { model } = createFakeModel();
+
+      await expect(
+        compactSession(makeOptions(session, model, cfg(1000), { keepRecentTurns })),
+      ).rejects.toBeInstanceOf(TypeError);
+    },
+  );
+
+  it("短工具结果不因 microcompact 膨胀", async () => {
+    const session = await makeSession();
+    for (let index = 0; index < 10; index += 1) {
+      await addUser(session, "u".repeat(2000));
+    }
+    await addBatch(session, "c1", "ok");
+    const { model } = createFakeModel(async () => ok("SUMMARY_SHORT"));
+
+    await compactSession(makeOptions(session, model, cfg(1000), { keepRecentTurns: 0 }));
+
+    const compactions = session
+      .events()
+      .filter((event) => event.type === "compaction");
+    expect(compactions.some((event) => event.payload.kind === "microcompact")).toBe(false);
+    expect(
+      buildMessages(session.events()).some(
+        (message) => message.role === "tool" && message.content === "ok",
+      ),
+    ).toBe(true);
   });
 });

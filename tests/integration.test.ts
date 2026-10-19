@@ -473,6 +473,25 @@ describe("runSession 端到端装配", () => {
     expect(events.some((event) => event.kind === "compacted")).toBe(false);
   });
 
+  it("compaction.enabled:false 时不校验压缩比例", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir: path.join(home, "disabled-invalid-ratios"),
+        fetchImpl: impl,
+        compaction: { enabled: false, keepTailRatio: 0, softRatio: 1 },
+      }),
+    );
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+  });
+
   it("结束后会话日志可读且工具结果完整", async () => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
@@ -1081,7 +1100,9 @@ describe("runSession resume", () => {
     ["相等", { keepTailRatio: 0.8, softRatio: 0.8 }],
     ["tail=0", { keepTailRatio: 0, softRatio: 0.8 }],
     ["soft=1", { keepTailRatio: 0.16, softRatio: 1 }],
-  ])("非法压缩比例（%s）在 runSession 入口抛 TypeError", async (_label, compaction) => {
+    ["keepRecentTurns=-1", { keepRecentTurns: -1 }],
+    ["keepRecentTurns=1.5", { keepRecentTurns: 1.5 }],
+  ])("非法压缩配置（%s）在 runSession 入口抛 TypeError", async (_label, compaction) => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
 
