@@ -158,6 +158,113 @@ for await (const event of runSession({
 
 `mcp.enabled`、`mcp.trustProjectConfig` 必须是布尔值，`mcp` 必须是普通对象，否则在入口抛 `TypeError`。MCP server 由用户自行安装并在配置中给出 `command`；MCP SDK 包（`@modelcontextprotocol/client`，测试夹具用 `@modelcontextprotocol/server`）已写入 `package.json`，随用户执行 `npm install` 安装；本仓库的 agent 不执行任何依赖安装命令。运行期状态写入会话 `status` 事件（`mcp_connected` / `mcp_connect_failed` / `mcp_tools_changed` / `mcp_tools_refresh_failed` / `mcp_tool_name_renamed` / `mcp_tool_invalid_schema` / `mcp_config_failed` / `mcp_config_warning` / `mcp_project_config_skipped`）。未知配置字段不再静默：`loadMcpConfig` 通过 `onWarning` 交回，`runSession` 记一条 `mcp_config_warning`；`list_changed` 刷新失败会做 3 次有界退避重试，仍失败才保留旧缓存并记 `mcp_tools_refresh_failed`（含 `attempts`）。工具名按 `(server, tool)` 字典序稳定分配，不依赖 server 返回顺序。
 
+## 权限与审批
+
+权限层在工具执行前判定 `allow` / `ask` / `deny`，默认预设为 `diagnose`。判定只决定是否调用工具；`allow` 后仍会经过 `shell` 危险命令黑名单与 `fs` 路径边界检查。权限规则是声明式匹配而非沙箱（D-114）。
+
+**配置路径与 trust 语义**
+
+- 用户级：`$HARNESS_HOME/permissions.json`（默认 `~/.harness/permissions.json`），默认加载。
+- 项目级：`<工具根>/.harness/permissions.json`，**默认不加载**；只有 `permissions.trustProjectConfig === true` 或显式提供 `permissions.projectConfigPath` 才读取（显式路径即视为信任）。文件存在但未信任时写 `status: permissions_project_config_skipped`，`message` 为路径。
+- 与 `mcp.trustProjectConfig` **相互独立**：信任项目 MCP 配置不会放宽权限。
+- 合并：`preset` / `approvalTimeoutMs` 取 inline → project → user → 默认（`diagnose` / 120000）；规则按 inline → project → user → 内置预设规则拼接。任一匹配规则为 `deny` 即拒绝，其次 `ask`，最后 `allow`；同优先级取最靠前一条（`source` + 全局 `ruleIndex`）。
+- 配置错误（JSON / schema / 版本 / 未知字段 / 非法谓词）抛 `PermissionConfigError`，`runSession` 启动失败（demo 退出码 2），不会忽略后继续。
+
+| 预设 | 只读 | 写 | 未知 |
+|---|---|---|---|
+| `read-only` | allow | deny | deny |
+| `workspace-write` | allow | ask（`fs` 的 `write`/`edit` 内置 allow） | deny |
+| `diagnose`（默认） | allow | ask | deny |
+| `danger-full-access` | allow | allow | allow |
+
+规则 `tool` 支持 `*`（任意串）与 `?`（单字符），整串大小写敏感匹配；`params` 为 AND，`key` 是点路径（如 `target.port`、`items.0`），每个 matcher 必须且只能提供 `eq` / `glob` / `in` / `range` 之一。`eq` 为 JSON 严格相等，`glob` 只匹配字符串，`in` 为非空数组，`range` 为闭区间且仅匹配有限 number。
+
+```json
+{
+  "version": 1,
+  "preset": "diagnose",
+  "approvalTimeoutMs": 120000,
+  "rules": [
+    {
+      "tool": "mcp__probe__mem_write",
+      "params": [{ "key": "address", "range": [536870912, 536870943] }],
+      "action": "allow",
+      "reason": "SRAM 调试窗口"
+    },
+    {
+      "tool": "mcp__serial__open",
+      "params": [{ "key": "port", "glob": "COM?" }],
+      "action": "allow"
+    },
+    {
+      "tool": "mcp__serial__write",
+      "params": [{ "key": "port", "in": ["COM3", "/dev/ttyUSB0"] }],
+      "action": "ask"
+    },
+    {
+      "tool": "fs",
+      "params": [{ "key": "op", "eq": "write" }],
+      "action": "ask"
+    },
+    { "tool": "mcp__probe__reset", "action": "deny", "reason": "无人值守禁止复位" }
+  ]
+}
+```
+
+`RunOptions.permissions` 可覆盖路径、信任、预设、规则、审批超时与审批器；内联值优先级最高，未提供时仍启用权限层并加载用户配置，没有全局关闭开关：
+
+```ts
+for await (const event of runSession({
+  input: "读取目标寄存器",
+  model: "local-gw/flash",
+  permissions: {
+    preset: "diagnose",
+    rules: [{ tool: "fs", params: [{ key: "op", eq: "read" }], action: "allow" }],
+    approvalTimeoutMs: 60000,
+    prompter: { request: async () => "deny" },
+  },
+})) {
+  // ...
+}
+```
+
+`permissions` 仅接受 `userConfigPath` / `projectConfigPath` / `trustProjectConfig` / `preset` / `rules` / `approvalTimeoutMs` / `prompter`；外层未知键与规则内容错误抛 `PermissionConfigError`，已知字段类型错误抛 `TypeError`。
+
+**ask 与审批**
+
+- `ask` 且提供 `prompter` 时等待审批，默认 120000 ms，超时按拒绝；同一 gate 内审批串行，按进入队列顺序执行。
+- `ask` 且没有 `prompter`（headless demo、Web 后端、未注入审批器的库调用）一律 `effective: "deny"`、`reason: "approval_unavailable"`，工具不执行。
+- 审批结果映射：批准 → `effective: "allow"`（理由追加 `approval_granted`）；拒绝 → `approval_denied`；超时 → `approval_timeout`；取消 → `approval_aborted`；审批器异常 → `approval_error: ...`（限长）。
+- 本轮只交付库层审批接口；Web/SSE 的审批 API 与 UI 不在范围内（`/api/actions`、`/api/events` 仍为 501，D-112）。
+
+**审计事件**
+
+进入权限判定的每次调用都先写 `permission_decision` 会话事件，之后才执行或返回拒绝。payload 含 `callId`（与 `tool_result.id` 相同）、`tool`、`action`（规则原动作，`ask` 仍记 `ask`）、`effective`、`reason`、`preset`、`source`、可选 `ruleIndex`、`paramsDigest`（稳定序列化后 SHA-256 前 16 位）、`paramsKeys`（顶层键排序，最多 32 个，单键最多 100 码点）、可选 `paramsPreview`（字符串最多 120 码点，整体 4096 字节；超出预算时丢弃后续键并置 `truncated: true`；可能含敏感片段，D-113）、`access`（`read` / `write` / `unknown`）。事件 `parent` 指向对应 assistant 事件，`tool_result` 在其后；`buildMessages` 与前端回放忽略该事件，不占模型上下文。
+
+**MCP 参数边界**
+
+MCP 工具参数 schema 为 `z.unknown()`，不会应用 server `inputSchema` 的默认值或类型转换。参数规则只匹配模型**实际提交**的参数；需要按默认值判定时，必须在提示或规则中要求模型显式提供（D-117）。
+
+**权限演示**
+
+离线（不触网）：
+
+```bash
+npm test -- tests/permissions-integration.test.ts
+```
+
+覆盖 diagnose 拒绝 `fs` 写、`danger-full-access` 放行，以及项目配置未 trust 时跳过。
+
+live 演示需要用户自备 OpenAI 兼容网关与模型：
+
+```bash
+HARNESS_HOME=/tmp/harness-demo \
+HARNESS_COMPAT_MODEL=<provider>/<model> \
+node dist/demo/run.js "在当前目录写入 demo.txt"
+```
+
+默认 `diagnose` 下该写调用返回 `permission_denied`；把 `/tmp/harness-demo/permissions.json` 设为 `{"version":1,"preset":"danger-full-access"}` 后重跑即可写入成功。Windows 使用临时目录的等价写法（如 git-bash `/c/Users/<你>/AppData/Local/Temp/harness-demo`，PowerShell `$env:HARNESS_HOME="$env:TEMP\harness-demo"`）。
+
 ## 上下文压缩
 
 长会话按三级处理，**只改变模型视图，不删除或改写会话日志与 artifacts**：
