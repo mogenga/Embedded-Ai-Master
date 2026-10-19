@@ -341,6 +341,7 @@ describe("buildMessages 投影重组", () => {
   });
 
   it("microcompact 替换非 evidence 结果并保留 evidence 原文", () => {
+    const evidenceText = `evidence body\n${"x".repeat(200)}`;
     const messages = buildMessages([
       mk(0, "system", { content: "SYS" }),
       mk(1, "assistant", {
@@ -353,7 +354,7 @@ describe("buildMessages 投影重组", () => {
       mk(
         2,
         "tool_result",
-        { id: "c1", ok: true, text: "evidence body", toolName: "reg_read", evidence: true },
+        { id: "c1", ok: true, text: evidenceText, toolName: "reg_read", evidence: true },
         1,
       ),
       mk(
@@ -371,7 +372,7 @@ describe("buildMessages 投影重组", () => {
       "tool",
       "tool",
     ]);
-    expect(messages[2]).toStrictEqual({ role: "tool", tool_call_id: "c1", content: "evidence body" });
+    expect(messages[2]).toStrictEqual({ role: "tool", tool_call_id: "c1", content: evidenceText });
     expect(messages[3]).toStrictEqual({
       role: "tool",
       tool_call_id: "c2",
@@ -517,6 +518,43 @@ describe("buildMessages 投影重组", () => {
     });
   });
 
+  it("microcompact 首行恰好 120 字符时不截断", () => {
+    const firstLine = "a".repeat(120);
+    const text = `${firstLine}\n${"x".repeat(200)}`;
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: true, text, toolName: "echo" }, 0),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
+    ]);
+
+    expect(messages[1]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: `[tool result elided; echo: ${firstLine}]`,
+    });
+  });
+
+  it("microcompact 首行按 CRLF 切分", () => {
+    const text = `first line\r\n${"x".repeat(200)}`;
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: true, text, toolName: "echo" }, 0),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
+    ]);
+
+    expect(messages[1]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "[tool result elided; echo: first line]",
+    });
+  });
+
   it("summary 保留 system 与尾部,并在最后 system 后插入摘要", () => {
     const messages = buildMessages([
       mk(0, "system", { content: "SYS1" }),
@@ -634,8 +672,140 @@ describe("buildMessages 投影重组", () => {
     ]);
   });
 
+  it("较新有效 summary 覆盖旧有效 summary", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "u0" }),
+      mk(1, "user", { content: "u1" }),
+      mk(2, "user", { content: "u2" }),
+      mk(3, "compaction", { kind: "summary", summary: "OLD", coversUpToSeq: 2 }),
+      mk(4, "user", { content: "u4" }),
+      mk(5, "compaction", { kind: "summary", summary: "NEW", coversUpToSeq: 4 }),
+      mk(6, "user", { content: "u6" }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "system", content: "[Conversation summary]\nNEW" },
+      { role: "user", content: "u6" },
+    ]);
+  });
+
+  it("边界覆盖完整工具批次时 summary 仍生效", () => {
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: true, text: "result", toolName: "echo" }, 0),
+      mk(2, "user", { content: "tail" }),
+      mk(3, "compaction", { kind: "summary", summary: "SUM", coversUpToSeq: 1 }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "system", content: "[Conversation summary]\nSUM" },
+      { role: "user", content: "tail" },
+    ]);
+  });
+
+  it("coversUpToSeq 等于 summary 自身 seq 时拒绝", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "u0" }),
+      mk(1, "compaction", { kind: "summary", summary: "BAD", coversUpToSeq: 1 }),
+      mk(2, "user", { content: "u2" }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "user", content: "u0" },
+      { role: "user", content: "u2" },
+    ]);
+  });
+
+  it("coversUpToSeq 大于 summary 自身 seq 且小于 lastSeq 时拒绝", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "u0" }),
+      mk(1, "compaction", { kind: "summary", summary: "BAD", coversUpToSeq: 2 }),
+      mk(2, "user", { content: "u2" }),
+      mk(3, "user", { content: "u3" }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "user", content: "u0" },
+      { role: "user", content: "u2" },
+      { role: "user", content: "u3" },
+    ]);
+  });
+
+  it("coversUpToSeq 等于 lastSeq 但晚于 summary 自身 seq 时拒绝", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "u0" }),
+      mk(1, "compaction", { kind: "summary", summary: "BAD", coversUpToSeq: 3 }),
+      mk(2, "user", { content: "u2" }),
+      mk(3, "user", { content: "u3" }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "user", content: "u0" },
+      { role: "user", content: "u2" },
+      { role: "user", content: "u3" },
+    ]);
+  });
+
+  it("elidedSeqs 非数组时忽略该 compaction", () => {
+    const text = `first line\n${"x".repeat(200)}`;
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: true, text, toolName: "echo" }, 0),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: 1, note: "bad" }),
+    ]);
+
+    expect(messages[1]).toStrictEqual({ role: "tool", tool_call_id: "c1", content: text });
+  });
+
+  it("toolName 非字符串时回退 tool", () => {
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: true, text: `first line\n${"x".repeat(200)}`, toolName: 123 }, 0),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
+    ]);
+
+    expect(messages[1]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "[tool result elided; tool: first line]",
+    });
+  });
+
+  it("artifactPath 非字符串时走首行占位", () => {
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(
+        1,
+        "tool_result",
+        { id: "c1", ok: true, text: `first line\n${"x".repeat(200)}`, toolName: "echo", artifactPath: 123 },
+        0,
+      ),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
+    ]);
+
+    expect(messages[1]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "[tool result elided; echo: first line]",
+    });
+  });
+
   it.each<[string, Record<string, unknown>]>([
     ["空摘要", { kind: "summary", summary: "  ", coversUpToSeq: 2 }],
+    ["非字符串摘要", { kind: "summary", summary: 42, coversUpToSeq: 2 }],
+    ["非 number 边界", { kind: "summary", summary: "BAD", coversUpToSeq: "2" }],
     ["负边界", { kind: "summary", summary: "BAD", coversUpToSeq: -1 }],
     ["超过末条", { kind: "summary", summary: "BAD", coversUpToSeq: 99 }],
     ["非整数边界", { kind: "summary", summary: "BAD", coversUpToSeq: 1.5 }],

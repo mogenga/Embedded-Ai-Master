@@ -118,6 +118,7 @@ function toSummaryDirective(
     || !Number.isInteger(coversUpToSeq)
     || coversUpToSeq < 0
     || coversUpToSeq > lastSeq
+    || coversUpToSeq >= event.seq
   ) {
     return undefined;
   }

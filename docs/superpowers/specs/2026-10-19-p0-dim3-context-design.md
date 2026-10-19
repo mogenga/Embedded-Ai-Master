@@ -86,7 +86,7 @@ type CompactionPayload =
    - 否则 → `[tool result elided; <toolName>: <首行 120 字符>]`; `toolName` 缺失时回退为 `tool`
    - 若占位不短于原文 → **保留原文**; 若 `payload.evidence === true` → **跳过替换, 投影原文**(投影层防御, 即使日志被旧版本/手工写入错误 elide, 即使同时带 `artifactPath`)。
 2. 按事件顺序扫描 `summary` 事件, 只采信同时满足以下条件的项, 并保持 `coversUpToSeq` 不倒退:
-   - 非空 summary; `coversUpToSeq` 为 `0..lastSeq` 的整数;
+   - 非空 summary; `coversUpToSeq` 为 `0..lastSeq` 且**小于 summary 事件自身 seq** 的整数(否则会覆盖摘要写入之后的事件);
    - 不落在批次中间(边界覆盖的 assistant 批次仍有 tool_result 在边界之后);
    - 不覆盖任何 `evidence` 结果。
    坏或倒退的 summary 被忽略, **回退到上一条已采信的有效 summary**(无则原视图); 不抛错、不写 stderr。
