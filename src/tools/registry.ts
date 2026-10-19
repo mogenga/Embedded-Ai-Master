@@ -7,6 +7,10 @@ import type { ToolDef } from "./types.js";
 const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
 function toParametersSchema(tool: ToolDef<any>): unknown {
+
+  if (tool.modelSchema !== undefined) {
+    return tool.modelSchema;
+  }
   const parameters = z.toJSONSchema(tool.schema, { io: "input" });
   const rootType = (parameters as { type?: unknown }).type;
   if (rootType !== "object") {

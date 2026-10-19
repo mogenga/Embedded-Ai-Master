@@ -169,6 +169,60 @@ describe("toModelToolSchemas", () => {
     expect(parameters.required).toBeUndefined();
   });
 
+  it("modelSchema 优先透传且不调用 z.toJSONSchema", () => {
+    const modelSchema = {
+      type: "object",
+      properties: { query: { type: "string" } },
+      required: ["query"],
+    };
+    const tool: ToolDef<unknown> = {
+      name: "mcp_like",
+      description: "透传 MCP schema",
+      schema: z.unknown(),
+      modelSchema,
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+
+    expect(toModelToolSchemas([tool])[0].function.parameters).toBe(modelSchema);
+  });
+
+  it("ToolRegistry 接受带 modelSchema 的 z.unknown 工具", () => {
+    const tool: ToolDef<unknown> = {
+      name: "mcp_like",
+      description: "透传 MCP schema",
+      schema: z.unknown(),
+      modelSchema: { type: "object", properties: {} },
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+
+    expect(new ToolRegistry([tool]).lookup("mcp_like")).toBe(tool);
+  });
+
+  it("modelSchema 为 undefined 时回退 z.toJSONSchema 并校验根 object", () => {
+    const tool: ToolDef<unknown> = {
+      name: "unknown_root",
+      description: "",
+      schema: z.unknown(),
+      modelSchema: undefined,
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+
+    expect(() => new ToolRegistry([tool])).toThrow(/parameters root must be an object/);
+  });
+
+  it("内置工具无 modelSchema 时行为不变", () => {
+    const schemas = toModelToolSchemas(createBuiltinTools());
+
+    expect(schemas.map((schema) => schema.function.name)).toEqual([
+      "echo",
+      "fs",
+      "shell",
+      "glob",
+      "grep",
+    ]);
+    expect(schemas[0].function.parameters).toMatchObject({ type: "object" });
+  });
+
   it("不修改输入工具数组", () => {
     const tools = [echoTool, otherTool];
     const fieldsBefore = tools.map((t) => ({
