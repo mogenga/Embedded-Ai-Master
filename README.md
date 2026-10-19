@@ -112,10 +112,10 @@ docs/             设计、计划与已知问题
 
 长会话按三级处理，**只改变模型视图，不删除或改写会话日志与 artifacts**：
 
-1. **一级落盘**：单条工具结果超过 8000 tokens 时写入会话目录 `artifacts/`，模型消息截断到 25000 tokens 并附完整输出路径。
-2. **二级 microcompact**：估算 token 超过 `contextWindow * softRatio`（默认 0.8）后，把**非 evidence**、非最近 `keepRecentTurns`（默认 2）轮、尚未 elide 的工具结果替换为占位（仅当占位长度短于原文，避免短结果膨胀）：有 `artifactPath` 时保留路径引用，否则保留 `<toolName>: <首行 120 字符>`。只追加 `compaction` 事件，原始 `tool_result` 仍在日志。
-3. **三级 autocompact**：二级后仍超阈值时，用同一模型把 `coversUpToSeq` 之前的历史摘要为纯文本；尾部按 `keepTailRatio`（默认 0.16）**不被 summary 覆盖**（`microcompact` 仍可能替换其中非 evidence 的工具结果），system 事件始终保留，摘要以 `role: system` 的 `[Conversation summary]` 消息插在最后一条 system 之后。边界若落在 assistant/tool_result 批次中间或会覆盖 evidence，则回退；没有可摘要内容、摘要为空或被 `maxOutputTokens` 截断、边界未超过旧 summary 事件（`no_progress`）、摘要调用失败时追加 `compaction {kind:"failed"}`，不静默成功；取消则传播。存在旧 summary 时，新摘要必须覆盖旧 summary 事件；旧摘要由 `buildMessages(prefix)` 注入一次，transcript 不再重复前置。投影层按事件顺序只采信 `coversUpToSeq` 不倒退的有效 summary。摘要落日志后重新测量，仍超阈值则追加 `failed{reason:"still_over_budget"}` 并返回（D-099）。
-   投影层只采用非空、`0 <= coversUpToSeq <= 最后 seq`、不切断工具批次且不覆盖 evidence 的 summary；非法 summary 回退上一条有效 summary。摘要调用缺 `usage` 时写 `status{status:"usage_missing",stage:"summary"}`，不写零 usage。
+1. **一级落盘**：单条工具结果按 UTF-16 字符数 / 4 估算超过 8000 tokens 时写入会话目录 `artifacts/`，模型消息截断到约 25000 tokens（100000 UTF-16 字符）并附完整输出路径。
+2. **二级 microcompact**：估算 token 超过 `contextWindow * softRatio`（默认 0.8）后，把**非 evidence**、非最近 `keepRecentTurns`（默认 2）轮、尚未 elide、且不在最后 summary 的 `coversUpToSeq` 覆盖范围内的工具结果替换为占位（仅当占位长度短于原文，避免短结果膨胀）：有 `artifactPath` 时保留路径引用，否则保留 `<toolName>: <首行 120 字符>`。只追加 `compaction` 事件，原始 `tool_result` 仍在日志。
+3. **三级 autocompact**：二级后仍超阈值时，用同一模型把 `coversUpToSeq` 之前的历史摘要为纯文本；尾部按 `keepTailRatio`（默认 0.16）**不被 summary 覆盖**（`microcompact` 仍可能替换其中非 evidence 的工具结果），system 事件始终保留，摘要以 `role: system` 的 `[Conversation summary]` 消息插在最后一条 system 之后（无 system 事件时置顶）。边界若落在 assistant/tool_result 批次中间或会覆盖 evidence，则回退；没有可摘要内容、摘要为空或被 `maxOutputTokens` 截断、边界未超过旧 summary 事件（`no_progress`）、前缀投影失败、摘要调用失败时追加 `compaction {kind:"failed"}`，不静默成功；取消则传播。存在旧 summary 时，新摘要必须覆盖旧 summary 事件；旧摘要由 `buildMessages(prefix)` 注入一次，transcript 不再重复前置。投影层按事件顺序只采信 `coversUpToSeq` 不倒退的有效 summary。摘要落日志后重新测量，仍超阈值则追加 `failed{reason:"still_over_budget"}` 并返回（D-099）。
+   投影层只采用非空、`0 <= coversUpToSeq < summary 事件自身 seq`（因此 `coversUpToSeq === 最后 seq` 非法）、不切断工具批次且不覆盖 evidence 的 summary；非法 summary 回退上一条有效 summary。摘要调用缺 `usage` 时写 `status{status:"usage_missing",stage:"summary"}`，不写零 usage。
    `keepTailRatio` 与 `softRatio` 必须满足 `0 < keepTailRatio < softRatio < 1`，`keepRecentTurns` 必须是非负整数；启用压缩时在 `runSession` / `compactSession` 入口抛 `TypeError`。
 
 evidence 保护：`ToolResultPayload.evidence === true` 的结果不会被二级/三级修剪；投影层会拒绝覆盖 evidence 的 summary（回退上一条有效 summary 或原视图）。旧日志中没有 `evidence` 字段的 `tool_result` 按非 evidence 处理（P0 未发布，不做迁移）。摘要请求的 usage 作为独立 `usage` 事件落日志（cached 字段经 `normalizeUsage` 归一化），`query` 在压缩后按会话累计 usage 重算 `costUsd`，因此计入 `maxCostUsd` 熔断。
@@ -287,7 +287,7 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 
 - 超时只保证管线返回，不保证工具真正停止（D-022）。
 - 网关不返回 `usage` 时 `maxCostUsd` 无法生效（D-027）。
-- token 估算按 UTF-16 字符数 / 4，CJK 场景偏低（D-005）；且不计 `tool_calls` 参数（D-033）。
+- token 估算按 UTF-16 字符数 / 4，CJK 场景偏低（D-005）；`tool_calls` 已按序列化长度计入（D-033 已解决）。
 - 模型响应体无大小上限，模型请求无请求级超时（D-031、D-032）。
 - 会话 append 无 `fsync`，断电或强杀可能留下半行（D-035）。
 - 4xx 除 429 外均不重试，408/409/425 未细分（D-036）。

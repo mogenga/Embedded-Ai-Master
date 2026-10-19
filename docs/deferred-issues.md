@@ -287,6 +287,7 @@
 - **影响**: 工具密集会话的预算被系统性低估,可能直到真实上下文超限才暴露。
 - **触发升级条件**: 出现上下文超限;工具调用占比高的会话预算明显偏离 `usage`;引入 usage 锚定校准。
 - **修复建议**: 将 `tool_calls[].function.name/arguments` 按序列化长度计入估算,或在 usage 锚定时按实际值校准。
+- **状态**: 已解决(2026-10-19 维度3 修复:`heuristicCountTokens` 已按序列化长度计入 `tool_calls`);剩余 CJK/emoji 低估见 D-005。
 
 ### D-034 · 文本截断可能切断代理对
 
@@ -780,7 +781,7 @@
 ### D-093 · 三级边界的逐事件 token 估算为近似值
 
 - **发现**: 2026-10-19,维度3 Task5 收尾。
-- **现象**: `computeTailBoundary` 按事件文本长度 / 4 逐事件累计;assistant 事件已计入 `tool_calls` 序列化长度(与 `heuristicCountTokens` 口径一致),但仍未计入 role/分隔符开销与 CJK 偏差;transcript 也按 UTF-16 代码单元计数/截断(仅保证不切断代理对),CJK 无按字符或 token 的校正。边界计算不使用 `TokenMeter` 的锚定 ratio,与预算检查口径不完全一致。
+- **现象**: `computeTailBoundary` 按事件文本长度 / 4 逐事件累计;assistant 事件已计入 `tool_calls` 序列化长度(与 `heuristicCountTokens` 口径一致),但仍未计入 role/分隔符开销与 CJK 偏差;transcript 也按 UTF-16 代码单元计数/截断(仅保证不切断代理对),CJK 无按字符或 token 的校正(CJK/emoji 低估与 D-005 同源)。边界计算不使用 `TokenMeter` 的锚定 ratio,与预算检查口径不完全一致。
 - **影响**: 尾部 16% 的实际保留量可能偏离目标;边界可能过早或过晚摘要,极端情况下产生额外 `failed` 或超出预期窗口。
 - **触发升级条件**: 尾部包含大 `tool_calls` 或 CJK 内容;实测窗口与估算偏差显著;摘要频繁在临界点失败。
 - **修复建议**: 统一用 `TokenMeter.measure` 对候选前缀做增量估算,或在边界计算中补齐 role/分隔符/CJK 估算并复用 ratio。
@@ -801,7 +802,7 @@
 - **现象**: 每次越过软阈值都会追加 `microcompact` / `summary` / `failed` 事件;`microcompact` 的 `elidedSeqs` 只增不合并,旧 summary 事件永久保留。
 - **影响**: 长会话日志体积与 `buildMessages` 扫描成本随压缩次数线性增长;rollover 提前触发;可回放性保留但事件噪声变大。
 - **触发升级条件**: 会话持续数百轮或频繁压缩;日志 I/O 成为瓶颈;需要限制单会话日志上限。
-- **修复建议**: 合并连续 `microcompact` 的 `elidedSeqs`、在 rollover 时压缩历史 compaction 元数据,或为 compaction 事件设上限并只保留最后一条 summary。
+- **修复建议**: 在 rollover 新代/归档层限定投影所需元数据(例如归档索引中合并连续 `microcompact` 的 `elidedSeqs`、只索引最后一条有效 summary),由投影层按需读取;不删除或改写既有事件,保持 append-only 与回放一致。
 - **状态**: 未解决;当前不合并、不删除任何事件。
 
 ### D-096 · `keepRecentTurns` 默认 2 轮未经场景校准
@@ -887,3 +888,4 @@
 | 2026-10-19 | 维度3 第二轮红队修复:summary 投影拒绝覆盖 evidence 并回退上一条有效 summary;坏 summary 校验非空/边界/批次完整性;摘要后仍超阈值落 `failed(still_over_budget)`;缺 usage 改写 `status(usage_missing)` 并复用 `normalizeUsage`;新摘要必须覆盖旧 summary 事件并在 transcript 前置旧摘要;microcompact 仅在占位更短时生效;`keepRecentTurns` 校验非负整数;TokenMeter 防御非有限 heuristic;`enabled:false` 不再校验比例;扩写 D-093/D-097,录入 D-099(单条结果/近期批次超窗) |
 | 2026-10-19 | 维度3 最后小修:移除 transcript 手动 `[Previous summary]` 前置(由 `buildMessages(prefix)` 注入一次);summary 投影按事件顺序只采信边界不倒退的有效 summary;D-099 补充首轮 `still_over_budget`、后续轮 `no_progress` 的轮次语义 |
 | 2026-10-19 | 维度3 Task3 第一轮 review 修复:补长 evidence 候选变异守卫、transcript 60% 边界、摘要 messages 两条与投影失败 catch 用例;compact 的 `elidedSeqs` 改用 `Number.isInteger`;design §4.4/§4.6 删除 `pricePerMillion` 并同步 brief;D-097/D-099 补 `still_over_budget` 与 `no_progress` 边界语义 |
+| 2026-10-19 | 维度3 Task5 第一轮 review 修复:README 更正 `tool_calls` 计数口径(D-033 已解决)、补 summary `covers < summary.seq`、二级候选排除旧 summary 覆盖范围、前缀投影失败、8000/25000 估算口径与无 system 回退;D-093 交叉引用 D-005;D-095 修复建议改为 rollover/归档层限定元数据、不删除既有事件;dev-notes 修正 Task1 提交信息与 task-5-brief 说明 |
