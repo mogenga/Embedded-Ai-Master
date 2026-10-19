@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadMcpConfig } from "../src/mcp/config.js";
+import type { McpConfigWarning } from "../src/mcp/config.js";
 import { McpConfigError } from "../src/mcp/errors.js";
 
 const roots: string[] = [];
@@ -216,8 +217,8 @@ describe("MCP 配置加载与合并", () => {
     ]);
   });
 
-  it("未知字段宽松忽略", () => {
-    const { home, workdir } = setup({
+  it("未知字段宽松忽略但通过 onWarning 披露（D-103）", () => {
+    const { home, workdir, userConfigPath } = setup({
       probe: {
         type: "stdio",
         description: "探针",
@@ -225,6 +226,20 @@ describe("MCP 配置加载与合并", () => {
         futureOption: { nested: true },
       },
     });
+    const warnings: McpConfigWarning[] = [];
+
+    expect(
+      loadMcpConfig({ home, workdir, onWarning: (warning) => warnings.push(warning) }),
+    ).toEqual([{ name: "probe", command: "node", cwd: workdir, timeoutMs: 15_000 }]);
+    expect(warnings).toEqual([
+      { file: userConfigPath, server: "probe", field: "type" },
+      { file: userConfigPath, server: "probe", field: "description" },
+      { file: userConfigPath, server: "probe", field: "futureOption" },
+    ]);
+  });
+
+  it("未提供 onWarning 时未知字段不影响加载", () => {
+    const { home, workdir } = setup({ probe: { command: "node", typoField: 1 } });
     expect(loadMcpConfig({ home, workdir })).toEqual([
       { name: "probe", command: "node", cwd: workdir, timeoutMs: 15_000 },
     ]);

@@ -80,7 +80,16 @@ export function createMcpTools(
   const tools: ToolDef<unknown>[] = [];
   const usedNames = new Set<string>(options.reservedNames ?? []);
 
-  for (const info of manager.tools()) {
+  // 先按 (server, tool) 字典序排序再分配名称:同一批工具不因 server 返回顺序
+  // 不同而改变暴露名,权限规则与历史会话才能按名寻址(D-100)。
+  const infos = manager.tools()
+    .slice()
+    .sort((left, right) =>
+      left.server === right.server
+        ? left.tool < right.tool ? -1 : left.tool > right.tool ? 1 : 0
+        : left.server < right.server ? -1 : 1,
+    );
+  for (const info of infos) {
     if (!isObjectSchema(info.inputSchema)) {
       options.onStatus?.({
         kind: "mcp_tool_invalid_schema",

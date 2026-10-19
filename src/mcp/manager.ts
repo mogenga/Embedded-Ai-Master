@@ -37,7 +37,11 @@ export interface McpStatusEvent {
   tool?: string;
   toolCount?: number;
   message?: string;
+  attempts?: number;
 }
+
+const REFRESH_MAX_ATTEMPTS = 3;
+const REFRESH_BASE_DELAY_MS = 100;
 
 export interface McpManagerOptions {
   connectTimeoutMs?: number;
@@ -518,6 +522,7 @@ export class McpManager {
                   kind: "tools_refresh_failed",
                   server: state.config.name,
                   message: messageOf(error),
+                  attempts: REFRESH_MAX_ATTEMPTS,
                 });
               });
             },
@@ -623,15 +628,30 @@ export class McpManager {
     if (!client || !state.connected || this.isClosed(state)) {
       return;
     }
-    let tools: McpToolInfo[];
-    try {
-      tools = await this.loadTools(client, state.config.name);
-    } catch (error) {
+    let tools: McpToolInfo[] | undefined;
+    let lastError: unknown;
+    // list_changed 后工具列表短暂抖动很常见,做有界退避重试(D-104)。
+    for (let attempt = 1; attempt <= REFRESH_MAX_ATTEMPTS; attempt += 1) {
+      if (this.isClosed(state)) {
+        return;
+      }
+      try {
+        tools = await this.loadTools(client, state.config.name);
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt < REFRESH_MAX_ATTEMPTS) {
+          await delay(REFRESH_BASE_DELAY_MS * 2 ** (attempt - 1));
+        }
+      }
+    }
+    if (tools === undefined) {
       if (!this.isClosed(state)) {
         this.emit({
           kind: "tools_refresh_failed",
           server: state.config.name,
-          message: messageOf(error),
+          message: messageOf(lastError),
+          attempts: REFRESH_MAX_ATTEMPTS,
         });
       }
       return;

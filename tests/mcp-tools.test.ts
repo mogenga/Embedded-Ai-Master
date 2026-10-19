@@ -134,11 +134,30 @@ describe("createMcpTools", () => {
       ]).manager,
     );
 
-    expect(tools[0].annotations).toEqual({ readOnly: true, destructive: false, evidence: true });
-    expect(tools[0].description).toBe("只读证据工具");
-    expect(tools[1].annotations).toEqual({ readOnly: false, destructive: true, evidence: false });
-    expect(tools[1].description).toBe("破坏性工具");
-    expect(tools[2].annotations).toEqual({ readOnly: false, destructive: false, evidence: false });
+    // D-100: 输出按 (server, tool) 字典序稳定排序,不依赖 manager 返回顺序。
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "mcp__s__plain",
+      "mcp__s__ro",
+      "mcp__s__rw",
+    ]);
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+    expect(byName.get("mcp__s__ro")?.annotations).toEqual({
+      readOnly: true,
+      destructive: false,
+      evidence: true,
+    });
+    expect(byName.get("mcp__s__ro")?.description).toBe("只读证据工具");
+    expect(byName.get("mcp__s__rw")?.annotations).toEqual({
+      readOnly: false,
+      destructive: true,
+      evidence: false,
+    });
+    expect(byName.get("mcp__s__rw")?.description).toBe("破坏性工具");
+    expect(byName.get("mcp__s__plain")?.annotations).toEqual({
+      readOnly: false,
+      destructive: false,
+      evidence: false,
+    });
   });
 
   it("同 server 内名称冲突时后一个追加 hash 并记录 renamed", () => {

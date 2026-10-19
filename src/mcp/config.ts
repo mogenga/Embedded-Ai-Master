@@ -14,13 +14,32 @@ export interface McpServerConfig {
   disabled?: boolean;
 }
 
+export interface McpConfigWarning {
+  file: string;
+  server: string;
+  field: string;
+}
+
 export interface LoadMcpConfigOptions {
   home: string;
   workdir: string;
   userConfigPath?: string;
   projectConfigPath?: string;
   includeProject?: boolean;
+  // 未知字段不再静默忽略:交给调用方记 status,避免 timeoutMS/arg 之类拼写错误难排查(D-103)。
+  onWarning?: (warning: McpConfigWarning) => void;
 }
+
+const SERVER_KNOWN_FIELDS = new Set([
+  "command",
+  "args",
+  "env",
+  "envAllowlist",
+  "inheritEnv",
+  "cwd",
+  "timeoutMs",
+  "disabled",
+]);
 
 type PartialServerConfig = Omit<McpServerConfig, "name" | "command"> & { command?: string };
 
@@ -57,9 +76,16 @@ function parseServer(
   raw: Record<string, unknown>,
   filePath: string,
   baseDir: string,
+  onWarning?: (warning: McpConfigWarning) => void,
 ): PartialServerConfig {
   const server: PartialServerConfig = {};
   const where = `${filePath} 中的 server "${name}"`;
+
+  for (const field of Object.keys(raw)) {
+    if (!SERVER_KNOWN_FIELDS.has(field)) {
+      onWarning?.({ file: filePath, server: name, field });
+    }
+  }
 
   if (raw.command !== undefined) {
     if (typeof raw.command !== "string" || raw.command.trim() === "") {
@@ -123,7 +149,10 @@ function parseServer(
   return server;
 }
 
-function parseConfigFile(filePath: string): Map<string, PartialServerConfig> {
+function parseConfigFile(
+  filePath: string,
+  onWarning?: (warning: McpConfigWarning) => void,
+): Map<string, PartialServerConfig> {
   const value = readJsonFile(filePath);
   const servers = new Map<string, PartialServerConfig>();
   if (value === undefined) {
@@ -148,7 +177,7 @@ function parseConfigFile(filePath: string): Map<string, PartialServerConfig> {
     if (!isRecord(raw)) {
       throw invalidConfig(`MCP server "${name}" 配置必须是对象: ${filePath}`);
     }
-    servers.set(name, parseServer(name, raw, filePath, baseDir));
+    servers.set(name, parseServer(name, raw, filePath, baseDir, onWarning));
   }
   return servers;
 }
@@ -193,10 +222,10 @@ function mergeServer(
 export function loadMcpConfig(opts: LoadMcpConfigOptions): McpServerConfig[] {
   const userPath = opts.userConfigPath ?? path.join(opts.home, "mcp.json");
   const projectPath = opts.projectConfigPath ?? path.join(opts.workdir, ".harness", "mcp.json");
-  const userServers = parseConfigFile(userPath);
+  const userServers = parseConfigFile(userPath, opts.onWarning);
   const projectServers = opts.includeProject === false
     ? new Map<string, PartialServerConfig>()
-    : parseConfigFile(projectPath);
+    : parseConfigFile(projectPath, opts.onWarning);
   const workdir = path.resolve(opts.workdir);
   const names = new Set([...userServers.keys(), ...projectServers.keys()]);
   const result: McpServerConfig[] = [];
