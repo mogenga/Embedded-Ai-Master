@@ -21,11 +21,14 @@ export interface ToolAnnotations {
   destructive?: boolean;
 }
 
+export type ToolAccess = "read" | "write" | "unknown";
+
 export interface ToolDef<I> {
   name: string;
   description: string;
   schema: z.ZodType<I>;
   modelSchema?: unknown;
   annotations?: ToolAnnotations;
+  access?(input: I): ToolAccess;
   execute(input: I, ctx: ToolCtx, signal: AbortSignal): Promise<ToolResult>;
 }
