@@ -35,6 +35,18 @@ async function main() {
   );
 
   server.registerTool(
+    "dup.a",
+    { description: "Sanitizes to dup_a" },
+    async () => textResult("dup-dot"),
+  );
+
+  server.registerTool(
+    "dup_a",
+    { description: "Collides with dup.a after sanitize" },
+    async () => textResult("dup-underscore"),
+  );
+
+  server.registerTool(
     "multi",
     {
       description: "Return two text blocks",

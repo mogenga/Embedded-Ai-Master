@@ -841,6 +841,14 @@
 - **修复建议**: 一级截断按单条结果强制落盘并进一步缩短模型视图;允许把最近批次中的非 evidence 结果降级为占位;或在 `still_over_budget` 时触发更小尾部/更强摘要策略。
 - **状态**: 未解决;当前只保证首轮显式记录 `still_over_budget`、后续轮 `no_progress`,不重复摘要。
 
+### D-100 · MCP 工具名消歧依赖 server 返回顺序
+
+- **发现**: 2026-10-19,维度5 Task3 复核(N-4)。
+- **现象**: `createMcpTools` 按 `manager.tools()` 顺序逐个占用名称。若 A 工具的基础名被 B 的确定性改名占用,后续工具会被连锁改名;同一批工具仅因 `listTools()` 返回顺序不同,最终暴露名可能不同。结果为全局唯一,且对同一输入列表确定。
+- **影响**: 模型看到的工具名可能随 server 实现/升级改变,历史会话中的工具名与权限规则(P1 按名寻址)可能失配;不改名工具不受影响。
+- **触发升级条件**: P1 权限规则按工具名持久化;跨会话回放依赖工具名稳定性;server 返回顺序被观察到变化并导致自动化脚本失败。
+- **修复建议**: 消歧前先按 `(server, tool)` 字典序排序稳定输入,或改为「先检测全部冲突、再按排序分配」;把最终映射写入会话/配置以便审计。
+
 ---
 
 ## 变更记录
@@ -889,3 +897,4 @@
 | 2026-10-19 | 维度3 最后小修:移除 transcript 手动 `[Previous summary]` 前置(由 `buildMessages(prefix)` 注入一次);summary 投影按事件顺序只采信边界不倒退的有效 summary;D-099 补充首轮 `still_over_budget`、后续轮 `no_progress` 的轮次语义 |
 | 2026-10-19 | 维度3 Task3 第一轮 review 修复:补长 evidence 候选变异守卫、transcript 60% 边界、摘要 messages 两条与投影失败 catch 用例;compact 的 `elidedSeqs` 改用 `Number.isInteger`;design §4.4/§4.6 删除 `pricePerMillion` 并同步 brief;D-097/D-099 补 `still_over_budget` 与 `no_progress` 边界语义 |
 | 2026-10-19 | 维度3 Task5 第一轮 review 修复:README 更正 `tool_calls` 计数口径(D-033 已解决)、补 summary `covers < summary.seq`、二级候选排除旧 summary 覆盖范围、前缀投影失败、8000/25000 估算口径与无 system 回退;D-093 交叉引用 D-005;D-095 修复建议改为 rollover/归档层限定元数据、不删除既有事件;dev-notes 修正 Task1 提交信息与 task-5-brief 说明 |
+| 2026-10-19 | 维度5 Task4:runSession 装配 MCP 与 list_changed 刷新;status 事件接入、配置错误隔离、finally close;spec §4.3/§4.4/§4.5 同步确定性消歧与 status 枚举;录入 D-100(消歧依赖 server 返回顺序) |

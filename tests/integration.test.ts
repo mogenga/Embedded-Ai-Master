@@ -45,8 +45,23 @@ afterEach(async () => {
   resumeCloseFailure.enabled = false;
   resumeCallCounter.count = 0;
   vi.unstubAllEnvs();
-  for (const dir of tempDirs.splice(0)) await rm(dir, { recursive: true, force: true });
+  for (const dir of tempDirs.splice(0)) await removeTempDir(dir);
 });
+
+// Windows 多 worker 并发下,临时目录可能被扫描/索引短暂占用而报 ENOTEMPTY;
+// 有限重试,真实残留仍会失败。
+async function removeTempDir(dir: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOTEMPTY" || attempt >= 4) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+}
 
 interface FetchCall {
   url: string;
@@ -1683,5 +1698,329 @@ describe("runSession resume systemPrompt 幂等", () => {
       { role: "assistant", content: "done", tool_calls: [] },
       { role: "user", content: "again" },
     ]);
+  });
+});
+
+
+const MCP_FIXTURE = path.join(import.meta.dirname, "fixtures", "mcp-echo-server.mjs");
+
+function mcpEchoServer(extra: Record<string, unknown> = {}): Record<string, unknown> {
+  return { command: process.execPath, args: [MCP_FIXTURE], ...extra };
+}
+
+async function writeMcpConfig(
+  dir: string,
+  servers: Record<string, unknown>,
+  name = "mcp.json",
+): Promise<string> {
+  const file = path.join(dir, name);
+  await writeFile(file, JSON.stringify({ mcpServers: servers }), "utf8");
+  return file;
+}
+
+function mcpStatusPayloads(sessionDir: string): Record<string, unknown>[] {
+  return readSessionFile(path.join(sessionDir, "session.v1.jsonl"))
+    .filter((event) => event.type === "status")
+    .map((event) => event.payload)
+    .filter((payload) => typeof payload.status === "string" && payload.status.startsWith("mcp_"));
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 3_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`等待条件超时（${timeoutMs}ms）`);
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe("runSession MCP 装配", () => {
+  it("MCP echo server 工具出现在请求 tools 中，调用闭环", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-echo-session");
+    const { impl, calls } = mockFetch([
+      toolCallResponseNoUsage("mcp-call", "mcp__echo__echo", { text: "hello-mcp" }),
+      EMPTY_RESPONSE,
+    ]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const firstTools = calls[0].body.tools as Array<{ function: { name: string } }>;
+    expect(firstTools.map((tool) => tool.function.name)).toContain("mcp__echo__echo");
+    const result = events.find(
+      (event) => event.kind === "tool_result" && event.id === "mcp-call",
+    );
+    expect(result).toMatchObject({ ok: true, text: "hello-mcp" });
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_connected", server: "echo" }),
+    );
+  });
+
+  it("mcp.enabled:false 时不加载也不连接", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const pidFile = path.join(configDir, "mcp.pid");
+    const userConfigPath = await writeMcpConfig(configDir, {
+      echo: mcpEchoServer({ env: { PID_FILE: pidFile } }),
+    });
+    const sessionDir = path.join(home, "mcp-disabled-session");
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { enabled: false, userConfigPath },
+      }),
+    );
+
+    const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+    expect(tools.map((tool) => tool.function.name).some((name) => name.startsWith("mcp__"))).toBe(
+      false,
+    );
+    expect(existsSync(pidFile)).toBe(false);
+    expect(mcpStatusPayloads(sessionDir)).toEqual([]);
+  });
+
+  it("无配置或全部 disabled 时不连接、不写 status", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const configPath = await writeMcpConfig(configDir, {
+      echo: mcpEchoServer({ disabled: true }),
+    });
+    const cases: Array<{ name: string; mcp?: { projectConfigPath?: string } }> = [
+      { name: "no-config" },
+      { name: "all-disabled", mcp: { projectConfigPath: configPath } },
+    ];
+
+    for (const entry of cases) {
+      const sessionDir = path.join(home, entry.name);
+      const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+      await collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir,
+          fetchImpl: impl,
+          cwd: configDir,
+          ...(entry.mcp !== undefined ? { mcp: entry.mcp } : {}),
+        }),
+      );
+      const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+      expect(tools.map((tool) => tool.function.name).some((name) => name.startsWith("mcp__"))).toBe(
+        false,
+      );
+      expect(mcpStatusPayloads(sessionDir)).toEqual([]);
+    }
+  });
+
+  it("单 server 连接失败记 status 且会话继续", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, {
+      echo: mcpEchoServer(),
+      broken: { command: "definitely-not-a-real-command-embedded-ai" },
+    });
+    const sessionDir = path.join(home, "mcp-partial-session");
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+    expect(tools.map((tool) => tool.function.name)).toContain("mcp__echo__echo");
+    expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_connect_failed", server: "broken" }),
+    );
+  });
+
+  it("配置坏 JSON 记 mcp_config_failed 且会话继续", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = path.join(configDir, "broken.json");
+    await writeFile(userConfigPath, "{ not json", "utf8");
+    const sessionDir = path.join(home, "mcp-config-failed-session");
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
+    expect(tools.map((tool) => tool.function.name).some((name) => name.startsWith("mcp__"))).toBe(
+      false,
+    );
+    expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_config_failed" }),
+    );
+  });
+
+  it("list_changed 后新工具出现在后续请求", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-list-changed-session");
+    const grownCall = {
+      id: "grow-call",
+      type: "function",
+      function: { name: "mcp__echo__grow", arguments: "{}" },
+    };
+    const grownToolCall = {
+      id: "grown-call",
+      type: "function",
+      function: { name: "mcp__echo__grown-1", arguments: "{}" },
+    };
+    const { impl, calls } = mockFetch([
+      { choices: [{ message: { content: "", tool_calls: [grownCall] }, finish_reason: "tool_calls" }] },
+      { choices: [{ message: { content: "", tool_calls: [grownToolCall] }, finish_reason: "tool_calls" }] },
+      { choices: [{ message: { content: "", tool_calls: [grownToolCall] }, finish_reason: "tool_calls" }] },
+      EMPTY_RESPONSE,
+    ]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const laterTools = calls.slice(1).map((call) =>
+      (call.body.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name),
+    );
+    expect(laterTools.some((names) => names.includes("mcp__echo__grown-1"))).toBe(true);
+    expect(
+      events.some(
+        (event) => event.kind === "tool_result" && event.id === "grown-call" && event.ok,
+      ),
+    ).toBe(true);
+    const logged = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(logged).toContainEqual(
+      expect.objectContaining({
+        type: "tool_result",
+        payload: expect.objectContaining({
+          toolName: "mcp__echo__grown-1",
+          ok: true,
+        }),
+      }),
+    );
+    expect(mcpStatusPayloads(sessionDir)).toContainEqual(
+      expect.objectContaining({ status: "mcp_tools_changed", server: "echo" }),
+    );
+  });
+
+  it("onStatus renamed 落到会话 status 事件", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-renamed-session");
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    const renamed = mcpStatusPayloads(sessionDir).filter(
+      (payload) => payload.status === "mcp_tool_name_renamed",
+    );
+    expect(renamed).toHaveLength(1);
+    expect(renamed[0]).toMatchObject({
+      server: "echo",
+      tool: "dup_a",
+      originalName: "mcp__echo__dup_a",
+    });
+    expect(renamed[0].name).toMatch(/^mcp__echo__dup_a_[0-9a-f]{6}$/);
+  });
+
+  it("关闭后 MCP 子进程退出", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const pidFile = path.join(configDir, "close.pid");
+    const userConfigPath = await writeMcpConfig(configDir, {
+      echo: mcpEchoServer({ env: { PID_FILE: pidFile } }),
+    });
+    const sessionDir = path.join(home, "mcp-close-session");
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: impl,
+        cwd: configDir,
+        mcp: { userConfigPath },
+      }),
+    );
+
+    expect(existsSync(pidFile)).toBe(true);
+    const pid = Number(await readFile(pidFile, "utf8"));
+    await waitFor(() => !isAlive(pid));
   });
 });

@@ -129,17 +129,18 @@ function mcpToolName(server: string, tool: string): string; // mcp__<sanitized s
 ```
 
 - schema 用 `z.unknown()`(MCP server 校验; 管线仅透传); `ToolDef` 增加可选 `modelSchema?: unknown`, `toModelToolSchemas` 优先使用它透传 MCP server 的真实 `inputSchema`(否则 `z.toJSONSchema` 对 `z.unknown()` 根类型不是 object 会抛错)。
-- `annotations: { readOnly: info.readOnly === true, destructive: info.destructive === true, evidence: false }`。
+- `annotations: { readOnly: info.readOnly === true, destructive: info.destructive === true, evidence: info.evidence === true }`。
 - execute: `manager.call(server, tool, input, signal)` → `ToolResult`。
-- 名称冲突: **按 server 隔离**; 冲突工具跳过并记 `mcp_tool_name_collision` status, 不阻塞会话/其他 server。
+- 名称冲突: sanitize/64 截断后若与已占用名冲突, 基于未 sanitize 的 `mcp__<server>__<tool>` 追加 `_<hash6>` **确定性消歧**, 不丢弃工具、不阻塞会话/其他 server; 每发生一次改名通过 `onStatus` 记录 `mcp_tool_name_renamed`(含 `originalName` 与最终 `name`)。同一 identity 再次冲突时追加 `#<attempt>` 重算, 循环保证 ≤64 且全局唯一。
+- 消歧顺序边界: 改名占用可能使后续工具的基础名再次冲突并连锁改名; 结果仍全局唯一, 且对同一 `tools()` 输入列表确定, 但依赖 server 返回顺序(见 D-100)。
 - 超长名称: sanitize 后截断到 64 并追加 6 位 hash。
 
 ### 4.4 `runSession` 装配
 
 - `RunOptions.mcp?: { enabled?: boolean; userConfigPath?: string; projectConfigPath?: string }`; 默认 `enabled:true`。
 - 启动: `loadMcpConfig` + `new McpManager` + `connectAll()`; 工具 = `[...createBuiltinTools(), ...createMcpTools(manager)]`。
-- status 事件: `session.append({type:"status", payload:{status:"mcp_connected"|"mcp_connect_failed"|"mcp_tools_changed", server, toolCount?, message?}})`。
-- list_changed 时刷新 registry: `ToolRegistry` 增加 `replace(tools)` 或重建; 只替换 MCP 命名空间工具, 保留内置工具。
+- status 事件: `session.append({type:"status", payload:{status:"mcp_connected"|"mcp_connect_failed"|"mcp_tools_changed"|"mcp_tools_refresh_failed"|"mcp_tool_name_renamed"|"mcp_config_failed", server?, tool?, name?, originalName?, toolCount?, message?}})`。
+- list_changed 时刷新 registry: `ToolRegistry.replace(tools)` 全量重建, 只替换 MCP 命名空间工具, 保留内置工具; 刷新失败保留旧集合并记 `mcp_tools_refresh_failed`。
 - close: finally 中 `await manager.close()`; 不覆盖主错误。
 - 无配置/全部 disabled → 不连接, 不写 status。
 
@@ -147,7 +148,8 @@ function mcpToolName(server: string, tool: string): string; // mcp__<sanitized s
 
 - `McpCallResult.code`: `ok`、`mcp_unavailable`、`mcp_tool_error`、`mcp_timeout`、`mcp_aborted`。
 - 配置错误(Task1): `mcp_config_invalid`(`McpConfigError`)。
-- status 事件 kind: `connected`、`connect_failed`、`tools_changed`、`tools_refresh_failed`、`listener_failed`、`call_failed`; Task3 另加 `tool_name_collision`。
+- status 事件 kind(manager 层): `connected`、`connect_failed`、`tools_changed`、`tools_refresh_failed`、`listener_failed`、`call_failed`。
+- runSession 落会话日志的 status 子集: `mcp_connected`、`mcp_connect_failed`、`mcp_tools_changed`、`mcp_tools_refresh_failed`、`mcp_tool_name_renamed`、`mcp_config_failed`; 配置错误隔离为 status, 不冒泡、不阻塞主会话。
 - 连接失败/刷新失败通过 status 表达，不进入 `McpCallResult.code`; 调用侧连接失败统一 `mcp_unavailable`。不再使用 `mcp_connect_failed`、`mcp_reconnect_failed`、`mcp_tools_refresh_failed` 作为 code。
 - 登记 deferred: 超时/取消不强制终止 server 端执行(写工具 P1)、敏感 env 暴露、未知字段宽松可能掩盖 typo。
 

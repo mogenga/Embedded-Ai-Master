@@ -14,6 +14,11 @@ import type { TokenMeter } from "./context/token-meter.js";
 import type { LoopEvent } from "./loop/events.js";
 import { query } from "./loop/query.js";
 import type { LoopCtx } from "./loop/query.js";
+import { loadMcpConfig } from "./mcp/config.js";
+import { McpConfigError } from "./mcp/errors.js";
+import { McpManager } from "./mcp/manager.js";
+import type { McpStatusEvent } from "./mcp/manager.js";
+import { createMcpTools } from "./mcp/tools.js";
 import { heuristicCountTokens } from "./model/count.js";
 import { createOpenAIProvider } from "./model/openai.js";
 import { SessionResumeError } from "./session/errors.js";
@@ -44,6 +49,50 @@ export interface RunOptions {
     keepTailRatio?: number;
     softRatio?: number;
   };
+  mcp?: {
+    enabled?: boolean;
+    userConfigPath?: string;
+    projectConfigPath?: string;
+  };
+}
+
+interface McpSessionStatus {
+  status:
+    | "mcp_connected"
+    | "mcp_connect_failed"
+    | "mcp_tools_changed"
+    | "mcp_tools_refresh_failed"
+    | "mcp_tool_name_renamed"
+    | "mcp_config_failed";
+  server?: string;
+  tool?: string;
+  name?: string;
+  originalName?: string;
+  toolCount?: number;
+  message?: string;
+}
+
+function toSessionMcpStatus(event: McpStatusEvent): McpSessionStatus | undefined {
+  switch (event.kind) {
+    case "connected":
+      return { status: "mcp_connected", server: event.server, toolCount: event.toolCount };
+    case "connect_failed":
+      return { status: "mcp_connect_failed", server: event.server, message: event.message };
+    case "tools_changed":
+      return { status: "mcp_tools_changed", server: event.server, toolCount: event.toolCount };
+    case "tools_refresh_failed":
+      return {
+        status: "mcp_tools_refresh_failed",
+        server: event.server,
+        message: event.message,
+      };
+    default:
+      return undefined;
+  }
+}
+
+function messageOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 const SESSION_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
@@ -221,6 +270,17 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   }
 
   let hasPrimaryError = false;
+  let mcpManager: McpManager | undefined;
+  let statusQueue: Promise<void> = Promise.resolve();
+  const appendMcpStatus = (status: McpSessionStatus): void => {
+    statusQueue = statusQueue
+      .then(() => session.append({ type: "status", payload: { ...status } }))
+      .then(
+        () => undefined,
+        () => undefined,
+      );
+  };
+
   try {
     if (systemPromptToAppend !== undefined) {
       await session.append({ type: "system", payload: { content: systemPromptToAppend } });
@@ -258,11 +318,68 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       budget = (messages) => checkBudget(messages, model.contextWindow);
     }
 
+    const builtinTools = createBuiltinTools();
+    const registry = new ToolRegistry(builtinTools);
+
+    if (opts.mcp?.enabled !== false) {
+      try {
+        const servers = loadMcpConfig({
+          home,
+          workdir: runCwd,
+          ...(opts.mcp?.userConfigPath !== undefined
+            ? { userConfigPath: opts.mcp.userConfigPath }
+            : {}),
+          ...(opts.mcp?.projectConfigPath !== undefined
+            ? { projectConfigPath: opts.mcp.projectConfigPath }
+            : {}),
+        });
+        if (servers.length > 0) {
+          const manager = new McpManager(servers, {
+            logger: (event) => {
+              const status = toSessionMcpStatus(event);
+              if (status !== undefined) appendMcpStatus(status);
+            },
+          });
+          mcpManager = manager;
+          const rebuildMcpTools = (): void => {
+            try {
+              const mcpTools = createMcpTools(manager, {
+                onStatus: (status) => {
+                  appendMcpStatus({
+                    status: "mcp_tool_name_renamed",
+                    server: status.server,
+                    tool: status.tool,
+                    name: status.name,
+                    originalName: status.originalName,
+                  });
+                },
+              });
+              registry.replace([...builtinTools, ...mcpTools]);
+            } catch (error) {
+              appendMcpStatus({
+                status: "mcp_tools_refresh_failed",
+                message: messageOf(error),
+              });
+            }
+          };
+          manager.onToolsChanged(() => rebuildMcpTools());
+          await manager.connectAll();
+          rebuildMcpTools();
+        }
+      } catch (error) {
+        if (error instanceof McpConfigError) {
+          appendMcpStatus({ status: "mcp_config_failed", message: error.message });
+        } else {
+          throw error;
+        }
+      }
+    }
+
     const ctx: LoopCtx = {
       session,
       model: modelProtocol,
       modelCfg: model,
-      tools: new ToolRegistry(createBuiltinTools()),
+      tools: registry,
       budget,
       signal,
       artifactDir: path.join(session.dir, "artifacts"),
@@ -281,10 +398,18 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     hasPrimaryError = true;
     throw error;
   } finally {
+    await statusQueue;
+    let closeError: unknown;
+    try {
+      await mcpManager?.close();
+    } catch (error) {
+      if (!hasPrimaryError) closeError = error;
+    }
     try {
       await session.close();
     } catch (error) {
-      if (!hasPrimaryError) throw error;
+      if (!hasPrimaryError && closeError === undefined) closeError = error;
     }
+    if (closeError !== undefined && !hasPrimaryError) throw closeError;
   }
 }

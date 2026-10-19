@@ -8,20 +8,13 @@ export interface McpToolSource {
   call(server: string, tool: string, args: unknown, signal?: AbortSignal): Promise<McpCallResult>;
 }
 
-export type McpToolAdapterStatus =
-  | {
-      kind: "mcp_tool_name_collision";
-      server: string;
-      tool: string;
-      name: string;
-    }
-  | {
-      kind: "mcp_tool_name_renamed";
-      server: string;
-      tool: string;
-      name: string;
-      originalName: string;
-    };
+export type McpToolAdapterStatus = {
+  kind: "mcp_tool_name_renamed";
+  server: string;
+  tool: string;
+  name: string;
+  originalName: string;
+};
 
 export interface CreateMcpToolsOptions {
   onStatus?: (status: McpToolAdapterStatus) => void;

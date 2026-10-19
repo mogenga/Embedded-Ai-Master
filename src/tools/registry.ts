@@ -29,22 +29,33 @@ function toParametersSchema(tool: ToolDef<any>): unknown {
   return parameters;
 }
 
+function buildToolMap(tools: ToolDef<any>[]): Map<string, ToolDef<any>> {
+  const map = new Map<string, ToolDef<any>>();
+  for (const tool of tools) {
+    if (!TOOL_NAME_PATTERN.test(tool.name)) {
+      throw new Error(`invalid tool name "${tool.name}": must match ${TOOL_NAME_PATTERN.source}`);
+    }
+    if (map.has(tool.name)) {
+      throw new Error(`tool already registered: ${tool.name}`);
+    }
+    // 构造期即验证 schema 可转换且根为 object: fail-fast,
+    // 同时把 zod 的 unrepresentable 错误提前到装配期。
+    toParametersSchema(tool);
+    map.set(tool.name, tool);
+  }
+  return map;
+}
+
 export class ToolRegistry {
-  private readonly tools = new Map<string, ToolDef<any>>();
+  private tools: Map<string, ToolDef<any>>;
 
   constructor(tools: ToolDef<any>[]) {
-    for (const tool of tools) {
-      if (!TOOL_NAME_PATTERN.test(tool.name)) {
-        throw new Error(`invalid tool name "${tool.name}": must match ${TOOL_NAME_PATTERN.source}`);
-      }
-      if (this.tools.has(tool.name)) {
-        throw new Error(`tool already registered: ${tool.name}`);
-      }
-      // 构造期即验证 schema 可转换且根为 object: fail-fast,
-      // 同时把 zod 的 unrepresentable 错误提前到装配期。
-      toParametersSchema(tool);
-      this.tools.set(tool.name, tool);
-    }
+    this.tools = buildToolMap(tools);
+  }
+
+  // 全量替换:先验证新集合再切换,校验失败时保留旧集合。
+  replace(tools: ToolDef<any>[]): void {
+    this.tools = buildToolMap(tools);
   }
 
   lookup(name: string): ToolDef<any> | undefined {
