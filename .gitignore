@@ -1,9 +1,33 @@
-.arts
+# 依赖
 node_modules/
+
+# 构建产物
 dist/
 dist-web/
-coverage/
+.vite/
 *.tsbuildinfo
-.harness/
-.superpowers/
+
+# 测试与覆盖率
+coverage/
 .tmp/
+*.log
+
+# 本地运行数据
+.harness/
+.arts/
+
+# 工具与流程产物
+.codeartsdoer/
+.superpowers/
+
+# 环境变量与密钥
+.env
+.env.*
+!.env.example
+
+# 编辑器与操作系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
