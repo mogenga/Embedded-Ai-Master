@@ -1,0 +1,18 @@
+# Python 虚拟环境与缓存
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# 导入的语料（不进版本库）
+corpus/
+
+# 原始运行 trace（体积大、可重新生成；汇总表与图表进库）
+results/runs/
+
+# 本地模型缓存与临时文件
+.cache/
+.uv-cache/
+*.log
