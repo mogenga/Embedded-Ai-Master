@@ -1024,6 +1024,36 @@ describe("runSession resume", () => {
     expect(secondFetch.calls).toHaveLength(0);
   });
 
+  it("resume 遇到多条 system 且其中一条不一致时抛 system_prompt_mismatch（D-044）", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "resume-multi-system");
+    const session = await createSession(sessionDir, { id: "multi-system", systemPrompt: "same" });
+    await session.append({ type: "system", payload: { content: "different" } });
+    await session.append({ type: "user", payload: { content: "hi" } });
+    await session.close();
+
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+    const error = await runSession({
+      input: "again",
+      model: "gw/flash",
+      providersText: providersText(),
+      sessionDir,
+      resume: true,
+      systemPrompt: "same",
+      fetchImpl: impl,
+    })
+      .next()
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(SessionResumeError);
+    expect((error as SessionResumeError).code).toBe("system_prompt_mismatch");
+    expect(calls).toHaveLength(0);
+  });
+
   it("空会话 resume 提供 systemPrompt 时补写 system", async () => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
@@ -1676,6 +1706,41 @@ describe("runSession resume 失败原子性", () => {
     expect((error as Error).message).toContain("status 400");
     expect((error as Error).message).not.toContain("close boom");
     expect(resumeCallCounter.count).toBe(1);
+  });
+
+  it("无主错误时 close 异常上抛给调用方（D-046）", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "atomic-close-success");
+    const firstFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        fetchImpl: firstFetch.impl,
+      }),
+    );
+
+    resumeCloseFailure.enabled = true;
+    const secondFetch = mockFetch([EMPTY_RESPONSE]);
+    const error = await collect(
+      runSession({
+        input: "again",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        fetchImpl: secondFetch.impl,
+      }),
+    ).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("close boom");
   });
 });
 

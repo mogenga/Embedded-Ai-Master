@@ -68,6 +68,7 @@ interface McpSessionStatus {
     | "mcp_tool_invalid_schema"
     | "mcp_tool_name_renamed"
     | "mcp_config_failed"
+    | "mcp_config_warning"
     | "mcp_project_config_skipped";
   server?: string;
   tool?: string;
@@ -181,14 +182,17 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
 
   let systemPromptToAppend: string | undefined;
   if (opts.systemPrompt !== undefined) {
-    const systemEvent = events.find((event) => event.type === "system");
-    if (systemEvent !== undefined) {
-      const content = systemEvent.payload.content;
-      if (content !== opts.systemPrompt) {
+    // 多 system 事件时要求**全部**与当前提示一致,避免只校验首条放行不一致历史(D-044)。
+    const systemEvents = events.filter((event) => event.type === "system");
+    if (systemEvents.length > 0) {
+      const mismatched = systemEvents.find(
+        (event) => event.payload.content !== opts.systemPrompt,
+      );
+      if (mismatched !== undefined) {
         throw new SessionResumeError(
           "system_prompt_mismatch",
           "Session system prompt does not match the provided systemPrompt",
-          { expected: opts.systemPrompt, actual: content },
+          { expected: opts.systemPrompt, actual: mismatched.payload.content },
         );
       }
     } else if (events.length > 0) {
@@ -395,6 +399,15 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
           home,
           workdir: runCwd,
           includeProject: trustProject,
+          onWarning: (warning) =>
+            appendMcpStatusOnce(
+              `config-warning:${warning.file}\u0000${warning.server}\u0000${warning.field}`,
+              {
+                status: "mcp_config_warning",
+                server: warning.server,
+                message: `未知 MCP 配置字段 "${warning.field}"（${warning.file}）`,
+              },
+            ),
           ...(opts.mcp?.userConfigPath !== undefined
             ? { userConfigPath: opts.mcp.userConfigPath }
             : {}),
@@ -486,14 +499,15 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     hasPrimaryError = true;
     throw error;
   } finally {
-    await statusQueue;
-
     let closeError: unknown;
+    // 先关闭 MCP(停止 list_changed 通知与 refresh),再 flush status 队列,
+    // 最后关闭 session;避免 refresh 在 flush 之后写入已关闭的会话(D-101)。
     try {
       await mcpManager?.close();
     } catch (error) {
       if (!hasPrimaryError) closeError = error;
     }
+    await statusQueue;
     try {
       await session.close();
     } catch (error) {
