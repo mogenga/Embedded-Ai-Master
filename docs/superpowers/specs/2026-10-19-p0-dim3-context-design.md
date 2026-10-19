@@ -74,23 +74,27 @@ type CompactionPayload =
 ```
 
 - `EventType` 已有 `compaction`(维度 6 预留)。
-- pipeline 在生成 `tool_result` 时写入 `evidence: tool.annotations?.evidence === true`、`toolName: call.name`。
+- 写入分工: pipeline 的 `runOne` 与重复 id 分支按工具名查询 `ToolDef.annotations.evidence`, 在结果中显式写 `evidence: boolean`(未注册或未标注时为 `false`), 不写 `toolName`; `query.toResultPayload` 写 `toolName: call.name`, 并在 `evidence !== undefined` 时透传 pipeline 的 `evidence`。
 - `query` 把 `BatchResult` 转为 payload 时保留这两个字段(现有 `toResultPayload` 扩展)。
 
 ### 4.2 `buildMessages` 压缩视图
 
 签名保持 `buildMessages(events: readonly SessionEvent[]): ModelChatMessage[]`; 内部先扫描 `compaction` 事件:
 
-1. 收集所有 `microcompact` 的 `elidedSeqs` 并集; 投影 tool_result 时若 seq 命中且 `payload.evidence !== true`:
+1. 收集所有 `microcompact` 的 `elidedSeqs` 并集(仅接受整数 seq, NaN/浮点忽略); 投影 tool_result 时若 seq 命中且 `payload.evidence !== true`, 且有收益(占位短于原文)才替换:
    - 有 `artifactPath` → `[tool result elided; full output at <artifactPath>]`
-   - 否则 → `[tool result elided; <toolName>: <首行 120 字符>]`
-   - 若 `payload.evidence === true` → **跳过替换, 投影原文**(投影层防御, 即使日志被旧版本/手工写入错误 elide)。
-2. 找到最后一条 `summary` 事件:
+   - 否则 → `[tool result elided; <toolName>: <首行 120 字符>]`; `toolName` 缺失时回退为 `tool`
+   - 若占位不短于原文 → **保留原文**; 若 `payload.evidence === true` → **跳过替换, 投影原文**(投影层防御, 即使日志被旧版本/手工写入错误 elide, 即使同时带 `artifactPath`)。
+2. 按事件顺序扫描 `summary` 事件, 只采信同时满足以下条件的项, 并保持 `coversUpToSeq` 不倒退:
+   - 非空 summary; `coversUpToSeq` 为 `0..lastSeq` 的整数;
+   - 不落在批次中间(边界覆盖的 assistant 批次仍有 tool_result 在边界之后);
+   - 不覆盖任何 `evidence` 结果。
+   坏或倒退的 summary 被忽略, **回退到上一条已采信的有效 summary**(无则原视图); 不抛错、不写 stderr。
    - **所有 `system` 事件始终保留**; 非 system 事件只投影 `seq > coversUpToSeq`(尾部 verbatim);
    - 在最后一个 system 消息之后插入 `{ role:"system", content:"[Conversation summary]\n"+summary }`;
-   - 若 `coversUpToSeq` 落在批次中间(投影后批次不完整) → 该 summary 事件视为无效, 忽略并保留原视图(不抛错, 因为日志可能由旧版本写入); 不写 stderr。
+   - 被 summary 丢弃的前缀不再做 system 位置/工具批次校验, 只校验保留下来的尾部与始终保留的 system; 因此旧日志中不完整的前缀不会阻止投影。
 3. `compaction` 事件本身不进入消息; `failed` 事件忽略。
-4. 既有 system/user/assistant/tool_result 校验不变; microcompact 只改 tool 消息的 content, 不改顺序。
+4. 既有 system/user/assistant/tool_result 校验对投影后的视图保持不变; microcompact 只改 tool 消息的 content, 不改顺序。
 
 ### 4.3 `TokenMeter`
 

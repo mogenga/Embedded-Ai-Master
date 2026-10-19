@@ -412,15 +412,91 @@ describe("buildMessages 投影重组", () => {
         ],
       }),
       mk(1, "tool_result", { id: "c1", ok: true, text: `one\n${"x".repeat(100)}`, toolName: "echo" }, 0),
-      mk(2, "tool_result", { id: "c2", ok: true, text: "two", toolName: "echo" }, 0),
+      mk(2, "tool_result", { id: "c2", ok: true, text: `two\n${"y".repeat(100)}`, toolName: "echo" }, 0),
       mk(3, "tool_result", { id: "c3", ok: true, text: `three\n${"x".repeat(100)}`, toolName: "echo" }, 0),
       mk(4, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "a" }),
       mk(5, "compaction", { kind: "microcompact", elidedSeqs: [3], note: "b" }),
     ]);
 
     expect(messages[1].content).toBe("[tool result elided; echo: one]");
-    expect(messages[2].content).toBe("two");
+    expect(messages[2].content).toBe(`two\n${"y".repeat(100)}`);
     expect(messages[3].content).toBe("[tool result elided; echo: three]");
+  });
+
+  it("evidence 结果同时带 artifactPath 时保留原文", () => {
+    const text = `evidence body ${"x".repeat(100)}`;
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "reg_read", arguments: {} }],
+      }),
+      mk(
+        1,
+        "tool_result",
+        { id: "c1", ok: true, text, toolName: "reg_read", artifactPath: "/tmp/a.txt", evidence: true },
+        0,
+      ),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
+    ]);
+
+    expect(messages[1]).toStrictEqual({ role: "tool", tool_call_id: "c1", content: text });
+  });
+
+  it("toolName 缺失时占位使用 tool 回退", () => {
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: true, text: `first line\n${"x".repeat(100)}` }, 0),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
+    ]);
+
+    expect(messages[1]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "[tool result elided; tool: first line]",
+    });
+  });
+
+  it("elidedSeqs 中的浮点 seq 不参与替换", () => {
+    const text = `keep me\n${"x".repeat(100)}`;
+    const messages = buildMessages([
+      mk(0, "user", { content: "hi" }),
+      mk(0.5, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1.5, "tool_result", { id: "c1", ok: true, text, toolName: "echo" }, 0.5),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1.5], note: "trim" }),
+    ]);
+
+    expect(messages[2]).toStrictEqual({ role: "tool", tool_call_id: "c1", content: text });
+  });
+
+  it("summary 与 microcompact 同时生效", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "old" }),
+      mk(1, "compaction", { kind: "summary", summary: "SUM", coversUpToSeq: 0 }),
+      mk(2, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(3, "tool_result", { id: "c1", ok: true, text: `result\n${"x".repeat(100)}`, toolName: "echo" }, 2),
+      mk(4, "compaction", { kind: "microcompact", elidedSeqs: [3], note: "trim" }),
+      mk(5, "user", { content: "new" }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "system", content: "[Conversation summary]\nSUM" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "c1", type: "function", function: { name: "echo", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "c1", content: "[tool result elided; echo: result]" },
+      { role: "user", content: "new" },
+    ]);
   });
 
   it("microcompact 首行截断不切断代理对", () => {
@@ -619,12 +695,14 @@ describe("buildMessages 投影重组", () => {
         toolCalls: [{ id: "c1", name: "echo", arguments: { text: "x" } }],
       }),
       mk(3, "tool_result", { id: "c1", ok: true, text: "x" }, 2),
+      mk(4, "compaction", { kind: "microcompact", elidedSeqs: [3], note: "trim" }),
+      mk(5, "compaction", { kind: "summary", summary: "SUM", coversUpToSeq: 3 }),
     ];
     const snapshot = JSON.stringify(events);
 
     buildMessages(events);
 
     expect(JSON.stringify(events)).toBe(snapshot);
-    expect(events.map((event) => event.seq)).toEqual([0, 1, 2, 3]);
+    expect(events.map((event) => event.seq)).toEqual([0, 1, 2, 3, 4, 5]);
   });
 });

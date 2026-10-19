@@ -367,16 +367,19 @@ async function runOne(
   return { id: call.id, result: { ...result, evidence } };
 }
 
-async function duplicateResult(call: BatchCall, opts: BatchOptions): Promise<BatchResult> {
+async function duplicateResult(
+  call: BatchCall,
+  opts: BatchOptions,
+  tools: ToolRegistry,
+): Promise<BatchResult> {
   const message = `duplicate call id: ${truncateText(call.id, MAX_NAME_ECHO_CHARS)}`;
-  return {
-    id: call.id,
-    result: await finalizeResult(
-      failure("duplicate_call_id", message),
-      call.id,
-      opts.artifactDir,
-    ),
-  };
+  const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
+  const result = await finalizeResult(
+    failure("duplicate_call_id", message),
+    call.id,
+    opts.artifactDir,
+  );
+  return { id: call.id, result: { ...result, evidence } };
 }
 
 export async function executeBatch(
@@ -393,7 +396,7 @@ export async function executeBatch(
     return false;
   });
   const run = (call: BatchCall, duplicate: boolean): Promise<BatchResult> =>
-    duplicate ? duplicateResult(call, opts) : runOne(session, tools, call, opts);
+    duplicate ? duplicateResult(call, opts, tools) : runOne(session, tools, call, opts);
 
   const concurrent = calls.every(
     (call) => tools.lookup(call.name)?.annotations?.readOnly === true,
