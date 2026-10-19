@@ -279,6 +279,7 @@ export const fsTool: ToolDef<FsInput> = {
   description: "在 workdir 内读取、写入或编辑文本文件",
   schema: fsInputSchema,
   annotations: { readOnly: false, destructive: true },
+  access: (input) => (input.op === "read" ? "read" : "write"),
   execute: async (input, ctx, signal) => {
     if (signal.aborted) return failure("aborted", "fs aborted before execution");
     try {

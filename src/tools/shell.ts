@@ -494,6 +494,7 @@ export const shellTool: ToolDef<ShellInput> = {
   description: "在 workdir 内执行 shell 命令(非沙箱,仅拦截已知高危命令)",
   schema: shellInputSchema,
   annotations: { readOnly: false, destructive: true },
+  access: () => "write",
   execute: async (input, ctx, signal) => {
     if (isDangerousCommand(input.command)) {
       return failure("dangerous_command", `dangerous command blocked: ${previewCommand(input.command)}`);
