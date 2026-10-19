@@ -1459,6 +1459,7 @@ describe("runSession 内置工具装配", () => {
         sessionDir,
         resume: true,
         fetchImpl: impl,
+        permissions: { preset: "danger-full-access" },
       }),
     );
 
@@ -2131,6 +2132,7 @@ describe("runSession MCP 装配", () => {
         fetchImpl: wrapped,
         cwd: configDir,
         mcp: { userConfigPath },
+        permissions: { preset: "danger-full-access" },
       }),
     );
 
@@ -2194,6 +2196,7 @@ describe("runSession MCP 装配", () => {
         fetchImpl: wrapped,
         cwd: configDir,
         mcp: { userConfigPath },
+        permissions: { preset: "danger-full-access" },
       }),
     );
 
@@ -2242,6 +2245,7 @@ describe("runSession MCP 装配", () => {
         fetchImpl: wrapped,
         cwd: configDir,
         mcp: { userConfigPath },
+        permissions: { preset: "danger-full-access" },
       }),
     );
 
@@ -2292,6 +2296,7 @@ describe("runSession MCP 装配", () => {
         fetchImpl: wrapped,
         cwd: configDir,
         mcp: { userConfigPath },
+        permissions: { preset: "danger-full-access" },
       }),
     );
 
@@ -2443,6 +2448,7 @@ describe("runSession MCP 装配", () => {
         fetchImpl: wrapped,
         cwd: configDir,
         mcp: { userConfigPath },
+        permissions: { preset: "danger-full-access" },
       }),
     );
 

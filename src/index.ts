@@ -23,6 +23,16 @@ import { createMcpTools } from "./mcp/tools.js";
 import type { McpToolAdapterStatus } from "./mcp/tools.js";
 import { heuristicCountTokens } from "./model/count.js";
 import { createOpenAIProvider } from "./model/openai.js";
+import { loadPermissionConfig, parseInlinePermissionConfig } from "./permissions/config.js";
+import type { InlinePermissionConfig, LoadedPermissionConfig } from "./permissions/config.js";
+import { PermissionConfigError } from "./permissions/errors.js";
+import { createPermissionGate } from "./permissions/gate.js";
+import type {
+  PermissionGate,
+  PermissionPreset,
+  PermissionPrompter,
+  PermissionRule,
+} from "./permissions/types.js";
 import { SessionResumeError } from "./session/errors.js";
 import { readSessionDir } from "./session/persistence.js";
 import { createSession, resumeSession } from "./session/session.js";
@@ -57,6 +67,118 @@ export interface RunOptions {
     projectConfigPath?: string;
     trustProjectConfig?: boolean;
   };
+  permissions?: RunPermissionOptions;
+}
+
+export interface RunPermissionOptions {
+  userConfigPath?: string;
+  projectConfigPath?: string;
+  trustProjectConfig?: boolean;
+  preset?: PermissionPreset;
+  rules?: PermissionRule[];
+  approvalTimeoutMs?: number;
+  prompter?: PermissionPrompter;
+}
+
+const PERMISSION_OPTION_KEYS = new Set([
+  "userConfigPath",
+  "projectConfigPath",
+  "trustProjectConfig",
+  "preset",
+  "rules",
+  "approvalTimeoutMs",
+  "prompter",
+]);
+
+function describeValue(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function permissionTypeError(key: string, expected: string, value: unknown): TypeError {
+  return new TypeError(
+    `permissions.${key} must be ${expected}; got ${describeValue(value)}`,
+  );
+}
+
+interface NormalizedPermissionOptions {
+  options: RunPermissionOptions;
+  inline: InlinePermissionConfig;
+}
+
+function normalizePermissionOptions(raw: unknown): NormalizedPermissionOptions | undefined {
+  if (raw === undefined) return undefined;
+  const proto =
+    typeof raw === "object" && raw !== null ? Object.getPrototypeOf(raw) : undefined;
+  if (
+    typeof raw !== "object"
+    || raw === null
+    || Array.isArray(raw)
+    || (proto !== Object.prototype && proto !== null)
+  ) {
+    throw new TypeError(`permissions must be an object; got ${describeValue(raw)}`);
+  }
+
+  const value = raw as Record<string, unknown>;
+  for (const key of Object.keys(value)) {
+    if (!PERMISSION_OPTION_KEYS.has(key)) {
+      throw new PermissionConfigError(
+        "invalid_schema",
+        `权限配置含未知字段 ${JSON.stringify(key)}`,
+      );
+    }
+  }
+
+  if (value.userConfigPath !== undefined && typeof value.userConfigPath !== "string") {
+    throw permissionTypeError("userConfigPath", "a string", value.userConfigPath);
+  }
+  if (value.projectConfigPath !== undefined && typeof value.projectConfigPath !== "string") {
+    throw permissionTypeError("projectConfigPath", "a string", value.projectConfigPath);
+  }
+  if (
+    value.trustProjectConfig !== undefined
+    && typeof value.trustProjectConfig !== "boolean"
+  ) {
+    throw permissionTypeError("trustProjectConfig", "a boolean", value.trustProjectConfig);
+  }
+  if (value.preset !== undefined && typeof value.preset !== "string") {
+    throw permissionTypeError("preset", "a string", value.preset);
+  }
+  if (value.rules !== undefined && !Array.isArray(value.rules)) {
+    throw permissionTypeError("rules", "an array", value.rules);
+  }
+  if (
+    value.approvalTimeoutMs !== undefined
+    && typeof value.approvalTimeoutMs !== "number"
+  ) {
+    throw permissionTypeError("approvalTimeoutMs", "a number", value.approvalTimeoutMs);
+  }
+  if (value.prompter !== undefined) {
+    const prompter = value.prompter;
+    if (
+      typeof prompter !== "object"
+      || prompter === null
+      || Array.isArray(prompter)
+      || typeof (prompter as { request?: unknown }).request !== "function"
+    ) {
+      throw permissionTypeError("prompter", "an object with a request function", prompter);
+    }
+  }
+
+  const inline: InlinePermissionConfig = {
+    ...(value.preset !== undefined
+      ? { preset: value.preset as PermissionPreset }
+      : {}),
+    ...(value.rules !== undefined
+      ? { rules: value.rules as PermissionRule[] }
+      : {}),
+    ...(value.approvalTimeoutMs !== undefined
+      ? { approvalTimeoutMs: value.approvalTimeoutMs as number }
+      : {}),
+  };
+  parseInlinePermissionConfig(inline);
+  return { options: value as RunPermissionOptions, inline };
 }
 
 interface McpSessionStatus {
@@ -213,6 +335,7 @@ async function planResume(sessionDir: string, opts: RunOptions): Promise<ResumeP
 
 export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   if (opts.sessionId !== undefined) assertSessionId(opts.sessionId);
+  const permissionOptions = normalizePermissionOptions(opts.permissions);
   const compaction = opts.compaction;
   if (compaction?.enabled !== undefined && typeof compaction.enabled !== "boolean") {
     throw new TypeError(`compaction.enabled must be a boolean; got ${typeof compaction.enabled}`);
@@ -299,8 +422,58 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   let session: SessionHandle;
   let systemPromptToAppend: string | undefined;
   let runCwd: string;
+  let loadedPermissions: LoadedPermissionConfig;
+  let permissionGate: PermissionGate;
+
+  const loadPermissions = (workdir: string): LoadedPermissionConfig =>
+    loadPermissionConfig({
+      home,
+      workdir,
+      ...(permissionOptions === undefined
+        ? {}
+        : {
+            inline: permissionOptions.inline,
+            ...(permissionOptions.options.userConfigPath !== undefined
+              ? { userConfigPath: permissionOptions.options.userConfigPath }
+              : {}),
+            ...(permissionOptions.options.projectConfigPath !== undefined
+              ? { projectConfigPath: permissionOptions.options.projectConfigPath }
+              : {}),
+            ...(permissionOptions.options.trustProjectConfig !== undefined
+              ? { trustProjectConfig: permissionOptions.options.trustProjectConfig }
+              : {}),
+          }),
+    });
+
+  const buildPermissionGate = (loaded: LoadedPermissionConfig): PermissionGate =>
+    createPermissionGate({
+      preset: loaded.preset,
+      rules: loaded.rules,
+      approvalTimeoutMs: loaded.approvalTimeoutMs,
+      ...(permissionOptions?.options.prompter !== undefined
+        ? { prompter: permissionOptions.options.prompter }
+        : {}),
+    });
 
   if (resume && resumeDir !== undefined) {
+    const headerPath = path.join(resumeDir, "header.json");
+    try {
+      await stat(headerPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        throw new SessionResumeError(
+          "missing_session_dir",
+          `Session header not found: ${headerPath}`,
+          { dir: resumeDir, file: "header.json" },
+        );
+      }
+      throw error;
+    }
+    // 只读 header 后再加载权限配置；配置失败不得打开 handle、触发 crash recovery 或追加事件。
+    const { header } = readSessionDir(resumeDir);
+    runCwd = path.resolve(opts.cwd ?? header.workdir ?? process.cwd());
+    loadedPermissions = loadPermissions(runCwd);
+    permissionGate = buildPermissionGate(loadedPermissions);
     const plan = await planResume(resumeDir, opts);
     session = plan.session;
     systemPromptToAppend = plan.systemPromptToAppend;
@@ -308,6 +481,8 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   } else {
     const sessionDir = resumeDir ?? path.join(home, "sessions", id);
     runCwd = path.resolve(opts.cwd ?? process.cwd());
+    loadedPermissions = loadPermissions(runCwd);
+    permissionGate = buildPermissionGate(loadedPermissions);
     session = await createSession(sessionDir, {
       id,
       systemPrompt: opts.systemPrompt,
@@ -346,6 +521,15 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   try {
     if (systemPromptToAppend !== undefined) {
       await session.append({ type: "system", payload: { content: systemPromptToAppend } });
+    }
+    if (loadedPermissions.projectSkipped !== undefined) {
+      await session.append({
+        type: "status",
+        payload: {
+          status: "permissions_project_config_skipped",
+          message: loadedPermissions.projectSkipped,
+        },
+      });
     }
 
     const signal = opts.signal ?? new AbortController().signal;
@@ -487,6 +671,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       cwd: runCwd,
       timeoutMs: opts.timeoutMs,
       pricePerMillion: provider.pricePerMillion,
+      permissionGate,
       ...(meter !== undefined ? { meter } : {}),
       ...(compactor !== undefined ? { compactor } : {}),
     };
