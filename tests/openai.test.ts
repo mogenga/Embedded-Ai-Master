@@ -103,6 +103,14 @@ describe("OpenAI 兼容模型适配器", () => {
       .toThrowError(/baseUrl is not a valid URL/);
   });
 
+  it.each(["ftp://gw/v1", "file:///tmp/gw"])(
+    "非 http(s) scheme 在创建期拒绝: %s（D-013）",
+    (baseUrl) => {
+      expect(() => createOpenAIProvider({ baseUrl, model: "m", fetchImpl: successFetch() }))
+        .toThrowError(/http/);
+    },
+  );
+
   it("将合法 tool_calls arguments JSON 解析为对象", async () => {
     const result = await complete(successFetch({ choices: [{ message: { content: "", tool_calls: [
       { id: "call-1", function: { name: "echo", arguments: '{"value":1}' } },
@@ -254,6 +262,47 @@ describe("OpenAI 兼容模型适配器", () => {
     }));
 
     expect(result).not.toHaveProperty("usage");
+  });
+
+  it("usage 数字字段为字符串时按数值收窄（D-014）", async () => {
+    const result = await complete(successFetch({
+      ...OK_BODY,
+      usage: { prompt_tokens: "10", completion_tokens: "3" },
+    }));
+
+    expect(result.usage).toEqual({ promptTokens: 10, completionTokens: 3 });
+  });
+
+  it("usage 数字字段非数值字符串时仍省略 usage", async () => {
+    const result = await complete(successFetch({
+      ...OK_BODY,
+      usage: { prompt_tokens: "ten", completion_tokens: "3" },
+    }));
+
+    expect(result).not.toHaveProperty("usage");
+  });
+
+  it("tool call type 非 function 或 content 非字符串时抛 invalid_response（D-037）", async () => {
+    await expect(complete(successFetch({
+      choices: [{
+        message: {
+          content: "",
+          tool_calls: [{
+            id: "c1",
+            type: "image",
+            function: { name: "echo", arguments: "{}" },
+          }],
+        },
+        finish_reason: "tool_calls",
+      }],
+    }))).rejects.toMatchObject({ code: "invalid_response" });
+
+    await expect(complete(successFetch({
+      choices: [{
+        message: { content: 42, tool_calls: [] },
+        finish_reason: "stop",
+      }],
+    }))).rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("缺少 tool call id 或 name 时抛 invalid_response", async () => {
@@ -511,6 +560,36 @@ describe("OpenAI 兼容模型适配器", () => {
     });
 
     const result = await provider.complete(MESSAGES, [], { signal: new AbortController().signal, maxOutputTokens: 1 });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(result.content).toBe("hi");
+  });
+
+  it.each([408, 409, 425])("HTTP %i 视为可重试（D-036）", async (status) => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status,
+        json: async () => ({}),
+        text: async () => "retry me",
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => OK_BODY,
+        text: async () => JSON.stringify(OK_BODY),
+      }) as unknown as typeof fetch;
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      retry: { maxRetries: 1, baseDelayMs: 1, sleep: async () => {}, rand: () => 0.5 },
+    });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 1,
+    });
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(result.content).toBe("hi");

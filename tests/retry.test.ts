@@ -71,6 +71,54 @@ describe('retry', () => {
     expect(calls).toBe(3);
   });
 
+  it('退避期间取消 → 立即抛 AbortError 且不再尝试（D-010）', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+
+    const pending = retry(
+      async () => {
+        calls += 1;
+        throw new Error('temporary');
+      },
+      {
+        maxRetries: 3,
+        baseDelayMs: 1_000,
+        isRetryable: () => true,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+        rand: () => 1,
+        signal: controller.signal,
+      },
+    );
+    setTimeout(() => controller.abort(), 5);
+    const started = Date.now();
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls).toBe(1);
+    expect(Date.now() - started).toBeLessThan(500);
+  });
+
+  it('已中止的 signal 在首次退避前就抛出', async () => {
+    let calls = 0;
+
+    await expect(
+      retry(
+        async () => {
+          calls += 1;
+          throw new Error('temporary');
+        },
+        {
+          maxRetries: 3,
+          baseDelayMs: 1,
+          isRetryable: () => true,
+          sleep: async () => {},
+          rand: () => 0.5,
+          signal: AbortSignal.abort(),
+        },
+      ),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+    expect(calls).toBe(1);
+  });
+
   it('不可重试错误立即抛出且不 sleep', async () => {
     const error = new Error('401');
     const sleep = vi.fn(async () => {});
