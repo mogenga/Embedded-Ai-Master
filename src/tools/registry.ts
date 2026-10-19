@@ -38,8 +38,7 @@ function buildToolMap(tools: ToolDef<any>[]): Map<string, ToolDef<any>> {
     if (map.has(tool.name)) {
       throw new Error(`tool already registered: ${tool.name}`);
     }
-    // 构造期即验证 schema 可转换且根为 object: fail-fast,
-    // 同时把 zod 的 unrepresentable 错误提前到装配期。
+
     toParametersSchema(tool);
     map.set(tool.name, tool);
   }
@@ -53,7 +52,7 @@ export class ToolRegistry {
     this.tools = buildToolMap(tools);
   }
 
-  // 全量替换:先验证新集合再切换,校验失败时保留旧集合。
+
   replace(tools: ToolDef<any>[]): void {
     this.tools = buildToolMap(tools);
   }

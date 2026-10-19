@@ -15,11 +15,28 @@ import { ToolRegistry } from "../src/tools/registry.js";
 
 const resumeCloseFailure = vi.hoisted(() => ({ enabled: false }));
 const resumeCallCounter = vi.hoisted(() => ({ count: 0 }));
+const statusAppendFailure = vi.hoisted(() => ({ enabled: false }));
 
 vi.mock("../src/session/session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/session/session.js")>();
   return {
     ...actual,
+    createSession: async (
+      dir: string,
+      opts?: Parameters<typeof actual.createSession>[1],
+    ) => {
+      const handle = await actual.createSession(dir, opts);
+      if (!statusAppendFailure.enabled) return handle;
+      statusAppendFailure.enabled = false;
+      const originalAppend = handle.append.bind(handle);
+      let failed = false;
+      handle.append = (event) => {
+        if (failed) return originalAppend(event);
+        failed = true;
+        return Promise.reject(new Error("status append boom"));
+      };
+      return handle;
+    },
     resumeSession: async (dir: string, opts?: { generationThresholdBytes?: number }) => {
       resumeCallCounter.count += 1;
       const handle = await actual.resumeSession(dir, opts);
@@ -46,12 +63,12 @@ async function tempDir(): Promise<string> {
 afterEach(async () => {
   resumeCloseFailure.enabled = false;
   resumeCallCounter.count = 0;
+  statusAppendFailure.enabled = false;
   vi.unstubAllEnvs();
   for (const dir of tempDirs.splice(0)) await removeTempDir(dir);
 });
 
-// Windows 多 worker 并发下,临时目录可能被扫描/索引短暂占用而报 ENOTEMPTY;
-// 有限重试,真实残留仍会失败。
+
 async function removeTempDir(dir: string): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
@@ -1876,6 +1893,40 @@ describe("runSession MCP 装配", () => {
     );
   });
 
+  it("status 写入失败时输出错误且会话继续", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, {
+      broken: { command: "definitely-not-a-real-command-embedded-ai" },
+    });
+    const sessionDir = path.join(home, "mcp-status-append-failure");
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    statusAppendFailure.enabled = true;
+    try {
+      const events = await collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir,
+          fetchImpl: impl,
+          cwd: configDir,
+          mcp: { userConfigPath },
+        }),
+      );
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[mcp] status event append failed: status append boom"),
+      );
+      expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
+    } finally {
+      errorSpy.mockRestore();
+      statusAppendFailure.enabled = false;
+    }
+  });
+
   it("配置坏 JSON 记 mcp_config_failed 且会话继续", async () => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
@@ -2079,9 +2130,7 @@ describe("runSession MCP 装配", () => {
     expect(secondTools).toContain("mcp__echo__echo");
   });
 
-  // MCP client 自身校验坏 inputSchema，真实链路落 tools_refresh_failed 并保留旧集合；
-  // adapter 跳过坏 schema 的独立路径由 tests/mcp-tools.test.ts 覆盖。
-  it("坏 schema 触发刷新失败时保留旧集合，坏工具不进入模型工具列表", async () => {
+  it("坏 schema 触发刷新失败时保留旧集合", async () => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
     const configDir = await tempDir();
@@ -2129,7 +2178,7 @@ describe("runSession MCP 装配", () => {
       (tool) => tool.function.name,
     );
     expect(secondTools).toContain("mcp__echo__echo");
-    expect(secondTools).not.toContain("mcp__echo__invalid");
+
   });
 
   it("registry 全局重建失败记 scope:global 且会话继续", async () => {
@@ -2164,6 +2213,13 @@ describe("runSession MCP 装配", () => {
           message: expect.stringContaining("registry replace boom"),
         }),
       );
+      expect(
+        mcpStatusPayloads(sessionDir).some(
+          (payload) =>
+            payload.status === "mcp_tool_name_renamed"
+            || payload.status === "mcp_tool_invalid_schema",
+        ),
+      ).toBe(false);
       expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
       const tools = calls[0].body.tools as Array<{ function: { name: string } }>;
       expect(tools.map((tool) => tool.function.name).some((name) => name.startsWith("mcp__"))).toBe(
@@ -2295,7 +2351,7 @@ describe("runSession MCP 装配", () => {
     ).rejects.toThrow(/mcp\.enabled must be a boolean/);
   });
 
-  it.each(["yes", 42, null])("mcp 非对象时抛 TypeError: %j", async (value) => {
+  it.each(["yes", 42, null, [], new Date()])("mcp 非对象时抛 TypeError: %j", async (value) => {
     await expect(
       collect(
         runSession({

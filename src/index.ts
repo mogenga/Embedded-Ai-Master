@@ -19,6 +19,7 @@ import { McpConfigError } from "./mcp/errors.js";
 import { McpManager } from "./mcp/manager.js";
 import type { McpStatusEvent } from "./mcp/manager.js";
 import { createMcpTools } from "./mcp/tools.js";
+import type { McpToolAdapterStatus } from "./mcp/tools.js";
 import { heuristicCountTokens } from "./model/count.js";
 import { createOpenAIProvider } from "./model/openai.js";
 import { SessionResumeError } from "./session/errors.js";
@@ -211,11 +212,17 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   }
 
   const rawMcp: unknown = opts.mcp;
-  if (
-    rawMcp !== undefined &&
-    (typeof rawMcp !== "object" || rawMcp === null || Array.isArray(rawMcp))
-  ) {
-    throw new TypeError(`mcp must be an object; got ${rawMcp === null ? "null" : typeof rawMcp}`);
+  if (rawMcp !== undefined) {
+    const proto =
+      typeof rawMcp === "object" && rawMcp !== null ? Object.getPrototypeOf(rawMcp) : undefined;
+    if (
+      typeof rawMcp !== "object" ||
+      rawMcp === null ||
+      Array.isArray(rawMcp) ||
+      (proto !== Object.prototype && proto !== null)
+    ) {
+      throw new TypeError(`mcp must be an object; got ${rawMcp === null ? "null" : typeof rawMcp}`);
+    }
   }
   if (opts.mcp?.enabled !== undefined && typeof opts.mcp.enabled !== "boolean") {
     throw new TypeError(`mcp.enabled must be a boolean; got ${typeof opts.mcp.enabled}`);
@@ -300,7 +307,10 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       .then(
         () => undefined,
         (error: unknown) => {
-          if (statusWriteFailure === undefined) statusWriteFailure = error;
+          if (statusWriteFailure === undefined) {
+            statusWriteFailure = error;
+            console.error(`[mcp] status event append failed: ${messageOf(error)}`);
+          }
         },
       );
   };
@@ -372,32 +382,35 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
             },
           });
           mcpManager = manager;
+          const emitAdapterStatus = (status: McpToolAdapterStatus): void => {
+            if (status.kind === "mcp_tool_invalid_schema") {
+              appendMcpStatusOnce(`invalid:${status.server}\u0000${status.tool}`, {
+                status: "mcp_tool_invalid_schema",
+                server: status.server,
+                tool: status.tool,
+                message: status.message,
+              });
+              return;
+            }
+            appendMcpStatusOnce(
+              `renamed:${status.server}\u0000${status.tool}\u0000${status.name}`,
+              {
+                status: "mcp_tool_name_renamed",
+                server: status.server,
+                tool: status.tool,
+                name: status.name,
+                originalName: status.originalName,
+              },
+            );
+          };
           const rebuildMcpTools = (): void => {
+            const pendingStatuses: McpToolAdapterStatus[] = [];
             try {
               const mcpTools = createMcpTools(manager, {
                 reservedNames: builtinTools.map((tool) => tool.name),
-                onStatus: (status) => {
-                  if (status.kind === "mcp_tool_invalid_schema") {
-                    appendMcpStatusOnce(`invalid:${status.server}\u0000${status.tool}`, {
-                      status: "mcp_tool_invalid_schema",
-                      server: status.server,
-                      tool: status.tool,
-                      message: status.message,
-                    });
-                    return;
-                  }
-                  appendMcpStatusOnce(
-                    `renamed:${status.server}\u0000${status.tool}\u0000${status.name}`,
-                    {
-                      status: "mcp_tool_name_renamed",
-                      server: status.server,
-                      tool: status.tool,
-                      name: status.name,
-                      originalName: status.originalName,
-                    },
-                  );
-                },
+                onStatus: (status) => pendingStatuses.push(status),
               });
+
               registry.replace([...builtinTools, ...mcpTools]);
             } catch (error) {
               appendMcpStatus({
@@ -405,7 +418,9 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
                 scope: "global",
                 message: messageOf(error),
               });
+              return;
             }
+            for (const status of pendingStatuses) emitAdapterStatus(status);
           };
           manager.onToolsChanged(() => rebuildMcpTools());
           await manager.connectAll();
@@ -444,9 +459,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     throw error;
   } finally {
     await statusQueue;
-    if (statusWriteFailure !== undefined) {
-      console.error(`[mcp] status event append failed: ${messageOf(statusWriteFailure)}`);
-    }
+
     let closeError: unknown;
     try {
       await mcpManager?.close();

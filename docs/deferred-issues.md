@@ -852,7 +852,7 @@
 ### D-101 · MCP status 写入与 close 的迟到竞态
 
 - **发现**: 2026-10-19,维度5 Task4 第二轮复核(N-5)。
-- **现象**: `runSession` 在 `finally` 中先 `await statusQueue` 再 `manager.close()`/`session.close()`。若某个 refresh 任务在 `await statusQueue` 之后才同步触发 listener 并入队 status,该写入会落在已关闭的 session 上;当前实现会记录 `status event append failed` 并继续关闭,但该条审计事件丢失。`appendMcpStatus` 只保留首个写入错误,未重试。
+- **现象**: `runSession` 在 `finally` 中先 `await statusQueue` 再 `manager.close()`/`session.close()`。若某个 refresh 任务在 `await statusQueue` 之后才同步触发 listener 并入队 status,该写入会落在已关闭的 session 上;`appendMcpStatus` 在首个失败时立即输出 `[mcp] status event append failed`(迟到入队同样会输出)并继续关闭,但该条审计事件仍会丢失,且不重试。
 - **影响**: list_changed 与会话结束高度重叠时可能丢失最后一条 `mcp_tools_changed`/`mcp_tools_refresh_failed` 审计;不影响工具调用结果与主会话退出码。
 - **触发升级条件**: 自动化依赖会话日志完整审计 MCP 工具变更;观察到 close 与 list_changed 并发导致 status 缺失;需要强一致事件序列。
 - **修复建议**: close 前先停止接收 refresh/listener(关闭标志或取消 token),再 flush 一次 status 队列;或为 status 写入增加有界重试/独立 sink。
