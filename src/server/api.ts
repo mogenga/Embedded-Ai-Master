@@ -13,6 +13,7 @@ import type { SessionEvent, SessionHeader } from "../session/types.js";
 export interface ApiOptions {
   harnessHome?: string;
   staticRoot?: string;
+  port?: number;
 }
 
 export interface SessionSummary {
@@ -69,6 +70,56 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 function sendError(res: ServerResponse, status: number, code: string, message: string): void {
   sendJson(res, status, { error: { code, message } });
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return (
+    hostname === "127.0.0.1"
+    || hostname === "localhost"
+    || hostname === "::1"
+    || hostname === "[::1]"
+  );
+}
+
+function requireLocalRequest(req: IncomingMessage, port: number | undefined): void {
+  const hostHeader = req.headers.host;
+  if (hostHeader !== undefined) {
+    let parsed: URL;
+    try {
+      parsed = new URL(`http://${hostHeader}`);
+    } catch {
+      throw new HttpError(403, "forbidden_host", "Host 非法");
+    }
+    if (!isLoopbackHostname(parsed.hostname)) {
+      throw new HttpError(403, "forbidden_host", "Host 必须是 loopback 地址");
+    }
+    if (port !== undefined) {
+      const hostPort = parsed.port === "" ? 80 : Number(parsed.port);
+      if (hostPort !== port) {
+        throw new HttpError(403, "forbidden_host", "Host 端口与监听端口不一致");
+      }
+    }
+  }
+  const origin = req.headers.origin;
+  if (origin !== undefined) {
+    let parsed: URL;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      throw new HttpError(403, "forbidden_origin", "Origin 非法");
+    }
+    if (!isLoopbackHostname(parsed.hostname)) {
+      throw new HttpError(403, "forbidden_origin", "Origin 必须是 loopback 地址");
+    }
+    if (port !== undefined) {
+      const originPort = parsed.port === ""
+        ? (parsed.protocol === "https:" ? 443 : 80)
+        : Number(parsed.port);
+      if (originPort !== port) {
+        throw new HttpError(403, "forbidden_origin", "Origin 端口与监听端口不一致");
+      }
+    }
+  }
 }
 
 function normalizeForCompare(value: string): string {
@@ -338,6 +389,9 @@ export function createApiHandler(
       const method = req.method ?? "GET";
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       const pathname = url.pathname;
+      if (pathname === "/api" || pathname.startsWith("/api/")) {
+        requireLocalRequest(req, opts.port);
+      }
 
       if (pathname === "/api/sessions") {
         requireMethod(method, "GET");
@@ -398,7 +452,7 @@ export function createUiServer(
 ): { server: Server; port: number; close(): Promise<void> } {
   const port = opts.port ?? 5174;
   const host = opts.host ?? "127.0.0.1";
-  const handler = createApiHandler(opts);
+  const handler = createApiHandler({ ...opts, port });
   const server = createServer((req, res) => {
     void handler(req, res);
   });
