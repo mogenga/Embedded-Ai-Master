@@ -206,6 +206,40 @@ describe("query 主循环", () => {
     });
   });
 
+  it("tool_result payload 写入 toolName 与 evidence", async () => {
+    const evidenceTool: ToolDef<{ text: string }> = {
+      name: "evidence",
+      description: "返回取证结果",
+      schema: z.object({ text: z.string() }),
+      annotations: { readOnly: true, evidence: true },
+      execute: async (input) => ({
+        isError: false,
+        code: "ok",
+        message: "",
+        text: input.text,
+      }),
+    };
+    const provider = scriptedProvider([
+      reply("取证", [{ id: "e1", name: "evidence", arguments: { text: "proof" } }]),
+      reply("完成"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([evidenceTool]),
+    });
+
+    await collect(query(ctx, "取证", { maxTurns: 10 }));
+
+    const logged = session.events().find((event) => event.type === "tool_result");
+    expect(logged?.payload).toStrictEqual({
+      id: "e1",
+      ok: true,
+      text: "proof",
+      code: "ok",
+      toolName: "evidence",
+      evidence: true,
+    });
+  });
+
   it("model-visible means logged: 投影含 tool 消息", async () => {
     const provider = scriptedProvider([reply("用 echo", [echoCall("c1")]), reply("完成")]);
     const { ctx, session } = await makeCtx(provider);
@@ -623,12 +657,14 @@ describe("query 主循环", () => {
         ok: false,
         text: "tool aborted before execution",
         code: "tool_aborted",
+        toolName: "echo",
       },
       {
         id: "c2",
         ok: false,
         text: "tool aborted before execution",
         code: "tool_aborted",
+        toolName: "echo",
       },
     ]);
     expect(logged.map((event) => event.parent)).toStrictEqual([
@@ -705,12 +741,14 @@ describe("query 主循环", () => {
         ok: false,
         text: "tool aborted before execution",
         code: "tool_aborted",
+        toolName: "echo",
       },
       {
         id: "c2",
         ok: false,
         text: "tool aborted before execution",
         code: "tool_aborted",
+        toolName: "echo",
       },
     ]);
     expect(logged.map((event) => event.parent)).toStrictEqual([
@@ -865,12 +903,14 @@ describe("query 主循环", () => {
         ok: false,
         text: "tool result not recorded due to error",
         code: "tool_result_lost",
+        toolName: "echo",
       },
       {
         id: "c2",
         ok: false,
         text: "tool result not recorded due to error",
         code: "tool_result_lost",
+        toolName: "echo",
       },
     ]);
     expect(results.map((event) => event.parent)).toStrictEqual([
@@ -929,12 +969,14 @@ describe("query 主循环", () => {
         ok: false,
         text: "tool result not recorded due to error",
         code: "tool_result_lost",
+        toolName: "echo",
       },
       {
         id: "c2",
         ok: false,
         text: "tool result not recorded due to error",
         code: "tool_result_lost",
+        toolName: "echo",
       },
     ]);
     expect(
@@ -1114,6 +1156,141 @@ describe("query 主循环", () => {
 
     expect(events.map((event) => event.kind)).toEqual(["model_message", "done"]);
     expect(provider.calls).toHaveLength(1);
+  });
+
+  it("compactor 压缩后 yield compacted 且视图含摘要、不含旧工具结果", async () => {
+    const provider = scriptedProvider([reply("done")]);
+    const { ctx, session } = await makeCtx(provider, {
+      budget: () => ({ over: true, tokens: 100, softLimit: 10 }),
+    });
+    const oldAssistant = await session.append({
+      type: "assistant",
+      payload: {
+        content: "",
+        toolCalls: [{ id: "old-1", name: "echo", arguments: { text: "old" } }],
+      },
+    });
+    const oldResult = await session.append({
+      type: "tool_result",
+      payload: {
+        id: "old-1",
+        ok: true,
+        text: "OLD-RESULT-MARKER",
+        code: "ok",
+        toolName: "echo",
+      },
+      parent: oldAssistant.seq,
+    });
+    ctx.compactor = async (target) => {
+      await target.append({
+        type: "compaction",
+        payload: { kind: "summary", summary: "OLD-SUMMARY", coversUpToSeq: oldResult.seq },
+      });
+    };
+
+    const events = await collect(query(ctx, "new input", { maxTurns: 10 }));
+
+    expect(events.map((event) => event.kind)).toEqual(["compacted", "model_message", "done"]);
+    const sent = provider.calls[0].messages;
+    expect(sent.some((message) => message.content.includes("OLD-SUMMARY"))).toBe(true);
+    expect(sent.some((message) => message.content.includes("OLD-RESULT-MARKER"))).toBe(false);
+    expect(sent.at(-1)).toEqual({ role: "user", content: "new input" });
+  });
+
+  it("compactor 追加的 usage 在压缩后重算成本并触发 maxCostUsd", async () => {
+    const provider = scriptedProvider([reply("", [echoCall("c1")]), reply("done")]);
+    const { ctx } = await makeCtx(provider, {
+      budget: () => ({ over: true, tokens: 100, softLimit: 10 }),
+      pricePerMillion: { input: 1, output: 1 },
+    });
+    ctx.compactor = async (target) => {
+      await target.append({
+        type: "usage",
+        payload: { promptTokens: 1_000_000, completionTokens: 0 },
+      });
+    };
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10, maxCostUsd: 0.5 }));
+
+    expect(provider.calls).toHaveLength(1);
+    expect(events.slice(-2)).toEqual([
+      { kind: "interrupted", reason: "max_cost_usd" },
+      { kind: "done", finishReason: "max_cost_usd" },
+    ]);
+  });
+
+  it("compactor 抛 AbortError 时以 interrupted(aborted) 结束", async () => {
+    const provider = scriptedProvider([reply("done")]);
+    const { ctx } = await makeCtx(provider, {
+      budget: () => ({ over: true, tokens: 100, softLimit: 10 }),
+      compactor: async () => {
+        throw new DOMException("The operation was aborted", "AbortError");
+      },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(events).toEqual([
+      { kind: "interrupted", reason: "aborted" },
+      { kind: "done", finishReason: "aborted" },
+    ]);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("complete 后 observe 更新测量,使下一轮 budget 超限并触发 compactor", async () => {
+    let ratio = 1;
+    const observed: Array<{ promptTokens: number; messages: ModelChatMessage[] }> = [];
+    const meter = {
+      measure(messages: ModelChatMessage[]) {
+        const raw = messages.reduce(
+          (total, message) => total + Math.ceil(message.content.length / 4),
+          0,
+        );
+        return raw * ratio;
+      },
+      observe(promptTokens: number, messages: ModelChatMessage[]) {
+        observed.push({ promptTokens, messages });
+        ratio = 100;
+      },
+      ratio() {
+        return ratio;
+      },
+    };
+    let compactions = 0;
+    const provider = scriptedProvider([
+      reply("", [echoCall("c1")], false, { promptTokens: 1000, completionTokens: 1 }),
+      reply("done", [], false, { promptTokens: 20, completionTokens: 1 }),
+    ]);
+    const { ctx } = await makeCtx(provider, {
+      meter,
+      budget: (messages) => ({
+        over: meter.measure(messages) > 10,
+        tokens: meter.measure(messages),
+        softLimit: 10,
+      }),
+      compactor: async (target) => {
+        compactions += 1;
+        await target.append({
+          type: "compaction",
+          payload: { kind: "microcompact", elidedSeqs: [], note: "noop" },
+        });
+      },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(observed).toHaveLength(2);
+    expect(observed[0].promptTokens).toBe(1000);
+    expect(observed[0].messages).toEqual(provider.calls[0].messages);
+    expect(compactions).toBe(1);
+    expect(events.map((event) => event.kind)).toEqual([
+      "model_message",
+      "tool_use",
+      "tool_result",
+      "compacted",
+      "model_message",
+      "done",
+    ]);
   });
 
   it("cwd/timeoutMs/artifactDir 透传至 executeBatch", async () => {

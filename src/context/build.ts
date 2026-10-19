@@ -1,5 +1,6 @@
 import type { ModelChatMessage } from "../model/protocol.js";
 import type { SessionEvent } from "../session/types.js";
+import { elidedContent } from "./microcompact.js";
 
 interface InvalidJsonMarker {
   error: "invalid_json";
@@ -62,6 +63,86 @@ interface ActiveBatch {
   seen: Set<string>;
 }
 
+interface SummaryDirective {
+  summary: string;
+  coversUpToSeq: number;
+}
+
+function collectElidedSeqs(events: readonly SessionEvent[]): Set<number> {
+  const elided = new Set<number>();
+  for (const event of events) {
+    if (event.type !== "compaction" || event.payload.kind !== "microcompact") continue;
+    const seqs = event.payload.elidedSeqs;
+    if (!Array.isArray(seqs)) continue;
+    for (const seq of seqs) {
+      if (typeof seq === "number") elided.add(seq);
+    }
+  }
+  return elided;
+}
+
+function summaryBoundaryComplete(
+  events: readonly SessionEvent[],
+  coversUpToSeq: number,
+): boolean {
+  for (const event of events) {
+    if (event.type !== "tool_result") continue;
+    if (event.seq <= coversUpToSeq) continue;
+    if (event.parent !== undefined && event.parent <= coversUpToSeq) return false;
+  }
+  return true;
+}
+
+function summaryCoversEvidence(
+  events: readonly SessionEvent[],
+  coversUpToSeq: number,
+): boolean {
+  for (const event of events) {
+    if (event.type !== "tool_result" || event.payload.evidence !== true) continue;
+    if (event.seq <= coversUpToSeq) return true;
+  }
+  return false;
+}
+
+function toSummaryDirective(
+  events: readonly SessionEvent[],
+  index: number,
+  lastSeq: number,
+): SummaryDirective | undefined {
+  const event = events[index];
+  const summary = event.payload.summary;
+  const coversUpToSeq = event.payload.coversUpToSeq;
+  if (typeof summary !== "string" || summary.trim() === "") return undefined;
+  if (
+    typeof coversUpToSeq !== "number"
+    || !Number.isInteger(coversUpToSeq)
+    || coversUpToSeq < 0
+    || coversUpToSeq > lastSeq
+  ) {
+    return undefined;
+  }
+  if (!summaryBoundaryComplete(events, coversUpToSeq)) return undefined;
+  if (summaryCoversEvidence(events, coversUpToSeq)) return undefined;
+  return { summary, coversUpToSeq };
+}
+
+// 按事件顺序采信有效 summary，且边界不得倒退；坏/倒退的 summary 不放大视图，
+// 也不吞掉之前已采信的有效摘要。
+function findEffectiveSummary(events: readonly SessionEvent[]): SummaryDirective | undefined {
+  const lastSeq = events.length === 0 ? -1 : events[events.length - 1].seq;
+  let accepted: SummaryDirective | undefined;
+  let lastBoundary = -1;
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index];
+    if (event.type !== "compaction" || event.payload.kind !== "summary") continue;
+    const valid = toSummaryDirective(events, index, lastSeq);
+    if (valid === undefined || valid.coversUpToSeq < lastBoundary) continue;
+    accepted = valid;
+    lastBoundary = valid.coversUpToSeq;
+  }
+  return accepted;
+}
+
 export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage[] {
   const bySeq = new Map<number, SessionEvent>();
   let previousSeq: number | undefined;
@@ -76,8 +157,18 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
   }
 
   const messages: ModelChatMessage[] = [];
+  const elidedSeqs = collectElidedSeqs(events);
+  const effectiveSummary = findEffectiveSummary(events);
+  const projected =
+    effectiveSummary === undefined
+      ? events
+      : events.filter(
+          (event) =>
+            event.type === "system" || event.seq > effectiveSummary.coversUpToSeq,
+        );
+
   let activeBatch: ActiveBatch | undefined;
-  for (const event of events) {
+  for (const event of projected) {
     if (
       activeBatch !== undefined &&
       (event.type === "user" || event.type === "system" || event.type === "assistant")
@@ -177,7 +268,11 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
         if (activeBatch.remaining.length === 0) {
           activeBatch = undefined;
         }
-        messages.push({ role: "tool", content: text, tool_call_id: id });
+        const replacement =
+          elidedSeqs.has(event.seq) && event.payload.evidence !== true
+            ? elidedContent(event.payload, text)
+            : undefined;
+        messages.push({ role: "tool", content: replacement ?? text, tool_call_id: id });
         break;
       }
       case "tool_call":
@@ -197,6 +292,13 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
     throw new TypeError(
       `assistant event ${activeBatch.assistantSeq} has ${activeBatch.remaining.length} missing tool_result events`,
     );
+  }
+  if (effectiveSummary !== undefined) {
+    const lastSystemIndex = messages.findLastIndex((message) => message.role === "system");
+    messages.splice(lastSystemIndex + 1, 0, {
+      role: "system",
+      content: `[Conversation summary]\n${effectiveSummary.summary}`,
+    });
   }
   return messages;
 }

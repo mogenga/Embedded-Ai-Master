@@ -12,6 +12,7 @@ export interface ToolResult {
   detail?: unknown;
   artifactPath?: string;
   text: string;
+  evidence?: boolean;
 }
 
 export interface ToolAnnotations {

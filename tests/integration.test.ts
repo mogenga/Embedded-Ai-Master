@@ -94,6 +94,32 @@ const EMPTY_RESPONSE = {
   usage: { prompt_tokens: 20, completion_tokens: 3 },
 };
 
+const LONG_TOOL_TEXT = "E".repeat(400);
+
+const LONG_TOOL_RESPONSE = {
+  choices: [
+    {
+      message: {
+        content: "",
+        tool_calls: [
+          {
+            id: "call-long",
+            type: "function",
+            function: { name: "echo", arguments: JSON.stringify({ text: LONG_TOOL_TEXT }) },
+          },
+        ],
+      },
+      finish_reason: "tool_calls",
+    },
+  ],
+  usage: { prompt_tokens: 5, completion_tokens: 2 },
+};
+
+const SUMMARY_RESPONSE = {
+  choices: [{ message: { content: "summary-of-old-context" }, finish_reason: "stop" }],
+  usage: { prompt_tokens: 100, completion_tokens: 10 },
+};
+
 const PROVIDERS = {
   gw: {
     protocol: "openai-chat-completions",
@@ -374,6 +400,96 @@ describe("runSession 端到端装配", () => {
       { kind: "interrupted", reason: "max_turns" },
       { kind: "done", finishReason: "max_turns" },
     ]);
+  });
+
+  it("compaction 默认开启:小 contextWindow 下历史工具结果触发摘要并落日志", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "auto-compaction");
+    const { impl, calls } = mockFetch([LONG_TOOL_RESPONSE, SUMMARY_RESPONSE, EMPTY_RESPONSE]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/tiny",
+        providersText: providersWith({ tiny: { contextWindow: 30, maxOutput: 512 } }),
+        sessionDir,
+        fetchImpl: impl,
+        compaction: { keepRecentTurns: 0 },
+      }),
+    );
+
+    expect(calls).toHaveLength(3);
+    expect(calls[1].body.tools).toEqual([]);
+    const summaryMessages = calls[1].body.messages as Array<{ role: string; content: string }>;
+    expect(summaryMessages[0]).toMatchObject({ role: "system" });
+
+    const finalMessages = calls[2].body.messages as Array<{ role: string; content: string }>;
+    const finalSystem = finalMessages.find(
+      (message) => message.role === "system" && message.content.includes("[Conversation summary]"),
+    );
+    expect(finalSystem).toBeDefined();
+    expect(finalSystem?.content).toContain("summary-of-old-context");
+    const toolMessages = finalMessages.filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0].content).toContain("[tool result elided");
+
+    const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(
+      log.some((event) => event.type === "compaction" && event.payload.kind === "microcompact"),
+    ).toBe(true);
+    expect(
+      log.some((event) => event.type === "compaction" && event.payload.kind === "summary"),
+    ).toBe(true);
+    expect(log.filter((event) => event.type === "usage").length).toBeGreaterThanOrEqual(2);
+    expect(events.some((event) => event.kind === "compacted")).toBe(true);
+  });
+
+  it("compaction.enabled:false 时不压缩并保留完整工具结果", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "no-compaction");
+    const { impl, calls } = mockFetch([LONG_TOOL_RESPONSE, EMPTY_RESPONSE]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/tiny",
+        providersText: providersWith({ tiny: { contextWindow: 30, maxOutput: 512 } }),
+        sessionDir,
+        fetchImpl: impl,
+        compaction: { enabled: false },
+      }),
+    );
+
+    expect(calls).toHaveLength(2);
+    const finalMessages = calls[1].body.messages as Array<{ role: string; content: string }>;
+    const toolMessages = finalMessages.filter((message) => message.role === "tool");
+    expect(toolMessages).toHaveLength(1);
+    expect(toolMessages[0].content).toBe(LONG_TOOL_TEXT);
+
+    const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(log.some((event) => event.type === "compaction")).toBe(false);
+    expect(events.some((event) => event.kind === "compacted")).toBe(false);
+  });
+
+  it("compaction.enabled:false 时不校验压缩比例", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir: path.join(home, "disabled-invalid-ratios"),
+        fetchImpl: impl,
+        compaction: { enabled: false, keepTailRatio: 0, softRatio: 1 },
+      }),
+    );
+
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
   });
 
   it("结束后会话日志可读且工具结果完整", async () => {
@@ -836,6 +952,172 @@ describe("runSession resume", () => {
     expect(secondFetch.calls[0].url).toBe("http://127.0.0.1:7777/v1/chat/completions");
     expect(secondFetch.calls[0].headers.get("authorization")).toBe("Bearer fresh-secret");
     expect(Object.keys(await readHeader(sessionDir))).not.toContain("apiKey");
+  });
+
+  it("强制压缩后 close→resume 仍含 summary/占位且日志只增不改", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "resume-after-compaction");
+    const tiny = providersWith({ tiny: { contextWindow: 30, maxOutput: 512 } });
+    const firstFetch = mockFetch([LONG_TOOL_RESPONSE, SUMMARY_RESPONSE, EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/tiny",
+        providersText: tiny,
+        sessionDir,
+        fetchImpl: firstFetch.impl,
+        compaction: { keepRecentTurns: 0 },
+      }),
+    );
+
+    const logPath = path.join(sessionDir, "session.v1.jsonl");
+    const before = readSessionFile(logPath);
+    expect(
+      before.some(
+        (event) => event.type === "compaction" && event.payload.kind === "summary",
+      ),
+    ).toBe(true);
+    expect(
+      before.some(
+        (event) => event.type === "compaction" && event.payload.kind === "microcompact",
+      ),
+    ).toBe(true);
+
+    const secondFetch = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "again",
+        model: "gw/tiny",
+        providersText: tiny,
+        sessionDir,
+        resume: true,
+        fetchImpl: secondFetch.impl,
+        compaction: { keepRecentTurns: 0 },
+      }),
+    );
+
+    expect(secondFetch.calls).toHaveLength(1);
+    const messages = secondFetch.calls[0].body.messages as Array<{
+      role: string;
+      content: string;
+    }>;
+    expect(
+      messages.some(
+        (message) =>
+          message.role === "system"
+          && message.content.includes("[Conversation summary]")
+          && message.content.includes("summary-of-old-context"),
+      ),
+    ).toBe(true);
+    expect(
+      messages.some(
+        (message) => message.role === "tool" && message.content.includes("[tool result elided"),
+      ),
+    ).toBe(true);
+
+    const after = readSessionFile(logPath);
+    expect(after.length).toBeGreaterThan(before.length);
+    expect(after.slice(0, before.length)).toEqual(before);
+  });
+
+  it("已有 summary 时 resume 修复不完整尾部批次并保持摘要可投影", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "resume-crash-summary");
+    const session = await createSession(sessionDir, { id: "crash-summary" });
+    await session.append({ type: "user", payload: { content: "old goal" } });
+    const oldAssistant = await session.append({
+      type: "assistant",
+      payload: {
+        content: "",
+        toolCalls: [{ id: "old", name: "echo", arguments: { text: "old" } }],
+      },
+    });
+    const oldResult = await session.append({
+      type: "tool_result",
+      payload: { id: "old", ok: true, text: "OLD-TOOL-MARKER", toolName: "echo" },
+      parent: oldAssistant.seq,
+    });
+    await session.append({
+      type: "compaction",
+      payload: { kind: "summary", summary: "OLD-SUMMARY", coversUpToSeq: oldResult.seq },
+    });
+    const pending = await session.append({
+      type: "assistant",
+      payload: {
+        content: "",
+        toolCalls: [{ id: "pending", name: "echo", arguments: {} }],
+      },
+    });
+    await session.close();
+
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "continue",
+        model: "gw/flash",
+        providersText: providersText(),
+        sessionDir,
+        resume: true,
+        fetchImpl: impl,
+      }),
+    );
+
+    expect(calls).toHaveLength(1);
+    const messages = calls[0].body.messages as Array<{ role: string; content: string }>;
+    expect(
+      messages.some(
+        (message) =>
+          message.role === "system"
+          && message.content.includes("[Conversation summary]")
+          && message.content.includes("OLD-SUMMARY"),
+      ),
+    ).toBe(true);
+    expect(messages.some((message) => message.content.includes("result lost due to crash"))).toBe(
+      true,
+    );
+    expect(messages.some((message) => message.content.includes("OLD-TOOL-MARKER"))).toBe(false);
+
+    const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(
+      log.some(
+        (event) =>
+          event.type === "tool_result"
+          && event.parent === pending.seq
+          && event.payload.code === "tool_result_lost",
+      ),
+    ).toBe(true);
+    expect(
+      log.some(
+        (event) =>
+          event.type === "interrupted" && event.payload.reason === "crash_recovery",
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["相等", { keepTailRatio: 0.8, softRatio: 0.8 }],
+    ["tail=0", { keepTailRatio: 0, softRatio: 0.8 }],
+    ["soft=1", { keepTailRatio: 0.16, softRatio: 1 }],
+    ["keepRecentTurns=-1", { keepRecentTurns: -1 }],
+    ["keepRecentTurns=1.5", { keepRecentTurns: 1.5 }],
+  ])("非法压缩配置（%s）在 runSession 入口抛 TypeError", async (_label, compaction) => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+
+    await expect(
+      collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir: path.join(home, "invalid-ratios"),
+          fetchImpl: mockFetch([EMPTY_RESPONSE]).impl,
+          compaction,
+        }),
+      ),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 });
 

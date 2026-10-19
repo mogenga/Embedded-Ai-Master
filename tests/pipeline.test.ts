@@ -253,6 +253,29 @@ describe("executeBatch 并发策略", () => {
     expect(results.map((entry) => entry.id)).toEqual(["s", "f"]);
     expect(results.map((entry) => entry.result.text)).toEqual(["slow", "fast"]);
   });
+
+  it("结果规范化后写入 evidence 注解标记", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const evidenceTool: ToolDef<{}> = {
+      name: "evidence",
+      description: "取证工具",
+      schema: z.object({}) as z.ZodType<{}>,
+      annotations: { readOnly: true, evidence: true },
+      execute: async () => ok("proof"),
+    };
+    const plainTool = makeTool<{}>("plain", async () => ok("plain"), true);
+    const reg = new ToolRegistry([evidenceTool, plainTool]);
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("1", "evidence"), call("2", "plain")],
+      { signal: new AbortController().signal, artifactDir: artifactDir() },
+    );
+
+    expect(results[0].result.evidence).toBe(true);
+    expect(results[1].result.evidence).toBe(false);
+  });
 });
 
 describe("executeBatch 错误与取消", () => {

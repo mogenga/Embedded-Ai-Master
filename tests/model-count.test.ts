@@ -22,4 +22,38 @@ describe("启发式 token 计数", () => {
 
     expect(heuristicCountTokens(messages)).toBe(3);
   });
+
+  it("tool_calls 序列化后按 4 字符/token 计入", () => {
+    const messages: ModelChatMessage[] = [
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: "c1",
+            type: "function",
+            function: { name: "echo", arguments: JSON.stringify({ text: "x".repeat(400) }) },
+          },
+        ],
+      },
+    ];
+
+    const serialized = JSON.stringify(messages[0].tool_calls);
+    expect(heuristicCountTokens(messages)).toBe(Math.ceil(serialized.length / 4));
+  });
+
+  it("content 与 tool_calls 合并计算", () => {
+    const messages: ModelChatMessage[] = [
+      {
+        role: "assistant",
+        content: "abcd",
+        tool_calls: [
+          { id: "c1", type: "function", function: { name: "echo", arguments: "1234" } },
+        ],
+      },
+    ];
+
+    const serialized = JSON.stringify(messages[0].tool_calls);
+    expect(heuristicCountTokens(messages)).toBe(Math.ceil((4 + serialized.length) / 4));
+  });
 });

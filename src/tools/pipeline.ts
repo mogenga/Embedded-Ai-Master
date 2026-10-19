@@ -361,8 +361,10 @@ async function runOne(
   call: BatchCall,
   opts: BatchOptions,
 ): Promise<BatchResult> {
+  const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
   const value = await executeOne(session, tools, call, opts);
-  return { id: call.id, result: await finalizeResult(value, call.id, opts.artifactDir) };
+  const result = await finalizeResult(value, call.id, opts.artifactDir);
+  return { id: call.id, result: { ...result, evidence } };
 }
 
 async function duplicateResult(call: BatchCall, opts: BatchOptions): Promise<BatchResult> {
