@@ -228,7 +228,6 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
 
     const signal = opts.signal ?? new AbortController().signal;
 
-
     let meter: TokenMeter | undefined;
     let budget: LoopCtx["budget"];
     let compactor: LoopCtx["compactor"];

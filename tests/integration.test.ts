@@ -575,7 +575,6 @@ describe("runSession 端到端装配", () => {
       }),
     );
 
-
     expect(calls).toHaveLength(3);
     expect(calls[1].body.tools).toEqual([]);
     expect(events.some((event) => event.kind === "compacted")).toBe(true);
