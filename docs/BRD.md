@@ -327,7 +327,7 @@ ESP32 仿真不用 Renode,用 Espressif QEMU fork(按需接)。
 6. 上下文压缩策略(**诊断证据链不能丢**,NFR-5);
 7. 多模型路由与降级;
 8. MCP 连接生命周期(会话级 vs 全局级);
-9. UI 形态优先级(CLI 先行 vs Web 先行;诊断 UI 需求 BR-6 为 Web 侧,倾向 Web 先行,形态学 opencode server-first);
+9. UI 形态优先级(CLI 先行 vs Web 先行;诊断 UI 需求 BR-6 为 Web 侧,倾向 Web 先行,形态学 opencode server-first);**已关闭(2026-10-19):Web 优先,不做 CLI**。M2 审批走 Web + HTTP API,headless 只保留库层策略;详见 [m2-roadmap.md](m2-roadmap.md)。
 10. 跨平台基线(已倾向:Windows 一等公民)。
 
 > RAG 对照实验(H1-H7)结论出来前,设计结论 4"不用向量 RAG"按**待验证**对待,不作为不可动摇前提。

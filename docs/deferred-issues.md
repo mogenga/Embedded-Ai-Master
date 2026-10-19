@@ -107,6 +107,7 @@
 
 ### D-013 · 非 http(s) scheme 的 `baseUrl` 不被拒绝
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`resolveChatCompletionsUrl` 在创建期校验 `http:`/`https:`,其他 scheme 抛 `TypeError`;补 ftp/file 用例。
 - **发现**: 2026-10-17,Task 6 交付核验。
 - **现象**: `createOpenAIProvider({ baseUrl: "ftp://gw/v1" })` 构造成功;首次请求时 `fetch` 抛 `TypeError`,被包成 `NetworkError` 并按可重试错误退避 4 次才暴露。
 - **影响**: 配置错误被延迟为"网络故障",排查成本高;每次启动白白消耗数秒退避。
@@ -115,6 +116,7 @@
 
 ### D-014 · `usage` 数字字段为字符串时整体省略 usage
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`toFiniteNumber` 接受可收窄的数值字符串,非数值字符串仍整体省略;补两条用例。
 - **发现**: 2026-10-17,Task 6 交付核验。
 - **现象**: `usage: { prompt_tokens: "10", completion_tokens: 3 }` 时 `hasCompleteUsage` 为 false,返回结果不含 `usage`。
 - **影响**: 计价与 `maxCostUsd` 熔断静默失去数据(只计 token 不熔断),与"字段缺失 ⇒ undefined"的刻意 fail-soft 难以区分。
@@ -132,6 +134,7 @@
 
 ### D-016 · 错误面仅 `ModelFatalError` 带 `code`,其余错误类型未导出
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):五个错误类全部导出并统一带 `code`(`api_4xx` / `retryable_http` / `unexpected_status` / `network` / `invalid_response` / `request_timeout`)。
 - **发现**: 2026-10-17,Task 6 交付核验。
 - **现象**: `RetryableHttpError` / `UnexpectedHttpError` / `NetworkError` / `ModelResponseError` 均未从模块导出;其中除 `ModelResponseError` 带 `code: "invalid_response"` 外,其余无 `code`,消费者只能按 `name` 字符串判别。
 - **影响**: Task 9/10 无法对错误做结构化分类(如区分"重试耗尽"与"3xx 意外响应");`instanceof` 不可用,只能比对字符串,重构时易失效。
@@ -148,6 +151,7 @@
 
 ### D-010 · 退避 `sleep` 不响应取消
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`RetryConfig` 新增 `signal`,`retry` 在退避期间监听 abort(并用同长度 timer 兜底不响应取消的注入 sleep),中止即抛 `AbortError`;adapter 每次尝试传入 `opts.signal`;补「退避期间取消」与「已中止 signal」用例。
 - **发现**: 2026-10-17,Task 6 第二轮整合复审。
 - **现象**: `src/model/retry.ts` 的 `sleep` 只接受毫秒数、不接收 `AbortSignal`。适配器仅在每次尝试开始前检查 `opts.signal.aborted`,正在进行的 `setTimeout` 不会因取消提前结束,因此取消最多要等待当前退避周期结束。
 - **影响**: 不发起新请求、结果仍正确;但交互取消的响应延迟最多为一个退避周期(默认首次约 1s,并按指数增长),取消后进程可能迟迟不退出。
@@ -199,6 +203,7 @@
 
 ### D-023 · 非字符串 `call.id` 绕过重复检测
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):管线入口对非字符串 id 直接返回 `tool_protocol_error` 且不执行工具;artifact 命名使用固定安全 id。
 - **发现**: 2026-10-18,Task 8 交付核验。
 - **现象**: `executeBatch` 的重复检测在 `typeof call.id !== "string"` 时直接判为非重复(`duplicates` 返回 `false`)。运行时探针: `[{id: 42}, {id: 42}]` 两条都执行并都返回 `ok`。`BatchResult.id` 类型声明为 `string`,但运行期不校验。
 - **影响**: 正常路径无影响——`call.id` 来自 Task 6 适配器解析的 tool call `id`,该处已校验为字符串(Task 6 的 `invalid_response` 守卫)。但这是管线里唯一的静默旁路: 若未来有其他调用方(回放、测试脚本、MCP 工具)构造 `BatchCall`,非字符串 id 会同时绕过重复检测与证据文件命名的字符串假设。
@@ -240,6 +245,7 @@
 
 ### D-028 · `invalid_json` marker 的 raw 无长度上限
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`query.markerResult` 与 `buildMessages` 双层限制 raw 为 8000 字符,超出追加 `[truncated]`。
 - **发现**: 2026-10-18,Task 9 第三轮红队审查(Minor)。
 - **现象**: `buildMessages` 将 marker 的 raw 原样回填,`query` 的 markerResult 也将 raw 原样写入 text/detail;模型一次输出超长坏参数会直接放大下一轮上下文与日志。
 - **影响**: 极端情况下可能触发 context 超限或日志膨胀,当前无上限/截断。
@@ -295,6 +301,7 @@
 
 ### D-034 · 文本截断可能切断代理对
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`truncateText` 在高代理处回退一位,artifact 截断路径统一走该函数;补 emoji 批次用例。
 - **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
 - **现象**: `src/tools/pipeline.ts` 的 `truncateText` 按 UTF-16 code unit 直接 `slice`,当截断点落在代理对中间时会留下孤立代理字符;`MAX_TEXT_CHARS` 与 200/2000 的出口截断均受影响。
 - **影响**: 含 emoji 或扩展 CJK 的工具输出被截断后,日志/JSON 可能出现替换字符或编码异常。
@@ -303,6 +310,7 @@
 
 ### D-035 · 会话 append 原子性与初始化回滚不完整
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):header 临时文件 `wx` + `fsync` + rename;append 后尽力 fsync;`createSession` 初始化失败(含 systemPrompt 写入)回滚 header/日志/锁;resume 续写前补齐末行换行。
 - **发现**: 2026-10-18,`fix/p0-full-review` 全量复核;关联 D-003、D-030。
 - **现象**: `append` 通过队列追加 JSONL,无 `fsync`,进程崩溃或断电可能留下半行;初始化阶段 `systemPrompt`/首条 `user` 写入失败不进入统一 `interrupted(error)` 出口,回滚分支覆盖也不完整。
 - **影响**: 会话日志可能不可回放或缺少终止原因,违背「日志是唯一事实源」的审计要求。
@@ -312,6 +320,7 @@
 
 ### D-036 · 4xx 未细分 408/409/425
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):408/409/425 与 429/5xx 一样按 `RetryableHttpError` 重试;补状态矩阵用例。
 - **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
 - **现象**: `src/model/openai.ts` 将所有 4xx(429 除外)归为不可重试的 `ModelFatalError(api_4xx)`;408/409/425 等本可重试的状态同样立即终止。
 - **影响**: 网关短暂过载或请求过早时无法自动恢复,会话以非预期 4xx 失败结束。
@@ -320,6 +329,7 @@
 
 ### D-037 · tool call type/content 校验缺失
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`type` 非 `function`(且非缺失)、`function` 非对象、`content` 非字符串且非 `null` 均抛 `invalid_response`;补对应用例。
 - **发现**: 2026-10-18,`fix/p0-full-review` 全量复核。
 - **现象**: 适配器只校验 `tool_calls[].id` 与 `function.name` 为字符串;不校验 `type === "function"`、`function.arguments` 的原始类型,`message.content` 非字符串时静默转空字符串。
 - **影响**: 畸形 tool call 可能被当作正常调用执行;网关字段类型漂移被 fail-soft 掩盖,难以诊断。
@@ -337,6 +347,7 @@
 
 ### D-039 · 同一会话目录并发 resume/append 无跨进程锁
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):新增 `src/session/lock.ts`,`createSession`/`resumeSession`/`forkSession` 以 `O_EXCL` 目录锁持有到 `close()`,跨进程冲突返回 `session_locked`,崩溃遗留锁按 PID 存活回收;补锁单测与 create→resume 重入用例。
 - **发现**: 2026-10-18,维度6 Task3 审查。
 - **现象**: `resumeSession` 只校验目录与 header 后重建 handle,不获取目录级锁;同一会话目录可被多个进程或句柄同时 resume/append,seq 来自各自内存的 `eventList.length`,可产生重复 seq 或交错行。2026-10-18 Task4 审查补充: `forkSession` 仅用非递归 `mkdir` 对**目标目录创建**做原子占位,可挡住并发 fork 同一 target;但 fork 成功后其他进程仍可绕过该占位直接打开该目录 append,锁未覆盖会话生命周期。
 - **影响**: 并发写会破坏 JSONL 的 seq 连续性,使日志无法回放;当前仅靠「同一目录只有一个活跃 handle」的约定规避。
@@ -362,6 +373,7 @@
 
 ### D-042 · artifact 越界与缺失共用 artifactMissing,目录 artifact 未定义
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):越界/链接越界/非普通文件标记 `artifactRejected`,源文件缺失仍标记 `artifactMissing`;目录型 artifact 按不支持跳过复制,fork 继续;补两组用例。
 - **发现**: 2026-10-18,维度6 Task4 审查(Task5 登记)。
 - **现象**: artifact 路径词法越界(位于 sourceDir 外)与源文件缺失(`stat` ENOENT)都调用 `markArtifactMissing`,统一写 `detail.artifactMissing = true`,消费方无法区分「拒绝复制」与「源文件不存在」。此外 `artifactPath` 指向目录时行为未定义: `stat` 成功,但随后 `copyFile` 抛 `EISDIR`/`EPERM`,导致整个 fork 失败,而不是按 artifact 缺失跳过。
 - **影响**: 缺失原因不可审计;目录型 artifact 会阻塞 fork,与设计「artifact 缺失不阻塞 fork」不一致。
@@ -380,6 +392,7 @@
 
 ### D-044 · resume 只校验首个 system 事件
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):resume 校验**全部** system 事件,任一不一致抛 `system_prompt_mismatch`;补多 system 集成用例。
 - **发现**: 2026-10-18,维度6 Task6 审查修复。
 - **现象**: `runSession` resume 时用 `events.find((event) => event.type === "system")` 只比较首条 system 事件内容;后续 system 事件既不参与内容比较,也不影响「无 system」判定。当前 P0 仅由 `createSession` 写入一条 system,`query` 只在无 system 时补写一条,不会产生多条。
 - **影响**: 若未来支持多 system 事件(分层提示、运行时追加/替换),resume 可能放行与当前 `systemPrompt` 不一致的会话,空会话补写判定也可能误判。
@@ -388,6 +401,7 @@
 
 ### D-045 · `checkpoint.turn` 每次 query 从 1 重新编号,resume 后与历史重复
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`query` 从会话最后一个 checkpoint 的 `turn` 续编;补同一会话两次 query 用例。
 - **发现**: 2026-10-18,维度6 Task8 收尾。
 - **现象**: `src/loop/query.ts` 在每次 `query` 调用内以 `let turn = 0` 起算,每轮 `turn += 1` 后写入 `checkpoint { turn }`。resume 后再次调用 `query` 会重新从 1 编号,生成的 checkpoint 与同目录历史 checkpoint 的 `turn` 重复;当前 checkpoint 只被写入,没有恢复/重放消费方。
 - **影响**: 当前仅影响日志审计可读性,不影响执行;若未来按 `turn` 定位断点、去重或恢复,重复编号会产生歧义。
@@ -396,6 +410,7 @@
 
 ### D-046 · 无主错误时 close 异常上抛分支缺真实路径测试
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):补「resume 正常完成、close 抛错 → 调用方收到 close 错误」集成用例。
 - **发现**: 2026-10-18,维度6 Task8 收尾。
 - **现象**: `runSession` 的 `finally` 中,`session.close()` 异常仅在 `hasPrimaryError === false` 时上抛(`src/index.ts:179-185`)。现有集成测试只覆盖「运行期主错误 + close 异常不覆盖原错误」;`tests/integration.test.ts` 已有 `resumeCloseFailure` mock 可让 resume 返回的 handle `close` 抛出,但未构造「无主错误且 close 抛出」的用例,该上抛分支未被看守。
 - **影响**: 当前行为正确但无回归保护;若重排 `finally` 或调整错误优先级,可能静默吞掉 close 失败而不被测试发现。
@@ -413,6 +428,7 @@
 
 ### D-048 · 代文件不连续(只有 v2 无 v1)仍被接受
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`readSessionDir` 校验代编号从 v1 连续递增,缺档抛 `SessionCorruptionError(invalid_event_line)`;补「只有 v2」「v1+v3」用例。
 - **发现**: 2026-10-18,第二轮红队审查修复。
 - **现象**: `readSessionDir` 只按现存 `session.vN.jsonl` 的数字升序合并,不校验代编号从 1 连续到最大代;目录中只有 `session.v2.jsonl` 时,只要 seq 从 0 开始即可正常读取,缺失的 `v1` 不产生任何错误。
 - **影响**: 代文件缺失可能是日志被删除、截断或同步失败的信号,当前被静默接受,审计链完整性无法保证;未来若按代定位断点或做增量同步,缺档会导致语义偏差。
@@ -421,6 +437,7 @@
 
 ### D-049 · create/resume 允许目录符号链接,与 fork 拒绝源目录链接口径不一致
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):create/resume 与 fork 口径统一,目录符号链接一律 `invalid_target`;补 junction 用例。
 - **发现**: 2026-10-18,最终加固审查。
 - **现象**: `createSession`/`resumeSession` 通过 `path.resolve` + `stat` 跟随目录符号链接,允许在链接指向的真实目录中创建/读取会话;`forkSession` 则显式 `lstat` 源目录并拒绝符号链接(`invalid_target`)。同一会话目录经链接访问时,create/resume 可用而 fork 不可用。
 - **影响**: 行为不一致会让调用方难以判断链接目录是否是受支持输入;若链接在 create/resume 期间被替换,实际读写位置可能与调用方预期不同,也削弱 fork 边界检查的可解释性。
@@ -620,6 +637,7 @@
 
 ### D-073 · 保留设备名未覆盖上标数字变体(`COM¹`/`LPT¹` 等)
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`WINDOWS_RESERVED` 扩展 `¹²³` 变体与 `CONIN$`/`CONOUT$`;补写/编辑用例。
 - **发现**: 2026-10-18,维度4 Task1 收尾修复。
 - **现象**: Windows 同时把 `COM¹`/`COM²`/`COM³`、`LPT¹`/`LPT²`/`LPT³` 等上标数字形式视为保留设备名,当前 `WINDOWS_RESERVED` 仅匹配 ASCII `1-9`,这类路径会放行到 `writeFile`/`edit`。`CONIN$`/`CONOUT$` 等控制台别名也未覆盖。
 - **影响**: 在 Windows 上写入这些名称可能落到设备而非工作区文件;行为依赖系统,跨平台一致性差。
@@ -710,6 +728,7 @@
 
 ### D-084 · 读取/跳过上限只披露布尔标记或总数,不披露规模与具体路径
 
+- **状态**: **部分解决**(2026-10-19,`fix/p0-remaining`):`fs read` 的 `detail` 增加 `nextOffset`;`grep`/`glob` 已分别披露文件/目录跳过数。仍未列具体跳过路径与总行数/字节数,保留跟踪。
 - **发现**: 2026-10-18,维度4 Task6 收尾。
 - **现象**: `fs read` 触达 2000 行 / 256 KiB 时只追加 `[truncated]`,`detail` 无总行数/总字节/下一次 `offset`;`grep` 对超过 2 MiB、含 NUL、不可读的文件只给 `[skipped N files ...]` 与分类计数,不列具体路径;`glob` 的 `[scan truncated at 5000 files]` 同样只有固定文案。
 - **影响**: 模型无法判断遗漏规模,可能把“截断后未搜到”误当“不存在”;排查时需要人工重跑并猜测范围,与 R3 的“诚实披露”仍有距离。
@@ -753,6 +772,7 @@
 
 ### D-089 · `grep` 跳过披露把目录计为 files 且不区分来源
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`walkFiles` 区分 `skippedFiles`/`skippedDirectories`,`grep` 文案改为 `[skipped N entries (X files, Y unreadable directories)]`,`detail.skipped` 拆分两项。
 - **发现**: 2026-10-19,第二轮红队审查(I-2)。
 - **现象**: `walkFiles` 的 `state.skipped`(不可读目录)已并入 `detail.skipped.unreadable` 与总数披露,但 `text` 仍写 `[skipped N files (binary/too large/unreadable)]`,无法区分文件与目录;根/嵌套不可读只给总数,不列路径。
 - **影响**: 模型可能把不可读目录误判为文件;排障时无法定位具体不可读位置,与 D-084(披露粒度不足)叠加。
@@ -762,6 +782,7 @@
 
 ### D-090 · `grep` 的 `glob` 过滤每个文件重新编译正则
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):新增 `compileGlobMatcher`,`grep` 在遍历前预编译一次。
 - **发现**: 2026-10-19,第二轮红队审查(Minor 项)。
 - **现象**: `grep` 在遍历回调中对每个候选文件调用 `matchesGlob(relative, input.glob)`,而 `matchesGlob` 每次都会执行 `compilePattern`;`glob` 工具本身已在 `execute` 中编译一次后复用。
 - **影响**: 大仓带 `glob` 过滤时产生重复编译开销;与 D-086 的回溯风险叠加,放大 CPU 占用。
@@ -852,6 +873,7 @@
 
 ### D-100 · MCP 工具名消歧依赖 server 返回顺序
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`createMcpTools` 先按 `(server, tool)` 字典序排序再分配名称;补稳定顺序断言。
 - **发现**: 2026-10-19,维度5 Task3 复核(N-4)。
 - **现象**: `createMcpTools` 按 `manager.tools()` 顺序逐个占用名称。若 A 工具的基础名被 B 的确定性改名占用,后续工具会被连锁改名;同一批工具仅因 `listTools()` 返回顺序不同,最终暴露名可能不同。结果为全局唯一,且对同一输入列表确定。
 - **影响**: 模型看到的工具名可能随 server 实现/升级改变,历史会话中的工具名与权限规则(P1 按名寻址)可能失配;不改名工具不受影响。
@@ -860,6 +882,7 @@
 
 ### D-101 · MCP status 写入与 close 的迟到竞态
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`runSession` 的 `finally` 改为先 `mcpManager.close()`(停止 list_changed/refresh),再 flush status 队列,最后关闭 session。
 - **发现**: 2026-10-19,维度5 Task4 第二轮复核(N-5)。
 - **现象**: `runSession` 在 `finally` 中先 `await statusQueue` 再 `manager.close()`/`session.close()`。若某个 refresh 任务在 `await statusQueue` 之后才同步触发 listener 并入队 status,该写入会落在已关闭的 session 上;`appendMcpStatus` 在首个失败时立即输出 `[mcp] status event append failed`(迟到入队同样会输出)并继续关闭,但该条审计事件仍会丢失,且不重试。
 - **影响**: list_changed 与会话结束高度重叠时可能丢失最后一条 `mcp_tools_changed`/`mcp_tools_refresh_failed` 审计;不影响工具调用结果与主会话退出码。
@@ -877,6 +900,7 @@
 
 ### D-103 · MCP 配置未知字段被静默忽略
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`loadMcpConfig` 新增 `onWarning`,未知 server 字段经 `mcp_config_warning` status 披露;不加 `onWarning` 时保持原宽松行为。
 - **发现**: 2026-10-19,维度5 Task1。
 - **现象**: `parseServer` 只校验已知字段,可选字段的拼写错误(如 `timeoutMS`、`arg`)不报错,直接按缺省值继续;若必填的 `command` 拼错(如 `commandd`),单级配置会因 `merged.command === undefined` 抛 `McpConfigError` 并跳过全部 MCP(另一级仍提供 command 时合并后不会报错)。
 - **影响**: 配置 typo 不会 fail-fast,可能表现为超时/参数与预期不符;与 `command` 严格校验的风格不一致。
@@ -885,6 +909,7 @@
 
 ### D-104 · list_changed 刷新失败不自动重试
 
+- **状态**: **已解决**(2026-10-19,`fix/p0-remaining`):`refreshTools` 有界重试 3 次(100ms 指数退避),最终失败仍保留旧缓存并记 `tools_refresh_failed{attempts:3}`。
 - **发现**: 2026-10-19,维度5 Task2/Task4。
 - **现象**: 刷新 `listTools()` 失败时保留旧缓存并记 `mcp_tools_refresh_failed`,不安排退避重试;只有下一次 list_changed 通知或连接重建才会再次刷新。
 - **影响**: server 短暂抖动后工具集合可能长期停留在旧版本;模型继续看到已移除的工具或看不到新增工具,调用时以工具执行错误暴露。
@@ -1009,3 +1034,4 @@
 | 2026-10-19 | A 档修复(fix/p0-a-tier):D-022 管线超时后串行屏障 + MCP 超时/取消断开重连;D-031 响应流式上限、D-032 请求超时;D-067 API Host/Origin 校验;D-075 shell abort 升级/兜底;D-099 emergency microcompact;D-102 env 白名单;D-105 项目配置 opt-in;D-106 破坏性工具不自动重试;D-107 listTools 超时;D-108 MCP content/schema/description 上限 |
 | 2026-10-19 | B 档修复(fix/p0-a-tier):`fs`/`glob`/`grep` 响应 `AbortSignal`(D-071/D-077 已解决);MCP 终止后轮询 PID,未确认退出则拒绝重连并返回 `mcp_uncertain`;`artifactPath` 存在的 evidence 在 emergency 阶段可降级为 artifact 引用(D-099 进一步缓解) |
 | 2026-10-19 | 标记 P0 未完成面:录入 D-109(第三方 in-process 工具缺 worker 隔离)、D-110(无 artifact evidence 超窗)、D-111(live 网关/真实 MCP/真机/终止失败路径验证缺口);D-022/D-099 补交叉引用;D-102 标注 `inheritEnv:true` 为显式设计取舍 |
+| 2026-10-19 | P0 剩余项修复(`fix/p0-remaining`):D-010/D-013/D-014/D-016/D-023/D-028/D-034/D-035/D-036/D-037/D-039/D-042/D-044/D-045/D-046/D-048/D-049/D-073/D-089/D-090/D-100/D-101/D-103/D-104 标已解决;D-084 标部分解决(新增 `nextOffset` 与跳过分类) |

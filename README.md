@@ -89,7 +89,7 @@ docs/             设计、计划与已知问题
 
 ### `fs`
 
-- `read`：`path` + 可选 `offset`（0 起行号）/`limit`（≤2000 行）；单次最多 2000 行、256 KiB，超出以 `[truncated]` 标记；`offset` 越界返回 `(no lines at offset)`。
+- `read`：`path` + 可选 `offset`（0 起行号）/`limit`（≤2000 行）；单次最多 2000 行、256 KiB，超出以 `[truncated]` 标记，`detail.nextOffset` 给出继续读取的位置；`offset` 越界返回 `(no lines at offset)`。
 - `write`：`path` + `content`，自动创建父目录。
 - `edit`：`path` + 非空 `oldText` + `newText`；`oldText` 必须唯一命中，否则 `edit_not_found` / `edit_not_unique`；按文件现有 CRLF/LF 风格写入。
 - workdir 限制：解析到工具根之外（含 `..`、绝对路径、symlink/junction 逃逸）→ `path_outside_workdir`；Windows 保留设备名 → `reserved_name`；`read` / `edit` 目标不是普通文件 → `not_a_file`；`write` 目标为目录或底层写入失败 → `write_failed`。
@@ -108,7 +108,7 @@ docs/             设计、计划与已知问题
 - `glob`：`pattern` 匹配**相对工具根**的 POSIX 路径（不是 `path` 根）；`*` 不跨 `/`、`?` 匹配单字符、`**/` 匹配任意层目录、段尾 `**` 匹配剩余路径，其余字符按字面量；反斜杠按 `/` 处理；大小写敏感。pattern 长度 ≤256、段数 ≤64，连续 `**/` 会折叠；超限视为非法。返回字典序路径，最多 200 条，超出 `[truncated]`；扫描上限 5000 个文件，超出 `[scan truncated at 5000 files]`。
 - `grep`：`pattern` 为正则（`ignoreCase` 可选），可加 `glob` 过滤、`maxResults`（1–1000，默认 200）；`glob` 非法（空 / NUL / 超长 / 超段数）→ `invalid_pattern`，不静默无匹配。输出 `<相对路径>:<行号>:<文本>`，按路径与行号排序，超出 `[truncated]`。扫描达到 5000 个文件时追加 `[scan truncated at 5000 files]`；单行超过 1 MiB 时跳过并追加 `[skipped N lines longer than 1 MiB]`。
 - 两者都只遍历工具根内：跳过 `.git`、`node_modules`、`.harness`、`dist`、`coverage`、`build`、`out`、`target`、`.pio`、`cmake-build-*`；遍历中遇到的 symlink 文件 / 目录都不跟随（显式 `path` 根为 symlink 时仍会跟随，D-079）。
-- `grep` 只读 ≤2 MiB 的文件，含 NUL 视为二进制；跳过文件与不可读目录合并计数 `[skipped N files (binary/too large/unreadable)]`，不列具体路径（D-084/D-089）。
+- `grep` 只读 ≤2 MiB 的文件，含 NUL 视为二进制；跳过项分别计数并披露为 `[skipped N entries (X files, Y unreadable directories)]`，`detail.skipped` 区分 `binary` / `tooLarge` / `unreadableFiles` / `unreadableDirectories`，不列具体路径（D-084 仍跟踪路径披露）。
 - 两者都响应 `AbortSignal`：`walkFiles` 在每个条目/递归前检查，`grep` 在文件读取前与每 256 行检查，取消返回 `aborted`。`grep` 先收集全部命中再截断，命中集很大时内存占用随结果增长（D-078）；`grep` 正则同步执行，ReDoS 不可中断（D-085），glob 编译仍有回溯风险（D-086）。
 
 ## MCP 客户端
@@ -116,7 +116,7 @@ docs/             设计、计划与已知问题
 `runSession` 默认启用 MCP（stdio），启动时读取两级配置并连接所有未禁用的 server：
 
 - 用户级：`$HARNESS_HOME/mcp.json`
-- 项目级：`<工具根>/.harness/mcp.json`（新建会话取 `opts.cwd` 或进程 cwd；resume 未传 `opts.cwd` 时取 `header.workdir`，缺失则回退进程 cwd）；**默认不加载**，需要 `mcp.trustProjectConfig: true` 显式信任，或由调用方显式传入 `projectConfigPath`；跳过时写 `mcp_project_config_skipped` status
+- 项目级：`<工具根>/.harness/mcp.json`（新建会话取 `opts.cwd` 或进程 cwd；resume 未传 `opts.cwd` 时取 `header.workdir`，缺失则回退进程 cwd）；**默认不加载**，需要 `mcp.trustProjectConfig: true` 显式信任，或由调用方显式传入 `projectConfigPath`；跳过时写 `mcp_project_config_skipped` status。未知字段经 `mcp_config_warning` status 披露，不再静默忽略。
 
 ```json
 {
@@ -156,7 +156,7 @@ for await (const event of runSession({
 }
 ```
 
-`mcp.enabled`、`mcp.trustProjectConfig` 必须是布尔值，`mcp` 必须是普通对象，否则在入口抛 `TypeError`。MCP server 由用户自行安装并在配置中给出 `command`；MCP SDK 包（`@modelcontextprotocol/client`，测试夹具用 `@modelcontextprotocol/server`）已写入 `package.json`，随用户执行 `npm install` 安装；本仓库的 agent 不执行任何依赖安装命令。运行期状态写入会话 `status` 事件（`mcp_connected` / `mcp_connect_failed` / `mcp_tools_changed` / `mcp_tools_refresh_failed` / `mcp_tool_name_renamed` / `mcp_tool_invalid_schema` / `mcp_config_failed` / `mcp_project_config_skipped`）。
+`mcp.enabled`、`mcp.trustProjectConfig` 必须是布尔值，`mcp` 必须是普通对象，否则在入口抛 `TypeError`。MCP server 由用户自行安装并在配置中给出 `command`；MCP SDK 包（`@modelcontextprotocol/client`，测试夹具用 `@modelcontextprotocol/server`）已写入 `package.json`，随用户执行 `npm install` 安装；本仓库的 agent 不执行任何依赖安装命令。运行期状态写入会话 `status` 事件（`mcp_connected` / `mcp_connect_failed` / `mcp_tools_changed` / `mcp_tools_refresh_failed` / `mcp_tool_name_renamed` / `mcp_tool_invalid_schema` / `mcp_config_failed` / `mcp_config_warning` / `mcp_project_config_skipped`）。未知配置字段不再静默：`loadMcpConfig` 通过 `onWarning` 交回，`runSession` 记一条 `mcp_config_warning`；`list_changed` 刷新失败会做 3 次有界退避重试，仍失败才保留旧缓存并记 `mcp_tools_refresh_failed`（含 `attempts`）。工具名按 `(server, tool)` 字典序稳定分配，不依赖 server 返回顺序。
 
 ## 上下文压缩
 
@@ -263,10 +263,11 @@ npm run serve:ui    # 真实数据服务，默认 http://127.0.0.1:5174/
 └── artifacts/           # 工具产物（按需）
 ```
 
-- `header.status` 取 `open` / `closed`：create/resume 后为 `open`，`close()` 用临时文件 + rename 原子写 `closed`，重复 close 幂等。
+- `header.status` 取 `open` / `closed`：create/resume 后为 `open`，`close()` 用临时文件 + `fsync` + rename 原子写 `closed`，重复 close 幂等。
 - create 把 `provider` / `model` / `workdir` 写入 header；`workdir` 记录创建时的进程 cwd。
-- 分代：append 前按字节判断，仅当当前代非空且追加后会越过阈值才新建 `session.v(N+1).jsonl`；读取按代数字升序合并，seq 跨代连续。
-- 每轮模型请求前由 `query` 追加 `checkpoint` 事件（`payload.turn`），只落会话日志，不进入 `LoopEvent` 流。
+- 分代：append 前按字节判断，仅当当前代非空且追加后会越过阈值才新建 `session.v(N+1).jsonl`；读取按代数字升序合并，seq 跨代连续；代编号必须从 v1 连续，缺档抛 `SessionCorruptionError(invalid_event_line)`。
+- 目录锁：`createSession` / `resumeSession` / `forkSession` 在目录内以 `session.lock`（`O_EXCL`）持有单写者锁，直到 `close()`；另一存活进程持锁时抛 `SessionResumeError("session_locked")`；持有者崩溃后按 PID 存活自动回收。
+- 每轮模型请求前由 `query` 追加 `checkpoint` 事件（`payload.turn`），只落会话日志，不进入 `LoopEvent` 流；`turn` 在同一会话内续编。
 
 ### resume
 
@@ -307,9 +308,9 @@ const child = await forkSession(sourceDir, atSeq, {
 
 - `atSeq` 必须使 `events[0..atSeq]` 可被 `buildMessages` 投影（批次闭合），而非按事件类型判断：批中 `usage`、部分 `tool_result`、未闭合的 assistant 批次均 → `not_turn_boundary`；无工具轮的 `usage` 前缀与普通 user 前缀可通过。前缀含 `atSeq` 并保留原 `seq` / `parent`，新 header 写 `forkedFrom: { sessionId, seq }`。
 - `opts.id` 不得与源会话 id 相同；`targetDir` 不得位于源会话目录内（含相同目录），否则 `invalid_target`。
-- artifact 自包含：前缀中 `tool_result.payload.artifactPath` 指向的文件复制到新会话 `artifacts/` 并重写路径；源文件缺失或越界时保留原路径并标 `detail.artifactMissing = true`，不阻塞 fork。
-- target 目录已存在（含空目录）→ `target_not_empty`；`targetDir` 或其父路径为文件 → `invalid_target`；失败时回滚本次写入。
-- 两个会话可并发追加、互不影响；同一目录的跨进程锁尚未实现（D-039）。
+- artifact 自包含：前缀中 `tool_result.payload.artifactPath` 指向的文件复制到新会话 `artifacts/` 并重写路径；源文件缺失标 `detail.artifactMissing = true`，越界/链接越界/非普通文件标 `detail.artifactRejected = true`，均保留原路径且不阻塞 fork。
+- target 目录已存在（含空目录）→ `target_not_empty`；`targetDir` 或其父路径为文件 → `invalid_target`；失败时回滚本次写入并释放锁。
+- 不同会话可并发追加、互不影响；同一目录由目录锁保证单写者（D-039 已解决）。
 
 ## live 测试
 
@@ -339,8 +340,8 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 - 超时/取消已阻止同批后续写调用启动，但不响应 signal 的残留工具仍可能在后台继续（D-022 已缓解；D-071/D-077）。
 - 网关不返回 `usage` 时 `maxCostUsd` 无法生效（D-027）。
 - token 估算按 UTF-16 字符数 / 4，CJK 场景偏低（D-005）；`tool_calls` 已按序列化长度计入（D-033 已解决）。
-- 会话 append 无 `fsync`，断电或强杀可能留下半行（D-035）。
-- 4xx 除 429 外均不重试，408/409/425 未细分（D-036）。
+- 会话 header 与日志已 fsync；极端断电仍可能留下半行，resume 会补齐末行换行并做崩溃尾部恢复（D-035 已解决）。
+- 4xx 中 408/409/425 已按可重试处理，其余不重试（D-036 已解决）。
 - 工具 JSON Schema 可能携带 `$schema`，严格网关兼容性待 live 验证（D-019）。
 
 上下文压缩：
@@ -353,9 +354,9 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 
 内置工具：
 
-- `glob` / `grep` 不响应取消，`grep` 先收集全部命中再截断（D-077、D-078）。
+- `glob` / `grep` 已响应取消（D-077 已解决）；`grep` 仍先收集全部命中再截断（D-078）。
 - `shell` 危险命令拦截是启发式、非沙箱，`env` / `bash -c` / `xargs` 等可绕过（D-083）；改目录方式与 shell 展开未覆盖（D-087、D-088）。
-- `glob` 编译仍有正则回溯风险（D-086）；`grep` 的 `glob` 过滤每文件重新编译（D-090）；跳过披露不区分文件与目录（D-089）。
+- `glob` 编译仍有正则回溯风险（D-086）；`grep` 的 `glob` 过滤已预编译（D-090 已解决）；跳过披露已区分文件与目录，仍未列具体路径（D-089 已解决，D-084 部分解决）。
 - 工具根与 resume 的 workdir 只做词法比较，不解析 symlink / 8.3 短名（D-082）。
 
 MCP：

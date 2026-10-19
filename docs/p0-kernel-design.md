@@ -323,11 +323,11 @@ MCP 客户端收敛为"本地 stdio + 会话级生命周期":每个 server 一�
 | #2 KB 渐进加载载体 | **仍开放**(P1 范畴) | 待 RAG 对照实验;P0 不受阻塞 |
 | #3 内置工具集最小范围 | **关闭** | fs/shell/glob/grep 四件进内核,取证全走 MCP(§4.2) |
 | #4 会话存储与回放协议 | **大半关闭** | SessionEvent JSONL schema + 投影式回放;具体字段表随 M1 实现定稿 |
-| #5 权限粒度 | 仍开放(P1) | P0 留管线阶段位 + annotations.destructive 钩子 |
+| #5 权限粒度 | **已收敛(2026-10-19)** | 参数级 allow/ask/deny + 默认 `diagnose` 预设,见 [m2-roadmap.md](m2-roadmap.md);P0 已留管线阶段位 + annotations.destructive 钩子 |
 | #6 上下文压缩策略 | **关闭** | 三级压缩 + 0.8 阈值 + verbatim 尾 16% + evidence 保护(§3.2) |
 | #7 多模型路由与降级 | **关闭**(收缩式) | 不做自动降级;声明式 provider,换模型 = 换配置(§2.2) |
 | #8 MCP 连接生命周期 | **关闭** | 会话级;握手超时/一次重启/变更事件(§5.2) |
-| #9 UI 形态优先级 | 仍开放(P2) | 主循环事件化已为双形态解耦铺平 |
+| #9 UI 形态优先级 | **已关闭(2026-10-19)** | **Web 优先,不做 CLI**;M2 审批以 Web + HTTP API 为主,headless 只保留库层策略;详见 [m2-roadmap.md](m2-roadmap.md) |
 | #10 跨平台基线 | 收敛为实施规范 | V7 四条;随实现细化 |
 
 ---
