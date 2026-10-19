@@ -278,20 +278,20 @@ describe("OpenAI 兼容模型适配器", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("成功响应 json() 抛 AbortError 时原样透传", async () => {
+  it("成功响应读取正文抛 AbortError 时原样透传", async () => {
     const abortError = new DOMException("Aborted", "AbortError");
     const fetchImpl = vi.fn(async () => ({
       ok: true,
       status: 200,
       json: async () => { throw abortError; },
-      text: async () => "",
+      text: async () => { throw abortError; },
     })) as unknown as typeof fetch;
 
     await expect(complete(fetchImpl)).rejects.toBe(abortError);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("将 opts.signal 原样传给 fetch", async () => {
+  it("fetch 收到与 opts.signal 联动的 signal", async () => {
     const controller = new AbortController();
     let captured: AbortSignal | null | undefined;
     const fetchImpl = mockFetch((_url, init) => {
@@ -302,7 +302,10 @@ describe("OpenAI 兼容模型适配器", () => {
     await createOpenAIProvider({ baseUrl: "http://gw/v1", model: "m", fetchImpl })
       .complete(MESSAGES, [], { signal: controller.signal, maxOutputTokens: 1 });
 
-    expect(captured).toBe(controller.signal);
+    expect(captured).toBeInstanceOf(AbortSignal);
+    expect(captured?.aborted).toBe(false);
+    controller.abort();
+    expect(captured?.aborted).toBe(true);
   });
 
   it.each([{ label: "null", body: null }, { label: "[]", body: [] }])("顶层响应 $label 抛 invalid_response", async ({ body }) => {
@@ -526,5 +529,160 @@ describe("OpenAI 兼容模型适配器", () => {
       expect((error as { bodyPreview: string }).bodyPreview).toHaveLength(512);
     }
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it("错误响应体只读取前 512 字节并取消流", async () => {
+    let cancelled = false;
+    let reads = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        reads += 1;
+        controller.enqueue(new TextEncoder().encode("x".repeat(256)));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }, { highWaterMark: 0 });
+    const fetchImpl = vi.fn(
+      async () => new Response(stream, { status: 401 }),
+    ) as unknown as typeof fetch;
+
+    try {
+      await complete(fetchImpl);
+      expect.fail("应拒绝 401 响应");
+    } catch (error) {
+      expect(error).toMatchObject({ code: "api_4xx", status: 401 });
+      expect((error as { bodyPreview: string }).bodyPreview).toHaveLength(512);
+    }
+    expect(cancelled).toBe(true);
+    expect(reads).toBeLessThanOrEqual(3);
+  });
+
+  it("请求超过 requestTimeoutMs 时抛 RequestTimeoutError", async () => {
+    const fetchImpl = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        const abort = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        if (signal?.aborted) abort();
+        else signal?.addEventListener("abort", abort, { once: true });
+      });
+    }) as unknown as typeof fetch;
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      requestTimeoutMs: 10,
+      retry: { maxRetries: 0 },
+    });
+
+    await expect(
+      provider.complete(MESSAGES, [], { signal: new AbortController().signal, maxOutputTokens: 1 }),
+    ).rejects.toMatchObject({ name: "RequestTimeoutError" });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  }, 2_000);
+
+  it("请求超时可重试，重试成功返回结果", async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          const abort = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => OK_BODY,
+        text: async () => JSON.stringify(OK_BODY),
+      });
+    }) as unknown as typeof fetch;
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      requestTimeoutMs: 10,
+      retry: { maxRetries: 1, baseDelayMs: 1, sleep: async () => {}, rand: () => 0.5 },
+    });
+
+    const result = await provider.complete(
+      MESSAGES,
+      [],
+      { signal: new AbortController().signal, maxOutputTokens: 1 },
+    );
+
+    expect(result.content).toBe("hi");
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  }, 2_000);
+
+  it("调用方取消仍抛 AbortError 而非超时", async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn((_url: string | URL | Request, init?: RequestInit) => {
+      return new Promise((_resolve, reject) => {
+        const signal = init?.signal;
+        const abort = () => reject(Object.assign(new Error("aborted"), { name: "AbortError" }));
+        if (signal?.aborted) abort();
+        else signal?.addEventListener("abort", abort, { once: true });
+      });
+    }) as unknown as typeof fetch;
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      requestTimeoutMs: 1_000,
+      retry: { maxRetries: 0 },
+    });
+    const pending = provider.complete(
+      MESSAGES,
+      [],
+      { signal: controller.signal, maxOutputTokens: 1 },
+    );
+    setTimeout(() => controller.abort(), 10);
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("响应体超过 maxResponseBytes 时拒绝", async () => {
+    const fetchImpl = mockFetch(() => ({ status: 200, body: OK_BODY }));
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      maxResponseBytes: 20,
+    });
+
+    await expect(
+      provider.complete(MESSAGES, [], { signal: new AbortController().signal, maxOutputTokens: 1 }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("流式响应超过 maxResponseBytes 时取消读取并拒绝", async () => {
+    let cancelled = false;
+    let sent = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        sent += 1;
+        controller.enqueue(new TextEncoder().encode("x".repeat(16)));
+        if (sent >= 10) controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(stream, { status: 200 })) as unknown as typeof fetch;
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      maxResponseBytes: 20,
+    });
+
+    await expect(
+      provider.complete(MESSAGES, [], { signal: new AbortController().signal, maxOutputTokens: 1 }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+    expect(cancelled).toBe(true);
   });
 });
