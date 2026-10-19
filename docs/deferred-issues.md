@@ -869,7 +869,7 @@
 ### D-103 · MCP 配置未知字段被静默忽略
 
 - **发现**: 2026-10-19,维度5 Task1。
-- **现象**: `parseServer` 只校验已知字段,可选字段的拼写错误(如 `timeoutMS`、`arg`)不报错,直接按缺省值继续;若必填的 `command` 拼错(如 `commandd`),则因 `merged.command === undefined` 抛 `McpConfigError` 并跳过全部 MCP。
+- **现象**: `parseServer` 只校验已知字段,可选字段的拼写错误(如 `timeoutMS`、`arg`)不报错,直接按缺省值继续;若必填的 `command` 拼错(如 `commandd`),单级配置会因 `merged.command === undefined` 抛 `McpConfigError` 并跳过全部 MCP(另一级仍提供 command 时合并后不会报错)。
 - **影响**: 配置 typo 不会 fail-fast,可能表现为超时/参数与预期不符;与 `command` 严格校验的风格不一致。
 - **触发升级条件**: 配置由用户手写且出错难定位;需要配置 lint/诊断;出现因 typo 导致的现场问题。
 - **修复建议**: 对未知字段输出 warning 或严格模式报错;在配置加载结果中保留原始 key 供 `mcp_config_failed` 诊断。
