@@ -555,6 +555,44 @@ describe("buildMessages 投影重组", () => {
     });
   });
 
+  it("microcompact 首行遇到连续空行时只取第一行", () => {
+    const text = `first line\n\n${"x".repeat(200)}`;
+    const events: SessionEvent[] = [
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: true, text, toolName: "echo" }, 0),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
+    ];
+
+    expect(() => buildMessages(events)).not.toThrow();
+    expect(buildMessages(events)[1]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "[tool result elided; echo: first line]",
+    });
+  });
+
+  it("microcompact 首行在文件末尾换行时正常提取", () => {
+    const text = `first line\n${"x".repeat(200)}\n`;
+    const events: SessionEvent[] = [
+      mk(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "echo", arguments: {} }],
+      }),
+      mk(1, "tool_result", { id: "c1", ok: true, text, toolName: "echo" }, 0),
+      mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
+    ];
+
+    expect(() => buildMessages(events)).not.toThrow();
+    expect(buildMessages(events)[1]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "[tool result elided; echo: first line]",
+    });
+  });
+
   it("summary 保留 system 与尾部,并在最后 system 后插入摘要", () => {
     const messages = buildMessages([
       mk(0, "system", { content: "SYS1" }),

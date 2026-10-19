@@ -127,7 +127,6 @@ function toSummaryDirective(
   return { summary, coversUpToSeq };
 }
 
-
 function findEffectiveSummary(events: readonly SessionEvent[]): SummaryDirective | undefined {
   const lastSeq = events.length === 0 ? -1 : events[events.length - 1].seq;
   let accepted: SummaryDirective | undefined;
