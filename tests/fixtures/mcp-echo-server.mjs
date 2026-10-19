@@ -99,6 +99,25 @@ async function main() {
   );
 
   server.registerTool(
+    "env",
+    { description: "Return selected environment variables" },
+    async () =>
+      textResult(
+        JSON.stringify({
+          parentOnly: process.env.MCP_MANAGER_TEST_PARENT_ONLY ?? null,
+          marker: process.env.MCP_MANAGER_TEST_MARKER ?? null,
+          configOnly: process.env.MCP_MANAGER_TEST_CONFIG_ONLY ?? null,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "pwd",
+    { description: "Return the server working directory" },
+    async () => textResult(process.cwd()),
+  );
+
+  server.registerTool(
     "grow-broken",
     { description: "Register a tool, then fail the next tools/list" },
     async () => {
@@ -131,7 +150,7 @@ async function main() {
       annotations: { destructiveHint: true },
     },
     async () => {
-      setTimeout(() => process.exit(1), 20);
+      setTimeout(() => process.exit(1), 100);
       return textResult("bye");
     },
   );
@@ -142,5 +161,9 @@ async function main() {
 if (process.env.SILENT === "1") {
   setInterval(() => {}, 1_000);
 } else {
+  const startDelayMs = Number(process.env.START_DELAY_MS ?? 0);
+  if (startDelayMs > 0) {
+    await delay(startDelayMs);
+  }
   await main();
 }

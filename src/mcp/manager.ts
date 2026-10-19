@@ -25,6 +25,7 @@ export type McpStatusKind =
   | "connect_failed"
   | "tools_changed"
   | "tools_refresh_failed"
+  | "listener_failed"
   | "call_failed";
 
 export interface McpStatusEvent {
@@ -44,6 +45,7 @@ interface ServerState {
   client?: Client;
   tools: McpToolInfo[];
   connected: boolean;
+  everConnected: boolean;
   closed: boolean;
   queue: Promise<unknown>;
   reconnecting?: Promise<boolean>;
@@ -98,6 +100,7 @@ export class McpManager {
           config,
           tools: [],
           connected: false,
+          everConnected: false,
           closed: false,
           queue: Promise.resolve(),
         } satisfies ServerState,
@@ -331,10 +334,11 @@ export class McpManager {
 
   private async connectServer(state: ServerState): Promise<boolean> {
     await this.disposeClient(state);
-    if (state.closed || this.closed) {
+    if (this.isClosed(state)) {
       return false;
     }
 
+    const wasConnected = state.everConnected;
     const config = state.config;
     let client: Client | undefined;
     try {
@@ -350,7 +354,16 @@ export class McpManager {
             autoRefresh: false,
             debounceMs: 0,
             onChanged: () => {
-              void this.enqueue(state, () => this.refreshTools(state));
+              void this.enqueue(state, () => this.refreshTools(state)).catch((error) => {
+                if (this.isClosed(state)) {
+                  return;
+                }
+                this.emit({
+                  kind: "tools_refresh_failed",
+                  server: state.config.name,
+                  message: messageOf(error),
+                });
+              });
             },
           },
         },
@@ -369,10 +382,27 @@ export class McpManager {
         this.connectTimeoutMs,
         `MCP 连接超时（${this.connectTimeoutMs}ms）`,
       );
+      if (this.isClosed(state)) {
+        await this.disposeClient(state);
+        return false;
+      }
       await this.loadTools(state, connectedClient);
+      if (this.isClosed(state)) {
+        await this.disposeClient(state);
+        return false;
+      }
 
       state.connected = true;
+      state.everConnected = true;
+      if (this.isClosed(state)) {
+        state.connected = false;
+        await this.disposeClient(state);
+        return false;
+      }
       this.emit({ kind: "connected", server: config.name, toolCount: state.tools.length });
+      if (wasConnected) {
+        this.notifyToolsChanged(state);
+      }
       return true;
     } catch (error) {
       if (client && state.client === client) {
@@ -382,7 +412,9 @@ export class McpManager {
         await client.close().catch(() => undefined);
       }
       state.connected = false;
-      this.emit({ kind: "connect_failed", server: config.name, message: messageOf(error) });
+      if (!this.isClosed(state)) {
+        this.emit({ kind: "connect_failed", server: config.name, message: messageOf(error) });
+      }
       return false;
     }
   }
@@ -408,7 +440,7 @@ export class McpManager {
 
   private async refreshTools(state: ServerState): Promise<void> {
     const client = state.client;
-    if (!client || !state.connected || state.closed || this.closed) {
+    if (!client || !state.connected || this.isClosed(state)) {
       return;
     }
     try {
@@ -421,14 +453,33 @@ export class McpManager {
       });
       return;
     }
+    this.notifyToolsChanged(state);
+  }
+
+  private notifyToolsChanged(state: ServerState): void {
+    if (this.isClosed(state)) {
+      return;
+    }
     this.emit({
       kind: "tools_changed",
       server: state.config.name,
       toolCount: state.tools.length,
     });
     for (const listener of this.listeners) {
-      listener(state.config.name);
+      try {
+        listener(state.config.name);
+      } catch (error) {
+        this.emit({
+          kind: "listener_failed",
+          server: state.config.name,
+          message: messageOf(error),
+        });
+      }
     }
+  }
+
+  private isClosed(state: ServerState): boolean {
+    return state.closed || this.closed;
   }
 
   private async disposeClient(state: ServerState): Promise<void> {
@@ -456,7 +507,7 @@ export class McpManager {
         error.code === SdkErrorCode.SendFailed
       );
     }
-    return /not connected|connection (?:closed|lost)|econnreset|epipe|socket|transport|disconnected/i.test(
+    return /\b(econnreset|epipe|broken pipe|not connected|connection (?:closed|lost))\b/i.test(
       messageOf(error),
     );
   }

@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -123,10 +123,12 @@ describe("McpManager 连接与工具发现", () => {
     expect(manager.tools()).toEqual([]);
   });
 
-  it("连接超时可注入并记录 connect_failed", async () => {
+  it("连接超时可注入并记录 connect_failed，且回收子进程", async () => {
+    const root = tempRoot();
+    const pidFile = path.join(root, "pid");
     const events: McpStatusEvent[] = [];
     const manager = track(
-      new McpManager([config("silent", { env: { SILENT: "1" } })], {
+      new McpManager([config("silent", { env: { SILENT: "1", PID_FILE: pidFile } })], {
         connectTimeoutMs: 300,
         logger: (event) => events.push(event),
       }),
@@ -134,10 +136,62 @@ describe("McpManager 连接与工具发现", () => {
 
     const started = Date.now();
     await manager.connectAll();
+    const pid = Number(readFileSync(pidFile, "utf8"));
 
     expect(Date.now() - started).toBeLessThan(3_000);
     expect(manager.tools()).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({ kind: "connect_failed", server: "silent" }));
+    await waitFor(() => !isAlive(pid), 3_000);
+  });
+
+  it("connectAll 并行连接多个 server", async () => {
+    const connectedAt: number[] = [];
+    const manager = track(
+      new McpManager(
+        [
+          config("slow-a", { env: { START_DELAY_MS: "300" } }),
+          config("slow-b", { env: { START_DELAY_MS: "300" } }),
+        ],
+        {
+          logger: (event) => {
+            if (event.kind === "connected") {
+              connectedAt.push(Date.now());
+            }
+          },
+        },
+      ),
+    );
+
+    await manager.connectAll();
+
+    expect(connectedAt).toHaveLength(2);
+    expect(Math.abs(connectedAt[0] - connectedAt[1])).toBeLessThan(200);
+  });
+
+  it("close 与 connect 并发时不产生 connected 事件并回收子进程", async () => {
+    const root = tempRoot();
+    const pidFile = path.join(root, "pid");
+    const events: McpStatusEvent[] = [];
+    const manager = track(
+      new McpManager([config("silent", { env: { SILENT: "1", PID_FILE: pidFile } })], {
+        connectTimeoutMs: 500,
+        logger: (event) => events.push(event),
+      }),
+    );
+
+    const connecting = manager.connectAll();
+    await waitFor(() => existsSync(pidFile), 2_000);
+    await manager.close();
+    await connecting;
+
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    expect(events).toEqual([]);
+    expect(manager.tools()).toEqual([]);
+    await waitFor(() => !isAlive(pid), 3_000);
+    expect(await manager.call("silent", "echo", {}, signal())).toMatchObject({
+      isError: true,
+      code: "mcp_unavailable",
+    });
   });
 });
 
@@ -172,6 +226,49 @@ describe("McpManager 工具调用", () => {
     const structured = await manager.call("echo", "structured", {}, signal());
     expect(structured.isError).toBe(false);
     expect(JSON.parse(structured.text)).toEqual({ answer: 42 });
+  });
+
+  it("env 继承 process.env、config.env 覆盖同名并透传 cwd", async () => {
+    const root = tempRoot();
+    const previousParentOnly = process.env.MCP_MANAGER_TEST_PARENT_ONLY;
+    const previousMarker = process.env.MCP_MANAGER_TEST_MARKER;
+    process.env.MCP_MANAGER_TEST_PARENT_ONLY = "parent-only";
+    process.env.MCP_MANAGER_TEST_MARKER = "parent";
+    try {
+      const manager = track(
+        new McpManager([
+          config("echo", {
+            cwd: root,
+            env: {
+              MCP_MANAGER_TEST_MARKER: "config",
+              MCP_MANAGER_TEST_CONFIG_ONLY: "config-only",
+            },
+          }),
+        ]),
+      );
+      await manager.connectAll();
+
+      const env = await manager.call("echo", "env", {}, signal());
+      expect(JSON.parse(env.text)).toEqual({
+        parentOnly: "parent-only",
+        marker: "config",
+        configOnly: "config-only",
+      });
+
+      const pwd = await manager.call("echo", "pwd", {}, signal());
+      expect(path.resolve(pwd.text)).toBe(path.resolve(root));
+    } finally {
+      if (previousParentOnly === undefined) {
+        delete process.env.MCP_MANAGER_TEST_PARENT_ONLY;
+      } else {
+        process.env.MCP_MANAGER_TEST_PARENT_ONLY = previousParentOnly;
+      }
+      if (previousMarker === undefined) {
+        delete process.env.MCP_MANAGER_TEST_MARKER;
+      } else {
+        process.env.MCP_MANAGER_TEST_MARKER = previousMarker;
+      }
+    }
   });
 
   it("参数校验失败返回 mcp_tool_error", async () => {
@@ -263,15 +360,25 @@ describe("McpManager 工具调用", () => {
 });
 
 describe("McpManager 断线与重连", () => {
-  it("断线后 call 自动重连一次", async () => {
+  it("断线后 call 自动重连一次并通知 onToolsChanged", async () => {
     const root = tempRoot();
     const pidFile = path.join(root, "pid");
-    const manager = track(new McpManager([config("echo", { env: { PID_FILE: pidFile } })]));
+    const events: McpStatusEvent[] = [];
+    const manager = track(
+      new McpManager([config("echo", { env: { PID_FILE: pidFile } })], {
+        logger: (event) => events.push(event),
+      }),
+    );
+    const changed: string[] = [];
+    manager.onToolsChanged((server) => changed.push(server));
     await manager.connectAll();
+    expect(changed).toEqual([]);
+
     const pid = Number(readFileSync(pidFile, "utf8"));
     expect(isAlive(pid)).toBe(true);
 
-    await manager.call("echo", "crash", {}, signal()).catch(() => undefined);
+    const first = await manager.call("echo", "crash", {}, signal());
+    expect(first).toMatchObject({ isError: false, code: "ok", text: "bye" });
     await waitFor(() => !isAlive(pid), 3_000);
 
     const result = await manager.call("echo", "echo", { text: "after-crash" }, signal());
@@ -279,6 +386,8 @@ describe("McpManager 断线与重连", () => {
 
     const newPid = Number(readFileSync(pidFile, "utf8"));
     expect(newPid).not.toBe(pid);
+    expect(changed).toEqual(["echo"]);
+    expect(events).toContainEqual(expect.objectContaining({ kind: "tools_changed", server: "echo" }));
   });
 
   it("调用中断线重连一次；重试仍断线返回 mcp_unavailable", async () => {
@@ -325,6 +434,28 @@ describe("McpManager list_changed 与关闭", () => {
     expect(changed).toEqual(["echo"]);
     expect(events).toContainEqual(expect.objectContaining({ kind: "tools_changed", server: "echo" }));
     expect(events.find((event) => event.kind === "tools_changed")?.toolCount).toBeGreaterThan(0);
+  });
+
+  it("onToolsChanged listener 抛错不影响其他 listener 与后续调用", async () => {
+    const events: McpStatusEvent[] = [];
+    const manager = track(new McpManager([config("echo")], { logger: (event) => events.push(event) }));
+    await manager.connectAll();
+    const changed: string[] = [];
+    manager.onToolsChanged(() => {
+      throw new Error("listener boom");
+    });
+    manager.onToolsChanged((server) => changed.push(server));
+
+    await manager.call("echo", "grow", {}, signal());
+    await waitFor(() => changed.length > 0);
+
+    expect(changed).toEqual(["echo"]);
+    expect(events).toContainEqual(expect.objectContaining({ kind: "listener_failed", server: "echo" }));
+    expect(await manager.call("echo", "echo", { text: "still-alive" }, signal())).toMatchObject({
+      isError: false,
+      code: "ok",
+      text: "still-alive",
+    });
   });
 
   it("刷新失败时保留旧缓存并记录 tools_refresh_failed", async () => {

@@ -11,7 +11,7 @@ MCP SDK v2 已用 Context7 查证(2026-10-19):
 
 - 运行时依赖 `@modelcontextprotocol/client` ^2.3.1; `StdioClientTransport` 从 `@modelcontextprotocol/client/stdio` 导入。
 - `new Client({name,version})` → `client.connect(transport)` → `client.listTools()` → `client.callTool({name,arguments}, {timeout?})`。
-- `client.setNotificationHandler("notifications/tools/list_changed", handler)` + `client.listen({toolsListChanged:true})`。
+- list_changed 用 `new Client(info, { listChanged: { tools: { autoRefresh:false, debounceMs, onChanged } } })`。`onChanged(error, items)` 在 `autoRefresh:false` 时 `items` 为 `null`，由调用方自行刷新。`client.listen(filter)` 是 2026-07-28 的 `subscriptions/listen`，当前 SDK 最高协商 2025-11-25，调用会抛 `MethodNotSupportedByProtocolVersion`，P0 不使用。
 - 测试 server 用 `@modelcontextprotocol/server`(devDependency) + `@modelcontextprotocol/server/stdio`; `McpServer.registerTool(name,{description,inputSchema},handler)`。
 - 工具注解 `annotations.readOnlyHint/destructiveHint`。
 
@@ -100,7 +100,10 @@ class McpManager {
   close(): Promise<void>;
 }
 interface McpCallResult { isError: boolean; code: string; message: string; detail?: unknown; text: string; }
-interface McpStatusEvent { kind: "connected" | "connect_failed" | "tools_changed" | "call_failed"; server: string; toolCount?: number; message?: string; }
+interface McpStatusEvent {
+  kind: "connected" | "connect_failed" | "tools_changed" | "tools_refresh_failed" | "listener_failed" | "call_failed";
+  server: string; toolCount?: number; message?: string;
+}
 ```
 
 - `connectAll`: 每个 server `new Client(...)` + `StdioClientTransport({command,args,env,cwd})`; `Promise.allSettled`; 失败记录 status 并继续; 成功 `listTools()` 缓存。
@@ -109,7 +112,10 @@ interface McpStatusEvent { kind: "connected" | "connect_failed" | "tools_changed
 - **超时/取消语义**: SDK 只提供 timeout, 无 signal 中止保证; P0 用 `Promise.race` 停止等待并返回 `mcp_timeout`/`mcp_aborted`, **不强制 close 连接**(避免影响同 server 其他调用); 写工具取消后 server 可能继续执行, 登记 deferred(P1 审批/隔离)。
 - 外层 pipeline 的 120s 与 server timeout 竞争时, 可能先返回 `tool_timeout`; manager 层测试断言 `mcp_timeout`, 集成层允许 `tool_timeout`。
 - `isError` 结果: `{isError:true, code:"mcp_tool_error", message, detail:{content}, text}`。
-- list_changed: `client.setNotificationHandler("notifications/tools/list_changed", ...)` + `client.listen({toolsListChanged:true})`; 刷新该 server 工具; 触发 `onToolsChanged` 与 status。
+- list_changed: `ClientOptions.listChanged.tools.onChanged`(配置 `autoRefresh:false`、`debounceMs:0`)，在回调中把刷新任务投递到该 server 的串行队列; 刷新成功触发 `tools_changed` 与 `onToolsChanged`; 失败保留旧缓存并记 `tools_refresh_failed`。
+- **listener 隔离**: `onToolsChanged` 逐个调用并 `try/catch`; 单个 listener 抛错记 `listener_failed`，继续调用其他 listener，不得让异常逃逸为未处理 rejection。
+- **重连后刷新**: 重连成功刷新工具集后触发 `tools_changed` 与 `onToolsChanged`(首次 `connectAll` 不触发，由调用方在连接后读取 `tools()`); 保证 registry 与 `manager.tools()` 一致。
+- **close 竞态**: `close()` 后在途 `connect`/`loadTools` 不得再把状态置为 connected，也不得 emit `connected`/`connect_failed`; 已关闭时立即 dispose 并返回失败。
 - **刷新失败**: `listTools()` 抛错时保留旧工具缓存并记录 `tools_refresh_failed`; 不立即清空(避免抖动误伤)。
 - `close`: 对每个 client `close()`; 清除定时器/监听。
 
@@ -136,19 +142,21 @@ function mcpToolName(server: string, tool: string): string; // mcp__<sanitized s
 - close: finally 中 `await manager.close()`; 不覆盖主错误。
 - 无配置/全部 disabled → 不连接, 不写 status。
 
-### 4.5 错误码
+### 4.5 错误码与 status
 
-`mcp_config_invalid`、`mcp_connect_failed`、`mcp_unavailable`、`mcp_tool_error`、`mcp_timeout`、`mcp_aborted`、`mcp_reconnect_failed`、`mcp_tool_name_collision`、`mcp_tools_refresh_failed`。
-- status 事件 kind: `connected`、`connect_failed`、`tools_changed`、`tools_refresh_failed`、`tool_name_collision`、`call_failed`。
+- `McpCallResult.code`: `ok`、`mcp_unavailable`、`mcp_tool_error`、`mcp_timeout`、`mcp_aborted`。
+- 配置错误(Task1): `mcp_config_invalid`(`McpConfigError`)。
+- status 事件 kind: `connected`、`connect_failed`、`tools_changed`、`tools_refresh_failed`、`listener_failed`、`call_failed`; Task3 另加 `tool_name_collision`。
+- 连接失败/刷新失败通过 status 表达，不进入 `McpCallResult.code`; 调用侧连接失败统一 `mcp_unavailable`。不再使用 `mcp_connect_failed`、`mcp_reconnect_failed`、`mcp_tools_refresh_failed` 作为 code。
 - 登记 deferred: 超时/取消不强制终止 server 端执行(写工具 P1)、敏感 env 暴露、未知字段宽松可能掩盖 typo。
 
 ## 5. 测试策略
 
 - config: user/project 合并、project 覆盖、disabled、缺失文件、坏 JSON/schema、名称校验。
-- manager: 用 `@modelcontextprotocol/server` 启动真实 stdio echo server(测试脚本); connectAll 成功/单失败隔离; listTools; call 成功/文本拼接/非 text/isError/timeout/abort; 断线重连一次; close。
+- manager: 用 `@modelcontextprotocol/server` 启动真实 stdio echo server(测试脚本); connectAll 成功/单失败隔离/并行时序/连接超时回收子进程; listTools; call 成功/文本拼接/非 text/isError/timeout/abort; env 继承与 `config.env` 覆盖、cwd 透传; 断线重连一次且重连后触发 `onToolsChanged`; close 与 connect 并发不产生状态事件; listener 抛错不中断其他 listener/后续调用。
 - tools: 命名/ sanitize/截断/冲突; annotations 映射; schema `z.unknown()`。
 - runSession: 集成 MCP echo server, 请求 tools 含 `mcp__echo__echo`; 调用闭环; status 事件; enabled:false/无配置不启动; close 后子进程退出。
-- list_changed: test server 动态注册工具 → client 刷新; registry 更新。
+- list_changed: test server 动态注册工具 → client 刷新(成功/失败保留旧缓存); registry 更新。
 - 覆盖率: 新增代码 line ≥90%。
 
 ## 6. 验收口径
