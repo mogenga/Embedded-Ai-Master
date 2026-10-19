@@ -63,14 +63,8 @@ export function readPath(input: unknown, key: string): { found: boolean; value?:
   return { found: true, value: current };
 }
 
-function normalizeZero(value: number): number {
-  return value === 0 ? 0 : value;
-}
-
+// `-0 === 0` 为 true,因此这里无需归一 -0;保留显式注释说明该语义是设计的一部分。
 function strictEqual(left: unknown, right: unknown): boolean {
-  if (typeof left === "number" && typeof right === "number") {
-    return normalizeZero(left) === normalizeZero(right);
-  }
   return left === right;
 }
 

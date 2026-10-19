@@ -1,7 +1,28 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+// 用可控失败模拟“项目配置存在但不可 stat”;ESM 命名空间不可 spy,只能模块级替换。
+const statFailure = vi.hoisted(() => ({ enabled: false }));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      statSync: (...args: Parameters<typeof actual.statSync>) => {
+        if (statFailure.enabled) {
+          const error = new Error("permission denied") as NodeJS.ErrnoException;
+          error.code = "EACCES";
+          throw error;
+        }
+        return actual.statSync(...args);
+      },
+    },
+  };
+});
 import {
   loadPermissionConfig,
   parseInlinePermissionConfig,
@@ -120,8 +141,11 @@ describe("parsePermissionConfig 版本与 JSON", () => {
 describe("parsePermissionConfig 字段校验", () => {
   const invalid: Array<[string, unknown]> = [
     ["tool 为空", { version: 1, rules: [{ tool: "", action: "allow" }] }],
+    ["tool 纯空白", { version: 1, rules: [{ tool: "   ", action: "allow" }] }],
     ["tool 超长", { version: 1, rules: [{ tool: "a".repeat(201), action: "allow" }] }],
     ["reason 为空", { version: 1, rules: [{ tool: "fs", reason: "", action: "allow" }] }],
+    ["reason 纯空白", { version: 1, rules: [{ tool: "fs", reason: "   ", action: "allow" }] }],
+    ["key 纯空白", { version: 1, rules: [{ tool: "fs", params: [{ key: "   ", eq: 1 }], action: "allow" }] }],
     ["非法 action", { version: 1, rules: [{ tool: "fs", action: "maybe" }] }],
     ["timeout 为 0", { version: 1, approvalTimeoutMs: 0 }],
     ["timeout 非整数", { version: 1, approvalTimeoutMs: 1.5 }],
@@ -187,6 +211,15 @@ describe("parsePermissionConfig 字段校验", () => {
     expect(config.preset).toBe("workspace-write");
     expect(config.approvalTimeoutMs).toBe(5000);
     expect(config.rules?.[0]?.params).toHaveLength(4);
+  });
+
+  it("rejects an infinite range parsed from raw JSON (1e400)", () => {
+    // JSON.stringify(Infinity) 会变成 null,所以上面的“range 非有限”用例实际未覆盖 Infinity;
+    // 这里用原始文本表达,确保 JSON.parse 产生的 Infinity 被 Zod 拒绝。
+    const raw =
+      '{"version":1,"rules":[{"tool":"fs","params":[{"key":"a","range":[0,1e400]}],"action":"allow"}]}';
+    expect(Number.isFinite(JSON.parse(raw).rules[0].params[0].range[1])).toBe(false);
+    expectConfigError(() => parsePermissionConfig(raw, "p.json"), "invalid_schema");
   });
 
   it("接受 range 上下界相等", () => {
@@ -333,6 +366,25 @@ describe("loadPermissionConfig 合并", () => {
     ]);
   });
 
+  it("rejects an unvalidated inline config instead of merging it silently", () => {
+    const { home, workdir } = tempLayout();
+    const invalidPreset = expectConfigError(
+      () => loadPermissionConfig({ home, workdir, inline: { preset: "yolo" as never } }),
+      "invalid_schema",
+    );
+    expect(invalidPreset.message).toContain("<inline>");
+
+    expectConfigError(
+      () =>
+        loadPermissionConfig({
+          home,
+          workdir,
+          inline: { rules: [{ tool: "fs", action: "allow", bogus: 1 } as never] },
+        }),
+      "invalid_schema",
+    );
+  });
+
   it("inline 未提供 preset/timeout 时依次取 project、user", () => {
     const { home, workdir } = tempLayout();
     writeConfig(userPath(home), { version: 1, preset: "read-only", approvalTimeoutMs: 3000 });
@@ -387,6 +439,17 @@ describe("loadPermissionConfig 读取错误", () => {
       "unsupported_version",
     );
     expect(error.message).toContain(file);
+  });
+
+  it("discloses an untrusted project config that exists but cannot be inspected", () => {
+    const { home, workdir } = tempLayout();
+    statFailure.enabled = true;
+    try {
+      // 未信任:不得静默当作“未配置”,必须 fail-closed 披露不可访问。
+      expectConfigError(() => loadPermissionConfig({ home, workdir }), "read_failed");
+    } finally {
+      statFailure.enabled = false;
+    }
   });
 
   it("非 ENOENT 读取失败映射为 read_failed", () => {

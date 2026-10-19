@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { runSession } from "../src/index.js";
 import type { RunOptions } from "../src/index.js";
 import type { LoopEvent } from "../src/loop/events.js";
+import { parseInlinePermissionConfig } from "../src/permissions/config.js";
 import { PermissionConfigError } from "../src/permissions/errors.js";
 import type { PermissionPreset } from "../src/permissions/types.js";
 import { acquireSessionLock } from "../src/session/lock.js";
@@ -162,6 +163,9 @@ function toolResults(events: LoopEvent[]): Array<Extract<LoopEvent, { kind: "too
 }
 
 async function attempt(permissions: unknown): Promise<unknown> {
+  // 校验失败应发生在触碰 home 之前;仍用隔离的临时 home,避免用例依赖实现顺序(D-125)。
+  const home = await tempDir();
+  vi.stubEnv("HARNESS_HOME", home);
   return collect(
     runSession({
       input: "hi",
@@ -361,6 +365,51 @@ describe("runSession 权限装配", () => {
     await lock.release();
   });
 
+  it("resume 时同样披露未信任的项目配置", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const workdir = await tempDir();
+    const sessionDir = path.join(home, "resume-project-skipped");
+    await writePermissionFile(path.join(workdir, ".harness", "permissions.json"), {
+      version: 1,
+      rules: [{ tool: "fs", action: "allow" }],
+    });
+    await runIn(home, workdir, "resume-project-skipped", [EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "again",
+        model: "gw/flash",
+        providersText: providersText(),
+        cwd: workdir,
+        sessionDir,
+        resume: true,
+        fetchImpl: mockFetch([EMPTY_RESPONSE]),
+      }),
+    );
+
+    const skipped = statusPayloads(sessionDir).filter(
+      (payload) => payload.status === "permissions_project_config_skipped",
+    );
+    expect(skipped).toHaveLength(2);
+    expect(skipped.every((payload) => typeof payload.message === "string")).toBe(true);
+  });
+
+  it("inline preset 覆盖 project 文件的 preset", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const workdir = await tempDir();
+    await writePermissionFile(path.join(workdir, ".harness", "permissions.json"), {
+      version: 1,
+      preset: "read-only",
+    });
+
+    const events = await runIn(home, workdir, "inline-over-project", [WRITE_CALL, EMPTY_RESPONSE], {
+      permissions: { preset: "danger-full-access", trustProjectConfig: true },
+    });
+    expect(toolResults(events)[0]).toMatchObject({ ok: true, code: "ok" });
+  });
+
   it("内联 preset 覆盖文件 preset", async () => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
@@ -445,6 +494,14 @@ describe("runSession 权限装配", () => {
 
   it("permissions 外层未知键 rule 抛 PermissionConfigError(invalid_schema)", async () => {
     const error = await attempt({ rule: [] });
+    expect(error).toBeInstanceOf(PermissionConfigError);
+    expect((error as PermissionConfigError).code).toBe("invalid_schema");
+  });
+
+  it("permissions 的 symbol 键视为未知字段", async () => {
+    const permissions: Record<PropertyKey, unknown> = { preset: "diagnose" };
+    permissions[Symbol("rule")] = { tool: "shell", action: "allow" };
+    const error = await attempt(permissions);
     expect(error).toBeInstanceOf(PermissionConfigError);
     expect((error as PermissionConfigError).code).toBe("invalid_schema");
   });
@@ -539,14 +596,19 @@ describe("runSession 权限装配", () => {
   });
 });
 
-describe("type guards", () => {
-  it("PermissionPreset 常量仍为四种", () => {
-    const presets: PermissionPreset[] = [
+describe("runtime preset contract", () => {
+  it("accepts exactly the four documented presets and rejects others", () => {
+    const accepted: PermissionPreset[] = [
       "read-only",
       "workspace-write",
       "diagnose",
       "danger-full-access",
     ];
-    expect(new Set(presets).size).toBe(4);
+    for (const preset of accepted) {
+      expect(() =>
+        parseInlinePermissionConfig({ preset }),
+      ).not.toThrow();
+    }
+    expect(() => parseInlinePermissionConfig({ preset: "yolo" })).toThrow(PermissionConfigError);
   });
 });

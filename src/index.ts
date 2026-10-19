@@ -121,11 +121,13 @@ function normalizePermissionOptions(raw: unknown): NormalizedPermissionOptions |
   }
 
   const value = raw as Record<string, unknown>;
-  for (const key of Object.keys(value)) {
-    if (!PERMISSION_OPTION_KEYS.has(key)) {
+  // Reflect.ownKeys 覆盖 symbol 键:Object.keys 会静默忽略它们,与“未知键一律拒绝”不符(D-126)。
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== "string" || !PERMISSION_OPTION_KEYS.has(key)) {
+      const label = typeof key === "symbol" ? key.toString() : JSON.stringify(key);
       throw new PermissionConfigError(
         "invalid_schema",
-        `权限配置含未知字段 ${JSON.stringify(key)}`,
+        `权限配置含未知字段 ${label}`,
       );
     }
   }

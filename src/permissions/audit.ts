@@ -4,7 +4,19 @@ const MAX_KEYS = 32;
 const MAX_KEY_CODE_POINTS = 100;
 const MAX_STRING_CODE_POINTS = 120;
 const MAX_PREVIEW_BYTES = 4096;
-const TRUNCATED_ENTRY = ',"truncated":true';
+// 保留键不能叫 "truncated":模型可以提交同名参数,否则标记会覆盖真实值(D-119)。
+const TRUNCATED_ENTRY = ',"previewTruncated":true';
+
+// 参数对象的键由模型控制:含自有 __proto__ 时,普通赋值会命中原型 setter,
+// 导致该键从摘要与哈希中消失(D-118)。defineProperty 保证写入自有属性。
+function setOwn(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
 
 function truncateCodePoints(value: string, limit: number): string {
   const codePoints = Array.from(value);
@@ -44,7 +56,7 @@ function normalize(value: unknown, seen: WeakSet<object>): unknown {
     const sorted: Record<string, unknown> = {};
     for (const key of Object.keys(object).sort()) {
       const item = normalize((object as Record<string, unknown>)[key], seen);
-      if (item !== undefined) sorted[key] = item;
+      if (item !== undefined) setOwn(sorted, key, item);
     }
     return sorted;
   } finally {
@@ -107,7 +119,7 @@ export function summarizeParams(args: unknown): {
   const keys = entries.map(([key]) => key);
 
   const preview: Record<string, unknown> = {};
-  for (const [key, value] of entries) preview[key] = value;
+  for (const [key, value] of entries) setOwn(preview, key, value);
 
   if (sourceKeys.length <= MAX_KEYS && utf8ByteLength(preview) <= MAX_PREVIEW_BYTES) {
     return { keys, preview };
@@ -116,11 +128,12 @@ export function summarizeParams(args: unknown): {
   const reservedBudget = MAX_PREVIEW_BYTES - Buffer.byteLength(TRUNCATED_ENTRY, "utf8");
   const truncatedPreview: Record<string, unknown> = {};
   for (const [key, value] of entries) {
-    const candidate = { ...truncatedPreview, [key]: value };
+    const candidate = { ...truncatedPreview };
+    setOwn(candidate, key, value);
     if (utf8ByteLength(candidate) > reservedBudget) break;
-    truncatedPreview[key] = value;
+    setOwn(truncatedPreview, key, value);
   }
-  truncatedPreview.truncated = true;
+  setOwn(truncatedPreview, "previewTruncated", true);
 
   return { keys, preview: truncatedPreview };
 }

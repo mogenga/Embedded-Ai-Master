@@ -42,10 +42,16 @@ const PresetSchema = z.enum(["read-only", "workspace-write", "diagnose", "danger
 const ActionSchema = z.enum(["allow", "ask", "deny"]);
 const MatcherValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
+// 纯空白字段不是有效配置:规则会永不命中却看起来生效,理由也不可读(D-121)。
+function isNotBlank(value: string): boolean {
+  return value.trim().length > 0;
+}
+
 const KeySchema = z
   .string()
   .min(1, "key 不能为空")
   .max(MAX_PATTERN_LENGTH, `key 长度不能超过 ${MAX_PATTERN_LENGTH}`)
+  .refine(isNotBlank, "key 不能只含空白")
   .refine(
     (value) => value.split(".").every((segment) => segment.length > 0),
     "key 的每个点分段都必须非空",
@@ -87,10 +93,15 @@ const RuleSchema = z.strictObject({
   tool: z
     .string()
     .min(1, "tool 不能为空")
-    .max(MAX_PATTERN_LENGTH, `tool 长度不能超过 ${MAX_PATTERN_LENGTH}`),
+    .max(MAX_PATTERN_LENGTH, `tool 长度不能超过 ${MAX_PATTERN_LENGTH}`)
+    .refine(isNotBlank, "tool 不能只含空白"),
   params: z.array(MatcherSchema).optional(),
   action: ActionSchema,
-  reason: z.string().min(1, "reason 不能为空").optional(),
+  reason: z
+    .string()
+    .min(1, "reason 不能为空")
+    .refine(isNotBlank, "reason 不能只含空白")
+    .optional(),
 });
 
 const ApprovalTimeoutSchema = z
@@ -204,11 +215,29 @@ export function loadPermissionConfig(opts: LoadPermissionOptions): LoadedPermiss
   let projectSkipped: string | undefined;
   if (projectTrusted) {
     project = readConfigFile(projectConfigPath);
-  } else if (fs.existsSync(projectConfigPath)) {
-    projectSkipped = projectConfigPath;
+  } else {
+    // 未信任时不读内容,但仍要区分“不存在”和“存在但不可 stat”:
+    // existsSync 把 EACCES/ENOTDIR 等一并吞成 false,会让用户看不到项目配置被跳过(D-122)。
+    let exists = false;
+    try {
+      fs.statSync(projectConfigPath);
+      exists = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new PermissionConfigError(
+          "read_failed",
+          `权限配置无法访问: ${projectConfigPath}`,
+          error,
+        );
+      }
+    }
+    if (exists) projectSkipped = projectConfigPath;
   }
 
-  const inline = opts.inline;
+  // loadPermissionConfig 是对外导出的库函数:调用方可能绕过 runSession,内联配置
+  // 必须在这里复用同一套 strict schema 校验,否则非法预设/未知字段会静默进入求值(D-120)。
+  const inline =
+    opts.inline === undefined ? undefined : parseInlinePermissionConfig(opts.inline);
   const rules: SourcedRule[] = [];
   for (const rule of inline?.rules ?? []) {
     rules.push({ rule, source: "inline" });

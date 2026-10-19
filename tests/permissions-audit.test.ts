@@ -98,6 +98,32 @@ describe("summarizeParams", () => {
     expect(typeof first?.fn).toBe("string");
   });
 
+  it("keeps an own __proto__ parameter visible in keys, digest and preview", () => {
+    const left = JSON.parse('{"__proto__":{"secret":"AAAA"},"path":"x"}') as Record<string, unknown>;
+    const right = JSON.parse('{"__proto__":{"secret":"BBBB"},"path":"x"}') as Record<string, unknown>;
+
+    expect(summarizeParams(left).keys).toEqual(["__proto__", "path"]);
+    expect(digestParams(left)).not.toBe(digestParams(right));
+    expect(stableStringify(left)).toContain("__proto__");
+
+    const preview = summarizeParams(left).preview;
+    expect(Object.hasOwn(preview ?? {}, "__proto__")).toBe(true);
+    expect(Object.getPrototypeOf(preview)).toBe(Object.prototype);
+  });
+
+  it("does not let a parameter named truncated collide with the truncation marker", () => {
+    const args: Record<string, unknown> = { truncated: "user-value" };
+    // 用 zz 前缀让 truncated 在排序中靠前,确保它不在预算裁剪时被丢弃。
+    for (let index = 0; index < 32; index += 1) {
+      args[`zz${String(index).padStart(2, "0")}${"k".repeat(86)}`] = "v".repeat(120);
+    }
+
+    const summary = summarizeParams(args);
+    expect(summary.preview?.truncated).toBe("user-value");
+    expect(summary.preview?.previewTruncated).toBe(true);
+    expect(utf8Bytes(summary.preview)).toBeLessThanOrEqual(4096);
+  });
+
   it("returns empty keys without preview for non-object input", () => {
     for (const input of [null, undefined, "text", 3, [1, 2]]) {
       const summary = summarizeParams(input);
@@ -115,7 +141,8 @@ describe("summarizeParams", () => {
     expect(summary.keys).toHaveLength(32);
     expect(summary.keys[0]).toBe("k00");
     expect(summary.keys[31]).toBe("k31");
-    expect(summary.preview?.truncated).toBe(true);
+    expect(summary.preview?.previewTruncated).toBe(true);
+    expect(summary.preview?.truncated).toBeUndefined();
   });
 
   it("truncates a single key to 100 characters", () => {
@@ -127,7 +154,7 @@ describe("summarizeParams", () => {
   it("does not mark truncated when everything fits", () => {
     const summary = summarizeParams({ b: 1, a: 2 });
     expect(summary.preview).toEqual({ a: 2, b: 1 });
-    expect(summary.preview?.truncated).toBeUndefined();
+    expect(summary.preview?.previewTruncated).toBeUndefined();
   });
 
   it("drops trailing keys so the preview stays within 4096 UTF-8 bytes", () => {
@@ -136,7 +163,8 @@ describe("summarizeParams", () => {
       args[`${String(index).padStart(2, "0")}${"k".repeat(88)}`] = "v".repeat(120);
     }
     const summary = summarizeParams(args);
-    expect(summary.preview?.truncated).toBe(true);
+    expect(summary.preview?.previewTruncated).toBe(true);
+    // 标记键计入预算:4096 字节上限对含标记的最终对象仍然成立。
     expect(Object.keys(summary.preview ?? {}).length).toBeLessThan(32);
     expect(utf8Bytes(summary.preview)).toBeLessThanOrEqual(4096);
   });

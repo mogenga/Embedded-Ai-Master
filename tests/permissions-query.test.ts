@@ -262,6 +262,53 @@ describe("query 权限审计", () => {
     expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
   });
 
+  it("serial batch writes audit before each result and omits absent optional fields", async () => {
+    // 写工具(readOnly:false)走串行路径:审计 → tool_result → 下一次调用。
+    const execute = vi.fn(async () => ({
+      isError: false,
+      code: "ok",
+      message: "",
+      text: "done",
+    }));
+    const writer: ToolDef<{ text: string }> = {
+      name: "writer",
+      description: "serial",
+      schema: z.object({ text: z.string() }),
+      annotations: { readOnly: false },
+      execute,
+    };
+    const call = (id: string): CompletionResult["toolCalls"][number] => ({
+      id,
+      name: "writer",
+      arguments: { text: id },
+    });
+    const provider = scriptedProvider([
+      reply("调用两次", [call("s1"), call("s2")]),
+      reply("完成"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([writer]),
+      permissionGate: fakeGate(),
+    });
+
+    await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    const logged = session.events();
+    const audits = logged.filter((event) => event.type === "permission_decision");
+    const results = logged.filter((event) => event.type === "tool_result");
+    expect(audits.map((event) => event.payload.callId)).toStrictEqual(["s1", "s2"]);
+    expect(results.map((event) => event.payload.id)).toStrictEqual(["s1", "s2"]);
+    for (let index = 0; index < audits.length; index += 1) {
+      expect(audits[index]!.seq).toBeLessThan(results[index]!.seq);
+    }
+    // fake gate 未提供 ruleIndex/paramsPreview,事件里不应出现这两个键。
+    for (const audit of audits) {
+      expect(Object.hasOwn(audit.payload, "ruleIndex")).toBe(false);
+      expect(Object.hasOwn(audit.payload, "paramsPreview")).toBe(false);
+    }
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
   it("未提供 permissionGate 时保持既有行为,不落审计事件", async () => {
     const provider = scriptedProvider([
       reply("调用", [echoCall("c1", "ok")]),
