@@ -424,7 +424,7 @@ describe("buildMessages 投影重组", () => {
     expect(messages[3].content).toBe("[tool result elided; echo: three]");
   });
 
-  it("evidence 结果同时带 artifactPath 时保留原文", () => {
+  it("evidence 结果同时带 artifactPath 时可降级为 artifact 引用", () => {
     const text = `evidence body ${"x".repeat(100)}`;
     const messages = buildMessages([
       mk(0, "assistant", {
@@ -440,7 +440,11 @@ describe("buildMessages 投影重组", () => {
       mk(2, "compaction", { kind: "microcompact", elidedSeqs: [1], note: "trim" }),
     ]);
 
-    expect(messages[1]).toStrictEqual({ role: "tool", tool_call_id: "c1", content: text });
+    expect(messages[1]).toStrictEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "[tool result elided; full output at /tmp/a.txt]",
+    });
   });
 
   it("toolName 缺失时占位使用 tool 回退", () => {
