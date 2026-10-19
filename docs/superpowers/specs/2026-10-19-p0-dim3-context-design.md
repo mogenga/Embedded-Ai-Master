@@ -146,6 +146,7 @@ async function compactSession(opts: CompactOptions): Promise<void>;
    - 成功 → 先 append 独立 `usage` 事件(摘要的 prompt/completion/cached), 再 append `compaction {kind:"summary", summary, coversUpToSeq}`; 失败(非取消) → append `compaction {kind:"failed", reason, stage:"summary"}` 并返回; 取消 → 抛。
 4. 摘要 prompt: "Summarize the conversation for continuation. Preserve: user goals, decisions, tool evidence references, open questions, and exact identifiers. Do not invent facts. Output plain text."
 5. 摘要成功后不修改历史事件; 下一次 `buildMessages` 自动应用。
+6. **emergency microcompact(D-099 修复)**: 摘要落日志后重新测量, 若仍超 `floor(contextWindow*softRatio)`, 在排除已 elide、且 `seq >` 新 summary 边界的前提下, **忽略 `keepRecentTurns`** 收集结果并追加 `compaction {kind:"microcompact", note:"elided N tool results (emergency)"}`; 非 evidence 结果直接占位, `artifactPath` 存在的 evidence 降级为 artifact 引用, 无 artifact 的 evidence 仍保留。重新测量降到阈值内则结束, 仍超才追加 `failed{reason:"still_over_budget"}`。
 
 ### 4.5 `query` 接入
 

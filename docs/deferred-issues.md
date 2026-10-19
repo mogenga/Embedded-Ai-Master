@@ -195,6 +195,7 @@
 - **影响**: 当前 P0 只有只读 echo,无影响;接入探针写内存、复位或文件写入工具后,超时后的残留调用可能与下一次写调用重叠,破坏串行写假设并造成设备状态竞争。MCP 侧同理:超时/取消后的串行保证不再成立。
 - **触发升级条件**: P1 接入首个非只读工具(写内存/复位/文件写入)前;MCP 侧为接入首个非只读 MCP 工具前。
 - **修复建议**: 写工具接入前引入可等待的终止或隔离机制(进程级 worker、MCP 会话级取消并等待服务端确认);或在超时后拒绝启动同批次后续写工具,并把会话标记为需人工确认。MCP 侧可维护"孤儿调用"屏障:超时/取消后暂停同 server 队列,直到原 promise settle、连接重置或人工确认。
+- **状态**: **已缓解**(2026-10-19,fix/p0-a-tier): pipeline 超时/取消后等待残留执行 `settleGraceMs`(默认 2s),仍未结束则不再启动同批后续调用,后续结果标 `tool_skipped_after_timeout`;内置 `fs`/`glob`/`grep`/`shell` 均已响应 signal(D-071/D-077 已解决)。MCP 超时/取消/破坏性断线后终止 transport 并轮询 PID,确认退出后才允许重连;未确认时标记 `mcp_uncertain` 并拒绝重连。剩余风险仅限自定义/第三方 in-process 工具故意忽略 signal(见 D-109)与 MCP 终止失败时的环境性残留(见 D-111)。
 
 ### D-023 · 非字符串 `call.id` 绕过重复检测
 
@@ -272,6 +273,7 @@
 - **影响**: 异常或恶意网关可返回超大 JSON 耗尽内存,长时间运行的嵌入式会话可能被单个响应拖垮。
 - **触发升级条件**: 接入不可信网关;出现响应体导致的内存异常;需要限制单次响应开销。
 - **修复建议**: 读取时累计字节数,超上限即取消并抛 `ModelResponseError`;或在请求前用 `Content-Length` 预检,并补上限边界测试。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier): `maxResponseBytes` 默认 8 MiB;流式读取累计字节,超限取消 reader 并抛 `ModelResponseError(invalid_response)`;支持 `Content-Length` 预检。
 
 ### D-032 · 模型请求无超时
 
@@ -280,6 +282,7 @@
 - **影响**: 网关接受连接后长期不返回时,主循环会无限等待(除非调用方主动 abort),无人值守场景不可用。
 - **触发升级条件**: 真实网关出现挂起;需要长时间无人值守运行;出现无法解释的会话停滞。
 - **修复建议**: 为模型请求增加可配置超时,超时映射为可重试或终止错误(需固定语义),并补「挂起 → 超时」测试。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier): `requestTimeoutMs` 默认 120s(provider 配置可覆盖);每次 attempt 独立 AbortController,超时抛 `RequestTimeoutError` 并纳入可重试集合;调用方 abort 仍透传 AbortError。
 
 ### D-033 · token 预算不计 tool_calls
 
@@ -373,6 +376,7 @@
 - **影响**: header 元数据无法用于还原/审计工具真实工作目录;未来若基于 `header.workdir` 重放、fork 或恢复编辑上下文,会得到与执行语义不符的路径。当前工具仅 `echo`,风险低。
 - **触发升级条件**: 出现依赖 `header.workdir` 恢复执行上下文的功能(重放、继续编辑、脚本路径解析);或工具从 `echo` 扩展到文件读写/命令执行。
 - **修复建议**: 统一来源——create 时写入 `opts.cwd ?? session.dir`,或让 `LoopCtx.cwd` 默认取 `header.workdir`;在 design 中明确 `header.workdir` 是「会话工作目录」还是「进程启动目录」。
+- **状态**: **已解决**(2026-10-19 复核;维度4 Task5 起 `runSession` 用 `runCwd = opts.cwd ?? process.cwd()` 同时写 `header.workdir` 与 `LoopCtx.cwd`;resume 用 `opts.cwd ?? header.workdir ?? process.cwd()`,并在两者都提供且不一致时抛 `workdir_mismatch`;`tests/integration.test.ts` 覆盖创建/恢复一致性)。
 
 ### D-044 · resume 只校验首个 system 事件
 
@@ -569,6 +573,7 @@
 - **影响**: 会话、知识库目录结构与事件内容可能被同机浏览器中的其他页面读取;未来 `/api/actions` 实现后风险升级为写操作。
 - **触发升级条件**: 实现 `/api/actions`;或需要在浏览器中承载不可信来源页面。
 - **修复建议**: 校验 `Host` 仅为 `127.0.0.1:<port>` / `localhost:<port>`,拒绝跨源 `Origin`;或引入启动时生成的一次性 token。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier): API 请求校验 Host/Origin 必须为 loopback 且端口与监听端口一致;跨源返回 403 `forbidden_host`/`forbidden_origin`;补 raw Host/Origin 集成测试。
 
 ### D-068 · Windows 尾随点目录名与实测行为不一致
 
@@ -603,6 +608,7 @@
 - **影响**: 会话取消或工具超时后,超大文件的读/写仍可能继续占用句柄与磁盘带宽;`read` 在启动后到首次命中截断前不会主动停止。
 - **触发升级条件**: 取消后出现长时间 IO 占用、句柄泄漏,或接入 P1 权限层需要强制终止工具。
 - **修复建议**: 把 `signal` 传给流并在 abort 时 `destroy()`,读循环内检查 `signal.aborted` 并关闭 `readline`;`readFile`/`writeFile` 前先快速检查 abort,失败返回结构化 `aborted`。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier): `fs.read` 把 signal 传给 `createReadStream` 并在读循环检查;`write/edit` 在操作前后检查并把 signal 传给 `readFile`/`writeFile`;取消返回 `aborted`，write/edit 明确提示可能留下部分文件。
 
 ### D-072 · `edit` 唯一性按非重叠匹配计数
 
@@ -635,6 +641,7 @@
 - **影响**: 取消不保证“进程结束 + 结果返回”两件事同时成立;上层若未设置超时,会话可能挂住;进程残留会占用串口/OpenOCD 句柄,与嵌入式场景的清理要求冲突。
 - **触发升级条件**: 实现工具级超时或出现 abort 后不返回/进程残留的真实现象。
 - **修复建议**: abort 后启动短定时器兜底 `finish(shell_aborted)` 并记录 kill 失败;POSIX 在宽限期后升级 `SIGKILL`,Windows 失败时二次 `taskkill` 或改用 job object;把 kill 失败原因写入 `detail`。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier): abort 后 1s 升级 `SIGKILL`/再次 `taskkill`,3s 仍未确认则返回 `shell_aborted` 并写 `detail.abortEscalated`/`terminateFailed`,Promise 必 settle;文本显式声明“process termination not confirmed”。
 
 ### D-076 · `shell` 的 `exitSignal` 与 `code=null` 语义存在平台边缘
 
@@ -651,6 +658,7 @@
 - **影响**: 会话取消或管线超时后,遍历仍会继续扫完 5000 个文件并读盘;大目录或 2 MiB 文件较多时,取消不能缩短实际耗时,只能让上层提前返回。
 - **触发升级条件**: 出现取消后长时间占用磁盘/句柄,或接入工具级强制终止与超时预算。
 - **修复建议**: 给 `walkFiles` 传入 `signal`,在每个条目/每次递归前检查并返回 `aborted`;`grep` 在 `stat`、`readFile` 与行循环内检查;工具返回结构化 `aborted` 而不是伪造空结果。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier): `walkFiles` 接收 signal 并在每个条目/递归/访问前 `throwIfAborted`;`glob`/`grep` 捕获 AbortError 返回 `aborted`;`grep` 在文件读取前与每 256 行检查取消。
 
 ### D-078 · `grep` 先收集全部命中再排序截断
 
@@ -840,7 +848,7 @@
 - **影响**: 极端大结果下压缩无法把视图降到软阈值以内,仍可能触窗或 4xx;首轮记 `still_over_budget`,之后每轮只记 `no_progress`,没有降级路径。
 - **触发升级条件**: 单条工具结果接近或超过窗口;近期批次包含多个大结果;网关因超窗持续拒绝。
 - **修复建议**: 一级截断按单条结果强制落盘并进一步缩短模型视图;允许把最近批次中的非 evidence 结果降级为占位;或在 `still_over_budget` 时触发更小尾部/更强摘要策略。
-- **状态**: 未解决;当前只保证首轮显式记录 `still_over_budget`、后续轮 `no_progress`,不重复摘要。
+- **状态**: **已缓解**(2026-10-19,fix/p0-a-tier): 摘要后仍超阈值时执行 emergency microcompact,忽略 `keepRecentTurns`;非 evidence 大结果直接占位,`artifactPath` 存在的 evidence 降级为 artifact 引用,降到阈值内则不再落 `still_over_budget`。无 artifact 的 evidence-only 超窗仍只能记录 `still_over_budget`/`no_progress`(见 D-110)。
 
 ### D-100 · MCP 工具名消歧依赖 server 返回顺序
 
@@ -865,6 +873,7 @@
 - **影响**: 不可信或供应链被污染的 server 可读取会话进程的密钥;不影响本仓库自身密钥管理,但扩大了信任边界。
 - **触发升级条件**: 接入首个非自研/第三方 MCP server;安全评审要求最小环境;需要按 server 配置 allowlist。
 - **修复建议**: 为 server 配置增加 `envAllowlist`/`envPassthrough`,默认仅传 PATH/HOME 等白名单;或提供显式 `inheritEnv: false`。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier): 默认仅传 PATH/HOME/SystemRoot/TEMP 等白名单;`inheritEnv: true` 恢复完整继承,`envAllowlist: [...]` 显式放行额外变量;`config.env` 始终覆盖。`inheritEnv: true` 属于显式放宽,敏感变量风险由配置方承担(设计取舍,不是未完成项)。
 
 ### D-103 · MCP 配置未知字段被静默忽略
 
@@ -881,6 +890,69 @@
 - **影响**: server 短暂抖动后工具集合可能长期停留在旧版本;模型继续看到已移除的工具或看不到新增工具,调用时以工具执行错误暴露。
 - **触发升级条件**: server 侧工具频繁热更新;观察到刷新失败后长时间不恢复;需要工具目录强一致。
 - **修复建议**: 失败后按指数退避重试有限次,并在 status 中记录 attempt;或在每轮请求前按 TTL 做一次惰性刷新。
+
+### D-105 · 项目级 MCP 配置在会话启动时自动执行命令,无信任门槛
+
+- **发现**: 2026-10-19,维度5全量复验。
+- **现象**: `loadMcpConfig` 默认读取 `<workdir>/.harness/mcp.json`, `runSession` 随后直接 `new McpManager` + `connectAll()`,把配置中的 `command` 作为子进程启动。workdir 可能来自不可信仓库;当前没有 trust/审批或用户确认,也没有跳过项目配置的开关。
+- **影响**: 打开/进入不可信工作区即可在会话启动阶段执行任意命令(且继承进程环境,见 D-102),发生在任何模型或工具调用之前;这是比“模型调用破坏性工具”更早的信任边界。
+- **触发升级条件**: 首个不可信仓库/第三方工作区;多用户或共享工作区;P1 权限/审批层接入。
+- **修复建议**: 项目配置默认不加载,需显式 `mcp.trustProjectConfig:true`(或按内容 hash 记录一次性信任);跳过时写 `mcp_project_config_skipped` status。显式传入的 `projectConfigPath` 视为调用方已信任。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier;实现与测试见 README「MCP 客户端」与 `tests/mcp-*`)。
+
+### D-106 · MCP 连接类错误后的重试可能重复执行破坏性工具
+
+- **发现**: 2026-10-19,维度5全量复验。
+- **现象**: `performCall` 把连接类错误视为“调用未送达”并重连重试一次。但 `SendFailed`/`ConnectionClosed` 可能发生在 server 已执行工具之后、响应到达 client 之前;重试会让破坏性工具(写内存/复位)执行两次。`annotations.destructive` 未参与重试判断。
+- **影响**: 设备状态可能被重复修改,违反 R2 的“先声明、可审计”预期;当前 P0 echo/fixture 无影响,P1 真硬件前必须处理。
+- **触发升级条件**: 首个破坏性 MCP 工具;P1 真硬件;stdio/串口链路不稳定。
+- **修复建议**: 对 `destructive:true` 的工具禁用自动重试,返回独立错误码(如 `mcp_uncertain`)并要求显式复核/人工确认;非破坏性工具保持一次重试。MCP 本身没有幂等键,不能靠重试保证 at-most-once。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier;实现与测试见 README「MCP 客户端」与 `tests/mcp-*`)。
+
+### D-107 · MCP `listTools()` 未显式设置超时
+
+- **发现**: 2026-10-19,维度5全量复验。
+- **现象**: `connectServer`/`refreshTools` 的 `client.listTools()` 没有传 timeout,使用 MCP SDK 默认 `DEFAULT_REQUEST_TIMEOUT_MSEC = 60000`;连接阶段的 15s 超时不覆盖工具发现。`connectAll` 会等待所有 server 的 `listTools()`;`list_changed` 刷新还会占用该 server 的串行队列。
+- **影响**: server 连接成功但不响应 `tools/list` 时,会话启动最多多等约 60s;刷新期间同 server 的调用被队列阻塞,病态 server 可拖慢整个会话。
+- **触发升级条件**: 病态/慢 server;启动时延 SLA;需要把连接+发现纳入同一超时预算。
+- **修复建议**: 给 `listTools()` 传 `{ timeout: ... }`,使用 `min(connectTimeoutMs, timeoutMs, 上限)`;连接与首次 `listTools` 共享预算或分别有明确上限;补“连接成功但 tools/list 挂起”用例。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier;实现与测试见 README「MCP 客户端」与 `tests/mcp-*`)。
+
+### D-108 · MCP content/schema 无大小上限
+
+- **发现**: 2026-10-19,维度5全量复验。
+- **现象**: `McpManager.toResult` 把所有 content block 拼接/`JSON.stringify` 后才交给管线截断;`inputSchema` 与 `description` 也原样进入模型请求,没有大小检查。管线截断发生在完整字符串已在内存中之后,且 schema/description 每次请求都会重复发送。
+- **影响**: 异常或恶意 server 可造成瞬时内存压力、上下文膨胀和按请求计费上升;与 D-102 的不可信 server 前提叠加。
+- **触发升级条件**: 首个第三方/不可信 server;大输出工具;需要限制单次调用开销。
+- **修复建议**: 对 content 按字节/条数封顶并标记 `truncated`,对 `structuredContent`/非 text 序列化同样封顶;对 `description`/`inputSchema` 设上限,超限跳过或截断并记 status。保留现有管线截断作为第二道防线。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier;实现与测试见 README「MCP 客户端」与 `tests/mcp-*`)。
+
+### D-109 · 自定义/第三方 in-process 工具缺少强制终止(worker/进程隔离)
+
+- **发现**: 2026-10-19,B 档收尾。
+- **现象**: pipeline 在超时/取消后能阻止同批后续写调用,但工具仍在本进程内执行;若自定义/第三方工具忽略 `AbortSignal`,JavaScript 没有强制终止手段。内置 `fs`/`shell`/`glob`/`grep` 已响应 signal(D-071/D-077 已解决)。
+- **影响**: 忽略 signal 的工具可继续占用 CPU/IO 或操作硬件;pipeline 屏障避免后续调用重叠,但不能回收工具本身。
+- **触发升级条件**: P1 接入第三方工具或真实写工具;需要硬性工具级超时/隔离;出现取消后残留执行事故。
+- **修复建议**: 每个工具在 `worker_threads`/子进程执行并可 terminate/kill;或对非内置工具建立“必须响应 signal”的契约,超时后标记会话需人工确认。
+- **状态**: 未解决;P1 架构项。
+
+### D-110 · 无 artifact 的 evidence 超窗仍无法 emergency 降级
+
+- **发现**: 2026-10-19,B 档收尾。
+- **现象**: emergency microcompact 只对非 evidence 或带 `artifactPath` 的 evidence 生效;无 artifact 的 evidence 超过窗口时仍只能保留并落 `still_over_budget`/`no_progress`。
+- **影响**: 极端大的 evidence 结果(且未触发一级落盘)仍可能触窗或 4xx;证据保护与窗口上限之间没有自动路径。
+- **触发升级条件**: 真实探针/寄存器读结果接近窗口;一级落盘阈值未覆盖;需要零残窗。
+- **修复建议**: emergency 前强制把 evidence 文本写入 `artifacts/`,并扩展 `CompactionPayload.microcompact` 携带 `artifactPaths`(seq→path),投影层优先使用该路径;保留原始日志与 evidence 标记。
+- **状态**: 未解决;需要扩展 `CompactionPayload`/投影层。
+
+### D-111 · P0 外部环境验证缺口(live 网关/真实 MCP/真机/终止失败路径)
+
+- **发现**: 2026-10-19,B 档收尾。
+- **现象**: `npm test` 的 live 网关用例因缺 `HARNESS_COMPAT_*` 环境变量 skip;MCP 仅使用本地 fixture;shell/MCP 终止失败路径只在 mock/spy 中验证;无真实探针/OpenOCD/串口。
+- **影响**: 真实网关兼容性、第三方 MCP server 行为、Windows 权限/PID 回收下的终止语义、真机句柄回收尚未验证;不能据 mock 结果宣称现场可用。
+- **触发升级条件**: P0 发布前/P1 真机前;接入真实网关或第三方 MCP server。
+- **修复建议**: 建立三组验收环境——(1) live 网关三 env 跑 `HARNESS_COMPAT_LIVE=1 npm test`;(2) 至少一个第三方 MCP server 的连接/调用/终止/断线重连;(3) 真机探针写/复位与串口句柄回收;记录命令、退出码与日志。
+- **状态**: 未解决;环境验证缺口,非本地代码缺陷。
 
 ---
 
@@ -933,3 +1005,7 @@
 | 2026-10-19 | 维度5 Task4:runSession 装配 MCP 与 list_changed 刷新;status 事件接入、配置错误隔离、finally close;spec §4.3/§4.4/§4.5 同步确定性消歧与 status 枚举;录入 D-100(消歧依赖 server 返回顺序) |
 | 2026-10-19 | 维度5 Task4 第二轮复核修复:坏 schema 集成断言改为完整工具名、补 replace 原子性/scope global/invalid_schema status/移除工具/close 冒泡/mcp 非对象用例;`appendMcpStatus` 不再静默吞写入失败;spec 目标 3 同步确定性改名;录入 D-101(status 写入与 close 迟到竞态) |
 | 2026-10-19 | 维度5 Task5 收尾:D-021 标记已解决(命名空间映射与确定性改名);录入 D-102(继承完整 env)、D-103(未知字段静默忽略)、D-104(list_changed 刷新失败不重试);README 补 MCP 配置/命名/隔离/刷新与依赖安装说明 |
+| 2026-10-19 | 维度5全量复验:录入 D-105 ~ D-108(项目级 MCP 配置自动执行无信任门槛、连接错误重试可能重复破坏性工具、listTools 无显式超时、MCP content/schema 无大小上限);D-043 标注已解决;四项转入 A 档修复(fix/p0-a-tier) |
+| 2026-10-19 | A 档修复(fix/p0-a-tier):D-022 管线超时后串行屏障 + MCP 超时/取消断开重连;D-031 响应流式上限、D-032 请求超时;D-067 API Host/Origin 校验;D-075 shell abort 升级/兜底;D-099 emergency microcompact;D-102 env 白名单;D-105 项目配置 opt-in;D-106 破坏性工具不自动重试;D-107 listTools 超时;D-108 MCP content/schema/description 上限 |
+| 2026-10-19 | B 档修复(fix/p0-a-tier):`fs`/`glob`/`grep` 响应 `AbortSignal`(D-071/D-077 已解决);MCP 终止后轮询 PID,未确认退出则拒绝重连并返回 `mcp_uncertain`;`artifactPath` 存在的 evidence 在 emergency 阶段可降级为 artifact 引用(D-099 进一步缓解) |
+| 2026-10-19 | 标记 P0 未完成面:录入 D-109(第三方 in-process 工具缺 worker 隔离)、D-110(无 artifact evidence 超窗)、D-111(live 网关/真实 MCP/真机/终止失败路径验证缺口);D-022/D-099 补交叉引用;D-102 标注 `inheritEnv:true` 为显式设计取舍 |

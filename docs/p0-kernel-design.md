@@ -188,7 +188,7 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
   }
   ```
   `ToolCtx` 携带会话 id、工作目录、事件发布器;`ToolResult` 含 `isError: boolean` + 结构化错误体(`code / message / detail`)——**R3"工具必须诚实"的类型化落点**:错误是数据,不是异常字符串。
-- **五阶段管线**(每批工具调用统一走过):查找 → schema 验证 → 权限检查(P0 恒 allow,接口留位给 P1 #7)→ 执行(超时 / 取消 / 大输出截断)→ 后处理(超限落盘 #3)。**职责边界(P0 实现)**: 管线只返回结构化 `ToolResult`,**不写会话日志、不发布事件、不记 usage**——这三件由主循环在收到批量结果后统一完成(`session.append(tool_result)` / yield 事件 / usage 记账),以保证"落日志"与"投影"由同一处负责、不重复写入。超时只保证管线按时返回 `tool_timeout`,**不保证**工具真正停止(见 `docs/deferred-issues.md` D-022)。
+- **五阶段管线**(每批工具调用统一走过):查找 → schema 验证 → 权限检查(P0 恒 allow,接口留位给 P1 #7)→ 执行(超时 / 取消 / 大输出截断)→ 后处理(超限落盘 #3)。**职责边界(P0 实现)**: 管线只返回结构化 `ToolResult`,**不写会话日志、不发布事件、不记 usage**——这三件由主循环在收到批量结果后统一完成(`session.append(tool_result)` / yield 事件 / usage 记账),以保证"落日志"与"投影"由同一处负责、不重复写入。超时返回 `tool_timeout`;串行批次在超时后会等待残留执行一个宽限期,仍未结束则不再启动同批后续调用(后续结果标 `tool_skipped_after_timeout`),因此不会与后续写调用重叠;内置 `fs`/`shell`/`glob`/`grep` 均已响应 `AbortSignal`,不响应 signal 的自定义/第三方 in-process 工具仍可能继续运行(见 `docs/deferred-issues.md` D-022)。
 - **超时分级**:内置 shell 默认 2 min;MCP 工具按 server 声明(serial 类长操作允许分钟级);超时 = signal 中止 + 结构化超时错误回传模型(模型可据此换策略——Phase 0 验证过"防 hang"必须做到工具级)。
 - **大输出截断**:执行器出口统一截断(默认 25k tokens,对齐母本 MCP 截断值),截断体交 #3 一级落盘。
 - **内置最小工具集**(决策点 #3 的答案):`fs`(读/写/编辑合一)、`shell`、`glob`、`grep` 四个进内核——诊断所需的"读日志、翻工程、跑编译"全够用;嵌入式取证一律走 MCP(探针/串口/KB),**不进内核**(领域逻辑不入内核的定位边界)。
@@ -204,7 +204,7 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
 - **危险命令**:`rm` 带 `-r`/`-R`/`--recursive` 或 `-f`/`--force` 任一且目标为 `/`、`~`、`$HOME`/`${HOME}`、多级 `..`、盘符根(`C:`/`C:\`/`C:\*`);`--no-preserve-root` 一律危险;跟踪 `cd`/`pushd`/`chdir`/`Set-Location` 的根目标(无参 `cd`/`chdir`/`pushd` 均保守视为根),后续 `rm -r *`/`rm -f *` 一并拦截;`mkfs*`、`format <drive>:`、`diskpart`、`bcdedit`、`shutdown`/`reboot`/`poweroff`/`halt`、`dd of=/dev/*`、fork bomb、`del`/`rd` 的 `<drive>:\*` 与 `<drive>:\*.*` 通配、`reg delete HKLM`、`cipher /w`;命中返回 `dangerous_command`,不 spawn。
 - **cwd**:`resolveInWorkdir` 后校验存在且为目录,失败 `cwd_invalid`。
 - **输出与退出**:stdout/stderr 各 1 MiB 截断并标记;`detail.stdout`/`detail.stderr` 为前 4096 字符摘要(按 UTF-16 码点边界裁剪,不切断代理对),并附 `stdoutBytes`/`stderrBytes` 与截断标记,完整输出在 `text`;非零退出仍 `isError:false`;子进程被系统信号终止返回 `isError:true`、`code:"shell_terminated"`,detail 保留 `exitCode:null` 与实际 `signal`(不把 null 伪装成 1);spawn 失败 `shell_spawn_failed`。
-- **取消**:`execute` 自管 abort——Windows 用 `taskkill /T /F` 杀进程树,POSIX 杀 `detached` 进程组;避免 Node 内置 signal 只杀 shell 导致孙进程残留;调用方中止返回 `shell_aborted`。
+- **取消**:`execute` 自管 abort——Windows 用 `taskkill /T /F` 杀进程树,POSIX 杀 `detached` 进程组;避免 Node 内置 signal 只杀 shell 导致孙进程残留;调用方中止返回 `shell_aborted`。abort 后 1s 升级 `SIGKILL`/再次 `taskkill`,3s 仍未确认退出则兜底返回 `shell_aborted` 并写 `abortEscalated`/`terminateFailed`,Promise 必定 settle。
 
 | 错误码 | 含义 |
 |---|---|
@@ -239,7 +239,8 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
 - **连接模型与生命周期**(决策点 #8 的答案:**会话级**):
   - 每个 MCP server 配置 = 一个连接定义;**连接归属其配置所在的作用域,作用域随会话**——一个会话启动时按"用户级 + 项目级"两层配置实例化全部 MCP 子进程,会话结束统一回收(杀进程组,防 OpenOCD/串口句柄泄漏——嵌入式特有要求)。
   - 会话间**零共享**:无全局连接池(PLAT-2"会话间上下文与 MCP 连接隔离"的直接落点)。
-  - 健康检查:启动握手超时(默认 30s)→ 该 server 标记失败,工具以结构化"server 不可用"回传(不静默);运行中进程退出 → 自动重启一次,再失败降级为不可用并**通知会话**(工具列表变更事件)。
+  - 健康检查:启动握手与 `listTools()` 发现使用同一连接超时(默认 15s)→ 该 server 标记失败,工具以结构化"server 不可用"回传(不静默);运行中进程退出 → 非破坏性工具自动重连一次,再失败降级为不可用并**通知会话**(工具列表变更事件);破坏性工具连接中断返回 `mcp_uncertain`,不自动重试。超时/取消后终止 transport 并轮询 PID,未确认退出则拒绝重连并保持 `mcp_uncertain`。
+  - 信任边界:用户级配置默认加载;项目级 `<workdir>/.harness/mcp.json` 默认不加载,需 `trustProjectConfig:true`(或显式路径);MCP 子进程默认只继承 env 白名单,`inheritEnv`/`envAllowlist` 可放宽。
   - 工具列表变更:重连后 tool list 变化以事件进会话日志并同步给模型(下轮请求的工具目录更新)。
 - **命名空间**:工具名 `mcp__<server>__<tool>` 全局唯一,进工具系统(#4)后与内置工具同管线;权限规则(P1)与 UI 展示都按此名寻址。sanitize/64 截断导致的名称冲突不再丢弃工具,而是基于原 `mcp__<server>__<tool>` 追加 `_<hash6>` 确定性消歧,并以 `mcp_tool_name_renamed` status 记录原名与最终名;工具 `_meta.evidence === true` 映射为证据标注。消歧占用可能使后续工具基础名连环改名,结果对同一 `tools()` 输入列表确定,但依赖 server 返回顺序(D-100)。`inputSchema` 根非 object 的工具在装配层跳过并记 `mcp_tool_invalid_schema`,不因单个坏工具导致整批 registry 重建失败。
 - **作用域两级**:`user`(~/.harness/mcp.json)/ `project`(<project>/.harness/mcp.json),project 覆盖 user 同名 server。母本的 local/project/user/managed 四级收敛为两级,managed(企业托管)砍掉。
