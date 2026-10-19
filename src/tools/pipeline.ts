@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { heuristicCountTokens } from "../model/count.js";
+import type { PermissionGate, PermissionRequest } from "../permissions/types.js";
 import type { SessionHandle } from "../session/session.js";
 import type { ToolRegistry } from "./registry.js";
-import type { ToolCtx, ToolResult } from "./types.js";
+import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
 
 export interface BatchCall {
   id: string;
@@ -17,12 +18,18 @@ export interface BatchResult {
   result: ToolResult;
 }
 
+export interface PermissionOptions {
+  gate: PermissionGate;
+  onDecision: (call: BatchCall, decision: PermissionRequest) => Promise<void>;
+}
+
 export interface BatchOptions {
   signal: AbortSignal;
   artifactDir: string;
   cwd?: string;
   timeoutMs?: number;
   settleGraceMs?: number;
+  permission?: PermissionOptions;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -289,16 +296,39 @@ interface ExecuteOutcome {
   pending?: Promise<unknown>;
 }
 
-async function executeOne(
-  session: SessionHandle,
+interface AuthorizedCall {
+  tool: ToolDef<any>;
+  input: unknown;
+}
+
+type AuthorizationOutcome =
+  | { kind: "authorized"; authorized: AuthorizedCall }
+  | { kind: "rejected"; result: ToolResult };
+
+function permissionDenied(decision: PermissionRequest): ToolResult {
+  const detail: Record<string, unknown> = {
+    action: decision.action,
+    effective: decision.effective,
+    reason: decision.reason,
+    preset: decision.preset,
+    source: decision.source,
+  };
+  if (decision.ruleIndex !== undefined) detail.ruleIndex = decision.ruleIndex;
+  const message = `permission denied: ${decision.reason}`;
+  return failure("permission_denied", message, detail, message);
+}
+
+// 授权阶段只做查询/校验/权限判定与审计,不得创建执行计时器。
+async function authorizeOne(
   tools: ToolRegistry,
   call: BatchCall,
   opts: BatchOptions,
-): Promise<ExecuteOutcome> {
+): Promise<AuthorizationOutcome> {
   const tool = tools.lookup(call.name);
   if (!tool) {
     const displayName = truncateText(call.name, MAX_NAME_ECHO_CHARS);
     return {
+      kind: "rejected",
       result: failure(
         "tool_not_found",
         `tool not found: ${displayName}`,
@@ -316,10 +346,41 @@ async function executeOne(
         .join("; ") || "schema validation failed";
     const message = truncateText(rawMessage, MAX_SCHEMA_MESSAGE_CHARS);
     return {
+      kind: "rejected",
       result: failure("schema_validation", message, sanitizeIssues(parsed.error.issues)),
     };
   }
 
+  if (opts.signal.aborted) {
+    return {
+      kind: "rejected",
+      result: failure("tool_aborted", "tool aborted before execution"),
+    };
+  }
+
+  if (opts.permission !== undefined) {
+    const decision = await opts.permission.gate.check({
+      callId: call.id,
+      tool,
+      args: parsed.data,
+      signal: opts.signal,
+    });
+    await opts.permission.onDecision(call, decision);
+    if (decision.effective !== "allow") {
+      return { kind: "rejected", result: permissionDenied(decision) };
+    }
+  }
+
+  return { kind: "authorized", authorized: { tool, input: parsed.data } };
+}
+
+async function executeAuthorized(
+  session: SessionHandle,
+  authorized: AuthorizedCall,
+  opts: BatchOptions,
+): Promise<ExecuteOutcome> {
+  // 审批期间调用方可能已中止;此时不能再依赖 executeAuthorized 内部注册的 abort
+  // 监听(事件已派发),必须在启动执行前同步复查,否则不检查 signal 的工具仍会运行。
   if (opts.signal.aborted) {
     return { result: failure("tool_aborted", "tool aborted before execution") };
   }
@@ -345,7 +406,9 @@ async function executeOne(
   const stillPending = (): Pick<ExecuteOutcome, "pending"> =>
     settled || execution === undefined ? {} : { pending: execution };
   try {
-    execution = Promise.resolve().then(() => tool.execute(parsed.data, ctx, signal));
+    execution = Promise.resolve().then(() =>
+      authorized.tool.execute(authorized.input, ctx, signal),
+    );
     const tracked = execution;
     void tracked.then(
       () => { settled = true; },
@@ -397,7 +460,12 @@ async function runOne(
   opts: BatchOptions,
 ): Promise<RunOutcome> {
   const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
-  const outcome = await executeOne(session, tools, call, opts);
+  const authorization = await authorizeOne(tools, call, opts);
+  if (authorization.kind === "rejected") {
+    const result = await finalizeResult(authorization.result, call.id, opts.artifactDir);
+    return { id: call.id, result: { ...result, evidence } };
+  }
+  const outcome = await executeAuthorized(session, authorization.authorized, opts);
   const result = await finalizeResult(outcome.result, call.id, opts.artifactDir);
   return {
     id: call.id,
@@ -502,10 +570,49 @@ export async function executeBatch(
     (call) => tools.lookup(call.name)?.annotations?.readOnly === true,
   );
   if (concurrent) {
-    const outcomes = await Promise.all(
-      calls.map((call, index) => run(call, duplicates[index])),
+    // 第一阶段:按输入顺序串行授权并审计;gate/onDecision 抛错直接上抛,
+    // 此时第二阶段尚未开始,任何工具都不会执行。
+    type Prepared =
+      | { kind: "final"; result: BatchResult }
+      | { kind: "authorized"; id: string; evidence: boolean; authorized: AuthorizedCall };
+    const prepared: Prepared[] = [];
+    for (let index = 0; index < calls.length; index += 1) {
+      const call = calls[index]!;
+      if (typeof call.id !== "string") {
+        prepared.push({ kind: "final", result: await invalidIdResult(call, opts, tools) });
+        continue;
+      }
+      if (duplicates[index]) {
+        prepared.push({ kind: "final", result: await duplicateResult(call, opts, tools) });
+        continue;
+      }
+      const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
+      const authorization = await authorizeOne(tools, call, opts);
+      if (authorization.kind === "rejected") {
+        const result = await finalizeResult(authorization.result, call.id, opts.artifactDir);
+        prepared.push({
+          kind: "final",
+          result: { id: call.id, result: { ...result, evidence } },
+        });
+        continue;
+      }
+      prepared.push({
+        kind: "authorized",
+        id: call.id,
+        evidence,
+        authorized: authorization.authorized,
+      });
+    }
+
+    // 第二阶段:全部授权完成后,允许的调用才并发执行。
+    return Promise.all(
+      prepared.map(async (entry): Promise<BatchResult> => {
+        if (entry.kind === "final") return entry.result;
+        const outcome = await executeAuthorized(session, entry.authorized, opts);
+        const result = await finalizeResult(outcome.result, entry.id, opts.artifactDir);
+        return { id: entry.id, result: { ...result, evidence: entry.evidence } };
+      }),
     );
-    return outcomes.map(({ id, result }) => ({ id, result }));
   }
 
   const settleGraceMs = resolveSettleGraceMs(opts.settleGraceMs);
