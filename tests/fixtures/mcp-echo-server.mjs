@@ -185,6 +185,28 @@ async function main() {
   );
 
   server.registerTool(
+    "shrink",
+    { description: "Shrink the tool list to echo and notify list_changed" },
+    async () => {
+      server.server.setRequestHandler("tools/list", async () => ({
+        tools: [
+          {
+            name: "echo",
+            description: "Echo the provided text",
+            inputSchema: {
+              type: "object",
+              properties: { text: { type: "string" } },
+              required: ["text"],
+            },
+          },
+        ],
+      }));
+      server.sendToolListChanged();
+      return textResult("shrunk");
+    },
+  );
+
+  server.registerTool(
     "vanish",
     { description: "Exit without replying" },
     async () => {

@@ -849,6 +849,14 @@
 - **触发升级条件**: P1 权限规则按工具名持久化;跨会话回放依赖工具名稳定性;server 返回顺序被观察到变化并导致自动化脚本失败。
 - **修复建议**: 消歧前先按 `(server, tool)` 字典序排序稳定输入,或改为「先检测全部冲突、再按排序分配」;把最终映射写入会话/配置以便审计。
 
+### D-101 · MCP status 写入与 close 的迟到竞态
+
+- **发现**: 2026-10-19,维度5 Task4 第二轮复核(N-5)。
+- **现象**: `runSession` 在 `finally` 中先 `await statusQueue` 再 `manager.close()`/`session.close()`。若某个 refresh 任务在 `await statusQueue` 之后才同步触发 listener 并入队 status,该写入会落在已关闭的 session 上;当前实现会记录 `status event append failed` 并继续关闭,但该条审计事件丢失。`appendMcpStatus` 只保留首个写入错误,未重试。
+- **影响**: list_changed 与会话结束高度重叠时可能丢失最后一条 `mcp_tools_changed`/`mcp_tools_refresh_failed` 审计;不影响工具调用结果与主会话退出码。
+- **触发升级条件**: 自动化依赖会话日志完整审计 MCP 工具变更;观察到 close 与 list_changed 并发导致 status 缺失;需要强一致事件序列。
+- **修复建议**: close 前先停止接收 refresh/listener(关闭标志或取消 token),再 flush 一次 status 队列;或为 status 写入增加有界重试/独立 sink。
+
 ---
 
 ## 变更记录
@@ -898,3 +906,4 @@
 | 2026-10-19 | 维度3 Task3 第一轮 review 修复:补长 evidence 候选变异守卫、transcript 60% 边界、摘要 messages 两条与投影失败 catch 用例;compact 的 `elidedSeqs` 改用 `Number.isInteger`;design §4.4/§4.6 删除 `pricePerMillion` 并同步 brief;D-097/D-099 补 `still_over_budget` 与 `no_progress` 边界语义 |
 | 2026-10-19 | 维度3 Task5 第一轮 review 修复:README 更正 `tool_calls` 计数口径(D-033 已解决)、补 summary `covers < summary.seq`、二级候选排除旧 summary 覆盖范围、前缀投影失败、8000/25000 估算口径与无 system 回退;D-093 交叉引用 D-005;D-095 修复建议改为 rollover/归档层限定元数据、不删除既有事件;dev-notes 修正 Task1 提交信息与 task-5-brief 说明 |
 | 2026-10-19 | 维度5 Task4:runSession 装配 MCP 与 list_changed 刷新;status 事件接入、配置错误隔离、finally close;spec §4.3/§4.4/§4.5 同步确定性消歧与 status 枚举;录入 D-100(消歧依赖 server 返回顺序) |
+| 2026-10-19 | 维度5 Task4 第二轮复核修复:坏 schema 集成断言改为完整工具名、补 replace 原子性/scope global/invalid_schema status/移除工具/close 冒泡/mcp 非对象用例;`appendMcpStatus` 不再静默吞写入失败;spec 目标 3 同步确定性改名;录入 D-101(status 写入与 close 迟到竞态) |

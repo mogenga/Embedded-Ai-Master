@@ -21,7 +21,7 @@ MCP SDK v2 已用 Context7 查证(2026-10-19):
 
 1. 配置: `$HARNESS_HOME/mcp.json`(user) 与 `<workdir>/.harness/mcp.json`(project), project 覆盖同名 server; `disabled:true` 跳过。
 2. 会话级 `McpManager`: `connectAll()` 并行连接, 单 server 失败不阻塞其他; 连接超时 15s; `close()` 断开全部。
-3. 工具注册: `mcp__<server>__<tool>` 命名空间, 名称 sanitize 与 64 字符限制; 冲突拒绝; annotations 映射。
+3. 工具注册: `mcp__<server>__<tool>` 命名空间, 名称 sanitize 与 64 字符限制; 名称冲突基于原 identity 确定性追加 `_<hash6>` 改名并记 `mcp_tool_name_renamed`; annotations 映射。
 4. 调用: `callTool` 透传参数; text content 拼接; 非 text content JSON 化; `isError` 映射; 超时/取消映射。
 5. 断线恢复: 连接类失败重连一次并重试; 仍失败返回 `mcp_unavailable`, 记录 status。
 6. list_changed: 监听并刷新工具集合; 新工具进入后续请求, 移除工具不再调用; 记录 status。

@@ -209,6 +209,14 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   if (compaction?.enabled !== undefined && typeof compaction.enabled !== "boolean") {
     throw new TypeError(`compaction.enabled must be a boolean; got ${typeof compaction.enabled}`);
   }
+
+  const rawMcp: unknown = opts.mcp;
+  if (
+    rawMcp !== undefined &&
+    (typeof rawMcp !== "object" || rawMcp === null || Array.isArray(rawMcp))
+  ) {
+    throw new TypeError(`mcp must be an object; got ${rawMcp === null ? "null" : typeof rawMcp}`);
+  }
   if (opts.mcp?.enabled !== undefined && typeof opts.mcp.enabled !== "boolean") {
     throw new TypeError(`mcp.enabled must be a boolean; got ${typeof opts.mcp.enabled}`);
   }
@@ -284,13 +292,16 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   let hasPrimaryError = false;
   let mcpManager: McpManager | undefined;
   let statusQueue: Promise<void> = Promise.resolve();
+  let statusWriteFailure: unknown;
   const seenMcpStatuses = new Set<string>();
   const appendMcpStatus = (status: McpSessionStatus): void => {
     statusQueue = statusQueue
       .then(() => session.append({ type: "status", payload: { ...status } }))
       .then(
         () => undefined,
-        () => undefined,
+        (error: unknown) => {
+          if (statusWriteFailure === undefined) statusWriteFailure = error;
+        },
       );
   };
   const appendMcpStatusOnce = (key: string, status: McpSessionStatus): void => {
@@ -433,6 +444,9 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     throw error;
   } finally {
     await statusQueue;
+    if (statusWriteFailure !== undefined) {
+      console.error(`[mcp] status event append failed: ${messageOf(statusWriteFailure)}`);
+    }
     let closeError: unknown;
     try {
       await mcpManager?.close();

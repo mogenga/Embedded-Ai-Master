@@ -78,6 +78,36 @@ describe("ToolRegistry", () => {
   it("重复工具名构造抛错", () => {
     expect(() => new ToolRegistry([echoTool, echoTool])).toThrow(/tool already registered/);
   });
+
+  it("replace 成功后全量替换工具集合", () => {
+    const reg = new ToolRegistry([echoTool]);
+
+    reg.replace([otherTool]);
+
+    expect(reg.all().map((tool) => tool.name)).toEqual(["other"]);
+    expect(reg.lookup("echo")).toBeUndefined();
+  });
+
+  it("replace 重复名失败时保留旧集合", () => {
+    const reg = new ToolRegistry([echoTool]);
+
+    expect(() => reg.replace([otherTool, otherTool])).toThrow(/tool already registered/);
+    expect(reg.all().map((tool) => tool.name)).toEqual(["echo"]);
+  });
+
+  it("replace 坏 modelSchema 失败时保留旧集合", () => {
+    const reg = new ToolRegistry([echoTool]);
+    const bad: ToolDef<unknown> = {
+      name: "bad",
+      description: "坏 modelSchema",
+      schema: z.unknown(),
+      modelSchema: { type: "string" },
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+
+    expect(() => reg.replace([bad])).toThrow(/modelSchema root must be an object/);
+    expect(reg.all().map((tool) => tool.name)).toEqual(["echo"]);
+  });
 });
 
 describe("echoTool", () => {
