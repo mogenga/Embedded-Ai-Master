@@ -21,7 +21,7 @@ describe("TokenMeter", () => {
     expect(meter.measure(messages)).toBe(150);
   });
 
-  it("observe 对整十倍用量做 EMA", () => {
+  it("observe 对 1.5 倍用量做 EMA", () => {
     const meter = createTokenMeter(() => 100);
 
     meter.observe(150, messages);
@@ -64,9 +64,9 @@ describe("TokenMeter", () => {
   it("heuristic 为 0 时用 max(1, ...) 避免除零", () => {
     const meter = createTokenMeter(() => 0);
 
-    meter.observe(2, messages);
+    meter.observe(1, messages);
 
-    expect(meter.ratio()).toBe(1.5);
+    expect(meter.ratio()).toBe(1);
     expect(meter.measure(messages)).toBe(0);
   });
 

@@ -287,6 +287,7 @@
 - **影响**: 工具密集会话的预算被系统性低估,可能直到真实上下文超限才暴露。
 - **触发升级条件**: 出现上下文超限;工具调用占比高的会话预算明显偏离 `usage`;引入 usage 锚定校准。
 - **修复建议**: 将 `tool_calls[].function.name/arguments` 按序列化长度计入估算,或在 usage 锚定时按实际值校准。
+- **状态**: 已解决(2026-10-19 维度3 修复:`heuristicCountTokens` 已按序列化长度计入 `tool_calls`);剩余 CJK/emoji 低估见 D-005。
 
 ### D-034 · 文本截断可能切断代理对
 
@@ -780,7 +781,7 @@
 ### D-093 · 三级边界的逐事件 token 估算为近似值
 
 - **发现**: 2026-10-19,维度3 Task5 收尾。
-- **现象**: `computeTailBoundary` 按事件文本长度 / 4 逐事件累计;assistant 事件已计入 `tool_calls` 序列化长度(与 `heuristicCountTokens` 口径一致),但仍未计入 role/分隔符开销与 CJK 偏差;transcript 也按 UTF-16 代码单元计数/截断(仅保证不切断代理对),CJK 无按字符或 token 的校正。边界计算不使用 `TokenMeter` 的锚定 ratio,与预算检查口径不完全一致。
+- **现象**: `computeTailBoundary` 按事件文本长度 / 4 逐事件累计;assistant 事件已计入 `tool_calls` 序列化长度(与 `heuristicCountTokens` 口径一致),但仍未计入 role/分隔符开销与 CJK 偏差;transcript 也按 UTF-16 代码单元计数/截断(仅保证不切断代理对),CJK 无按字符或 token 的校正(CJK/emoji 低估与 D-005 同源)。边界计算不使用 `TokenMeter` 的锚定 ratio,与预算检查口径不完全一致。
 - **影响**: 尾部 16% 的实际保留量可能偏离目标;边界可能过早或过晚摘要,极端情况下产生额外 `failed` 或超出预期窗口。
 - **触发升级条件**: 尾部包含大 `tool_calls` 或 CJK 内容;实测窗口与估算偏差显著;摘要频繁在临界点失败。
 - **修复建议**: 统一用 `TokenMeter.measure` 对候选前缀做增量估算,或在边界计算中补齐 role/分隔符/CJK 估算并复用 ratio。
@@ -801,7 +802,7 @@
 - **现象**: 每次越过软阈值都会追加 `microcompact` / `summary` / `failed` 事件;`microcompact` 的 `elidedSeqs` 只增不合并,旧 summary 事件永久保留。
 - **影响**: 长会话日志体积与 `buildMessages` 扫描成本随压缩次数线性增长;rollover 提前触发;可回放性保留但事件噪声变大。
 - **触发升级条件**: 会话持续数百轮或频繁压缩;日志 I/O 成为瓶颈;需要限制单会话日志上限。
-- **修复建议**: 合并连续 `microcompact` 的 `elidedSeqs`、在 rollover 时压缩历史 compaction 元数据,或为 compaction 事件设上限并只保留最后一条 summary。
+- **修复建议**: 在 rollover 新代/归档层限定投影所需元数据(例如归档索引中合并连续 `microcompact` 的 `elidedSeqs`、只索引最后一条有效 summary),由投影层按需读取;不删除或改写既有事件,保持 append-only 与回放一致。
 - **状态**: 未解决;当前不合并、不删除任何事件。
 
 ### D-096 · `keepRecentTurns` 默认 2 轮未经场景校准
@@ -816,7 +817,7 @@
 ### D-097 · `compacted` 事件不区分压缩成功与失败
 
 - **发现**: 2026-10-19,维度3 第一轮整体审查(Minor 项)。
-- **现象**: `query` 在 compactor 返回后无条件 `yield { kind: "compacted" }`;`compactSession` 在摘要为空、被 `maxOutputTokens` 截断、边界 `no_progress`、摘要后仍超阈值(`still_over_budget`)或摘要调用失败时只追加 `compaction {kind:"failed"}` 并正常返回,因此事件流同样发出 `compacted`。摘要缺 usage 的 `status {status:"usage_missing",stage:"summary"}` 也只落日志,事件流不携带。
+- **现象**: `query` 在 compactor 返回后无条件 `yield { kind: "compacted" }`;`compactSession` 在摘要为空、被 `maxOutputTokens` 截断、边界 `no_progress`、摘要后仍超阈值(`still_over_budget`)或摘要调用失败时只追加 `compaction {kind:"failed"}` 并正常返回,因此事件流同样发出 `compacted`。摘要缺 usage 的 `status {status:"usage_missing",stage:"summary"}` 也只落日志,事件流不携带。另,`still_over_budget` 的 `failed` 事件在有效 `summary` 事件之后追加,日志可能同时存在成功摘要与 `failed`;调用方若只看最后一条 `failed` 判定摘要未生成会误判。
 - **影响**: 调用方若以 `compacted` 判断压缩成功会误判;成功/失败仍可从会话日志区分,但事件流与日志语义不一致。
 - **触发升级条件**: 调用方依赖事件流做重试、成本提示或 UI 状态;需要把压缩结果暴露给上层。
 - **修复建议**: 让 compactor 返回结果并由 `query` 携带成功/失败信息,或新增显式 `compaction_result` 事件;保持事件流与日志一致。
@@ -834,7 +835,7 @@
 ### D-099 · 单条结果或近期批次超窗时仅有 `still_over_budget`
 
 - **发现**: 2026-10-19,维度3 第二轮红队审查(I-2)。
-- **现象**: 默认 `keepRecentTurns=2` 会保护最近批次不被 microcompact;若单个工具结果或最近批次本身超过 `contextWindow * softRatio`,二级无法修剪,三级摘要又必须保留尾部,摘落后重新测量仍超阈值。首轮追加 `compaction {kind:"failed",reason:"still_over_budget",stage:"summary"}` 并继续以超窗消息请求;后续轮因尾部边界不再前进,会命中 `no_progress`,不会再次调用摘要。
+- **现象**: 默认 `keepRecentTurns=2` 会保护最近批次不被 microcompact;若单个工具结果或最近批次本身超过 `contextWindow * softRatio`,二级无法修剪,三级摘要又必须保留尾部,摘落后重新测量仍超阈值。首轮追加 `compaction {kind:"failed",reason:"still_over_budget",stage:"summary"}` 并继续以超窗消息请求;后续轮因尾部边界不再前进,会命中 `no_progress`,不会再次调用摘要。另,`no_progress` 门槛取旧 summary 事件 `seq` 而非旧 `coversUpToSeq`;当新边界落在 `(旧 coversUpToSeq, 旧 summary.seq]` 时,边界相对旧 covers 已前进但仍判 `no_progress`,压缩会持续停滞(该口径用于避免新摘要丢失旧摘要文本)。
 - **影响**: 极端大结果下压缩无法把视图降到软阈值以内,仍可能触窗或 4xx;首轮记 `still_over_budget`,之后每轮只记 `no_progress`,没有降级路径。
 - **触发升级条件**: 单条工具结果接近或超过窗口;近期批次包含多个大结果;网关因超窗持续拒绝。
 - **修复建议**: 一级截断按单条结果强制落盘并进一步缩短模型视图;允许把最近批次中的非 evidence 结果降级为占位;或在 `still_over_budget` 时触发更小尾部/更强摘要策略。
@@ -886,3 +887,5 @@
 | 2026-10-19 | 维度3 第一轮整体审查修复:摘要空/全空白/截断落 `failed` 且不计费;`no_progress` 幂等守卫;比例配置入口校验;`heuristicCountTokens` 计入 `tool_calls`;transcript/首行截断保护代理对;删除 `CompactOptions.pricePerMillion`;补充压缩后 resume、summary+坏尾部恢复、批次边界与 evidence 用例;更正 D-093(assistant 已计 `tool_calls`),录入 D-097(`compacted` 不区分成功/失败)、D-098(坏 summary 容错与 microcompact failed 分支) |
 | 2026-10-19 | 维度3 第二轮红队修复:summary 投影拒绝覆盖 evidence 并回退上一条有效 summary;坏 summary 校验非空/边界/批次完整性;摘要后仍超阈值落 `failed(still_over_budget)`;缺 usage 改写 `status(usage_missing)` 并复用 `normalizeUsage`;新摘要必须覆盖旧 summary 事件并在 transcript 前置旧摘要;microcompact 仅在占位更短时生效;`keepRecentTurns` 校验非负整数;TokenMeter 防御非有限 heuristic;`enabled:false` 不再校验比例;扩写 D-093/D-097,录入 D-099(单条结果/近期批次超窗) |
 | 2026-10-19 | 维度3 最后小修:移除 transcript 手动 `[Previous summary]` 前置(由 `buildMessages(prefix)` 注入一次);summary 投影按事件顺序只采信边界不倒退的有效 summary;D-099 补充首轮 `still_over_budget`、后续轮 `no_progress` 的轮次语义 |
+| 2026-10-19 | 维度3 Task3 第一轮 review 修复:补长 evidence 候选变异守卫、transcript 60% 边界、摘要 messages 两条与投影失败 catch 用例;compact 的 `elidedSeqs` 改用 `Number.isInteger`;design §4.4/§4.6 删除 `pricePerMillion` 并同步 brief;D-097/D-099 补 `still_over_budget` 与 `no_progress` 边界语义 |
+| 2026-10-19 | 维度3 Task5 第一轮 review 修复:README 更正 `tool_calls` 计数口径(D-033 已解决)、补 summary `covers < summary.seq`、二级候选排除旧 summary 覆盖范围、前缀投影失败、8000/25000 估算口径与无 system 回退;D-093 交叉引用 D-005;D-095 修复建议改为 rollover/归档层限定元数据、不删除既有事件;dev-notes 修正 Task1 提交信息与 task-5-brief 说明 |

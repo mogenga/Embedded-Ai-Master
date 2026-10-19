@@ -139,7 +139,7 @@ git commit -m "feat(context): usage锚定token计数"
 - Consumes: Task 1 compaction 事件、Task 2 TokenMeter、`buildMessages`、`SessionHandle`、`ModelProtocol`
 - Produces:
   - `compactSession(opts: CompactOptions): Promise<void>`
-  - `CompactOptions { session, model, modelCfg, pricePerMillion?, keepRecentTurns?, keepTailRatio?, softRatio?, meter, signal }`
+  - `CompactOptions { session, model, modelCfg, keepRecentTurns?, keepTailRatio?, softRatio?, meter, signal }`
 
 - [ ] **Step 1: 写失败测试**
 

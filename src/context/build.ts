@@ -75,7 +75,7 @@ function collectElidedSeqs(events: readonly SessionEvent[]): Set<number> {
     const seqs = event.payload.elidedSeqs;
     if (!Array.isArray(seqs)) continue;
     for (const seq of seqs) {
-      if (typeof seq === "number") elided.add(seq);
+      if (Number.isInteger(seq)) elided.add(seq);
     }
   }
   return elided;
@@ -118,6 +118,7 @@ function toSummaryDirective(
     || !Number.isInteger(coversUpToSeq)
     || coversUpToSeq < 0
     || coversUpToSeq > lastSeq
+    || coversUpToSeq >= event.seq
   ) {
     return undefined;
   }
@@ -126,8 +127,6 @@ function toSummaryDirective(
   return { summary, coversUpToSeq };
 }
 
-// 按事件顺序采信有效 summary，且边界不得倒退；坏/倒退的 summary 不放大视图，
-// 也不吞掉之前已采信的有效摘要。
 function findEffectiveSummary(events: readonly SessionEvent[]): SummaryDirective | undefined {
   const lastSeq = events.length === 0 ? -1 : events[events.length - 1].seq;
   let accepted: SummaryDirective | undefined;

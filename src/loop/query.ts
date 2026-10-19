@@ -288,12 +288,9 @@ export async function* query(
         }
         await session.append({ type: "usage", payload });
         costUsd += computeCostUsd(usage, ctx.pricePerMillion);
+        ctx.meter?.observe(normalized.promptTokens, messages);
       } else {
         await session.append({ type: "status", payload: { status: "usage_missing" } });
-      }
-
-      if (response.usage !== undefined) {
-        ctx.meter?.observe(response.usage.promptTokens, messages);
       }
 
       yield { kind: "model_message", content: response.content };

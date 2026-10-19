@@ -50,7 +50,7 @@ function collectElidedSeqs(events: readonly SessionEvent[]): Set<number> {
     const seqs = event.payload.elidedSeqs;
     if (!Array.isArray(seqs)) continue;
     for (const seq of seqs) {
-      if (typeof seq === "number") elided.add(seq);
+      if (Number.isInteger(seq)) elided.add(seq);
     }
   }
   return elided;
@@ -177,7 +177,6 @@ function toTranscript(messages: ModelChatMessage[]): string {
 function measureWith(meter: TokenMeter | undefined, messages: ModelChatMessage[]): number {
   return meter === undefined ? heuristicCountTokens(messages) : meter.measure(messages);
 }
-
 
 function failureReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);

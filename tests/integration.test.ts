@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildMessages } from "../src/context/build.js";
+import { SUMMARY_PROMPT } from "../src/context/compact.js";
 import { ConfigLoadError, ModelReferenceError } from "../src/config/providers.js";
 import { runSession } from "../src/index.js";
 import type { LoopEvent } from "../src/loop/events.js";
@@ -119,6 +120,35 @@ const SUMMARY_RESPONSE = {
   choices: [{ message: { content: "summary-of-old-context" }, finish_reason: "stop" }],
   usage: { prompt_tokens: 100, completion_tokens: 10 },
 };
+
+const HIGH_USAGE_TOOL_RESPONSE = {
+  choices: [
+    {
+      message: {
+        content: "",
+        tool_calls: [
+          {
+            id: "call-meter",
+            type: "function",
+            function: { name: "echo", arguments: JSON.stringify({ text: "hi" }) },
+          },
+        ],
+      },
+      finish_reason: "tool_calls",
+    },
+  ],
+  usage: { prompt_tokens: 1000, completion_tokens: 2 },
+};
+
+const SOFT_RATIO_TOOL_RESPONSE = toolCallResponseNoUsage("call-soft", "echo", {
+  text: "S".repeat(100),
+});
+const TAIL_RATIO_TOOL_RESPONSE_A = toolCallResponseNoUsage("c1", "echo", {
+  text: "A".repeat(80),
+});
+const TAIL_RATIO_TOOL_RESPONSE_B = toolCallResponseNoUsage("c2", "echo", {
+  text: "B".repeat(80),
+});
 
 const PROVIDERS = {
   gw: {
@@ -422,7 +452,7 @@ describe("runSession 端到端装配", () => {
     expect(calls).toHaveLength(3);
     expect(calls[1].body.tools).toEqual([]);
     const summaryMessages = calls[1].body.messages as Array<{ role: string; content: string }>;
-    expect(summaryMessages[0]).toMatchObject({ role: "system" });
+    expect(summaryMessages[0]).toEqual({ role: "system", content: SUMMARY_PROMPT });
 
     const finalMessages = calls[2].body.messages as Array<{ role: string; content: string }>;
     const finalSystem = finalMessages.find(
@@ -490,6 +520,118 @@ describe("runSession 端到端装配", () => {
     );
 
     expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+  });
+
+  it("meter 注入:大 prompt_tokens 锚定后使下一轮预算超限并触发压缩", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "meter-anchor");
+    const { impl, calls } = mockFetch([
+      HIGH_USAGE_TOOL_RESPONSE,
+      SUMMARY_RESPONSE,
+      EMPTY_RESPONSE,
+    ]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/tiny",
+        providersText: providersWith({ tiny: { contextWindow: 90, maxOutput: 512 } }),
+        sessionDir,
+        fetchImpl: impl,
+        compaction: { softRatio: 0.4 },
+      }),
+    );
+
+    expect(calls).toHaveLength(3);
+    expect(calls[1].body.tools).toEqual([]);
+    const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(
+      log.some(
+        (event) => event.type === "compaction" && event.payload.kind === "summary",
+      ),
+    ).toBe(true);
+    expect(events.some((event) => event.kind === "compacted")).toBe(true);
+  });
+
+  it("softRatio 透传:自定义阈值触发压缩而默认 0.8 不会", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "soft-ratio");
+    const { impl, calls } = mockFetch([
+      SOFT_RATIO_TOOL_RESPONSE,
+      SUMMARY_RESPONSE,
+      EMPTY_RESPONSE,
+    ]);
+
+    const events = await collect(
+      runSession({
+        input: "hi",
+        model: "gw/tiny",
+        providersText: providersWith({ tiny: { contextWindow: 100, maxOutput: 512 } }),
+        sessionDir,
+        fetchImpl: impl,
+        compaction: { softRatio: 0.5 },
+      }),
+    );
+
+    expect(calls).toHaveLength(3);
+    expect(calls[1].body.tools).toEqual([]);
+    expect(events.some((event) => event.kind === "compacted")).toBe(true);
+    const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
+    expect(
+      log.some(
+        (event) => event.type === "compaction" && event.payload.kind === "summary",
+      ),
+    ).toBe(true);
+  });
+
+  it("keepTailRatio 透传:自定义 0.9 使摘要不再覆盖较早批次", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const sessionDir = path.join(home, "tail-ratio");
+    const { impl, calls } = mockFetch([
+      TAIL_RATIO_TOOL_RESPONSE_A,
+      TAIL_RATIO_TOOL_RESPONSE_B,
+      SUMMARY_RESPONSE,
+      EMPTY_RESPONSE,
+    ]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/tiny",
+        providersText: providersWith({ tiny: { contextWindow: 100, maxOutput: 512 } }),
+        sessionDir,
+        fetchImpl: impl,
+        compaction: { softRatio: 0.95, keepTailRatio: 0.9 },
+      }),
+    );
+
+    expect(calls).toHaveLength(4);
+    expect(calls[2].body.tools).toEqual([]);
+    const summaryMessages = calls[2].body.messages as Array<{ role: string; content: string }>;
+    expect(summaryMessages[1].role).toBe("user");
+    expect(summaryMessages[1].content).toContain("user: hi");
+    expect(summaryMessages[1].content).not.toContain("tool(c1):");
+  });
+
+  it("compaction.enabled 非布尔值在入口抛 TypeError", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+
+    await expect(
+      collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir: path.join(home, "invalid-enabled"),
+          fetchImpl: mockFetch([EMPTY_RESPONSE]).impl,
+          compaction: { enabled: 0 as unknown as boolean },
+        }),
+      ),
+    ).rejects.toBeInstanceOf(TypeError);
   });
 
   it("结束后会话日志可读且工具结果完整", async () => {
@@ -1120,6 +1262,26 @@ describe("runSession resume", () => {
     ).rejects.toBeInstanceOf(TypeError);
   });
 });
+
+function toolCallResponseNoUsage(id: string, name: string, args: unknown): unknown {
+  return {
+    choices: [
+      {
+        message: {
+          content: "",
+          tool_calls: [
+            {
+              id,
+              type: "function",
+              function: { name, arguments: JSON.stringify(args) },
+            },
+          ],
+        },
+        finish_reason: "tool_calls",
+      },
+    ],
+  };
+}
 
 function toolCallResponse(id: string, name: string, args: unknown): unknown {
   return {
