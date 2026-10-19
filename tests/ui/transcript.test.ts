@@ -184,6 +184,53 @@ describe("transcript", () => {
     ]);
     expect(invalid.cost).toBeUndefined();
   });
+  it("permission_decision 事件不产生卡片且状态不变", () => {
+    const events: SessionEvent[] = [
+      { seq: 1, ts: "t", type: "user", payload: { content: "症状" } },
+      {
+        seq: 2,
+        ts: "t",
+        type: "assistant",
+        payload: {
+          content: "",
+          toolCalls: [{ id: "c1", name: "serial_read", arguments: { port: "COM3" } }],
+        },
+      },
+      {
+        seq: 3,
+        ts: "t",
+        parent: 2,
+        type: "permission_decision",
+        payload: {
+          callId: "c1",
+          tool: "serial_read",
+          action: "allow",
+          effective: "allow",
+          reason: "test:allow",
+          preset: "read-only",
+          source: "builtin",
+          paramsDigest: "digest",
+          paramsKeys: ["port"],
+          access: "read",
+        },
+      },
+      {
+        seq: 4,
+        ts: "t",
+        parent: 2,
+        type: "tool_result",
+        payload: { id: "c1", ok: true, code: "ok", text: "0x00" },
+      },
+    ];
+
+    const view = transcriptFromSession(events);
+    const withoutAudit = events.filter((event) => event.type !== "permission_decision");
+
+    expect(view.events.map((event) => event.kind)).toStrictEqual(["user", "tool"]);
+    expect(view.events).toHaveLength(transcriptFromSession(withoutAudit).events.length);
+    expect(view.status).toBe("diagnosing");
+    expect(reduceStep(events)).toStrictEqual(reduceStep(withoutAudit));
+  });
   it("emptyTranscriptView 返回五步待办、idle 与空事件", () => {
     const view = emptyTranscriptView();
     expect(view.status).toBe("idle");

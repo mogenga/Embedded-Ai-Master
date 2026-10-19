@@ -1,3 +1,10 @@
+import type {
+  PermissionAction,
+  PermissionPreset,
+  PermissionSource,
+} from "../permissions/types.js";
+import type { ToolAccess } from "../tools/types.js";
+
 export type EventType =
   | "system"
   | "user"
@@ -8,7 +15,8 @@ export type EventType =
   | "checkpoint"
   | "status"
   | "interrupted"
-  | "compaction";
+  | "compaction"
+  | "permission_decision";
 
 export interface SessionHeader {
   id: string;
@@ -53,3 +61,18 @@ export type CompactionPayload =
   | { kind: "microcompact"; elidedSeqs: number[]; note: string }
   | { kind: "summary"; summary: string; coversUpToSeq: number }
   | { kind: "failed"; reason: string; stage: "microcompact" | "summary" };
+
+export interface PermissionDecisionPayload {
+  callId: string;
+  tool: string;
+  action: PermissionAction;
+  effective: "allow" | "deny";
+  reason: string;
+  preset: PermissionPreset;
+  source: PermissionSource;
+  ruleIndex?: number;
+  paramsDigest: string;
+  paramsKeys: string[];
+  paramsPreview?: Record<string, unknown>;
+  access?: ToolAccess;
+}

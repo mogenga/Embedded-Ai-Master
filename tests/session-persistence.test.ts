@@ -358,6 +358,50 @@ describe("readSessionDir", () => {
   });
 });
 
+describe("permission_decision 事件", () => {
+  it("写一条 permission_decision 事件后可读", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    const appended = await session.append({
+      type: "permission_decision",
+      payload: {
+        callId: "c1",
+        tool: "echo",
+        action: "allow",
+        effective: "allow",
+        reason: "test:allow",
+        preset: "read-only",
+        source: "builtin",
+        ruleIndex: 0,
+        paramsDigest: "digest",
+        paramsKeys: ["text"],
+        paramsPreview: { text: "hi" },
+        access: "read",
+      },
+    });
+    await session.close();
+
+    const result = readSessionDir(dir);
+
+    expect(result.events).toEqual([appended]);
+    expect(result.events[0]?.payload).toMatchObject({ callId: "c1", effective: "allow" });
+  });
+
+  it("旧日志不含 permission_decision 时读取正常", () => {
+    const dir = makeTempDir();
+    writeHeader(dir, defaultHeader());
+    writeLines(dir, "session.v1.jsonl", [
+      JSON.stringify(makeEvent(0, "user")),
+      JSON.stringify(makeEvent(1, "usage")),
+    ]);
+
+    const result = readSessionDir(dir);
+
+    expect(result.events.map((event) => event.type)).toEqual(["user", "usage"]);
+    expect(result.events.some((event) => event.type === "permission_decision")).toBe(false);
+  });
+});
+
 type Session = Awaited<ReturnType<typeof createSession>>;
 
 async function makeSource(): Promise<{ dir: string; session: Session }> {

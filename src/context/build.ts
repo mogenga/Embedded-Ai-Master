@@ -286,7 +286,8 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
       case "checkpoint":
       case "status":
       case "interrupted":
-      case "compaction": {
+      case "compaction":
+      case "permission_decision": {
         break;
       }
       default: {

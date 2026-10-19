@@ -30,6 +30,7 @@ const EVENT_TYPES: Record<EventType, true> = {
   status: true,
   interrupted: true,
   compaction: true,
+  permission_decision: true,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

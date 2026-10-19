@@ -6,10 +6,11 @@ import type {
   ModelChatMessage,
   ModelProtocol,
 } from "../model/protocol.js";
+import type { PermissionGate } from "../permissions/types.js";
 import type { SessionHandle } from "../session/session.js";
-import type { ToolResultPayload } from "../session/types.js";
+import type { PermissionDecisionPayload, ToolResultPayload } from "../session/types.js";
 import { executeBatch } from "../tools/pipeline.js";
-import type { BatchCall, BatchResult } from "../tools/pipeline.js";
+import type { BatchCall, BatchOptions, BatchResult } from "../tools/pipeline.js";
 import { toModelToolSchemas } from "../tools/registry.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/types.js";
@@ -31,6 +32,7 @@ export interface LoopCtx {
   timeoutMs?: number;
   systemPrompt?: string;
   pricePerMillion?: PricePerMillion;
+  permissionGate?: PermissionGate;
 }
 
 export interface LoopConfig extends BreakerLimits {}
@@ -353,15 +355,45 @@ export async function* query(
       }
 
       const split = splitToolUses(response.toolCalls);
+      const batchOptions: BatchOptions = {
+        signal: ctx.signal,
+        artifactDir: ctx.artifactDir,
+        ...(ctx.cwd === undefined ? {} : { cwd: ctx.cwd }),
+        ...(ctx.timeoutMs === undefined ? {} : { timeoutMs: ctx.timeoutMs }),
+      };
+      if (ctx.permissionGate !== undefined) {
+        const gate = ctx.permissionGate;
+        batchOptions.permission = {
+          gate,
+          onDecision: async (call, decision) => {
+            const payload: PermissionDecisionPayload = {
+              callId: decision.callId,
+              tool: decision.tool,
+              action: decision.action,
+              effective: decision.effective,
+              reason: decision.reason,
+              preset: decision.preset,
+              source: decision.source,
+              ...(decision.ruleIndex === undefined ? {} : { ruleIndex: decision.ruleIndex }),
+              paramsDigest: decision.paramsDigest,
+              paramsKeys: decision.paramsKeys,
+              ...(decision.paramsPreview === undefined
+                ? {}
+                : { paramsPreview: decision.paramsPreview }),
+              access: decision.access,
+            };
+            await session.append({
+              type: "permission_decision",
+              payload: { ...payload },
+              parent: assistantEvent.seq,
+            });
+          },
+        };
+      }
       const batchResults: BatchResult[] =
         split.calls.length === 0
           ? []
-          : await executeBatch(session, ctx.tools, split.calls, {
-              signal: ctx.signal,
-              artifactDir: ctx.artifactDir,
-              cwd: ctx.cwd,
-              timeoutMs: ctx.timeoutMs,
-            });
+          : await executeBatch(session, ctx.tools, split.calls, batchOptions);
 
       for (let index = 0; index < response.toolCalls.length; index += 1) {
         const call = response.toolCalls[index];
