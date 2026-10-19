@@ -23,6 +23,14 @@ describe("启发式 token 计数", () => {
     expect(heuristicCountTokens(messages)).toBe(3);
   });
 
+  it("空 tool_calls 数组不计 token", () => {
+    const messages: ModelChatMessage[] = [
+      { role: "assistant", content: "", tool_calls: [] },
+    ];
+
+    expect(heuristicCountTokens(messages)).toBe(0);
+  });
+
   it("tool_calls 序列化后按 4 字符/token 计入", () => {
     const messages: ModelChatMessage[] = [
       {

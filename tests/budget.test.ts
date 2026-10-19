@@ -43,7 +43,7 @@ describe("checkBudgetTokens", () => {
   });
 
   it("softLimit 向下取整", () => {
-    expect(checkBudgetTokens(1001, 10000, 0.1)).toEqual({
+    expect(checkBudgetTokens(1001, 10001, 0.1)).toEqual({
       over: true,
       tokens: 1001,
       softLimit: 1000,
