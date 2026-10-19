@@ -23,6 +23,10 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isAbortError(error: unknown): boolean {
+  return (error as { name?: string } | null)?.name === "AbortError";
+}
+
 const MAX_PATTERN_LENGTH = 256;
 const MAX_PATTERN_SEGMENTS = 64;
 
@@ -84,7 +88,10 @@ export const globTool: ToolDef<GlobInput> = {
     "在 workdir 内按 glob 模式查找文件；pattern 匹配相对 workdir 的 POSIX 路径（不是 path 根），* 也匹配以点开头的隐藏文件",
   schema: globInputSchema,
   annotations: { readOnly: true },
-  execute: async (input, ctx: ToolCtx) => {
+  execute: async (input, ctx: ToolCtx, signal) => {
+    if (signal.aborted) {
+      return failure("aborted", "glob aborted");
+    }
     const regex = compilePattern(input.pattern);
     if (!regex) {
       return failure("invalid_pattern", `invalid pattern: ${JSON.stringify(input.pattern)}`);
@@ -115,9 +122,23 @@ export const globTool: ToolDef<GlobInput> = {
     }
 
     const matches: string[] = [];
-    const outcome = await walkFiles(root, workdir, (_absolute, relative) => {
-      if (regex.test(relative)) matches.push(relative);
-    });
+    let outcome;
+    try {
+      outcome = await walkFiles(
+        root,
+        workdir,
+        (_absolute, relative) => {
+          if (regex.test(relative)) matches.push(relative);
+        },
+        MAX_SCANNED_FILES,
+        signal,
+      );
+    } catch (error) {
+      if (signal.aborted || isAbortError(error)) {
+        return failure("aborted", "glob aborted");
+      }
+      return failure("read_failed", `cannot read directory: ${errorMessage(error)}`);
+    }
     if (outcome.error !== undefined) {
       return failure("read_failed", `cannot read directory: ${errorMessage(outcome.error)}`);
     }

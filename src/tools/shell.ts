@@ -15,6 +15,8 @@ export type ShellInput = z.infer<typeof shellInputSchema>;
 const MAX_STREAM_BYTES = 1024 * 1024;
 const MAX_COMMAND_PREVIEW = 200;
 const DETAIL_TEXT_CHARS = 4096;
+const ABORT_ESCALATE_MS = 1_000;
+const ABORT_FALLBACK_MS = 3_000;
 const FORK_BOMB = /:\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:/;
 const SUDO_VALUE_OPTIONS = new Set([
   "-u",
@@ -48,18 +50,28 @@ function previewCommand(command: string): string {
   return command.length <= MAX_COMMAND_PREVIEW ? command : `${command.slice(0, MAX_COMMAND_PREVIEW)}...`;
 }
 
-function terminateTree(pid: number): void {
+function terminateTree(pid: number, force = false): boolean {
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-    return;
+    try {
+      const result = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      return result.status === 0;
+    } catch {
+      return false;
+    }
   }
+  const signal = force ? "SIGKILL" : "SIGTERM";
   try {
-    process.kill(-pid, "SIGTERM");
+    process.kill(-pid, signal);
+    return true;
   } catch {
     try {
-      process.kill(pid, "SIGTERM");
+      process.kill(pid, signal);
+      return true;
     } catch {
-      void 0;
+      return false;
     }
   }
 }
@@ -380,14 +392,42 @@ function runCommand(command: string, cwd: string, signal: AbortSignal): Promise<
     const stdout = createCollector();
     const stderr = createCollector();
     let child: ReturnType<typeof spawn> | undefined;
-    const onAbort = (): void => {
-      if (child?.pid !== undefined) terminateTree(child.pid);
+    let escalateTimer: ReturnType<typeof setTimeout> | undefined;
+    let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+    const clearAbortTimers = (): void => {
+      if (escalateTimer !== undefined) clearTimeout(escalateTimer);
+      if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
+      escalateTimer = undefined;
+      fallbackTimer = undefined;
     };
     const finish = (result: ToolResult): void => {
       if (settled) return;
       settled = true;
+      clearAbortTimers();
       signal.removeEventListener("abort", onAbort);
       resolvePromise(result);
+    };
+    const onAbort = (): void => {
+      const pid = child?.pid;
+      let terminateFailed = pid === undefined;
+      if (pid !== undefined) {
+        terminateFailed = !terminateTree(pid);
+      }
+      escalateTimer = setTimeout(() => {
+        if (settled || pid === undefined) return;
+        terminateFailed = !terminateTree(pid, true);
+      }, ABORT_ESCALATE_MS);
+      fallbackTimer = setTimeout(() => {
+        if (settled) return;
+        const message = "command aborted; process termination not confirmed";
+        finish({
+          isError: true,
+          code: "shell_aborted",
+          message,
+          detail: { abortEscalated: true, terminateFailed },
+          text: message,
+        });
+      }, ABORT_FALLBACK_MS);
     };
 
     try {

@@ -17,10 +17,15 @@ import type { ToolCtx } from "../src/tools/types.js";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
-  return { ...actual, spawn: vi.fn(actual.spawn) };
+  return {
+    ...actual,
+    spawn: vi.fn(actual.spawn),
+    spawnSync: vi.fn(actual.spawnSync),
+  };
 });
 
 const spawnMock = vi.mocked(childProcess.spawn);
+const spawnSyncMock = vi.mocked(childProcess.spawnSync);
 
 const tempDirs: string[] = [];
 
@@ -79,6 +84,7 @@ async function waitForExit(pid: number, timeoutMs = 10000): Promise<void> {
 
 afterEach(() => {
   spawnMock.mockReset();
+  spawnSyncMock.mockReset();
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -498,6 +504,44 @@ describe("shellTool 执行", () => {
     },
     25000,
   );
+
+  it("abort 后进程不退出时升级终止并兜底返回 shell_aborted", async () => {
+    vi.useFakeTimers();
+    const workdir = makeWorkdir();
+    const child = fakeChild();
+    Object.assign(child, { pid: 424242 });
+    spawnMock.mockImplementationOnce(() => child);
+    const killSpy = process.platform === "win32"
+      ? undefined
+      : vi.spyOn(process, "kill").mockImplementation(() => {
+        throw new Error("kill failed");
+      });
+    if (process.platform === "win32") {
+      spawnSyncMock.mockImplementation(
+        (() => ({ status: 1 })) as unknown as typeof childProcess.spawnSync,
+      );
+    }
+    try {
+      const controller = new AbortController();
+      const pending = run(workdir, "echo hi", undefined, controller.signal);
+      controller.abort();
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      const result = await pending;
+
+      expect(result).toMatchObject({ isError: true, code: "shell_aborted" });
+      expect(result.text).toContain("not confirmed");
+      if (process.platform === "win32") {
+        expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+      } else {
+        expect(killSpy?.mock.calls.some(([, signal]) => signal === "SIGTERM")).toBe(true);
+        expect(killSpy?.mock.calls.some(([, signal]) => signal === "SIGKILL")).toBe(true);
+      }
+    } finally {
+      killSpy?.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 
   it(
     "stderr 超过 1 MiB 截断并标记",

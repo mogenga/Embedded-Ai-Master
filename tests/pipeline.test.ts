@@ -433,6 +433,68 @@ describe("executeBatch 错误与取消", () => {
     expect(results[0].result.code).toBe("tool_timeout");
   });
 
+  it("串行超时后残留工具未结束时跳过后续工具", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    let secondCalls = 0;
+    const reg = new ToolRegistry([
+      makeTool<{}>("never", () => new Promise<ToolResult>(() => {}), false),
+      makeTool<{}>("second", async () => {
+        secondCalls += 1;
+        return ok("second");
+      }, false),
+    ]);
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("1", "never"), call("2", "second")],
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        timeoutMs: 10,
+        settleGraceMs: 20,
+      },
+    );
+
+    expect(results[0].result).toMatchObject({ isError: true, code: "tool_timeout" });
+    expect(results[1].result).toMatchObject({
+      isError: true,
+      code: "tool_skipped_after_timeout",
+    });
+    expect(secondCalls).toBe(0);
+  });
+
+  it("串行超时后残留工具在宽限期内结束时继续后续工具", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    let secondCalls = 0;
+    const reg = new ToolRegistry([
+      makeTool<{}>("late", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        return ok("late");
+      }, false),
+      makeTool<{}>("second", async () => {
+        secondCalls += 1;
+        return ok("second");
+      }, false),
+    ]);
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("1", "late"), call("2", "second")],
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        timeoutMs: 10,
+        settleGraceMs: 200,
+      },
+    );
+
+    expect(results[0].result).toMatchObject({ isError: true, code: "tool_timeout" });
+    expect(results[1].result).toMatchObject({ isError: false, code: "ok", text: "second" });
+    expect(secondCalls).toBe(1);
+  });
+
   it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
     "timeoutMs=%s 回退默认值且不抛错",
     async (timeoutMs) => {

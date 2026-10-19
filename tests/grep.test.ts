@@ -59,8 +59,12 @@ function fakeFile(name: string): Dirent {
   } as unknown as Dirent;
 }
 
-function run(workdir: string, input: Parameters<typeof grepTool.execute>[0]) {
-  return grepTool.execute(input, makeCtx(workdir), signal);
+function run(
+  workdir: string,
+  input: Parameters<typeof grepTool.execute>[0],
+  signalOverride: AbortSignal = signal,
+) {
+  return grepTool.execute(input, makeCtx(workdir), signalOverride);
 }
 
 afterEach(() => {
@@ -496,5 +500,16 @@ describe("grep 执行", () => {
     expect(r.isError).toBe(true);
     expect(r.code).toBe("read_failed");
     expect(r.text).toContain("boom");
+  });
+
+  it("已取消 signal 时返回 aborted", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "a.txt", "needle\n");
+    const controller = new AbortController();
+    controller.abort();
+
+    const r = await run(workdir, { pattern: "needle" }, controller.signal);
+
+    expect(r).toMatchObject({ isError: true, code: "aborted" });
   });
 });
