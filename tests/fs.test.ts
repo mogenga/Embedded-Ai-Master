@@ -143,6 +143,7 @@ describe("fs read", () => {
     expect(r.text).toContain("2000| line-2000");
     expect(r.text).not.toContain("line-2001");
     expect(r.text.endsWith("[truncated]")).toBe(true);
+    expect(r.detail).toMatchObject({ truncated: true, nextOffset: 2000 });
   });
 
   it("超过 256KiB 时截断", async () => {
@@ -479,7 +480,10 @@ describe("fs edit", () => {
   });
 });
 describe("fs Windows 保留设备名", () => {
-  it.each(["CON", "CON ", "CON:", "CON:stream", "CON. ", "con.txt", "NUL", "COM1", "lpt9.log", "sub/AUX.txt"])(
+  it.each([
+    "CON", "CON ", "CON:", "CON:stream", "CON. ", "con.txt", "NUL", "COM1", "lpt9.log",
+    "sub/AUX.txt", "COM¹", "LPT².log", "CONIN$", "CONOUT$",
+  ])(
     "write %s → reserved_name 且不落盘",
     async (target) => {
       const workdir = makeWorkdir();

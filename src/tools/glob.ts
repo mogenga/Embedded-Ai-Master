@@ -82,6 +82,15 @@ export function matchesGlob(relPath: string, pattern: string): boolean {
   return regex ? regex.test(relPath) : false;
 }
 
+// 供批量过滤场景预编译一次,避免每个文件重复编译(D-090)。
+export function compileGlobMatcher(
+  pattern: string,
+): ((relPath: string) => boolean) | undefined {
+  const regex = compilePattern(pattern);
+  if (regex === undefined) return undefined;
+  return (relPath: string) => regex.test(relPath);
+}
+
 export const globTool: ToolDef<GlobInput> = {
   name: "glob",
   description:

@@ -2,7 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
 import { walkFiles, MAX_SCANNED_FILES } from "./fs-walk.js";
-import { isValidGlob, matchesGlob } from "./glob.js";
+import { compileGlobMatcher, isValidGlob } from "./glob.js";
 import { resolveInWorkdir, ToolPathError } from "./path-safety.js";
 import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
 
@@ -29,7 +29,8 @@ interface MatchLine {
 interface SkippedCounts {
   binary: number;
   tooLarge: number;
-  unreadable: number;
+  unreadableFiles: number;
+  unreadableDirectories: number;
 }
 
 function failure(code: string, message: string): ToolResult {
@@ -76,6 +77,9 @@ export const grepTool: ToolDef<GrepInput> = {
     if (input.glob !== undefined && !isValidGlob(input.glob)) {
       return failure("invalid_pattern", `invalid glob pattern: ${JSON.stringify(input.glob)}`);
     }
+    // glob 过滤每个文件重新编译会是 O(files × compile);这里预编译一次(D-090)。
+    const globFilter =
+      input.glob === undefined ? undefined : compileGlobMatcher(input.glob);
 
     const limit = input.maxResults ?? DEFAULT_MAX_RESULTS;
     const workdir = path.resolve(ctx.cwd);
@@ -103,20 +107,25 @@ export const grepTool: ToolDef<GrepInput> = {
     }
 
     const matches: MatchLine[] = [];
-    const skipped: SkippedCounts = { binary: 0, tooLarge: 0, unreadable: 0 };
+    const skipped: SkippedCounts = {
+      binary: 0,
+      tooLarge: 0,
+      unreadableFiles: 0,
+      unreadableDirectories: 0,
+    };
     let skippedLongLines = 0;
 
     let outcome;
     try {
       outcome = await walkFiles(root, workdir, async (absolute, relative) => {
         signal.throwIfAborted();
-        if (input.glob !== undefined && !matchesGlob(relative, input.glob)) return;
+        if (globFilter !== undefined && !globFilter(relative)) return;
 
         let info;
         try {
           info = await stat(absolute);
         } catch {
-          skipped.unreadable += 1;
+          skipped.unreadableFiles += 1;
           return;
         }
         if (!info.isFile()) return;
@@ -129,7 +138,7 @@ export const grepTool: ToolDef<GrepInput> = {
         try {
           buffer = await readFile(absolute);
         } catch {
-          skipped.unreadable += 1;
+          skipped.unreadableFiles += 1;
           return;
         }
         if (buffer.includes(0)) {
@@ -159,7 +168,7 @@ export const grepTool: ToolDef<GrepInput> = {
       return failure("read_failed", `cannot read directory: ${errorMessage(outcome.error)}`);
     }
 
-    skipped.unreadable += outcome.state.skipped;
+    skipped.unreadableDirectories += outcome.state.skippedDirectories;
 
     matches.sort((a, b) => {
       if (a.file !== b.file) return a.file < b.file ? -1 : 1;
@@ -173,9 +182,12 @@ export const grepTool: ToolDef<GrepInput> = {
         : returned.map((match) => `${match.file}:${match.line}:${match.text}`);
     if (matches.length > limit) lines.push("[truncated]");
 
-    const skippedTotal = skipped.binary + skipped.tooLarge + skipped.unreadable;
-    if (skippedTotal > 0) {
-      lines.push(`[skipped ${skippedTotal} files (binary/too large/unreadable)]`);
+    const skippedFiles = skipped.binary + skipped.tooLarge + skipped.unreadableFiles;
+    const skippedEntries = skippedFiles + skipped.unreadableDirectories;
+    if (skippedEntries > 0) {
+      lines.push(
+        `[skipped ${skippedEntries} entries (${skippedFiles} files, ${skipped.unreadableDirectories} unreadable directories)]`,
+      );
     }
     if (skippedLongLines > 0) {
       lines.push(`[skipped ${skippedLongLines} lines longer than 1 MiB]`);
@@ -192,7 +204,12 @@ export const grepTool: ToolDef<GrepInput> = {
         scanned: outcome.state.scanned,
         matched: matches.length,
         returned: returned.length,
-        skipped: { ...skipped },
+        skipped: {
+          binary: skipped.binary,
+          tooLarge: skipped.tooLarge,
+          unreadableFiles: skipped.unreadableFiles,
+          unreadableDirectories: skipped.unreadableDirectories,
+        },
         skippedLongLines,
         truncated: matches.length > limit,
         scanTruncated: outcome.state.scanTruncated,

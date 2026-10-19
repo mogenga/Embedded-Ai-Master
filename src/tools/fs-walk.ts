@@ -21,6 +21,9 @@ const UNREADABLE_CODES = new Set(["EACCES", "EPERM", "ENOENT"]);
 export interface WalkState {
   scanned: number;
   skipped: number;
+  // 不可读目录数与不可读文件数分开计数(D-089)。
+  skippedDirectories: number;
+  skippedFiles: number;
   scanTruncated: boolean;
 }
 
@@ -53,7 +56,13 @@ export async function walkFiles(
   maxScanned = MAX_SCANNED_FILES,
   signal?: AbortSignal,
 ): Promise<WalkResult> {
-  const state: WalkState = { scanned: 0, skipped: 0, scanTruncated: false };
+  const state: WalkState = {
+    scanned: 0,
+    skipped: 0,
+    skippedDirectories: 0,
+    skippedFiles: 0,
+    scanTruncated: false,
+  };
 
   const walk = async (dir: string, entries: Dirent[]): Promise<unknown | undefined> => {
     for (const entry of entries) {
@@ -72,6 +81,7 @@ export async function walkFiles(
         } catch (error) {
           if (isUnreadable(error)) {
             state.skipped += 1;
+            state.skippedDirectories += 1;
             continue;
           }
           return error;
@@ -95,6 +105,7 @@ export async function walkFiles(
   } catch (error) {
     if (isUnreadable(error)) {
       state.skipped += 1;
+      state.skippedDirectories += 1;
       return { state };
     }
     return { state, error };

@@ -660,6 +660,25 @@ describe("executeBatch 证据落盘", () => {
     expect(await readFile(artifactPath, "utf8")).toBe(text);
   });
 
+  it("代理对边界截断不留孤立代理（D-034）", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const emoji = "😀";
+    const text = emoji.repeat(60_000);
+    const reg = new ToolRegistry([outputTool("big", text)]);
+    const dir = artifactDir();
+
+    const results = await executeBatch(session, reg, [call("emoji", "big")], {
+      signal: new AbortController().signal,
+      artifactDir: dir,
+    });
+
+    const body = results[0].result.text.split("\n[truncated")[0] ?? "";
+    expect(body.length).toBeGreaterThan(0);
+    const last = body.charCodeAt(body.length - 1);
+    expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+    expect(await readFile(results[0].result.artifactPath ?? "", "utf8")).toBe(text);
+  });
+
   it("恰好 8000 token（32000 字符）不落盘", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const text = "e".repeat(32000);
@@ -875,6 +894,22 @@ describe("executeBatch 证据唯一性", () => {
     expect(results[0].result.code).toBe("ok");
     expect(results[1].result).toMatchObject({ isError: true, code: "duplicate_call_id" });
     expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("非字符串 id → tool_protocol_error 且不执行（D-023）", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const execute = vi.fn(async () => ok("never"));
+    const reg = new ToolRegistry([makeTool<{}>("tool", execute, true)]);
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [{ id: 42 as unknown as string, name: "tool", input: {} }],
+      { signal: new AbortController().signal, artifactDir: artifactDir() },
+    );
+
+    expect(results[0].result).toMatchObject({ isError: true, code: "tool_protocol_error" });
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("同批两个 readOnly 工具同 id 不覆盖", async () => {

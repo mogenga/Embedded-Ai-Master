@@ -63,8 +63,13 @@ class ToolAbortedError extends Error {
   }
 }
 
+// 按 UTF-16 截断时避免切断代理对,否则 JSON/日志会留下孤立代理字符(D-034)。
 function truncateText(value: string, maxChars: number): string {
-  return value.length > maxChars ? value.slice(0, maxChars) : value;
+  if (value.length <= maxChars) return value;
+  let end = Math.max(0, Math.floor(maxChars));
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return value.slice(0, end);
 }
 
 function failure(code: string, message: string, detail?: unknown, text = message): ToolResult {
@@ -252,14 +257,14 @@ async function finalizeResult(
   try {
     const artifactPath = await writeArtifact(artifactDir, artifactBaseName(callId), result.text);
     const truncated = result.text.length > MAX_TEXT_CHARS;
-    const body = truncated ? result.text.slice(0, MAX_TEXT_CHARS) : result.text;
+    const body = truncated ? truncateText(result.text, MAX_TEXT_CHARS) : result.text;
     const marker = truncated
       ? `\n[truncated; full output at ${artifactPath}]`
       : `\n[full output at ${artifactPath}]`;
     return { ...result, text: `${body}${marker}`, artifactPath };
   } catch (error) {
     const truncated = result.text.length > MAX_TEXT_CHARS;
-    const body = truncated ? result.text.slice(0, MAX_TEXT_CHARS) : result.text;
+    const body = truncated ? truncateText(result.text, MAX_TEXT_CHARS) : result.text;
     const marker = truncated
       ? "\n[truncated; artifact write failed]"
       : "\n[artifact write failed; full output retained]";
@@ -443,6 +448,21 @@ async function skippedResult(
   return { id: call.id, result: { ...result, evidence } };
 }
 
+// 非字符串 id 会同时绕过重复检测与 artifact 命名假设,在管线入口直接拒绝(D-023)。
+async function invalidIdResult(
+  call: BatchCall,
+  opts: BatchOptions,
+  tools: ToolRegistry,
+): Promise<RunOutcome> {
+  const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
+  const result = await finalizeResult(
+    failure("tool_protocol_error", `invalid tool call id: ${describeType(call.id)}`),
+    "invalid-id",
+    opts.artifactDir,
+  );
+  return { id: String(call.id), result: { ...result, evidence } };
+}
+
 async function duplicateResult(
   call: BatchCall,
   opts: BatchOptions,
@@ -472,7 +492,11 @@ export async function executeBatch(
     return false;
   });
   const run = (call: BatchCall, duplicate: boolean): Promise<RunOutcome> =>
-    duplicate ? duplicateResult(call, opts, tools) : runOne(session, tools, call, opts);
+    typeof call.id !== "string"
+      ? invalidIdResult(call, opts, tools)
+      : duplicate
+        ? duplicateResult(call, opts, tools)
+        : runOne(session, tools, call, opts);
 
   const concurrent = calls.every(
     (call) => tools.lookup(call.name)?.annotations?.readOnly === true,

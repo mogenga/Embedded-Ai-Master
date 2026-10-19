@@ -20,7 +20,9 @@ export type FsInput = z.infer<typeof fsInputSchema>;
 
 const MAX_READ_LINES = 2000;
 const MAX_READ_BYTES = 256 * 1024;
-const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+// Windows 保留设备名:ASCII 与 Unicode 上标数字变体(COM¹/COM²/COM³ 等),
+// 以及 CONIN$/CONOUT$ 控制台别名(D-073)。
+const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³]|conin\$|conout\$)(\..*)?$/i;
 
 function failure(code: string, message: string, detail?: unknown): ToolResult {
   return { isError: true, code, message, detail, text: message };
@@ -168,11 +170,22 @@ async function readOp(input: FsInput, ctx: ToolCtx, signal: AbortSignal): Promis
 
   const relative = toRelative(ctx.cwd, absolute);
   if (output.length === 0) {
-    return success("(no lines at offset)", { path: relative, lines: 0, truncated: false });
+    return success("(no lines at offset)", {
+      path: relative,
+      lines: 0,
+      truncated: false,
+      nextOffset: start,
+    });
   }
   const body = output.join("\n");
   const text = truncated ? (body.length > 0 ? `${body}\n[truncated]` : "[truncated]") : body;
-  return success(text, { path: relative, lines: output.length, truncated });
+  // 截断时披露下一次 offset,模型无需猜行号即可继续读取(D-084)。
+  return success(text, {
+    path: relative,
+    lines: output.length,
+    truncated,
+    nextOffset: start + output.length,
+  });
 }
 
 async function writeOp(

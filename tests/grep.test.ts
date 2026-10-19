@@ -208,9 +208,9 @@ describe("grep 执行", () => {
 
     const r = await run(workdir, { pattern: "needle" });
 
-    expect(r.text).toBe("ok.txt:1:needle\n[skipped 1 files (binary/too large/unreadable)]");
+    expect(r.text).toBe("ok.txt:1:needle\n[skipped 1 entries (1 files, 0 unreadable directories)]");
     expect(r.detail).toMatchObject({
-      skipped: { binary: 1, tooLarge: 0, unreadable: 0 },
+      skipped: { binary: 1, tooLarge: 0, unreadableFiles: 0, unreadableDirectories: 0 },
     });
   });
 
@@ -221,9 +221,9 @@ describe("grep 执行", () => {
     const r = await run(workdir, { pattern: "a" });
 
     expect(r.isError).toBe(false);
-    expect(r.text).toBe("(no matches)\n[skipped 1 files (binary/too large/unreadable)]");
+    expect(r.text).toBe("(no matches)\n[skipped 1 entries (1 files, 0 unreadable directories)]");
     expect(r.detail).toMatchObject({
-      skipped: { binary: 0, tooLarge: 1, unreadable: 0 },
+      skipped: { binary: 0, tooLarge: 1, unreadableFiles: 0, unreadableDirectories: 0 },
     });
   });
 
@@ -238,7 +238,7 @@ describe("grep 执行", () => {
 
     expect(r.text).toBe("limit.txt:1:needle");
     expect(r.detail).toMatchObject({
-      skipped: { binary: 0, tooLarge: 0, unreadable: 0 },
+      skipped: { binary: 0, tooLarge: 0, unreadableFiles: 0, unreadableDirectories: 0 },
     });
   });
 
@@ -292,9 +292,9 @@ describe("grep 执行", () => {
     const r = await run(workdir, { pattern: "needle" });
 
     expect(r.isError).toBe(false);
-    expect(r.text).toBe("ok.txt:1:needle\n[skipped 1 files (binary/too large/unreadable)]");
+    expect(r.text).toBe("ok.txt:1:needle\n[skipped 1 entries (1 files, 0 unreadable directories)]");
     expect(r.detail).toMatchObject({
-      skipped: { binary: 0, tooLarge: 0, unreadable: 1 },
+      skipped: { binary: 0, tooLarge: 0, unreadableFiles: 1, unreadableDirectories: 0 },
     });
   });
 
@@ -312,9 +312,9 @@ describe("grep 执行", () => {
     const r = await run(workdir, { pattern: "needle" });
 
     expect(r.isError).toBe(false);
-    expect(r.text).toBe("(no matches)\n[skipped 1 files (binary/too large/unreadable)]");
+    expect(r.text).toBe("(no matches)\n[skipped 1 entries (0 files, 1 unreadable directories)]");
     expect(r.detail).toMatchObject({
-      skipped: { binary: 0, tooLarge: 0, unreadable: 1 },
+      skipped: { binary: 0, tooLarge: 0, unreadableFiles: 0, unreadableDirectories: 1 },
     });
   });
 
@@ -335,9 +335,9 @@ describe("grep 执行", () => {
     const r = await run(workdir, { pattern: "needle" });
 
     expect(r.isError).toBe(false);
-    expect(r.text).toBe("ok.txt:1:needle\n[skipped 1 files (binary/too large/unreadable)]");
+    expect(r.text).toBe("ok.txt:1:needle\n[skipped 1 entries (0 files, 1 unreadable directories)]");
     expect(r.detail).toMatchObject({
-      skipped: { binary: 0, tooLarge: 0, unreadable: 1 },
+      skipped: { binary: 0, tooLarge: 0, unreadableFiles: 0, unreadableDirectories: 1 },
     });
   });
 
@@ -472,7 +472,7 @@ describe("grep 执行", () => {
     const r = await run(workdir, { pattern: "needle" });
 
     expect(r.isError).toBe(false);
-    expect(r.text).toBe("(no matches)\n[skipped 1 files (binary/too large/unreadable)]");
+    expect(r.text).toBe("(no matches)\n[skipped 1 entries (1 files, 0 unreadable directories)]");
   });
 
   it("根 stat 报 ENOTDIR → not_a_directory", async () => {
