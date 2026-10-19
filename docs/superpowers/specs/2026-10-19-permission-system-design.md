@@ -276,7 +276,7 @@ export interface PermissionDecisionPayload {
 - `callId` 与对应 `tool_result.id` 相同，用于并发批次与回放关联；同一 assistant 的多次同名调用也能区分。
 - `paramsDigest`：对参数做稳定序列化（对象键排序、数组保序）后取 SHA-256 前 16 位十六进制。
 - `paramsKeys`：顶层键排序，最多 32 个，单个截断 100 字符；由 gate 基于解析后参数计算并写入 `PermissionRequest`，主循环不再从原始输入重算。
-- `paramsPreview`：顶层键的值摘要；字符串截断到 120 个码点（不切断代理对），数字/布尔/null 原样，对象/数组记为 `{ type, size }`；整体 JSON 序列化后的 UTF-8 字节数不超过 4096，超出时丢弃后续键，并保证最终对象仍能容纳 `truncated: true`（先预留该键的预算）。
+- `paramsPreview`：顶层键的值摘要；字符串截断到 120 个码点（不切断代理对），数字/布尔/null 原样，对象/数组记为 `{ type, size }`；整体 JSON 序列化后的 UTF-8 字节数不超过 4096，超出时丢弃后续键，并保证最终对象仍能容纳 `previewTruncated: true`（先预留该键的预算）。标记键不用 `truncated`，因为参数本身可能含同名键（D-119）。
 - `reason` 来自规则、预设默认或审批结果；不得为空。
 - 事件写入顺序：先 `permission_decision`，后（若执行）`tool_result`，两者 `parent` 均为同一 assistant seq。
 

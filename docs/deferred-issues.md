@@ -1033,6 +1033,141 @@
 - **修复建议**: 在调用前按 server `inputSchema` 显式补默认值(需评估兼容性与安全影响);或要求模型显式提供参数并在文档中声明,保持判定与审计一致。
 - **状态**: 未解决;MCP 参数边界。
 
+### D-118 · `__proto__` 自有键在审计摘要与摘要哈希中被丢弃,可造成 digest 冲突
+
+- **发现**: 2026-10-19,M2 权限系统 Task 4 review;全量复验确认。
+- **现象**: 参数对象经 `JSON.parse` 得到自有 `__proto__` 键(模型对 `z.unknown()` 的 MCP 工具可直接提交)。`summarizeParams` 与 `stableStringify` 用 `target[key] = value` 构建普通对象,`__proto__` 命中原型 setter:该键被当作原型赋值,不成为自有键。实测 `{"__proto__":{"secret":"AAAA"},"path":"x"}` 与 `{"__proto__":{"secret":"BBBB"},"path":"x"}` 的 `digestParams` 完全相同(`4c99d722e6918fb1`),`stableStringify` 均输出 `{"path":"x"}`;`paramsKeys` 仍列出 `__proto__`,但 `paramsPreview` 缺失该键且其原型被改写为 `{type:"object",size:1}`。
+- **影响**: 仅影响审计(判定走 `readPath` 的 `Object.hasOwn`,匹配不受影响)。两次参数仅在 `__proto__` 内容上不同的调用会得到相同 `paramsDigest`,审计无法区分;`paramsPreview` 丢失该字段,且预览对象原型被污染(局部对象,不污染全局)。
+- **触发升级条件**: MCP/第三方工具允许任意对象参数且审计需要按 digest 唯一关联;出现因摘要冲突导致的取证歧义;需要对外导出审计摘要。
+- **修复建议**: 用 `Object.create(null)` 构建摘要/序列化的中间对象,或对键做 `Object.defineProperty` 赋值;补 `__proto__`、`constructor`、`prototype` 键的回归用例。
+- **状态**: **已解决**(2026-10-19,`feat/m2-permission`):`audit.ts` 新增 `setOwn`,`stableStringify`/`summarizeParams` 改用 `Object.defineProperty` 写入;新增 `__proto__` 自有键用例(keys/digest/preview 三处断言)。
+
+### D-119 · 参数名 `truncated` 与预览截断标记同名时被覆盖
+
+- **发现**: 2026-10-19,M2 权限系统 Task 4 review;全量复验确认。
+- **现象**: `summarizeParams` 超预算时先写入用户键值,再执行 `truncatedPreview.truncated = true`。若模型提交的参数本身含 `truncated` 键(如实测 `{truncated:"user-value", x:"x".repeat(5000)}`),预览中的用户值被布尔 `true` 覆盖,无法区分“参数值”与“截断标记”。
+- **影响**: 审计中该参数按截断标记解读,真实值丢失;`paramsDigest` 仍包含真实值,二者不一致。
+- **触发升级条件**: 工具参数含 `truncated` 等保留名;审计需要从 preview 还原参数。
+- **修复建议**: 改用不会与参数键冲突的保留键(如 `_truncated`),或把截断标记放在预览对象之外(如 `paramsPreviewTruncated` 字段)。
+- **状态**: **已解决**(2026-10-19,`feat/m2-permission`):截断标记改为 `previewTruncated`,并计入 4096 字节预算;新增同名参数用例,README/spec 同步。
+
+### D-120 · `loadPermissionConfig` 不校验 inline,导出库函数可绕过 schema
+
+- **发现**: 2026-10-19,M2 权限系统 Task 2 review;全量复验确认。
+- **现象**: `loadPermissionConfig` 直接把 `opts.inline` 合并进结果,不做 Zod 校验;实测 `inline: {preset:"yolo", rules:[{tool:"fs", action:"allow", bogus:1}]}` 原样返回(`preset=yolo`、未知字段保留)。`runSession` 入口会先经 `parseInlinePermissionConfig`,但该函数本身是导出的库 API。
+- **影响**: 直接调用 `loadPermissionConfig` 的代码可注入非法预设与畸形规则;非法预设会在求值时回落为 `DEFAULT_ACTIONS[preset][access]` → `undefined`,`evaluatePolicy` 返回非枚举动作,gate 再按 deny 处理(不会 fail-open),但违规规则可能被静默接受。
+- **触发升级条件**: 对外开放库 API;出现绕过 `runSession` 的调用方。
+- **修复建议**: 在 `loadPermissionConfig` 内对 `inline` 复用 `parseInlinePermissionConfig`,或在类型/文档中明确该函数要求已校验输入。
+- **状态**: **已解决**(2026-10-19,`feat/m2-permission`):`loadPermissionConfig` 对 `inline` 复用 `parseInlinePermissionConfig`;新增非法预设与未知规则字段用例。
+
+### D-121 · 纯空白 `tool` / `reason` / `key` 被配置校验接受
+
+- **发现**: 2026-10-19,M2 权限系统 Task 2 review;全量复验确认。
+- **现象**: Zod schema 只校验 `min(1)`,不 `trim`。实测 `tool: "   "`、`reason: "   "`、`params.key: "   "` 均被 `parsePermissionConfig` 接受。
+- **影响**: 空白规则通常不匹配任何工具,表现为“规则看似配置成功实则永不生效”;`reason: "   "` 会进入审计,理由不可读。
+- **触发升级条件**: 用户手写配置且出现规则不生效;需要配置 lint。
+- **修复建议**: 对 `tool`/`reason`/`key` 加 `trim().min(1)` 或 `.refine(v => v.trim().length > 0)`。
+- **状态**: **已解决**(2026-10-19,`feat/m2-permission`):`tool`/`reason`/`key` 增加非空白 refine;三条纯空白用例覆盖。
+
+### D-122 · 项目权限配置“存在但不可 stat”时静默不披露
+
+- **发现**: 2026-10-19,M2 权限系统 Task 2 review;全量复验以 `.harness` 为普通文件的场景复现。
+- **现象**: 未 trust 分支用 `fs.existsSync(projectConfigPath)` 判断是否存在;路径不可 stat(如父级 `.harness` 是文件、权限错误)时 `existsSync` 返回 false,既不读取也不写 `permissions_project_config_skipped`。trusted 分支此时 `readFileSync` 得到 ENOENT 也按“未配置”处理。实测两种情况均无披露。
+- **影响**: 用户以为项目权限规则已生效或不生效,日志无任何提示;与 `mcp_project_config_skipped` 的披露语义不一致(参见 D-105)。
+- **触发升级条件**: 需要排查“项目规则为何不生效”;多用户/共享工作区。
+- **修复建议**: 用 `stat` 区分 ENOENT 与其他错误;非 ENOENT 时写 `status` 或抛 `PermissionConfigError`。
+- **状态**: **已解决**(2026-10-19,`feat/m2-permission`):未信任分支改用 `statSync` 区分 ENOENT 与其他错误,非 ENOENT 抛 `read_failed`;新增 EACCES 用例。
+
+### D-123 · resume 预读 header 与日志造成重复 IO
+
+- **发现**: 2026-10-19,M2 权限系统 Task 7 review;全量复验确认。
+- **现象**: `runSession` 的 resume 分支先 `stat(header.json)` 再 `readSessionDir(resumeDir)` 取 header 计算 cwd,随后 `planResume` 再次 `stat` + `readSessionDir` 完整读取同一日志。配置加载前移(`runSession` 装配 Task 7)放大了这次重复读取。
+- **影响**: 只读、无副作用,但大日志 resume 的启动延迟与内存翻倍;并发写日志时两次读取可能看到不同内容(第二次为准)。
+- **触发升级条件**: 会话日志达到 rollover 量级;resume 启动耗时成为问题。
+- **修复建议**: 让 `planResume` 接收已读取的 `{header, events}` 快照,或在 `runSession` 侧复用第一次结果。
+- **状态**: 未解决;性能边界。
+
+### D-124 · 权限配置测试缺口:trust + 坏项目配置、resume skipped、inline 与 project 优先级、非有限 range
+
+- **发现**: 2026-10-19,M2 权限系统 Task 2/7 review;全量复验确认无对应用例。
+- **现象**: ①`trustProjectConfig:true` + 项目配置为坏 JSON/schema 的正例缺失(只有 untrusted 跳过与 trusted 生效两个 happy path);②resume 场景未断言 `permissions_project_config_skipped`;③`inline.preset` 对 project/user 文件 preset 的优先级无单测(代码顺序为 inline ?? project ?? user);④`range` 非有限值只在 JSON 路径被测,而 `JSON.parse("1e400")` 得到 `Infinity` 由 Zod 拒绝(实测 `invalid_schema`),缺少显式断言。
+- **影响**: 上述行为当前正确,但后续修改(尤其配置优先级与错误路径)缺少回归保护。
+- **触发升级条件**: 修改 `loadPermissionConfig` 合并顺序或 trust 语义;出现配置优先级事故。
+- **修复建议**: 按四项各补 1 条用例。
+- **状态**: **部分解决**(2026-10-19,`feat/m2-permission`):补齐 resume skipped、inline 对 project 文件优先级、`1e400` 非有限 range 用例;`trustProjectConfig:true` + 坏项目配置由既有「坏 project 配置（已信任）」用例覆盖。
+
+### D-125 · 部分 `permissions` 校验用例未隔离 `HARNESS_HOME`
+
+- **发现**: 2026-10-19,M2 权限系统 Task 7 review;全量复验确认。
+- **现象**: `tests/permissions-integration.test.ts` 的 `attempt()` 辅助函数未 `vi.stubEnv("HARNESS_HOME", …)`,7 条类型错误用例与 4 条非普通对象用例因此使用真实 `~/.harness`。校验在创建会话前失败,实测未写入真实目录,但用例依赖该前提。
+- **影响**: 若参数校验被移到 `createSession` 之后,这些用例会向真实 home 写入会话目录;测试结果受本机环境影响。
+- **触发升级条件**: 调整 `runSession` 校验顺序;CI 环境共享 home。
+- **修复建议**: 在 `attempt()` 内部创建临时 home 并 `stubEnv`,或让 `runSession` 的校验阶段完全不触碰 home。
+- **状态**: **已解决**(2026-10-19,`feat/m2-permission`):`attempt()` 内创建临时 home 并 `stubEnv`。
+
+### D-126 · `RunOptions.permissions` 的 symbol 键不参与未知键校验
+
+- **发现**: 2026-10-19,M2 权限系统 Task 7 review;全量复验确认(代码路径)。
+- **现象**: `normalizePermissionOptions` 用 `Object.keys(value)` 枚举未知键,只覆盖字符串键;symbol 键既不报错也不被读取,静默忽略。与“外层未知键一律 `PermissionConfigError`”的严格语义不一致。
+- **影响**: 配置对象若通过符号键传递(反射/序列化库/错误拼写),不会 fail-fast;不影响判定结果。
+- **触发升级条件**: 对外开放库 API;出现通过符号键注入配置的调用方。
+- **修复建议**: 同时枚举 `Reflect.ownKeys(value)` 并对 symbol 键报错,或改用 `Object.getOwnPropertyNames` + 显式忽略。
+- **状态**: **已解决**(2026-10-19,`feat/m2-permission`):改用 `Reflect.ownKeys`,symbol 键报 `invalid_schema`;新增用例。
+
+### D-127 · 代码整洁:14 个新增文件缺末尾换行,`normalizeZero` 为空操作
+
+- **发现**: 2026-10-19,M2 权限系统 Task 1/4/6/7 review 汇总;全量复验确认。
+- **现象**: 缺 EOF 换行的新增文件包括 `src/permissions/{audit,config,errors,gate,rules,types}.ts`、`tests/permissions-{audit,config,gate,integration,query,rules}.test.ts`、`docs/superpowers/{plans/2026-10-19-permission-system.md,specs/2026-10-19-permission-system-design.md}`;`tests/session-persistence.test.ts`、`tests/ui/transcript.test.ts`、`src/tools/fs.ts`、`src/tools/shell.ts` 的缺换行为 main 既有状态。`rules.ts` 的 `normalizeZero` 在 `===` 比较下等价于原值(`-0 === 0`),当前为空操作。
+- **影响**: 无功能影响;diff 噪声与潜在 `\ No newline` 标记;空操作函数易误导读者以为 `-0` 需要特殊处理。
+- **触发升级条件**: 仓库引入 EOF 检查;需要清理 `rules.ts` 的可读性。
+- **修复建议**: 批量补末尾换行;删除 `normalizeZero` 或在注释中说明其为显式语义文档。
+- **状态**: **部分解决**(2026-10-19,`feat/m2-permission`):本轮新增/改动文件补齐 EOF 换行,`normalizeZero` 已删除(`-0 === 0`);`src/tools/fs.ts`、`src/tools/shell.ts` 等 main 既有文件保持原状。
+
+### D-128 · 用例 `PermissionPreset 常量仍为四种` 为恒真断言
+
+- **发现**: 2026-10-19,M2 权限系统 Task 7 review;全量复验确认。
+- **现象**: `tests/permissions-integration.test.ts` 末尾该用例在本地字面量数组上断言 `new Set(presets).size === 4`;`PermissionPreset` 只是类型,运行时没有可被改动的值,断言恒真。
+- **影响**: 该用例无法因生产代码变化而失败,给人一种“预设集合受测”的错觉;真正的回归保护来自 policy/config 用例。
+- **触发升级条件**: 需要保证预设枚举与配置 schema/README 同步。
+- **修复建议**: 改为对运行时来源断言(如解析四个预设名均通过 `parseInlinePermissionConfig`、第五个值被拒),或删除该用例。
+- **状态**: **已解决**(2026-10-19,`feat/m2-permission`):恒真用例替换为 `parseInlinePermissionConfig` 的四预设接受/第五值拒绝断言。
+
+### D-129 · query 层权限用例缺口:串行批次顺序、可选字段缺省、gate 返回值运行时校验
+
+- **发现**: 2026-10-19,M2 权限系统 Task 6 review;全量复验确认。
+- **现象**: ①`tests/permissions-query.test.ts` 全部使用 `echoTool`(`readOnly`),`executeBatch` 走并发两阶段路径,串行批次的“审计 → tool_result → 下一调用”事件顺序无 query 层用例;②未断言 `ruleIndex`/`paramsPreview` 缺省时事件中不存在该键;③`query` 直接信任 `PermissionGate` 返回结构,未做运行时字段校验(typed 契约)。
+- **影响**: 串行路径的事件顺序与 parent 正确性只由 pipeline 层覆盖;gate 实现若返回缺失字段,审计事件会写入不完整 payload。
+- **触发升级条件**: 修改 `query` 的批次循环或 gate 契约;第三方实现 `PermissionGate`。
+- **修复建议**: 补一条写工具(串行)查询用例;补可选字段缺省断言;在 `query`/`onDecision` 处做最小运行时校验或明确文档化为内部契约。
+- **状态**: **部分解决**(2026-10-19,`feat/m2-permission`):新增写工具串行批次用例(审计先于每次结果)并断言 `ruleIndex`/`paramsPreview` 缺省时键不存在;gate 返回值运行时校验仍按 typed 内部契约保留。
+
+### D-130 · 审批期间 abort 的审计语义与队列槽位释放时机
+
+- **发现**: 2026-10-19,M2 权限系统 Task 4/5 review;全量复验确认。
+- **现象**: ①审批等待期间调用方 abort、gate 仍返回 `allow` 时,`onDecision` 会先写一条 `effective: "allow"` 的审计,随后 `executeAuthorized` 复查 signal 返回 `tool_aborted`;audit 与结果码不一致但可区分。②审批项因 abort/超时 settle 时立即释放串行槽位并 `pump()` 下一项;被 abort 的 prompter 底层异步操作可能仍在收尾,二者短暂重叠(审批已不可撤销)。
+- **影响**: 审计读者需结合 `tool_result.code` 判断实际执行;prompter 责任方需保证 abort 后不再产生副作用。
+- **触发升级条件**: Web 审批 UI 依赖 audit 展示“已批准”;prompter 实现有外部副作用(弹窗/设备)。
+- **修复建议**: 可在 audit 中追加 `abortedBeforeExecution: true` 或改在 `executeAuthorized` 复查后再写审计;为 prompter 提供明确的 abort 契约文档。
+- **状态**: 未解决;已记录的设计语义。
+
+### D-131 · 病态 thenable 占用审批槽位(复核:受 `approvalTimeoutMs` 约束,非无限卡死)
+
+- **发现**: 2026-10-19,M2 权限系统 Task 4 review 提出“病态 thenable 可能卡住队列”;全量复验专项复核。
+- **现象**: prompter 返回 `then` 存在但永不 settle 的对象时,`Promise.resolve(thenable)` 保持 pending;实测连续两次此类返回值分别在 `approvalTimeoutMs` 后按 `approval_timeout` deny,第三次正常 allow,队列未毒化。
+- **影响**: 不存在无限卡死;最坏代价是该审批占满一个超时窗口,期间后续审批排队(符合“入队即计时”的设计)。
+- **触发升级条件**: 若未来移除此超时或放大默认值。
+- **修复建议**: 保持 `approvalTimeoutMs` 为强制上限;无需改动。
+- **状态**: 已复核,非缺陷;登记为边界。
+
+### D-132 · 审批错误描述二次抛错导致 `check` 永不 settle、审批通道失效
+
+- **发现**: 2026-10-19,全量复验。
+- **现象**: `gate.ts` 与 `policy.ts` 的 `errorMessage` 直接读取 `error.message` / `String(error)`;若该值本身抛错(Error 子类 getter、Proxy、自定义 `toString`),异常从 rejection 回调逸出:`settle` 不执行、`active` 槽位永久占用,后续审批全部排队直至各自超时;`evaluatePolicy` 同路径会整体抛出,`runSession` 启动失败。`describeValue` 对自定义 `Symbol.toStringTag` getter 同样不设防。
+- **影响**: 审批通道可整体失效;失败方向为 fail-closed(不会误放行),但会拒绝所有 `ask`。
+- **触发升级条件**: 已修复。
+- **修复建议**: —。
+- **状态**: **已解决**(2026-10-19,`feat/m2-permission`):`errorMessage` 以 try/catch 兜底返回 `unknown error`,`describeValue` 兜底返回 `[object]`;新增 3 条回归用例(`message` getter、`toStringTag` getter、队列不被毒化),全量 1509 passed / 1 skipped,`src/permissions` lines 97.8%。
+
 ---
 
 ## 变更记录
@@ -1090,3 +1225,5 @@
 | 2026-10-19 | 标记 P0 未完成面:录入 D-109(第三方 in-process 工具缺 worker 隔离)、D-110(无 artifact evidence 超窗)、D-111(live 网关/真实 MCP/真机/终止失败路径验证缺口);D-022/D-099 补交叉引用;D-102 标注 `inheritEnv:true` 为显式设计取舍 |
 | 2026-10-19 | P0 剩余项修复(`fix/p0-remaining`):D-010/D-013/D-014/D-016/D-023/D-028/D-034/D-035/D-036/D-037/D-039/D-042/D-044/D-045/D-046/D-048/D-049/D-073/D-089/D-090/D-100/D-101/D-103/D-104 标已解决;D-084 标部分解决(新增 `nextOffset` 与跳过分类) |
 | 2026-10-19 | M2 权限系统 Task 8:录入 D-112 ~ D-117(Web/SSE 审批未实现、`paramsPreview` 敏感片段、规则非沙箱、串行审计崩溃窗口、内部 API 绕过、MCP 参数不应用 server 默认值);README 新增「权限与审批」 |
+| 2026-10-19 | M2 权限系统全量复验:录入 D-118 ~ D-131(审计摘要 `__proto__` 键丢失与 digest 冲突、`truncated` 参数被覆盖、`loadPermissionConfig` 不校验 inline、纯空白配置字段、不可 stat 的项目配置不披露、resume 重复 IO、四处测试缺口、symbol 键未防、EOF/空操作整洁性、恒真断言、串行路径缺口、审批 abort 语义);D-132 记录并标注已解决(`errorMessage`/`describeValue` 二次抛错导致审批队列卡死) |
+| 2026-10-19 | 权限系统高价值项修复(`feat/m2-permission`):D-118 `__proto__` 审计键丢失、D-119 截断标记改名 `previewTruncated`、D-120 inline 复用 schema 校验、D-121 空白字段拒绝、D-122 不可 stat 项目配置 fail-closed、D-125 测试 home 隔离、D-126 symbol 键拒绝、D-128 恒真断言替换;D-124/D-127/D-129 部分解决;README/spec 同步标记名 |

@@ -239,7 +239,7 @@ for await (const event of runSession({
 
 **审计事件**
 
-进入权限判定的每次调用都先写 `permission_decision` 会话事件，之后才执行或返回拒绝。payload 含 `callId`（与 `tool_result.id` 相同）、`tool`、`action`（规则原动作，`ask` 仍记 `ask`）、`effective`、`reason`、`preset`、`source`、可选 `ruleIndex`、`paramsDigest`（稳定序列化后 SHA-256 前 16 位）、`paramsKeys`（顶层键排序，最多 32 个，单键最多 100 码点）、可选 `paramsPreview`（字符串最多 120 码点，整体 4096 字节；超出预算时丢弃后续键并置 `truncated: true`；可能含敏感片段，D-113）、`access`（`read` / `write` / `unknown`）。事件 `parent` 指向对应 assistant 事件，`tool_result` 在其后；`buildMessages` 与前端回放忽略该事件，不占模型上下文。
+进入权限判定的每次调用都先写 `permission_decision` 会话事件，之后才执行或返回拒绝。payload 含 `callId`（与 `tool_result.id` 相同）、`tool`、`action`（规则原动作，`ask` 仍记 `ask`）、`effective`、`reason`、`preset`、`source`、可选 `ruleIndex`、`paramsDigest`（稳定序列化后 SHA-256 前 16 位）、`paramsKeys`（顶层键排序，最多 32 个，单键最多 100 码点）、可选 `paramsPreview`（字符串最多 120 码点，整体 4096 字节；超出预算时丢弃后续键并置 `previewTruncated: true`；可能含敏感片段，D-113）、`access`（`read` / `write` / `unknown`）。事件 `parent` 指向对应 assistant 事件，`tool_result` 在其后；`buildMessages` 与前端回放忽略该事件，不占模型上下文。
 
 **MCP 参数边界**
 
