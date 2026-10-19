@@ -121,7 +121,6 @@ interface CompactOptions {
   session: SessionHandle;
   model: ModelProtocol;
   modelCfg: ModelCfg;
-  pricePerMillion?: PriceTable;
   keepRecentTurns?: number;    // 默认 2
   keepTailRatio?: number;      // 默认 0.16
   softRatio?: number;          // 默认 0.8
@@ -160,7 +159,7 @@ async function compactSession(opts: CompactOptions): Promise<void>;
 
 ### 4.6 `runSession` 装配
 
-- `createTokenMeter(heuristicCountTokens)`; `compactor: (session) => compactSession({session, model, modelCfg, pricePerMillion, signal, meter, ...})`。
+- `createTokenMeter(heuristicCountTokens)`; `compactor: (session) => compactSession({session, model, modelCfg, signal, meter, ...})`。
 - `RunOptions.compaction?: { enabled?: boolean; keepRecentTurns?: number; keepTailRatio?: number; softRatio?: number }`; 缺省 `enabled:true`, 其余默认值如上。
 - `enabled:false` 时不注入 compactor/meter, 保留现有行为; `budget` 仍用 `checkBudget`(启发式)。
 

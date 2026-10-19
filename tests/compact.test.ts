@@ -9,6 +9,7 @@ import type { CompactOptions } from "../src/context/compact.js";
 import type { CompletionResult, ModelChatMessage, ModelProtocol } from "../src/model/protocol.js";
 import { createSession } from "../src/session/session.js";
 import type { SessionHandle } from "../src/session/session.js";
+import type { SessionEvent } from "../src/session/types.js";
 
 interface ModelCall {
   messages: ModelChatMessage[];
@@ -76,6 +77,38 @@ async function makeSession(): Promise<SessionHandle> {
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
+
+function fakeSession(snapshots: SessionEvent[][]): {
+  session: SessionHandle;
+  appended: SessionEvent[];
+} {
+  let call = 0;
+  const appended: SessionEvent[] = [];
+  const session: SessionHandle = {
+    id: "fake",
+    dir: ".",
+    header: { id: "fake", createdAt: new Date(0).toISOString(), status: "open" },
+    async append(ev) {
+      const event: SessionEvent = {
+        ...ev,
+        seq: appended.length,
+        ts: new Date(0).toISOString(),
+      };
+      appended.push(event);
+      return event;
+    },
+    events() {
+      const snapshot = snapshots[Math.min(call, snapshots.length - 1)] ?? [];
+      call += 1;
+      return snapshot;
+    },
+    usageTotals() {
+      return { promptTokens: 0, completionTokens: 0, cachedTokens: 0 };
+    },
+    async close() {},
+  };
+  return { session, appended };
+}
 
 async function addUser(session: SessionHandle, content: string) {
   return session.append({ type: "user", payload: { content } });
@@ -203,6 +236,28 @@ describe("compactSession", () => {
     expect(toolMessages[5].content).toBe("e".repeat(1200));
   });
 
+  it("长 evidence 是唯一可修剪候选时不进入 microcompact", async () => {
+    const session = await makeSession();
+    await addUser(session, "start");
+    await addBatch(session, "e1", "E".repeat(1200), { evidence: true });
+    await addBatch(session, "c2", "a".repeat(1200));
+    await addBatch(session, "c3", "b".repeat(1200));
+    const { calls, model } = createFakeModel(async () => ok("SUMMARY_EVIDENCE_ONLY"));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    const microcompactions = session
+      .events()
+      .filter((event) => event.type === "compaction" && event.payload.kind === "microcompact");
+    expect(microcompactions).toHaveLength(0);
+    expect(calls).toHaveLength(1);
+    expect(
+      buildMessages(session.events()).some(
+        (message) => message.role === "tool" && message.content === "E".repeat(1200),
+      ),
+    ).toBe(true);
+  });
+
   it("二级后仍超时摘要，append usage 与 summary 并保留尾部", async () => {
     const session = await makeSession();
     const user = await addUser(session, "x".repeat(6000));
@@ -216,6 +271,7 @@ describe("compactSession", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].tools).toStrictEqual([]);
     expect(calls[0].maxOutputTokens).toBe(2048);
+    expect(calls[0].messages).toHaveLength(2);
     expect(calls[0].messages[0]).toStrictEqual({ role: "system", content: SUMMARY_PROMPT });
     expect(calls[0].messages[1].role).toBe("user");
     expect(calls[0].messages[1].content.length).toBeLessThanOrEqual(2400);
@@ -282,6 +338,37 @@ describe("compactSession", () => {
       stage: "summary",
     });
     expect(calls).toHaveLength(0);
+  });
+
+  it("前缀投影失败时 append failed 不抛出", async () => {
+    const ts = new Date(0).toISOString();
+    const valid: SessionEvent[] = [
+      { seq: 0, ts, type: "user", payload: { content: "y".repeat(6000) } },
+    ];
+    const malformed: SessionEvent[] = [
+      { seq: 0, ts, type: "user", payload: { content: "start" } },
+      {
+        seq: 1,
+        ts,
+        type: "assistant",
+        payload: { content: "", toolCalls: [{ id: "c1", name: "echo", arguments: {} }] },
+      },
+      { seq: 2, ts, type: "user", payload: { content: "x".repeat(4000) } },
+    ];
+    const { session, appended } = fakeSession([valid, valid, malformed]);
+    const { calls, model } = createFakeModel(async () => ok("MUST_NOT_RUN"));
+
+    await expect(
+      compactSession(makeOptions(session, model, cfg(1000))),
+    ).resolves.toBeUndefined();
+
+    expect(calls).toHaveLength(0);
+    expect(appended).toHaveLength(1);
+    expect(appended[0].payload).toMatchObject({
+      kind: "failed",
+      stage: "summary",
+    });
+    expect(String(appended[0].payload.reason)).toContain("missing tool_result");
   });
 
   it("摘要失败 append failed 不抛出", async () => {
@@ -533,6 +620,20 @@ describe("compactSession", () => {
     expect(transcript.length).toBeLessThanOrEqual(2400);
     expect(/[\uD800-\uDBFF]$/.test(transcript)).toBe(false);
     expect(/^[\uDC00-\uDFFF]/.test(transcript.slice(-1))).toBe(false);
+  });
+
+  it("transcript 在 60% 上限内不提前截断", async () => {
+    const session = await makeSession();
+    await addUser(session, "u".repeat(2200));
+    await addBatch(session, "c1", "z".repeat(1200));
+    const { calls, model } = createFakeModel(async () => ok("SUMMARY_60"));
+
+    await compactSession(makeOptions(session, model, cfg(1000)));
+
+    expect(calls).toHaveLength(1);
+    const transcript = calls[0].messages[1].content;
+    expect(transcript.length).toBe(2206);
+    expect(transcript.length).toBeGreaterThan(2000);
   });
 
   it("近期批次过大导致摘要后仍超阈值时 failed(still_over_budget)", async () => {

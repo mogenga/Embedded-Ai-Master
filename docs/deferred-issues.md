@@ -816,7 +816,7 @@
 ### D-097 · `compacted` 事件不区分压缩成功与失败
 
 - **发现**: 2026-10-19,维度3 第一轮整体审查(Minor 项)。
-- **现象**: `query` 在 compactor 返回后无条件 `yield { kind: "compacted" }`;`compactSession` 在摘要为空、被 `maxOutputTokens` 截断、边界 `no_progress`、摘要后仍超阈值(`still_over_budget`)或摘要调用失败时只追加 `compaction {kind:"failed"}` 并正常返回,因此事件流同样发出 `compacted`。摘要缺 usage 的 `status {status:"usage_missing",stage:"summary"}` 也只落日志,事件流不携带。
+- **现象**: `query` 在 compactor 返回后无条件 `yield { kind: "compacted" }`;`compactSession` 在摘要为空、被 `maxOutputTokens` 截断、边界 `no_progress`、摘要后仍超阈值(`still_over_budget`)或摘要调用失败时只追加 `compaction {kind:"failed"}` 并正常返回,因此事件流同样发出 `compacted`。摘要缺 usage 的 `status {status:"usage_missing",stage:"summary"}` 也只落日志,事件流不携带。另,`still_over_budget` 的 `failed` 事件在有效 `summary` 事件之后追加,日志可能同时存在成功摘要与 `failed`;调用方若只看最后一条 `failed` 判定摘要未生成会误判。
 - **影响**: 调用方若以 `compacted` 判断压缩成功会误判;成功/失败仍可从会话日志区分,但事件流与日志语义不一致。
 - **触发升级条件**: 调用方依赖事件流做重试、成本提示或 UI 状态;需要把压缩结果暴露给上层。
 - **修复建议**: 让 compactor 返回结果并由 `query` 携带成功/失败信息,或新增显式 `compaction_result` 事件;保持事件流与日志一致。
@@ -834,7 +834,7 @@
 ### D-099 · 单条结果或近期批次超窗时仅有 `still_over_budget`
 
 - **发现**: 2026-10-19,维度3 第二轮红队审查(I-2)。
-- **现象**: 默认 `keepRecentTurns=2` 会保护最近批次不被 microcompact;若单个工具结果或最近批次本身超过 `contextWindow * softRatio`,二级无法修剪,三级摘要又必须保留尾部,摘落后重新测量仍超阈值。首轮追加 `compaction {kind:"failed",reason:"still_over_budget",stage:"summary"}` 并继续以超窗消息请求;后续轮因尾部边界不再前进,会命中 `no_progress`,不会再次调用摘要。
+- **现象**: 默认 `keepRecentTurns=2` 会保护最近批次不被 microcompact;若单个工具结果或最近批次本身超过 `contextWindow * softRatio`,二级无法修剪,三级摘要又必须保留尾部,摘落后重新测量仍超阈值。首轮追加 `compaction {kind:"failed",reason:"still_over_budget",stage:"summary"}` 并继续以超窗消息请求;后续轮因尾部边界不再前进,会命中 `no_progress`,不会再次调用摘要。另,`no_progress` 门槛取旧 summary 事件 `seq` 而非旧 `coversUpToSeq`;当新边界落在 `(旧 coversUpToSeq, 旧 summary.seq]` 时,边界相对旧 covers 已前进但仍判 `no_progress`,压缩会持续停滞(该口径用于避免新摘要丢失旧摘要文本)。
 - **影响**: 极端大结果下压缩无法把视图降到软阈值以内,仍可能触窗或 4xx;首轮记 `still_over_budget`,之后每轮只记 `no_progress`,没有降级路径。
 - **触发升级条件**: 单条工具结果接近或超过窗口;近期批次包含多个大结果;网关因超窗持续拒绝。
 - **修复建议**: 一级截断按单条结果强制落盘并进一步缩短模型视图;允许把最近批次中的非 evidence 结果降级为占位;或在 `still_over_budget` 时触发更小尾部/更强摘要策略。
@@ -886,3 +886,4 @@
 | 2026-10-19 | 维度3 第一轮整体审查修复:摘要空/全空白/截断落 `failed` 且不计费;`no_progress` 幂等守卫;比例配置入口校验;`heuristicCountTokens` 计入 `tool_calls`;transcript/首行截断保护代理对;删除 `CompactOptions.pricePerMillion`;补充压缩后 resume、summary+坏尾部恢复、批次边界与 evidence 用例;更正 D-093(assistant 已计 `tool_calls`),录入 D-097(`compacted` 不区分成功/失败)、D-098(坏 summary 容错与 microcompact failed 分支) |
 | 2026-10-19 | 维度3 第二轮红队修复:summary 投影拒绝覆盖 evidence 并回退上一条有效 summary;坏 summary 校验非空/边界/批次完整性;摘要后仍超阈值落 `failed(still_over_budget)`;缺 usage 改写 `status(usage_missing)` 并复用 `normalizeUsage`;新摘要必须覆盖旧 summary 事件并在 transcript 前置旧摘要;microcompact 仅在占位更短时生效;`keepRecentTurns` 校验非负整数;TokenMeter 防御非有限 heuristic;`enabled:false` 不再校验比例;扩写 D-093/D-097,录入 D-099(单条结果/近期批次超窗) |
 | 2026-10-19 | 维度3 最后小修:移除 transcript 手动 `[Previous summary]` 前置(由 `buildMessages(prefix)` 注入一次);summary 投影按事件顺序只采信边界不倒退的有效 summary;D-099 补充首轮 `still_over_budget`、后续轮 `no_progress` 的轮次语义 |
+| 2026-10-19 | 维度3 Task3 第一轮 review 修复:补长 evidence 候选变异守卫、transcript 60% 边界、摘要 messages 两条与投影失败 catch 用例;compact 的 `elidedSeqs` 改用 `Number.isInteger`;design §4.4/§4.6 删除 `pricePerMillion` 并同步 brief;D-097/D-099 补 `still_over_budget` 与 `no_progress` 边界语义 |
