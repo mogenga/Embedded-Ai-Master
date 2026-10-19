@@ -40,6 +40,7 @@ src/
 ├── context/      日志投影（buildMessages）与上下文预算
 ├── demo/         headless CLI 入口
 ├── loop/         事件类型、熔断、query 主循环
+├── mcp/          MCP stdio 客户端：配置合并、连接生命周期、工具适配
 ├── model/        模型协议、OpenAI 兼容适配器、重试、token 估算
 ├── session/      append-only JSONL 会话
 ├── server/       只读 HTTP API（会话 / 知识库 / 设备）与静态资源服务
@@ -107,6 +108,50 @@ docs/             设计、计划与已知问题
 - 两者都只遍历工具根内：跳过 `.git`、`node_modules`、`.harness`、`dist`、`coverage`、`build`、`out`、`target`、`.pio`、`cmake-build-*`；遍历中遇到的 symlink 文件 / 目录都不跟随（显式 `path` 根为 symlink 时仍会跟随，D-079）。
 - `grep` 只读 ≤2 MiB 的文件，含 NUL 视为二进制；跳过文件与不可读目录合并计数 `[skipped N files (binary/too large/unreadable)]`，不列具体路径（D-084/D-089）。
 - 两者都不响应 `AbortSignal`（D-077）；`grep` 先收集全部命中再截断，命中集很大时内存占用随结果增长（D-078）；`grep` 正则同步执行，ReDoS 不可中断（D-085），glob 编译仍有回溯风险（D-086）。
+
+## MCP 客户端
+
+`runSession` 默认启用 MCP（stdio），启动时读取两级配置并连接所有未禁用的 server：
+
+- 用户级：`$HARNESS_HOME/mcp.json`
+- 项目级：`<cwd>/.harness/mcp.json`
+
+```json
+{
+  "mcpServers": {
+    "probe": {
+      "command": "node",
+      "args": ["C:/tools/probe-mcp/server.js"],
+      "env": { "PROBE_PORT": "COM3" },
+      "cwd": "C:/tools/probe-mcp",
+      "timeoutMs": 15000
+    },
+    "disabled-server": { "disabled": true }
+  }
+}
+```
+
+- 字段级合并：同名 server 以 project 覆盖 user，`env` 按键合并；project 只写 `disabled: true` 时沿用 user 的 command/args。`cwd` 相对配置文件所在目录解析，缺省为当前 workdir；`timeoutMs` 缺省 15000 ms。未知字段忽略，`command` 必填，名称须匹配 `^[a-zA-Z0-9_-]{1,64}$`。
+- 连接失败只影响该 server：记录 `mcp_connect_failed`，其余 server 与主会话继续；配置 JSON/schema 非法记录 `mcp_config_failed` 并跳过全部 MCP。`mcp.enabled: false` 或未配置任何 server 时完全不启动客户端。
+- 工具暴露为 `mcp__<server>__<tool>`；非 `[a-zA-Z0-9_-]` 字符替换为 `_`，超过 64 字符或与内置/其他 MCP 工具冲突时确定性追加 `_<hash6>`，并记 `mcp_tool_name_renamed`。工具的 `_meta.evidence === true` 映射为证据结果，参与上下文压缩保护。
+- 调用：文本内容拼接，非文本内容 JSON 化；`isError` 映射为工具失败；超时/取消分别返回 `mcp_timeout` / `mcp_aborted`。同一 server 的调用串行，不同 server 可并行；超时只停止等待，不保证 server 端终止（D-022）。
+- `list_changed`：工具列表变化后刷新 registry，后续轮次使用新集合；刷新失败保留旧集合并记 `mcp_tools_refresh_failed`（`scope: "global"` 表示整体重建失败）。会话结束时统一关闭全部子进程。
+
+```ts
+for await (const event of runSession({
+  input: "读取目标寄存器",
+  model: "local-gw/flash",
+  mcp: {
+    enabled: true,
+    userConfigPath: "C:/Users/me/.harness/mcp.json",
+    projectConfigPath: "C:/work/project/.harness/mcp.json",
+  },
+})) {
+  // ...
+}
+```
+
+`mcp.enabled` 必须是布尔值，`mcp` 必须是普通对象，否则在入口抛 `TypeError`。MCP server 由用户自行安装并在配置中给出 `command`；本仓库不执行任何依赖安装。运行期状态写入会话 `status` 事件（`mcp_connected` / `mcp_connect_failed` / `mcp_tools_changed` / `mcp_tools_refresh_failed` / `mcp_tool_name_renamed` / `mcp_tool_invalid_schema` / `mcp_config_failed`）。
 
 ## 上下文压缩
 
@@ -306,6 +351,14 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 - `shell` 危险命令拦截是启发式、非沙箱，`env` / `bash -c` / `xargs` 等可绕过（D-083）；改目录方式与 shell 展开未覆盖（D-087、D-088）。
 - `glob` 编译仍有正则回溯风险（D-086）；`grep` 的 `glob` 过滤每文件重新编译（D-090）；跳过披露不区分文件与目录（D-089）。
 - 工具根与 resume 的 workdir 只做词法比较，不解析 symlink / 8.3 短名（D-082）。
+
+MCP：
+
+- 超时/取消只停止等待，不强制终止 server 端执行，也不保证与后续调用串行（D-022）。
+- 子进程继承完整 `process.env`，第三方 server 可读取会话进程的敏感变量（D-102）。
+- 配置未知字段（含 typo）静默忽略（D-103）；刷新失败保留旧缓存且不自动重试（D-104）。
+- 工具名消歧依赖 server 返回顺序，跨会话稳定性未保证（D-100）；会话结束与 list_changed 重叠时可能丢失最后一条 status 审计（D-101）。
+- 仅支持 stdio；未启用 2026-07-28 协议的 `subscriptions/listen`。
 
 前端工作台：
 
