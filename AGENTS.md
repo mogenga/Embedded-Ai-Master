@@ -1,6 +1,6 @@
 # AGENTS.md — Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 工具。当前处于**纯文档规划期**：受版本控制的文件只有 `docs/`（5 篇）、`LICENSE`、`.gitignore`，**无任何代码、构建、测试或 lint 配置**。不要臆造技术栈、包管理器或测试命令。
+面向嵌入式调试场景的 agent 工具。当前处于 **M1/P0 交付后、M2 启动前**：P0 内核（`src/`）与 Web 工作台（`src/ui/`、`web/`）已实现，测试在 `tests/`，构建与脚本配置见 `package.json` / `tsconfig*.json` / `vite.config.ts` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
 
 ## 事实源（先读这些，别猜）
 - `docs/BRD.md` — 业务需求（领域层 BR-xx / 平台层 PLAT-xx）、硬性规则 R1-R9、路线图 M1-M4。
@@ -8,14 +8,24 @@
 - `docs/framework-architecture-inventory.md` — 框架能力清单 24 项 + 10 个决策点。
 - `docs/harness-comparison.md` — Claude Code / dsh / Codex / Gemini CLI / opencode / goose / pi 横向调研。
 - `docs/rag-vs-agentic-search-todo.md` — 待办对照实验（决策点 #2 的判据）。
+- `docs/ontology-scope-note.md` — Ontology 暂缓纳入检索比对的**范围决策**与重启条件（2026-10-19）。它不是待办缺陷，不登记进 `deferred-issues.md`；未经重启条件触发，不要主动把它并入方案比对。
+- `docs/m2-roadmap.md` — M2 路线图（决策点 #5/#9 已关闭项、M2 任务分期）。
+- `docs/frontend-design.md` — 前端设计规范（布局、令牌、组件、验收口径）。
 - `docs/deferred-issues.md` — 已知但暂不修的缺陷与覆盖缺口，含升级触发条件；改动前先查，避免重复发现。
 
 架构为两层：**平台层**（领域无关 harness，模型接入/上下文/工具/会话/权限）与**领域层**（嵌入式调试能力，经 MCP / 插件挂载）。内核代码不得含领域逻辑——嵌入式取证一律走 MCP，不进内核。
 
+## 常用命令（以 `package.json` 与 `README.md` 为准）
+
+- 测试与构建：`npm test`（vitest run，不触网）、`npm run coverage`（lines 阈值 85%）、`npm run typecheck`、`npm run lint`（当前等同 `tsc --noEmit`，见 D-006）、`npm run build`。
+- 前端：`npm run build:web`、`npm run test:ui`、`npm run typecheck:web`、`npm run verify:ui`（V1-V14 浏览器验收，需 Chrome/Edge）。
+- live 测试默认跳过；开启方式见 README「live 测试」。
+- **依赖安装禁令同样适用于此**：只输出命令给用户，不代为执行（见下文）。
+
 ## 硬约束（不可违反）
 1. **技术栈已定案（2026-10-16，决策点 #1 关闭），完整约束如下**：
    - **语言与运行时**：TypeScript + Node 24（ESM-only，禁止 CommonJS 混用）。本机已具备 Node 24.14.1，package.json 用 `"engines": { "node": ">=24" }` 声明。
-   - **协议层（可复用，不得自研）**：MCP 官方 TS SDK v2——`@modelcontextprotocol/client`（CLI 侧客户端）、`@modelcontextprotocol/server`（MCP server 入口）、`@modelcontextprotocol/server/stdio`（stdio 传输）；工具与消息 schema 用 **Zod v4**（MCP SDK v2 走 Standard Schema，Zod v4 为首选接线）。
+   - **协议层（可复用，不得自研）**：MCP 官方 TS SDK v2——`@modelcontextprotocol/client`（harness 侧客户端）、`@modelcontextprotocol/server`（MCP server 入口，测试夹具用）、`@modelcontextprotocol/server/stdio`（stdio 传输）；工具与消息 schema 用 **Zod v4**（MCP SDK v2 走 Standard Schema，Zod v4 为首选接线）。
    - **内核（必须自研，禁止整体引入现成 harness）**：主循环 / 会话 / 工具系统 / 上下文管理 / MCP 生命周期。可借鉴 Claude Code / dsh / opencode 源码语义，但不得 vendor 任何现成 harness。
    - **模型适配层（必须自研）**：极简适配器，仅 `complete` / `countTokens` 两方法；P0 只实现 OpenAI 兼容（`/v1/chat/completions`）；可借鉴 dsh llm-pi-ai 语法，但不整体引 pi-ai。
    - **测试**：vitest。
@@ -82,3 +92,12 @@ bash "<skills-dir>/subagent-driven-development/scripts/task-brief" <plan.md> <N>
 
 ## 环境注意
 Windows 为一等公民（git-bash）。已知坑（详见 BRD §13 / §11.2）：Kaspersky 启发式会静默删除 ELF；pyOCD USB 枚举死锁，真硬件后端必须用 OpenOCD；内部路径按 POSIX 风格统一表示，出口再转换。
+
+## 实现期注意事项
+
+- **先查 `docs/deferred-issues.md` 再动手**：已知缺陷有编号（D-xxx），修复后标注「已解决」并保留条目，不要删除。
+- **`npm run lint` 等同 `tsc --noEmit`**（D-006），不要把它当作独立静态检查的证据。
+- **测试不得触网**：live 测试由 `HARNESS_COMPAT_LIVE=1` 显式开启；默认 `npm test` 必须离线通过。
+- **工具必须诚实（R3）**：新增工具或错误路径时，失败要显式返回错误码，不得静默吞掉或把失败伪装成成功；Web 端也不得伪造提交成功。
+- **超时/取消的语义**：新增工具须响应 `AbortSignal`；超时后不得让残留调用与后续调用重叠（D-022 已缓解，新增写工具前重读）。
+- **内核不含领域逻辑**：探针 / 串口 / KB 等嵌入式能力一律经 MCP 挂载；`src/` 只放平台层能力。
