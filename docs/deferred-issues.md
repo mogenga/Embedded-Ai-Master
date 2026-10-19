@@ -181,7 +181,7 @@
 
 ### D-021 · MCP 工具名字符集与注册表校验不一致
 
-- **状态**: 已解决(2026-10-19;维度5 Task3 `createMcpTools` 统一映射为 `mcp__<server>__<tool>`,sanitize 非 `[a-zA-Z0-9_-]` 字符,超长/冲突确定性改名,注册表保持 OpenAI 契约;`mcp-tools` 覆盖 `dup.a`/`dup_a` 冲突)。
+- **状态**: 已解决(2026-10-19;维度5 Task3 `createMcpTools` 统一映射为 `mcp__<server>__<tool>`,sanitize 非 `[a-zA-Z0-9_-]` 字符,超长/冲突确定性改名,注册表保持 OpenAI 契约;`tests/mcp-tools.test.ts` 覆盖 `a.b`/`a_b` 跨 server 冲突与同 server `dup` 改名,`tests/integration.test.ts` 覆盖 fixture `dup.a`/`dup_a`)。
 - **发现**: 2026-10-18,Task 7 交付核验。
 - **现象**: `ToolRegistry` 现按 OpenAI function 名契约校验(`a-z/A-Z/0-9/_/-`,1-64 字符)。经 Context7 查证 MCP SEP-986,工具名**额外允许 `.` 和 `/`**(用于命名空间,如 `user-profile/update`)。即 MCP 合法名可能被注册表直接拒绝。
 - **影响**: 当前 P0 只有内置 echo,无影响;接入 MCP 客户端(设计稿 #5)时,带 `/` 或 `.` 的 server 工具会构造期抛错。且这类名字本就不能原样发给 OpenAI,必须在挂载层做**名称映射**(如 `mcp__server__tool`),而不是放宽注册表校验。
@@ -869,7 +869,7 @@
 ### D-103 · MCP 配置未知字段被静默忽略
 
 - **发现**: 2026-10-19,维度5 Task1。
-- **现象**: `parseServer` 只校验已知字段,未知字段(含拼写错误的 `timeoutMS`、`arg` 等)不报错,直接按缺省值继续。
+- **现象**: `parseServer` 只校验已知字段,可选字段的拼写错误(如 `timeoutMS`、`arg`)不报错,直接按缺省值继续;若必填的 `command` 拼错(如 `commandd`),则因 `merged.command === undefined` 抛 `McpConfigError` 并跳过全部 MCP。
 - **影响**: 配置 typo 不会 fail-fast,可能表现为超时/参数与预期不符;与 `command` 严格校验的风格不一致。
 - **触发升级条件**: 配置由用户手写且出错难定位;需要配置 lint/诊断;出现因 typo 导致的现场问题。
 - **修复建议**: 对未知字段输出 warning 或严格模式报错;在配置加载结果中保留原始 key 供 `mcp_config_failed` 诊断。
