@@ -43,7 +43,7 @@ function readJsonFile(filePath: string): unknown | undefined {
     throw invalidConfig(`MCP 配置读取失败: ${filePath}`, error);
   }
   try {
-    return JSON.parse(text) as unknown;
+    return JSON.parse(text.replace(/^\uFEFF/, "")) as unknown;
   } catch (error) {
     throw invalidConfig(`MCP 配置 JSON 无效: ${filePath}`, error);
   }
@@ -114,7 +114,7 @@ function parseConfigFile(filePath: string): Map<string, PartialServerConfig> {
   }
   const rawServers = value.mcpServers;
   if (rawServers === undefined) {
-    return servers;
+    throw invalidConfig(`MCP 配置缺少 mcpServers: ${filePath}`);
   }
   if (!isRecord(rawServers)) {
     throw invalidConfig(`MCP 配置 mcpServers 必须是对象: ${filePath}`);

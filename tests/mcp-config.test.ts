@@ -119,6 +119,46 @@ describe("MCP 配置加载与合并", () => {
     expect(loadMcpConfig({ home, workdir })).toEqual([]);
   });
 
+  it("user 无 command 且 project 仅 disabled:true 时报缺 command", () => {
+    const { home, workdir } = setup(
+      { probe: { args: ["x.js"] } },
+      { probe: { disabled: true } },
+    );
+    expectInvalid(() => loadMcpConfig({ home, workdir }));
+  });
+
+  it("user 单独 disabled:true 时跳过", () => {
+    const { home, workdir } = setup({ probe: { command: "node", disabled: true } });
+    expect(loadMcpConfig({ home, workdir })).toEqual([]);
+  });
+
+  it("user 缺 command 时由 project 补齐并成功", () => {
+    const { home, workdir } = setup(
+      { probe: { args: ["x.js"], env: { A: "1" } } },
+      { probe: { command: "node" } },
+    );
+    expect(loadMcpConfig({ home, workdir })).toEqual([
+      {
+        name: "probe",
+        command: "node",
+        args: ["x.js"],
+        env: { A: "1" },
+        cwd: workdir,
+        timeoutMs: 15_000,
+      },
+    ]);
+  });
+
+  it("project disabled:false 覆盖 user disabled:true 时启用", () => {
+    const { home, workdir } = setup(
+      { probe: { command: "node", disabled: true } },
+      { probe: { disabled: false } },
+    );
+    expect(loadMcpConfig({ home, workdir })).toEqual([
+      { name: "probe", command: "node", cwd: workdir, timeoutMs: 15_000 },
+    ]);
+  });
+
   it("未被 project 覆盖的 user server 保留，结果按 name 稳定排序", () => {
     const { home, workdir } = setup(
       { zeta: { command: "z" }, alpha: { command: "a" } },
@@ -156,9 +196,26 @@ describe("MCP 配置加载与合并", () => {
     const { home, workdir, userConfigPath } = setup();
     writeJson(userConfigPath, []);
     expectInvalid(() => loadMcpConfig({ home, workdir }));
+    writeJson(userConfigPath, {});
+    expectInvalid(() => loadMcpConfig({ home, workdir }));
+    writeJson(userConfigPath, { mcpServer: { probe: { command: "node" } } });
+    expectInvalid(() => loadMcpConfig({ home, workdir }));
     writeJson(userConfigPath, { mcpServers: [] });
     expectInvalid(() => loadMcpConfig({ home, workdir }));
     writeJson(userConfigPath, { mcpServers: { probe: "node" } });
+    expectInvalid(() => loadMcpConfig({ home, workdir }));
+  });
+
+  it("project 坏 JSON 与 schema 非法报 McpConfigError", () => {
+    const { home, workdir, projectConfigPath } = setup({ probe: { command: "node" } });
+    mkdirSync(path.dirname(projectConfigPath), { recursive: true });
+    writeFileSync(projectConfigPath, "{oops", "utf8");
+    expectInvalid(() => loadMcpConfig({ home, workdir }));
+    writeJson(projectConfigPath, []);
+    expectInvalid(() => loadMcpConfig({ home, workdir }));
+    writeJson(projectConfigPath, {});
+    expectInvalid(() => loadMcpConfig({ home, workdir }));
+    writeJson(projectConfigPath, { mcpServers: { probe: null } });
     expectInvalid(() => loadMcpConfig({ home, workdir }));
   });
 
@@ -169,8 +226,12 @@ describe("MCP 配置加载与合并", () => {
       { command: "   " },
       { command: 1 },
       { command: "node", args: [1] },
+      { command: "node", args: "x" },
       { command: "node", env: { A: 1 } },
+      { command: "node", env: [] },
+      { command: "node", env: null },
       { command: "node", cwd: 1 },
+      { command: "node", cwd: "" },
       { command: "node", disabled: "yes" },
     ];
     for (const server of cases) {
@@ -202,13 +263,73 @@ describe("MCP 配置加载与合并", () => {
     ]);
   });
 
+  it("userConfigPath/projectConfigPath 覆盖默认路径，cwd 相对覆盖文件目录", () => {
+    const root = tempRoot();
+    const home = path.join(root, "home");
+    const workdir = path.join(root, "work");
+    const userConfigPath = path.join(root, "custom", "user.json");
+    const projectConfigPath = path.join(root, "custom", "project.json");
+    mkdirSync(home, { recursive: true });
+    mkdirSync(workdir, { recursive: true });
+    writeJson(path.join(home, "mcp.json"), { mcpServers: { defaultUser: { command: "node" } } });
+    writeJson(path.join(workdir, ".harness", "mcp.json"), {
+      mcpServers: { defaultProject: { command: "node" } },
+    });
+    writeJson(userConfigPath, { mcpServers: { userTool: { command: "node", cwd: "user-bin" } } });
+    writeJson(projectConfigPath, {
+      mcpServers: { projectTool: { command: "node", cwd: "project-bin" } },
+    });
+
+    expect(loadMcpConfig({ home, workdir, userConfigPath, projectConfigPath })).toEqual([
+      {
+        name: "projectTool",
+        command: "node",
+        cwd: path.resolve(path.dirname(projectConfigPath), "project-bin"),
+        timeoutMs: 15_000,
+      },
+      {
+        name: "userTool",
+        command: "node",
+        cwd: path.resolve(path.dirname(userConfigPath), "user-bin"),
+        timeoutMs: 15_000,
+      },
+    ]);
+  });
+
   it.each(["bad name", "with.dot", "a/b", "", "x".repeat(65)])("非法名称 %j 被拒绝", (name) => {
     const { home, workdir } = setup({ [name]: { command: "node" } });
     expectInvalid(() => loadMcpConfig({ home, workdir }));
   });
 
+  it("64 字符名称合法", () => {
+    const name = "a".repeat(64);
+    const { home, workdir } = setup({ [name]: { command: "node" } });
+    expect(loadMcpConfig({ home, workdir })).toEqual([
+      { name, command: "node", cwd: workdir, timeoutMs: 15_000 },
+    ]);
+  });
+
   it.each([0, -1, 1.5, "100", null])("非法 timeoutMs %j 被拒绝", (timeoutMs) => {
     const { home, workdir } = setup({ probe: { command: "node", timeoutMs } });
     expectInvalid(() => loadMcpConfig({ home, workdir }));
+  });
+
+  it("配置文件路径为目录时报读取失败", () => {
+    const { home, workdir, userConfigPath } = setup();
+    mkdirSync(userConfigPath, { recursive: true });
+    expectInvalid(() => loadMcpConfig({ home, workdir }));
+  });
+
+  it("UTF-8 BOM 可正常解析", () => {
+    const { home, workdir, userConfigPath } = setup();
+    mkdirSync(path.dirname(userConfigPath), { recursive: true });
+    writeFileSync(
+      userConfigPath,
+      `\uFEFF${JSON.stringify({ mcpServers: { probe: { command: "node" } } })}`,
+      "utf8",
+    );
+    expect(loadMcpConfig({ home, workdir })).toEqual([
+      { name: "probe", command: "node", cwd: workdir, timeoutMs: 15_000 },
+    ]);
   });
 });
