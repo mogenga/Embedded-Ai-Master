@@ -269,12 +269,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   }
 
   const maxChars = Math.floor(modelCfg.contextWindow * 0.6 * 4);
-  const transcriptBody = toTranscript(prefixMessages);
-  const transcriptWithHistory =
-    previousSummary === undefined
-      ? transcriptBody
-      : `[Previous summary]\n${previousSummary.summary}\n\n${transcriptBody}`;
-  const transcript = truncateSurrogateSafe(transcriptWithHistory, maxChars);
+  const transcript = truncateSurrogateSafe(toTranscript(prefixMessages), maxChars);
 
   let result: CompletionResult;
   try {

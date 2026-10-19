@@ -834,11 +834,11 @@
 ### D-099 · 单条结果或近期批次超窗时仅有 `still_over_budget`
 
 - **发现**: 2026-10-19,维度3 第二轮红队审查(I-2)。
-- **现象**: 默认 `keepRecentTurns=2` 会保护最近批次不被 microcompact;若单个工具结果或最近批次本身超过 `contextWindow * softRatio`,二级无法修剪,三级摘要又必须保留尾部,摘落后重新测量仍超阈值,只能追加 `compaction {kind:"failed",reason:"still_over_budget",stage:"summary"}` 并继续以超窗消息请求。
-- **影响**: 极端大结果下压缩无法把视图降到软阈值以内,仍可能触窗或 4xx;失败会按轮重复出现,没有降级路径。
+- **现象**: 默认 `keepRecentTurns=2` 会保护最近批次不被 microcompact;若单个工具结果或最近批次本身超过 `contextWindow * softRatio`,二级无法修剪,三级摘要又必须保留尾部,摘落后重新测量仍超阈值。首轮追加 `compaction {kind:"failed",reason:"still_over_budget",stage:"summary"}` 并继续以超窗消息请求;后续轮因尾部边界不再前进,会命中 `no_progress`,不会再次调用摘要。
+- **影响**: 极端大结果下压缩无法把视图降到软阈值以内,仍可能触窗或 4xx;首轮记 `still_over_budget`,之后每轮只记 `no_progress`,没有降级路径。
 - **触发升级条件**: 单条工具结果接近或超过窗口;近期批次包含多个大结果;网关因超窗持续拒绝。
 - **修复建议**: 一级截断按单条结果强制落盘并进一步缩短模型视图;允许把最近批次中的非 evidence 结果降级为占位;或在 `still_over_budget` 时触发更小尾部/更强摘要策略。
-- **状态**: 未解决;当前只保证显式记录 `still_over_budget`,不重复摘要。
+- **状态**: 未解决;当前只保证首轮显式记录 `still_over_budget`、后续轮 `no_progress`,不重复摘要。
 
 ---
 
@@ -885,3 +885,4 @@
 | 2026-10-19 | 维度3 Task5 收尾:README 补三级压缩、`RunOptions.compaction`、evidence 保护与摘要成本;录入 D-091 ~ D-096(prompt cache 断裂仅告警、摘要质量、逐事件估算、摘要不重试、compaction 事件增长、`keepRecentTurns` 默认值) |
 | 2026-10-19 | 维度3 第一轮整体审查修复:摘要空/全空白/截断落 `failed` 且不计费;`no_progress` 幂等守卫;比例配置入口校验;`heuristicCountTokens` 计入 `tool_calls`;transcript/首行截断保护代理对;删除 `CompactOptions.pricePerMillion`;补充压缩后 resume、summary+坏尾部恢复、批次边界与 evidence 用例;更正 D-093(assistant 已计 `tool_calls`),录入 D-097(`compacted` 不区分成功/失败)、D-098(坏 summary 容错与 microcompact failed 分支) |
 | 2026-10-19 | 维度3 第二轮红队修复:summary 投影拒绝覆盖 evidence 并回退上一条有效 summary;坏 summary 校验非空/边界/批次完整性;摘要后仍超阈值落 `failed(still_over_budget)`;缺 usage 改写 `status(usage_missing)` 并复用 `normalizeUsage`;新摘要必须覆盖旧 summary 事件并在 transcript 前置旧摘要;microcompact 仅在占位更短时生效;`keepRecentTurns` 校验非负整数;TokenMeter 防御非有限 heuristic;`enabled:false` 不再校验比例;扩写 D-093/D-097,录入 D-099(单条结果/近期批次超窗) |
+| 2026-10-19 | 维度3 最后小修:移除 transcript 手动 `[Previous summary]` 前置(由 `buildMessages(prefix)` 注入一次);summary 投影按事件顺序只采信边界不倒退的有效 summary;D-099 补充首轮 `still_over_budget`、后续轮 `no_progress` 的轮次语义 |

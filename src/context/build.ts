@@ -126,16 +126,21 @@ function toSummaryDirective(
   return { summary, coversUpToSeq };
 }
 
-// 从新到旧找第一条有效 summary；坏的 summary 不放大视图也不吞掉更早的有效摘要。
+// 按事件顺序采信有效 summary，且边界不得倒退；坏/倒退的 summary 不放大视图，
+// 也不吞掉之前已采信的有效摘要。
 function findEffectiveSummary(events: readonly SessionEvent[]): SummaryDirective | undefined {
   const lastSeq = events.length === 0 ? -1 : events[events.length - 1].seq;
-  for (let index = events.length - 1; index >= 0; index -= 1) {
+  let accepted: SummaryDirective | undefined;
+  let lastBoundary = -1;
+  for (let index = 0; index < events.length; index += 1) {
     const event = events[index];
     if (event.type !== "compaction" || event.payload.kind !== "summary") continue;
     const valid = toSummaryDirective(events, index, lastSeq);
-    if (valid !== undefined) return valid;
+    if (valid === undefined || valid.coversUpToSeq < lastBoundary) continue;
+    accepted = valid;
+    lastBoundary = valid.coversUpToSeq;
   }
-  return undefined;
+  return accepted;
 }
 
 export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage[] {

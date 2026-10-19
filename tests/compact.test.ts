@@ -608,7 +608,7 @@ describe("compactSession", () => {
     });
   });
 
-  it("再次摘要时 transcript 前置旧 summary 并要求覆盖旧 summary 事件", async () => {
+  it("再次摘要时旧 summary 只由 buildMessages 注入一次", async () => {
     const session = await makeSession();
     await addUser(session, "old");
     const assistant = await session.append({
@@ -637,8 +637,10 @@ describe("compactSession", () => {
     );
 
     expect(calls).toHaveLength(1);
-    expect(calls[0].messages[1].content.startsWith("[Previous summary]\nOLD-SUM")).toBe(true);
-    expect(calls[0].messages[1].content).toContain("[Conversation summary]\nOLD-SUM");
+    const transcript = calls[0].messages[1].content;
+    expect(transcript).toContain("[Conversation summary]\nOLD-SUM");
+    expect(transcript).not.toContain("[Previous summary]");
+    expect(transcript.match(/OLD-SUM/g)).toHaveLength(1);
     const summaries = session
       .events()
       .filter((event) => event.type === "compaction" && event.payload.kind === "summary");

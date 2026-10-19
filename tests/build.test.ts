@@ -540,6 +540,24 @@ describe("buildMessages 投影重组", () => {
     expect(messages.some((message) => message.content.includes("NEW-BAD"))).toBe(false);
   });
 
+  it("summary 边界倒退时忽略较新的倒退 summary", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "u0" }),
+      mk(1, "user", { content: "u1" }),
+      mk(2, "user", { content: "u2" }),
+      mk(3, "compaction", { kind: "summary", summary: "S1", coversUpToSeq: 2 }),
+      mk(4, "user", { content: "u3" }),
+      mk(5, "compaction", { kind: "summary", summary: "S2", coversUpToSeq: 1 }),
+      mk(6, "user", { content: "u4" }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "system", content: "[Conversation summary]\nS1" },
+      { role: "user", content: "u3" },
+      { role: "user", content: "u4" },
+    ]);
+  });
+
   it.each<[string, Record<string, unknown>]>([
     ["空摘要", { kind: "summary", summary: "  ", coversUpToSeq: 2 }],
     ["负边界", { kind: "summary", summary: "BAD", coversUpToSeq: -1 }],
