@@ -8,6 +8,10 @@ if (process.env.PID_FILE) {
   fs.writeFileSync(process.env.PID_FILE, String(process.pid), "utf8");
 }
 
+if (process.env.PID_LOG) {
+  fs.appendFileSync(process.env.PID_LOG, `${process.pid}\n`, "utf8");
+}
+
 function textResult(text) {
   return { content: [{ type: "text", text }] };
 }
@@ -119,8 +123,11 @@ async function main() {
 
   server.registerTool(
     "grow-broken",
-    { description: "Register a tool, then fail the next tools/list" },
-    async () => {
+    {
+      description: "Register a tool, then fail the next tools/list",
+      inputSchema: z.object({ ms: z.number().optional() }),
+    },
+    async ({ ms = 0 }) => {
       grownCount += 1;
       server.registerTool(
         `grown-${grownCount}`,
@@ -128,6 +135,9 @@ async function main() {
         async () => textResult(`grown-${grownCount}`),
       );
       server.server.setRequestHandler("tools/list", async () => {
+        if (ms > 0) {
+          await delay(ms);
+        }
         throw new Error("tools/list refresh failed");
       });
       return textResult(`grown-${grownCount}`);

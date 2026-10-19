@@ -165,7 +165,8 @@ describe("McpManager 连接与工具发现", () => {
     await manager.connectAll();
 
     expect(connectedAt).toHaveLength(2);
-    expect(Math.abs(connectedAt[0] - connectedAt[1])).toBeLessThan(200);
+    // 串行时两个 connected 至少相隔 START_DELAY_MS（300ms）；300ms 阈值保留区分度并降低 CI 抖动。
+    expect(Math.abs(connectedAt[0] - connectedAt[1])).toBeLessThan(300);
   });
 
   it("close 与 connect 并发时不产生 connected 事件并回收子进程", async () => {
@@ -403,13 +404,14 @@ describe("McpManager 断线与重连", () => {
     expect(after).toMatchObject({ isError: false, code: "ok", text: "alive" });
   }, 15_000);
 
-  it("重连仍失败时返回 mcp_unavailable", async () => {
+  it("重连仍失败时返回 mcp_unavailable 并保留旧工具缓存", async () => {
     const root = tempRoot();
     const pidFile = path.join(root, "pid");
     const serverConfig = config("echo", { env: { PID_FILE: pidFile } });
     const manager = track(new McpManager([serverConfig]));
     await manager.connectAll();
     const pid = Number(readFileSync(pidFile, "utf8"));
+    const before = manager.tools().map((tool) => tool.tool);
 
     await manager.call("echo", "crash", {}, signal()).catch(() => undefined);
     await waitFor(() => !isAlive(pid), 3_000);
@@ -417,6 +419,42 @@ describe("McpManager 断线与重连", () => {
 
     const result = await manager.call("echo", "echo", { text: "nope" }, signal());
     expect(result).toMatchObject({ isError: true, code: "mcp_unavailable" });
+    expect(manager.tools().map((tool) => tool.tool)).toEqual(before);
+  });
+
+  it("首连失败后经 call 恢复成功触发 tools_changed 与 onToolsChanged", async () => {
+    const events: McpStatusEvent[] = [];
+    const changed: string[] = [];
+    const serverConfig = config("echo", { command: "definitely-not-a-real-command-embedded-ai" });
+    const manager = track(new McpManager([serverConfig], { logger: (event) => events.push(event) }));
+    manager.onToolsChanged((server) => changed.push(server));
+
+    await manager.connectAll();
+    expect(events).toContainEqual(expect.objectContaining({ kind: "connect_failed", server: "echo" }));
+    expect(changed).toEqual([]);
+
+    serverConfig.command = process.execPath;
+    const result = await manager.call("echo", "echo", { text: "recovered" }, signal());
+    expect(result).toMatchObject({ isError: false, code: "ok", text: "recovered" });
+    expect(changed).toEqual(["echo"]);
+    expect(events).toContainEqual(expect.objectContaining({ kind: "tools_changed", server: "echo" }));
+  });
+
+  it("断线恢复只重连一次（按 spawn 计数）", async () => {
+    const root = tempRoot();
+    const pidLog = path.join(root, "pid.log");
+    const manager = track(new McpManager([config("echo", { env: { PID_LOG: pidLog } })]));
+    const pids = () => readFileSync(pidLog, "utf8").trim().split("\n").map(Number);
+
+    await manager.connectAll();
+    expect(pids()).toHaveLength(1);
+
+    await manager.call("echo", "crash", {}, signal());
+    await waitFor(() => !isAlive(pids()[0]), 3_000);
+
+    const result = await manager.call("echo", "echo", { text: "once" }, signal());
+    expect(result).toMatchObject({ isError: false, code: "ok", text: "once" });
+    expect(pids()).toHaveLength(2);
   });
 });
 
@@ -488,5 +526,19 @@ describe("McpManager list_changed 与关闭", () => {
       isError: true,
       code: "mcp_unavailable",
     });
+  });
+
+  it("refresh 在途时 close 不写回工具且不发 tools_refresh_failed", async () => {
+    const events: McpStatusEvent[] = [];
+    const manager = track(new McpManager([config("echo")], { logger: (event) => events.push(event) }));
+    await manager.connectAll();
+
+    await manager.call("echo", "grow-broken", { ms: 500 }, signal());
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await manager.close();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(events.some((event) => event.kind === "tools_refresh_failed")).toBe(false);
+    expect(manager.tools()).toEqual([]);
   });
 });

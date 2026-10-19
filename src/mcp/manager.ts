@@ -46,6 +46,7 @@ interface ServerState {
   tools: McpToolInfo[];
   connected: boolean;
   everConnected: boolean;
+  everConnectAttempted: boolean;
   closed: boolean;
   queue: Promise<unknown>;
   reconnecting?: Promise<boolean>;
@@ -101,6 +102,7 @@ export class McpManager {
           tools: [],
           connected: false,
           everConnected: false,
+          everConnectAttempted: false,
           closed: false,
           queue: Promise.resolve(),
         } satisfies ServerState,
@@ -154,7 +156,7 @@ export class McpManager {
     await Promise.allSettled(
       [...this.states.values()].map(async (state) => {
         state.closed = true;
-        await this.disposeClient(state);
+        await this.disposeClient(state, true);
       }),
     );
   }
@@ -338,7 +340,8 @@ export class McpManager {
       return false;
     }
 
-    const wasConnected = state.everConnected;
+    const wasConnected = state.everConnected || state.everConnectAttempted;
+    state.everConnectAttempted = true;
     const config = state.config;
     let client: Client | undefined;
     try {
@@ -386,19 +389,15 @@ export class McpManager {
         await this.disposeClient(state);
         return false;
       }
-      await this.loadTools(state, connectedClient);
+      const tools = await this.loadTools(connectedClient, config.name);
       if (this.isClosed(state)) {
         await this.disposeClient(state);
         return false;
       }
 
+      state.tools = tools;
       state.connected = true;
       state.everConnected = true;
-      if (this.isClosed(state)) {
-        state.connected = false;
-        await this.disposeClient(state);
-        return false;
-      }
       this.emit({ kind: "connected", server: config.name, toolCount: state.tools.length });
       if (wasConnected) {
         this.notifyToolsChanged(state);
@@ -419,11 +418,11 @@ export class McpManager {
     }
   }
 
-  private async loadTools(state: ServerState, client: Client): Promise<void> {
+  private async loadTools(client: Client, server: string): Promise<McpToolInfo[]> {
     const { tools } = await client.listTools();
-    state.tools = tools.map((tool) => {
+    return tools.map((tool) => {
       const info: McpToolInfo = {
-        server: state.config.name,
+        server,
         tool: tool.name,
         description: tool.description ?? "",
         inputSchema: tool.inputSchema,
@@ -443,16 +442,23 @@ export class McpManager {
     if (!client || !state.connected || this.isClosed(state)) {
       return;
     }
+    let tools: McpToolInfo[];
     try {
-      await this.loadTools(state, client);
+      tools = await this.loadTools(client, state.config.name);
     } catch (error) {
-      this.emit({
-        kind: "tools_refresh_failed",
-        server: state.config.name,
-        message: messageOf(error),
-      });
+      if (!this.isClosed(state)) {
+        this.emit({
+          kind: "tools_refresh_failed",
+          server: state.config.name,
+          message: messageOf(error),
+        });
+      }
       return;
     }
+    if (this.isClosed(state)) {
+      return;
+    }
+    state.tools = tools;
     this.notifyToolsChanged(state);
   }
 
@@ -482,11 +488,13 @@ export class McpManager {
     return state.closed || this.closed;
   }
 
-  private async disposeClient(state: ServerState): Promise<void> {
+  private async disposeClient(state: ServerState, clearTools = false): Promise<void> {
     const client = state.client;
     state.client = undefined;
     state.connected = false;
-    state.tools = [];
+    if (clearTools) {
+      state.tools = [];
+    }
     if (client) {
       await client.close().catch(() => undefined);
     }

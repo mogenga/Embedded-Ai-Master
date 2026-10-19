@@ -11,7 +11,7 @@ MCP SDK v2 已用 Context7 查证(2026-10-19):
 
 - 运行时依赖 `@modelcontextprotocol/client` ^2.3.1; `StdioClientTransport` 从 `@modelcontextprotocol/client/stdio` 导入。
 - `new Client({name,version})` → `client.connect(transport)` → `client.listTools()` → `client.callTool({name,arguments}, {timeout?})`。
-- list_changed 用 `new Client(info, { listChanged: { tools: { autoRefresh:false, debounceMs, onChanged } } })`。`onChanged(error, items)` 在 `autoRefresh:false` 时 `items` 为 `null`，由调用方自行刷新。`client.listen(filter)` 是 2026-07-28 的 `subscriptions/listen`，当前 SDK 最高协商 2025-11-25，调用会抛 `MethodNotSupportedByProtocolVersion`，P0 不使用。
+- list_changed 用 `new Client(info, { listChanged: { tools: { autoRefresh:false, debounceMs, onChanged } } })`。`onChanged(error, items)` 在 `autoRefresh:false` 时 `items` 为 `null`，由调用方自行刷新。`client.listen(filter)` 是 2026-07-28 的 `subscriptions/listen`；SDK 默认 legacy 握手协商 2025-11-25，调用会抛 `MethodNotSupportedByProtocolVersion`；SDK 可通过 `versionNegotiation` pin 2026-07-28，但 P0 不启用，故不使用 `listen`。
 - 测试 server 用 `@modelcontextprotocol/server`(devDependency) + `@modelcontextprotocol/server/stdio`; `McpServer.registerTool(name,{description,inputSchema},handler)`。
 - 工具注解 `annotations.readOnlyHint/destructiveHint`。
 
@@ -95,7 +95,7 @@ class McpManager {
   constructor(servers: McpServerConfig[], opts?: { connectTimeoutMs?: number; logger?: (e: McpStatusEvent) => void });
   connectAll(): Promise<void>;                 // 并行; 单失败不抛
   tools(): McpToolInfo[];                      // 当前可用工具
-  call(server: string, tool: string, args: unknown, signal: AbortSignal): Promise<McpCallResult>;
+  call(server: string, tool: string, args: unknown, signal?: AbortSignal): Promise<McpCallResult>;
   onToolsChanged(listener: (server: string) => void): void;
   close(): Promise<void>;
 }
@@ -107,17 +107,18 @@ interface McpStatusEvent {
 ```
 
 - `connectAll`: 每个 server `new Client(...)` + `StdioClientTransport({command,args,env,cwd})`; `Promise.allSettled`; 失败记录 status 并继续; 成功 `listTools()` 缓存。
-- **per-server 串行队列**: 同一 server 的所有 `call` 串行执行(即使 `readOnlyHint:true`), 避免探针/串口类工具被管线并发; 不同 server 可并行。
+- **per-server 串行队列**: 同一 server 的所有 `call` 串行执行(即使 `readOnlyHint:true`), 避免探针/串口类工具被管线并发; 不同 server 可并行。该保证**只覆盖已返回的调用**: timeout/abort 经 `Promise.race` 提前返回后, 底层 `callTool` 可能仍在执行, 队列不会等待它, 后续调用可能与之重叠; 写工具接入前必须引入可等待的终止/隔离机制(见 deferred D-022)。
 - `call`: 查找 server/tool; 脱线或调用抛连接类错误 → `reconnect(server)` 一次 → 重试一次; 仍失败 `{isError:true, code:"mcp_unavailable"}`; `callTool` timeout 用 `min(server.timeoutMs, 120000)`; `signal` abort → `mcp_aborted`。
-- **超时/取消语义**: SDK 只提供 timeout, 无 signal 中止保证; P0 用 `Promise.race` 停止等待并返回 `mcp_timeout`/`mcp_aborted`, **不强制 close 连接**(避免影响同 server 其他调用); 写工具取消后 server 可能继续执行, 登记 deferred(P1 审批/隔离)。
+- **超时/取消语义**: SDK 只提供 timeout, 无 signal 中止保证; P0 用 `Promise.race` 停止等待并返回 `mcp_timeout`/`mcp_aborted`, **不强制 close 连接**(避免影响同 server 其他调用); 写工具取消后 server 可能继续执行, 且不再保证与后续调用的串行性, 登记 deferred D-022(P1 审批/隔离)。
 - 外层 pipeline 的 120s 与 server timeout 竞争时, 可能先返回 `tool_timeout`; manager 层测试断言 `mcp_timeout`, 集成层允许 `tool_timeout`。
 - `isError` 结果: `{isError:true, code:"mcp_tool_error", message, detail:{content}, text}`。
 - list_changed: `ClientOptions.listChanged.tools.onChanged`(配置 `autoRefresh:false`、`debounceMs:0`)，在回调中把刷新任务投递到该 server 的串行队列; 刷新成功触发 `tools_changed` 与 `onToolsChanged`; 失败保留旧缓存并记 `tools_refresh_failed`。
 - **listener 隔离**: `onToolsChanged` 逐个调用并 `try/catch`; 单个 listener 抛错记 `listener_failed`，继续调用其他 listener，不得让异常逃逸为未处理 rejection。
-- **重连后刷新**: 重连成功刷新工具集后触发 `tools_changed` 与 `onToolsChanged`(首次 `connectAll` 不触发，由调用方在连接后读取 `tools()`); 保证 registry 与 `manager.tools()` 一致。
-- **close 竞态**: `close()` 后在途 `connect`/`loadTools` 不得再把状态置为 connected，也不得 emit `connected`/`connect_failed`; 已关闭时立即 dispose 并返回失败。
+- **重连后刷新**: 重连成功刷新工具集后触发 `tools_changed` 与 `onToolsChanged`(首次 `connectAll` 成功不触发，由调用方在连接后读取 `tools()`; 首连失败后经 `call` 恢复成功视为重连，触发通知); 保证 registry 与 `manager.tools()` 一致。
+- **close 竞态**: `close()` 后在途 `connect`/`loadTools` 不得再把状态置为 connected，也不得 emit `connected`/`connect_failed`; 在途 refresh 不得写回 `state.tools`，也不得 emit `tools_refresh_failed`; 已关闭时立即 dispose 并返回失败。
 - **刷新失败**: `listTools()` 抛错时保留旧工具缓存并记录 `tools_refresh_failed`; 不立即清空(避免抖动误伤)。
-- `close`: 对每个 client `close()`; 清除定时器/监听。
+- **工具缓存生命周期**: 重连前的临时 dispose 不清空旧工具缓存(重连失败仍保留); 只有最终 `close()` 清空。
+- `close`: 对每个 client `close()`; 清除定时器/监听; 清空工具缓存。
 
 ### 4.3 工具适配
 
