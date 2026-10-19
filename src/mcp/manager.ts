@@ -10,6 +10,7 @@ export interface McpToolInfo {
   inputSchema: unknown;
   readOnly?: boolean;
   destructive?: boolean;
+  evidence?: boolean;
 }
 
 export interface McpCallResult {
@@ -432,6 +433,9 @@ export class McpManager {
       }
       if (tool.annotations?.destructiveHint === true) {
         info.destructive = true;
+      }
+      if (tool._meta?.evidence === true) {
+        info.evidence = true;
       }
       return info;
     });

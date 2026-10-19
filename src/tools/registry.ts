@@ -6,13 +6,23 @@ import type { ToolDef } from "./types.js";
 // 在注册期 fail-fast,避免 MCP 工具名到网关才 400。
 const TOOL_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
 
-function toParametersSchema(tool: ToolDef<any>): unknown {
+function rootTypeOf(schema: unknown): unknown {
+  if (typeof schema !== "object" || schema === null) {
+    return undefined;
+  }
+  return (schema as { type?: unknown }).type;
+}
 
+function toParametersSchema(tool: ToolDef<any>): unknown {
   if (tool.modelSchema !== undefined) {
+    const rootType = rootTypeOf(tool.modelSchema);
+    if (rootType !== "object") {
+      throw new Error(`tool "${tool.name}" modelSchema root must be an object, got ${String(rootType ?? "none")}`);
+    }
     return tool.modelSchema;
   }
   const parameters = z.toJSONSchema(tool.schema, { io: "input" });
-  const rootType = (parameters as { type?: unknown }).type;
+  const rootType = rootTypeOf(parameters);
   if (rootType !== "object") {
     throw new Error(`tool "${tool.name}" parameters root must be an object, got ${String(rootType ?? "none")}`);
   }

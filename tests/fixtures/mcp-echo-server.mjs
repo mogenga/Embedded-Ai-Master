@@ -29,6 +29,7 @@ async function main() {
       description: "Echo the provided text",
       inputSchema: z.object({ text: z.string() }),
       annotations: { readOnlyHint: true },
+      _meta: { evidence: true },
     },
     async ({ text }) => textResult(text),
   );

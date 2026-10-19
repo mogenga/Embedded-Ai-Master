@@ -1,9 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createBuiltinTools } from "../src/tools/builtin.js";
 import { echoTool } from "../src/tools/echo.js";
 import { ToolRegistry, toModelToolSchemas } from "../src/tools/registry.js";
 import type { ToolDef } from "../src/tools/types.js";
+
+vi.mock("zod", { spy: true });
 
 const otherTool: ToolDef<{ count: number }> = {
   name: "other",
@@ -170,6 +172,8 @@ describe("toModelToolSchemas", () => {
   });
 
   it("modelSchema 优先透传且不调用 z.toJSONSchema", () => {
+    const spy = vi.mocked(z.toJSONSchema);
+    spy.mockClear();
     const modelSchema = {
       type: "object",
       properties: { query: { type: "string" } },
@@ -184,6 +188,7 @@ describe("toModelToolSchemas", () => {
     };
 
     expect(toModelToolSchemas([tool])[0].function.parameters).toBe(modelSchema);
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it("ToolRegistry 接受带 modelSchema 的 z.unknown 工具", () => {
@@ -208,6 +213,26 @@ describe("toModelToolSchemas", () => {
     };
 
     expect(() => new ToolRegistry([tool])).toThrow(/parameters root must be an object/);
+  });
+
+  it("非法 modelSchema 根类型在注册期失败", () => {
+    const nonObject: ToolDef<unknown> = {
+      name: "bad_model_schema",
+      description: "",
+      schema: z.unknown(),
+      modelSchema: { type: "string" },
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+    const nullSchema: ToolDef<unknown> = {
+      name: "null_model_schema",
+      description: "",
+      schema: z.unknown(),
+      modelSchema: null,
+      execute: async () => ({ isError: false, code: "ok", message: "", text: "" }),
+    };
+
+    expect(() => new ToolRegistry([nonObject])).toThrow(/modelSchema root must be an object/);
+    expect(() => toModelToolSchemas([nullSchema])).toThrow(/modelSchema root must be an object/);
   });
 
   it("内置工具无 modelSchema 时行为不变", () => {

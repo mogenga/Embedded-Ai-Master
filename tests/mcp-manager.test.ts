@@ -83,6 +83,8 @@ describe("McpManager 连接与工具发现", () => {
     expect(echo).toMatchObject({ server: "echo", tool: "echo", description: "Echo the provided text" });
     expect(echo?.inputSchema).toMatchObject({ type: "object" });
     expect(echo?.readOnly).toBe(true);
+    expect(echo?.evidence).toBe(true);
+    expect(manager.tools().find((tool) => tool.tool === "multi")?.evidence).toBeUndefined();
     expect(manager.tools().find((tool) => tool.tool === "crash")?.destructive).toBe(true);
     expect(events).toContainEqual(expect.objectContaining({ kind: "connected", server: "echo" }));
     expect(events.find((event) => event.kind === "connected")?.toolCount).toBeGreaterThan(0);

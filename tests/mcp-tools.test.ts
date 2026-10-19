@@ -123,38 +123,105 @@ describe("createMcpTools", () => {
   it("annotations 映射 readOnly/destructive/evidence", () => {
     const tools = createMcpTools(
       makeManager([
-        makeInfo("s", "ro", { readOnly: true, destructive: false }),
-        makeInfo("s", "rw", {}),
+        makeInfo("s", "ro", {
+          readOnly: true,
+          destructive: false,
+          evidence: true,
+          description: "只读证据工具",
+        }),
+        makeInfo("s", "rw", { destructive: true, description: "破坏性工具" }),
+        makeInfo("s", "plain", {}),
       ]).manager,
     );
 
-    expect(tools[0].annotations).toEqual({ readOnly: true, destructive: false, evidence: false });
-    expect(tools[1].annotations).toEqual({ readOnly: false, destructive: false, evidence: false });
+    expect(tools[0].annotations).toEqual({ readOnly: true, destructive: false, evidence: true });
+    expect(tools[0].description).toBe("只读证据工具");
+    expect(tools[1].annotations).toEqual({ readOnly: false, destructive: true, evidence: false });
+    expect(tools[1].description).toBe("破坏性工具");
+    expect(tools[2].annotations).toEqual({ readOnly: false, destructive: false, evidence: false });
   });
 
-  it("同 server 内名称冲突跳过后一个并记录 status", () => {
+  it("同 server 内名称冲突时后一个追加 hash 并记录 renamed", () => {
     const statuses: McpToolAdapterStatus[] = [];
     const tools = createMcpTools(
-      makeManager([makeInfo("a", "dup"), makeInfo("a", "dup"), makeInfo("a", "ok")]).manager,
+      makeManager([
+        makeInfo("a", "dup"),
+        makeInfo("a", "dup"),
+        makeInfo("a", "dup"),
+        makeInfo("a", "ok"),
+      ]).manager,
       { onStatus: (status) => statuses.push(status) },
     );
 
-    expect(tools.map((tool) => tool.name)).toEqual(["mcp__a__dup", "mcp__a__ok"]);
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "mcp__a__dup",
+      "mcp__a__dup_b68125",
+      "mcp__a__dup_9caddb",
+      "mcp__a__ok",
+    ]);
     expect(statuses).toEqual([
-      { kind: "mcp_tool_name_collision", server: "a", tool: "dup", name: "mcp__a__dup" },
+      {
+        kind: "mcp_tool_name_renamed",
+        server: "a",
+        tool: "dup",
+        name: "mcp__a__dup_b68125",
+        originalName: "mcp__a__dup",
+      },
+      {
+        kind: "mcp_tool_name_renamed",
+        server: "a",
+        tool: "dup",
+        name: "mcp__a__dup_9caddb",
+        originalName: "mcp__a__dup",
+      },
     ]);
   });
 
-  it("跨 server 的 sanitize 冲突同样跳过，且不阻塞其他 server", () => {
+  it("跨 server sanitize 冲突时确定性改名，且不阻塞其他 server", () => {
     const statuses: McpToolAdapterStatus[] = [];
     const tools = createMcpTools(
       makeManager([makeInfo("a.b", "x"), makeInfo("a_b", "x"), makeInfo("c", "x")]).manager,
       { onStatus: (status) => statuses.push(status) },
     );
 
-    expect(tools.map((tool) => tool.name)).toEqual(["mcp__a_b__x", "mcp__c__x"]);
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "mcp__a_b__x",
+      "mcp__a_b__x_7513b1",
+      "mcp__c__x",
+    ]);
     expect(statuses).toEqual([
-      { kind: "mcp_tool_name_collision", server: "a_b", tool: "x", name: "mcp__a_b__x" },
+      {
+        kind: "mcp_tool_name_renamed",
+        server: "a_b",
+        tool: "x",
+        name: "mcp__a_b__x_7513b1",
+        originalName: "mcp__a_b__x",
+      },
+    ]);
+  });
+
+  it("截断后的名称冲突同样追加 hash 并保持 64 字符", () => {
+    const longTool = "t".repeat(60);
+    const clipped = `mcp__a_b__${longTool}`.slice(0, 57);
+    const base = `${clipped}_39e981`;
+    const renamed = `${clipped}_cac240`;
+    const statuses: McpToolAdapterStatus[] = [];
+    const tools = createMcpTools(
+      makeManager([makeInfo("a.b", longTool), makeInfo("a_b", longTool)]).manager,
+      { onStatus: (status) => statuses.push(status) },
+    );
+
+    expect(tools.map((tool) => tool.name)).toEqual([base, renamed]);
+    expect(tools[1].name).toHaveLength(64);
+    expect(tools[1].name).not.toBe(tools[0].name);
+    expect(statuses).toEqual([
+      {
+        kind: "mcp_tool_name_renamed",
+        server: "a_b",
+        tool: longTool,
+        name: renamed,
+        originalName: base,
+      },
     ]);
   });
 
