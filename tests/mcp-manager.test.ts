@@ -1,7 +1,7 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { McpServerConfig } from "../src/mcp/config.js";
 import { McpManager } from "../src/mcp/manager.js";
 import type { McpStatusEvent } from "../src/mcp/manager.js";
@@ -231,7 +231,7 @@ describe("McpManager 工具调用", () => {
     expect(JSON.parse(structured.text)).toEqual({ answer: 42 });
   });
 
-  it("env 继承 process.env、config.env 覆盖同名并透传 cwd", async () => {
+  it("inheritEnv:true 时继承 process.env、config.env 覆盖同名并透传 cwd", async () => {
     const root = tempRoot();
     const previousParentOnly = process.env.MCP_MANAGER_TEST_PARENT_ONLY;
     const previousMarker = process.env.MCP_MANAGER_TEST_MARKER;
@@ -241,6 +241,7 @@ describe("McpManager 工具调用", () => {
       const manager = track(
         new McpManager([
           config("echo", {
+            inheritEnv: true,
             cwd: root,
             env: {
               MCP_MANAGER_TEST_MARKER: "config",
@@ -270,6 +271,50 @@ describe("McpManager 工具调用", () => {
         delete process.env.MCP_MANAGER_TEST_MARKER;
       } else {
         process.env.MCP_MANAGER_TEST_MARKER = previousMarker;
+      }
+    }
+  });
+
+  it("默认只传白名单 env，父进程其他变量不可见", async () => {
+    const previous = process.env.MCP_MANAGER_TEST_PARENT_ONLY;
+    process.env.MCP_MANAGER_TEST_PARENT_ONLY = "secret";
+    try {
+      const manager = track(new McpManager([config("echo")]));
+      await manager.connectAll();
+
+      const env = await manager.call("echo", "env", {}, signal());
+      expect(JSON.parse(env.text)).toEqual({
+        parentOnly: null,
+        marker: null,
+        configOnly: null,
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.MCP_MANAGER_TEST_PARENT_ONLY;
+      } else {
+        process.env.MCP_MANAGER_TEST_PARENT_ONLY = previous;
+      }
+    }
+  });
+
+  it("envAllowlist 显式放行指定的父进程变量", async () => {
+    const previous = process.env.MCP_MANAGER_TEST_PARENT_ONLY;
+    process.env.MCP_MANAGER_TEST_PARENT_ONLY = "allowed";
+    try {
+      const manager = track(
+        new McpManager([
+          config("echo", { envAllowlist: ["MCP_MANAGER_TEST_PARENT_ONLY"] }),
+        ]),
+      );
+      await manager.connectAll();
+
+      const env = await manager.call("echo", "env", {}, signal());
+      expect(JSON.parse(env.text)).toMatchObject({ parentOnly: "allowed" });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.MCP_MANAGER_TEST_PARENT_ONLY;
+      } else {
+        process.env.MCP_MANAGER_TEST_PARENT_ONLY = previous;
       }
     }
   });
@@ -315,6 +360,56 @@ describe("McpManager 工具调用", () => {
 
     expect(aborted).toMatchObject({ isError: true, code: "mcp_aborted" });
     expect(Date.now() - started).toBeLessThan(600);
+  });
+
+  it("timeout 后关闭 server，后续调用重连且不残留旧进程", async () => {
+    const root = tempRoot();
+    const pidLog = path.join(root, "pid.log");
+    const manager = track(
+      new McpManager([config("echo", { timeoutMs: 100, env: { PID_LOG: pidLog } })]),
+    );
+    await manager.connectAll();
+    const firstPid = Number(readFileSync(pidLog, "utf8").trim().split("\n")[0]);
+
+    const timedOut = await manager.call("echo", "slow", { ms: 800, tag: "timeout" }, signal());
+    expect(timedOut).toMatchObject({ isError: true, code: "mcp_timeout" });
+    await waitFor(() => !isAlive(firstPid), 3_000);
+
+    const after = await manager.call("echo", "echo", { text: "after-timeout" }, signal());
+    expect(after).toMatchObject({ isError: false, code: "ok", text: "after-timeout" });
+    const pids = readFileSync(pidLog, "utf8").trim().split("\n");
+    expect(pids).toHaveLength(2);
+  });
+
+  it("终止未确认时拒绝重连并返回 mcp_uncertain", async () => {
+    const root = tempRoot();
+    const pidLog = path.join(root, "pid.log");
+    const manager = track(
+      new McpManager(
+        [config("echo", { timeoutMs: 100, env: { PID_LOG: pidLog } })],
+        { terminateTimeoutMs: 50 },
+      ),
+    );
+    await manager.connectAll();
+    const originalKill = process.kill.bind(process);
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+      pid: number,
+      sig?: NodeJS.Signals | number,
+    ) => {
+      if (sig === 0) return true;
+      return originalKill(pid, sig);
+    }) as typeof process.kill);
+    try {
+      const timedOut = await manager.call("echo", "slow", { ms: 800, tag: "timeout" }, signal());
+      expect(timedOut).toMatchObject({ isError: true, code: "mcp_timeout" });
+
+      const next = await manager.call("echo", "echo", { text: "after-timeout" }, signal());
+
+      expect(next).toMatchObject({ isError: true, code: "mcp_uncertain" });
+      expect(readFileSync(pidLog, "utf8").trim().split("\n")).toHaveLength(1);
+    } finally {
+      killSpy.mockRestore();
+    }
   });
 
   it("已取消的 signal 立即返回 mcp_aborted，signal 可省略", async () => {
@@ -404,6 +499,18 @@ describe("McpManager 断线与重连", () => {
 
     const after = await manager.call("echo", "echo", { text: "alive" }, signal());
     expect(after).toMatchObject({ isError: false, code: "ok", text: "alive" });
+  }, 15_000);
+
+  it("破坏性工具断线后不自动重试，返回 mcp_uncertain", async () => {
+    const root = tempRoot();
+    const pidLog = path.join(root, "pid.log");
+    const manager = track(new McpManager([config("echo", { env: { PID_LOG: pidLog } })]));
+    await manager.connectAll();
+
+    const result = await manager.call("echo", "vanish-destructive", {}, signal());
+    expect(result).toMatchObject({ isError: true, code: "mcp_uncertain" });
+    const pids = readFileSync(pidLog, "utf8").trim().split("\n");
+    expect(pids).toHaveLength(1);
   }, 15_000);
 
   it("重连仍失败时返回 mcp_unavailable 并保留旧工具缓存", async () => {
@@ -544,6 +651,81 @@ describe("McpManager list_changed 与关闭", () => {
       isError: true,
       code: "mcp_unavailable",
     });
+  });
+
+  it("连接成功但 tools/list 挂起时按发现超时失败并回收子进程", async () => {
+    const root = tempRoot();
+    const pidFile = path.join(root, "pid");
+    const connectedFile = path.join(root, "connected");
+    const events: McpStatusEvent[] = [];
+    const manager = track(
+      new McpManager(
+        [
+          config("hang", {
+            env: {
+              TOOLS_HANG: "1",
+              PID_FILE: pidFile,
+              CONNECTED_FILE: connectedFile,
+            },
+          }),
+        ],
+        { connectTimeoutMs: 500, logger: (event) => events.push(event) },
+      ),
+    );
+
+    await manager.connectAll();
+
+    expect(existsSync(connectedFile)).toBe(true);
+    expect(manager.tools()).toEqual([]);
+    expect(events).toContainEqual(
+      expect.objectContaining({ kind: "connect_failed", server: "hang" }),
+    );
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    await waitFor(() => !isAlive(pid), 3_000);
+  }, 5_000);
+
+  it("超长文本输出按 1 MiB 截断并标记", async () => {
+    const manager = track(new McpManager([config("echo")]));
+    await manager.connectAll();
+
+    const result = await manager.call("echo", "huge", {}, signal());
+
+    expect(result).toMatchObject({ isError: false, code: "ok", detail: { truncated: true } });
+    expect(result.text.endsWith("[MCP output truncated at 1 MiB]")).toBe(true);
+    expect(Buffer.byteLength(result.text, "utf8")).toBeLessThanOrEqual(1024 * 1024 + 64);
+  });
+
+  it("超长 structuredContent 同样截断", async () => {
+    const manager = track(new McpManager([config("echo")]));
+    await manager.connectAll();
+
+    const result = await manager.call("echo", "structured-huge", {}, signal());
+
+    expect(result).toMatchObject({ isError: false, code: "ok", detail: { truncated: true } });
+    expect(result.text.endsWith("[MCP output truncated at 1 MiB]")).toBe(true);
+  });
+
+  it("超大 inputSchema 被跳过，超长 description 被截断", async () => {
+    const events: McpStatusEvent[] = [];
+    const manager = track(
+      new McpManager([config("echo", { env: { BIG_SCHEMA: "1" } })], {
+        logger: (event) => events.push(event),
+      }),
+    );
+    await manager.connectAll();
+
+    expect(manager.tools().some((tool) => tool.tool === "huge-schema")).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        kind: "tool_invalid_schema",
+        server: "echo",
+        tool: "huge-schema",
+      }),
+    );
+    const description =
+      manager.tools().find((tool) => tool.tool === "huge-description")?.description ?? "";
+    expect(description.length).toBeLessThanOrEqual(4096 + 20);
+    expect(description.endsWith("[truncated]")).toBe(true);
   });
 
   it("refresh 在途时 close 不写回工具且不发 tools_refresh_failed", async () => {

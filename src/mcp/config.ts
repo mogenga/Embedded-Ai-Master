@@ -7,6 +7,8 @@ export interface McpServerConfig {
   command: string;
   args?: string[];
   env?: Record<string, string>;
+  envAllowlist?: string[];
+  inheritEnv?: boolean;
   cwd?: string;
   timeoutMs?: number;
   disabled?: boolean;
@@ -17,6 +19,7 @@ export interface LoadMcpConfigOptions {
   workdir: string;
   userConfigPath?: string;
   projectConfigPath?: string;
+  includeProject?: boolean;
 }
 
 type PartialServerConfig = Omit<McpServerConfig, "name" | "command"> & { command?: string };
@@ -77,6 +80,23 @@ function parseServer(
       throw invalidConfig(`${where} 的 env 必须是字符串 map`);
     }
     server.env = { ...(raw.env as Record<string, string>) };
+  }
+
+  if (raw.envAllowlist !== undefined) {
+    if (
+      !Array.isArray(raw.envAllowlist)
+      || raw.envAllowlist.some((key) => typeof key !== "string")
+    ) {
+      throw invalidConfig(`${where} 的 envAllowlist 必须是字符串数组`);
+    }
+    server.envAllowlist = [...raw.envAllowlist] as string[];
+  }
+
+  if (raw.inheritEnv !== undefined) {
+    if (typeof raw.inheritEnv !== "boolean") {
+      throw invalidConfig(`${where} 的 inheritEnv 必须是布尔值`);
+    }
+    server.inheritEnv = raw.inheritEnv;
   }
 
   if (raw.cwd !== undefined) {
@@ -161,6 +181,12 @@ function mergeServer(
   if (merged.env !== undefined) {
     config.env = merged.env;
   }
+  if (merged.envAllowlist !== undefined) {
+    config.envAllowlist = merged.envAllowlist;
+  }
+  if (merged.inheritEnv !== undefined) {
+    config.inheritEnv = merged.inheritEnv;
+  }
   return config;
 }
 
@@ -168,7 +194,9 @@ export function loadMcpConfig(opts: LoadMcpConfigOptions): McpServerConfig[] {
   const userPath = opts.userConfigPath ?? path.join(opts.home, "mcp.json");
   const projectPath = opts.projectConfigPath ?? path.join(opts.workdir, ".harness", "mcp.json");
   const userServers = parseConfigFile(userPath);
-  const projectServers = parseConfigFile(projectPath);
+  const projectServers = opts.includeProject === false
+    ? new Map<string, PartialServerConfig>()
+    : parseConfigFile(projectPath);
   const workdir = path.resolve(opts.workdir);
   const names = new Set([...userServers.keys(), ...projectServers.keys()]);
   const result: McpServerConfig[] = [];

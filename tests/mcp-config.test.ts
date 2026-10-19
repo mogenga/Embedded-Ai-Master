@@ -111,6 +111,51 @@ describe("MCP 配置加载与合并", () => {
     ]);
   });
 
+  it("解析 inheritEnv/envAllowlist，project 按字段覆盖", () => {
+    const { home, workdir } = setup(
+      { probe: { command: "node", inheritEnv: false, envAllowlist: ["A"] } },
+      { probe: { inheritEnv: true, envAllowlist: ["B"] } },
+    );
+
+    expect(loadMcpConfig({ home, workdir })).toEqual([
+      {
+        name: "probe",
+        command: "node",
+        cwd: workdir,
+        timeoutMs: 15_000,
+        inheritEnv: true,
+        envAllowlist: ["B"],
+      },
+    ]);
+  });
+
+  it.each([
+    { inheritEnv: "yes" },
+    { inheritEnv: 1 },
+    { envAllowlist: "PATH" },
+    { envAllowlist: [1] },
+    { envAllowlist: null },
+  ])("非法 inheritEnv/envAllowlist 被拒绝: %j", (extra) => {
+    const { home, workdir } = setup({ probe: { command: "node", ...extra } });
+    expectInvalid(() => loadMcpConfig({ home, workdir }));
+  });
+
+  it("includeProject:false 时忽略 project 配置", () => {
+    const { home, workdir } = setup(
+      { probe: { command: "user" } },
+      { probe: { command: "project" } },
+    );
+
+    expect(loadMcpConfig({ home, workdir, includeProject: false })).toEqual([
+      {
+        name: "probe",
+        command: "user",
+        cwd: workdir,
+        timeoutMs: 15_000,
+      },
+    ]);
+  });
+
   it("project 只写 disabled:true 时继承 user 且最终跳过", () => {
     const { home, workdir } = setup(
       { probe: { command: "node", args: ["user.js"] } },

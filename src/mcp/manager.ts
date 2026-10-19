@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { Client, SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import type { CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
@@ -40,19 +41,23 @@ export interface McpStatusEvent {
 
 export interface McpManagerOptions {
   connectTimeoutMs?: number;
+  terminateTimeoutMs?: number;
   logger?: (event: McpStatusEvent) => void;
 }
 
 interface ServerState {
   config: McpServerConfig;
   client?: Client;
+  transport?: StdioClientTransport;
   tools: McpToolInfo[];
   connected: boolean;
   everConnected: boolean;
   everConnectAttempted: boolean;
   closed: boolean;
+  uncertain: boolean;
   queue: Promise<unknown>;
   reconnecting?: Promise<boolean>;
+  terminating?: Promise<boolean>;
 }
 
 type InvokeOutcome =
@@ -64,6 +69,27 @@ type InvokeOutcome =
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_CALL_TIMEOUT_MS = 15_000;
 const MAX_CALL_TIMEOUT_MS = 120_000;
+const DEFAULT_TERMINATE_TIMEOUT_MS = 2_000;
+const MAX_CONTENT_BYTES = 1024 * 1024;
+const MAX_SCHEMA_BYTES = 64 * 1024;
+const MAX_DESCRIPTION_CHARS = 4096;
+const TRUNCATED_MARKER = "[MCP output truncated at 1 MiB]";
+const DEFAULT_ENV_ALLOWLIST = [
+  "PATH",
+  "HOME",
+  "USERPROFILE",
+  "SystemRoot",
+  "SystemDrive",
+  "windir",
+  "TEMP",
+  "TMP",
+  "PATHEXT",
+  "COMSPEC",
+  "SHELL",
+  "LANG",
+  "LC_ALL",
+  "TERM",
+];
 const CLIENT_INFO = { name: "embedded-ai-master", version: "0.1.0" } as const;
 
 function messageOf(error: unknown): string {
@@ -71,6 +97,71 @@ function messageOf(error: unknown): string {
     return error.message;
   }
   return String(error);
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function byteLength(value: string): number {
+  return Buffer.byteLength(value, "utf8");
+}
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const buffer = Buffer.from(value, "utf8");
+  if (buffer.length <= maxBytes) return value;
+  let end = maxBytes;
+  while (end > 0 && (buffer[end]! & 0xc0) === 0x80) end -= 1;
+  return buffer.subarray(0, end).toString("utf8");
+}
+
+function truncateDescription(value: string): string {
+  if (value.length <= MAX_DESCRIPTION_CHARS) return value;
+  let end = MAX_DESCRIPTION_CHARS;
+  const last = value.charCodeAt(end - 1);
+  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return `${value.slice(0, end)} [truncated]`;
+}
+
+function safeJson(value: unknown): string {
+  try {
+    const serialized = JSON.stringify(value);
+    return typeof serialized === "string" ? serialized : String(serialized);
+  } catch {
+    return "[unserializable content]";
+  }
+}
+
+function buildEnv(config: McpServerConfig): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (config.inheritEnv === true) {
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined) env[key] = value;
+    }
+  } else {
+    for (const key of DEFAULT_ENV_ALLOWLIST) {
+      const value = process.env[key];
+      if (value !== undefined) env[key] = value;
+    }
+  }
+  for (const key of config.envAllowlist ?? []) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  for (const [key, value] of Object.entries(config.env ?? {})) {
+    env[key] = value;
+  }
+  return env;
 }
 
 function isObjectSchema(schema: unknown): boolean {
@@ -99,12 +190,14 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: s
 export class McpManager {
   private readonly states: Map<string, ServerState>;
   private readonly connectTimeoutMs: number;
+  private readonly terminateTimeoutMs: number;
   private readonly logger?: (event: McpStatusEvent) => void;
   private readonly listeners = new Set<(server: string) => void>();
   private closed = false;
 
   constructor(servers: McpServerConfig[], options: McpManagerOptions = {}) {
     this.connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+    this.terminateTimeoutMs = options.terminateTimeoutMs ?? DEFAULT_TERMINATE_TIMEOUT_MS;
     this.logger = options.logger;
     this.states = new Map(
       servers.map((config) => [
@@ -116,6 +209,7 @@ export class McpManager {
           everConnected: false,
           everConnectAttempted: false,
           closed: false,
+          uncertain: false,
           queue: Promise.resolve(),
         } satisfies ServerState,
       ]),
@@ -191,6 +285,16 @@ export class McpManager {
     if (state.closed || this.closed) {
       return this.failCall(state, "mcp_unavailable", `MCP server 不可用: ${state.config.name}`);
     }
+    if (state.terminating !== undefined) {
+      await state.terminating;
+    }
+    if (state.uncertain) {
+      return this.failCall(
+        state,
+        "mcp_uncertain",
+        `MCP server 上一调用未能确认终止，拒绝重连: ${state.config.name}`,
+      );
+    }
     if (signal?.aborted) {
       return this.failCall(state, "mcp_aborted", "MCP 调用已取消");
     }
@@ -235,19 +339,31 @@ export class McpManager {
       return this.toResult(outcome.value);
     }
     if (outcome.kind === "aborted") {
+      this.beginDispose(state);
       return this.failCall(state, "mcp_aborted", "MCP 调用已取消");
     }
     if (outcome.kind === "timeout") {
+      this.beginDispose(state);
       return this.failCall(state, "mcp_timeout", `MCP 调用超时（${timeoutMs}ms）`);
     }
 
     const error = outcome.error;
     if (this.isTimeoutError(error)) {
+      this.beginDispose(state);
       return this.failCall(state, "mcp_timeout", `MCP 调用超时（${timeoutMs}ms）`);
     }
     if (this.isConnectionError(error, state)) {
       if (!allowReconnect) {
+        this.beginDispose(state);
         return this.failCall(state, "mcp_unavailable", `MCP server 不可用: ${state.config.name}`);
+      }
+      if (state.tools.find((info) => info.tool === tool)?.destructive === true) {
+        this.beginDispose(state);
+        return this.failCall(
+          state,
+          "mcp_uncertain",
+          `MCP 破坏性工具连接中断且结果不确定，未自动重试: ${state.config.name}/${tool}`,
+        );
       }
       if (!(await this.reconnect(state))) {
         return this.failCall(state, "mcp_unavailable", `MCP server 不可用: ${state.config.name}`);
@@ -308,31 +424,54 @@ export class McpManager {
 
   private toResult(result: CallToolResult): McpCallResult {
     const parts: string[] = [];
-    for (const block of result.content ?? []) {
-      if (block.type === "text") {
-        parts.push(block.text);
-      } else {
-        parts.push(JSON.stringify(block));
+    let used = 0;
+    let truncated = false;
+    const push = (part: string): boolean => {
+      const separator = parts.length === 0 ? 0 : 1;
+      const cost = separator + byteLength(part);
+      if (used + cost <= MAX_CONTENT_BYTES) {
+        parts.push(part);
+        used += cost;
+        return true;
       }
+      const remaining = MAX_CONTENT_BYTES - used - separator;
+      const piece = truncateUtf8(part, remaining);
+      if (piece.length > 0) {
+        parts.push(piece);
+        used += separator + byteLength(piece);
+      }
+      truncated = true;
+      return false;
+    };
+
+    for (const block of result.content ?? []) {
+      if (!push(block.type === "text" ? block.text : safeJson(block))) break;
     }
     if (parts.length === 0 && result.structuredContent !== undefined) {
-      parts.push(JSON.stringify(result.structuredContent));
+      push(safeJson(result.structuredContent));
     }
-    const text = parts.join("\n");
+    const body = parts.join("\n");
+    const text = truncated ? `${body}\n${TRUNCATED_MARKER}` : body;
     if (result.isError === true) {
       return {
         isError: true,
         code: "mcp_tool_error",
         message: text || "MCP 工具返回错误",
-        detail: { content: result.content },
+        detail: truncated ? { truncated: true } : { content: result.content },
         text,
       };
     }
-    return { isError: false, code: "ok", message: "", text };
+    return {
+      isError: false,
+      code: "ok",
+      message: "",
+      ...(truncated ? { detail: { truncated: true } } : {}),
+      text,
+    };
   }
 
   private async reconnect(state: ServerState): Promise<boolean> {
-    if (state.closed || this.closed) {
+    if (state.closed || this.closed || state.uncertain) {
       return false;
     }
     if (state.reconnecting) {
@@ -356,13 +495,15 @@ export class McpManager {
     state.everConnectAttempted = true;
     const config = state.config;
     let client: Client | undefined;
+    let transport: StdioClientTransport | undefined;
     try {
-      const transport = new StdioClientTransport({
+      transport = new StdioClientTransport({
         command: config.command,
         args: [...(config.args ?? [])],
-        env: { ...process.env, ...config.env } as Record<string, string>,
+        env: buildEnv(config),
         cwd: config.cwd,
       });
+      state.transport = transport;
       client = new Client(CLIENT_INFO, {
         listChanged: {
           tools: {
@@ -419,6 +560,9 @@ export class McpManager {
       if (client && state.client === client) {
         state.client = undefined;
       }
+      if (transport !== undefined && state.transport === transport) {
+        state.transport = undefined;
+      }
       if (client) {
         await client.close().catch(() => undefined);
       }
@@ -431,7 +575,7 @@ export class McpManager {
   }
 
   private async loadTools(client: Client, server: string): Promise<McpToolInfo[]> {
-    const { tools } = await client.listTools();
+    const { tools } = await client.listTools(undefined, { timeout: this.connectTimeoutMs });
     const loaded: McpToolInfo[] = [];
     for (const tool of tools) {
       if (!isObjectSchema(tool.inputSchema)) {
@@ -443,10 +587,21 @@ export class McpManager {
         });
         continue;
       }
+      if (byteLength(safeJson(tool.inputSchema)) > MAX_SCHEMA_BYTES) {
+        this.emit({
+          kind: "tool_invalid_schema",
+          server,
+          tool: tool.name,
+          message: `MCP 工具 inputSchema 超过 ${MAX_SCHEMA_BYTES} bytes: ${server}/${tool.name}`,
+        });
+        continue;
+      }
       const info: McpToolInfo = {
         server,
         tool: tool.name,
-        description: tool.description ?? "",
+        description: truncateDescription(
+          typeof tool.description === "string" ? tool.description : "",
+        ),
         inputSchema: tool.inputSchema,
       };
       if (tool.annotations?.readOnlyHint === true) {
@@ -514,9 +669,83 @@ export class McpManager {
     return state.closed || this.closed;
   }
 
+  private async terminateAndWait(pid: number | undefined): Promise<boolean> {
+    if (pid === undefined) {
+      return true;
+    }
+    if (process.platform === "win32") {
+      try {
+        const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        killer.on("error", () => undefined);
+        killer.unref();
+      } catch {
+        void 0;
+      }
+    } else {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        try {
+          process.kill(-pid, "SIGKILL");
+        } catch {
+          void 0;
+        }
+      }
+    }
+    const deadline = Date.now() + this.terminateTimeoutMs;
+    while (Date.now() < deadline) {
+      if (!isProcessAlive(pid)) {
+        return true;
+      }
+      await delay(50);
+    }
+    return !isProcessAlive(pid);
+  }
+
+  private beginDispose(state: ServerState, clearTools = false): void {
+    const client = state.client;
+    const pid = state.transport?.pid ?? undefined;
+    state.client = undefined;
+    state.transport = undefined;
+    state.connected = false;
+    if (clearTools) {
+      state.tools = [];
+    }
+    const terminating = this.terminateAndWait(pid).then(async (dead) => {
+      if (!dead) {
+        state.uncertain = true;
+      }
+      if (client) {
+        await client.close().catch(() => undefined);
+      }
+      return dead;
+    });
+    state.terminating = terminating;
+    void terminating.then(
+      () => {
+        if (state.terminating === terminating) {
+          state.terminating = undefined;
+        }
+      },
+      () => {
+        state.uncertain = true;
+        if (state.terminating === terminating) {
+          state.terminating = undefined;
+        }
+      },
+    );
+  }
+
   private async disposeClient(state: ServerState, clearTools = false): Promise<void> {
+    if (state.terminating !== undefined) {
+      await state.terminating;
+    }
     const client = state.client;
     state.client = undefined;
+    state.transport = undefined;
     state.connected = false;
     if (clearTools) {
       state.tools = [];

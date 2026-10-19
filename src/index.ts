@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { resolveHarnessHome } from "./config/harness-home.js";
@@ -54,6 +55,7 @@ export interface RunOptions {
     enabled?: boolean;
     userConfigPath?: string;
     projectConfigPath?: string;
+    trustProjectConfig?: boolean;
   };
 }
 
@@ -65,7 +67,8 @@ interface McpSessionStatus {
     | "mcp_tools_refresh_failed"
     | "mcp_tool_invalid_schema"
     | "mcp_tool_name_renamed"
-    | "mcp_config_failed";
+    | "mcp_config_failed"
+    | "mcp_project_config_skipped";
   server?: string;
   tool?: string;
   name?: string;
@@ -227,6 +230,14 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   if (opts.mcp?.enabled !== undefined && typeof opts.mcp.enabled !== "boolean") {
     throw new TypeError(`mcp.enabled must be a boolean; got ${typeof opts.mcp.enabled}`);
   }
+  if (
+    opts.mcp?.trustProjectConfig !== undefined
+    && typeof opts.mcp.trustProjectConfig !== "boolean"
+  ) {
+    throw new TypeError(
+      `mcp.trustProjectConfig must be a boolean; got ${typeof opts.mcp.trustProjectConfig}`,
+    );
+  }
   const compactionEnabled = compaction?.enabled !== false;
   if (compactionEnabled) {
     assertCompactionRatios(compaction?.keepTailRatio ?? 0.16, compaction?.softRatio ?? 0.8);
@@ -272,6 +283,12 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     model: modelName,
     fetchImpl: opts.fetchImpl,
     ...(apiKey !== undefined && apiKey !== "" ? { apiKey } : {}),
+    ...(provider.requestTimeoutMs !== undefined
+      ? { requestTimeoutMs: provider.requestTimeoutMs }
+      : {}),
+    ...(provider.maxResponseBytes !== undefined
+      ? { maxResponseBytes: provider.maxResponseBytes }
+      : {}),
   });
 
   const id = opts.sessionId ?? randomUUID();
@@ -364,14 +381,25 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
 
     if (opts.mcp?.enabled !== false) {
       try {
+        const explicitProjectPath = opts.mcp?.projectConfigPath;
+        const trustProject =
+          opts.mcp?.trustProjectConfig === true || explicitProjectPath !== undefined;
+        const defaultProjectPath = path.join(runCwd, ".harness", "mcp.json");
+        if (!trustProject && existsSync(defaultProjectPath)) {
+          appendMcpStatus({
+            status: "mcp_project_config_skipped",
+            message: defaultProjectPath,
+          });
+        }
         const servers = loadMcpConfig({
           home,
           workdir: runCwd,
+          includeProject: trustProject,
           ...(opts.mcp?.userConfigPath !== undefined
             ? { userConfigPath: opts.mcp.userConfigPath }
             : {}),
-          ...(opts.mcp?.projectConfigPath !== undefined
-            ? { projectConfigPath: opts.mcp.projectConfigPath }
+          ...(explicitProjectPath !== undefined
+            ? { projectConfigPath: explicitProjectPath }
             : {}),
         });
         if (servers.length > 0) {
