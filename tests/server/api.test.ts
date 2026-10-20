@@ -435,7 +435,7 @@ describe("ui api", () => {
     expect(errorCode(res.body)).toBe("unsupported_media_type");
   });
 
-  it("Body 超过 32 KiB 返回 413 payload_too_large", async () => {
+  it("Body 超过 64 KiB 返回 413 payload_too_large", async () => {
     const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
     close = s.close;
     const res = await rawRequest(
@@ -443,7 +443,7 @@ describe("ui api", () => {
       "/api/actions",
       "POST",
       writeHeaders(s.port),
-      JSON.stringify({ text: "a".repeat(33_000) }),
+      JSON.stringify({ text: "a".repeat(66_000) }),
     );
     expect(res.status).toBe(413);
     expect(errorCode(res.body)).toBe("payload_too_large");

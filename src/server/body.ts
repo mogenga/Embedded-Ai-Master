@@ -1,7 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import { HttpError } from "./http.js";
 
-const DEFAULT_LIMIT_BYTES = 32768;
+const DEFAULT_LIMIT_BYTES = 65536;
 const READ_TIMEOUT_MS = 5000;
 
 function assertJsonContentType(req: IncomingMessage): void {

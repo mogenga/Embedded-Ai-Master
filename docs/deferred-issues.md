@@ -456,7 +456,7 @@
 
 - **发现**: 2026-10-18,Task 10 视觉验收。
 - **现象**: `src/ui/main.tsx` 向 `VITE_ACTION_URL` POST `{ text }`,但未定义请求 id、会话 id、响应状态与错误映射;后端未接入时仅 `console.warn`,没有可观测的 UI 反馈。
-- **Task 15 更新**: 本地服务当时已提供 `/api/actions`(POST)与 `/api/events`(GET),但两者均返回 501;action 请求/响应 schema 仍未定义(详见 D-063)。2026-10-20 起 `/api/events` 已实现为只读 SSE 事件流,`/api/actions` 仍为 501。
+- **Task 15 更新**: 本地服务当时已提供 `/api/actions`(POST)与 `/api/events`(GET),但两者均返回 501;action 请求/响应 schema 仍未定义(详见 D-063)。2026-10-20 起 `/api/events` 已实现为只读 SSE 事件流;`/api/actions` 随后也已落地(见 D-139)。
 - **影响**: 真实后端接入时端点路径与 schema 仍需重新约定;UI 无法区分「已受理 / 参数拒绝 / 网络失败」,也无法安全重试或去重。
 - **触发升级条件**: 接入首个真实 action 端点;需要失败重试、幂等或前端可观测的提交状态。
 - **修复建议**: 定义 action 请求/响应 schema(`requestId`、`sessionId`、`text`;202 受理、4xx 校验失败、5xx 可重试),前端落提交中/失败态,并按 `requestId` 去重。
@@ -558,7 +558,7 @@
 - **影响**: 工作台只能读取既有会话与知识库,不能发起新对话、接收实时 LoopEvent 或回传写操作结果;复位提示会停留在「执行中,等待工具结果」。
 - **触发升级条件**: 接入 `runSession`/`query` 或 MCP 事件;需要提交、重试、中断;真机调试写入。
 - **修复建议**: 定义 action schema(`requestId`、`sessionId`、`text`,202 受理/4xx/5xx)与 SSE 事件(`LoopEvent` JSON、`id`/`Last-Event-ID` 重放);501 迁移为真实实现并补端到端测试。
-- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus`):`/api/events` 固定 501 已替换为真实 SSE 单会话事件流,支持 `since`/`Last-Event-ID` 补播、`tool_started`/`mcp_status`/`device_status` 投影、心跳/背压/`stream_end`/`stream_error`;契约见 README「实时事件流」,端到端覆盖见 `tests/events-e2e.test.ts`。`/api/actions` 仍为 501,Web 写操作与审批另见 D-051/D-137。
+- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus`):`/api/events` 固定 501 已替换为真实 SSE 单会话事件流,支持 `since`/`Last-Event-ID` 补播、`tool_started`/`mcp_status`/`device_status` 投影、心跳/背压/`stream_end`/`stream_error`;契约见 README「实时事件流」,端到端覆盖见 `tests/events-e2e.test.ts`。`/api/actions` 已于 2026-10-20 落地(见 D-139),Web 写操作与审批见 D-051/D-137。
 
 ### D-064 · 知识库扫描深度与条目上限静默截断
 

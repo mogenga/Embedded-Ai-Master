@@ -448,7 +448,7 @@ npm run build:web && npm run build && npm run serve:ui
 
 **202 语义**：只表示决策已送达 gate，不表示工具已执行；最终结果以会话日志的 `permission_decision` 为准（批准为 `effective: "allow"` 且 reason 含 `approval_granted`，拒绝为 deny）。HTTP 不返回 `effective`，前端也不本地伪造终态，等待 SSE 更新。
 
-**写端点通用约束**：`POST /api/actions` 与 `POST /api/approvals` 必须携带 `Origin`，且为 loopback、端口等于监听端口，否则 403 `forbidden_origin`；`Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（接受 `charset` 等参数，415），body 上限 32 KiB（413），读取超时 5s（408 `request_timeout`）。只读端点仍只校验 `Host` / `Origin`。
+**写端点通用约束**：`POST /api/actions` 与 `POST /api/approvals` 必须携带 `Origin`，且为 loopback、端口等于监听端口，否则 403 `forbidden_origin`；`Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（接受 `charset` 等参数，415），body 上限 64 KiB（413），读取超时 5s（408 `request_timeout`）。`text` 仍保留 8000 字符上限；64 KiB 足以覆盖其最坏 JSON 转义（约 48 KiB）。只读端点仍只校验 `Host` / `Origin`。
 
 **前端发送语义**：追加输入成功后只刷新会话列表，保持当前视图与 SSE 连接，不重载会话；只有新建会话（提交前没有 `activeSessionId`）才按返回的 `sessionId` 切换并订阅。
 

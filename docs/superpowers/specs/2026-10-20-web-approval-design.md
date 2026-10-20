@@ -114,7 +114,7 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner;
 
 ### 7.2 行为
 
-- `start` 校验：`text` 为字符串、去空白后非空、长度 ≤ `maxTextLength`（默认 8000）；否则抛 `RunnerInputError(code: "invalid_text")`。
+- `start` 校验：`text` 为字符串、去空白后非空、长度 ≤ `maxTextLength`（默认 8000）；否则抛 `RunnerInputError(code: "invalid_text")`。HTTP body 上限为 64 KiB，足以容纳 8000 个 UTF-16 单元的最坏 JSON 转义（约 48 KiB），因此上限不会在校验前误伤合法输入。
 - **受理边界**：`start` 必须等到会话 `header.json` 已落盘（即 `runSession` 调用 `onSession` 之后）才返回 202。实现用 readiness promise + 运行 promise 竞速；`readyTimeoutMs`（默认 10s）内未就绪则 abort 并抛 `session_start_timeout`。generator 在就绪前失败时把错误映射为对应的受理前错误（模型/配置），不留半成品会话目录由 `runSession` 自身清理。无法归类的启动失败（会话锁冲突、日志损坏、IO）保留现有 `model_unavailable` HTTP code 以维持契约，但 message 必须明确「会话启动失败」而不是声称模型不可用。
 - `sessionId` 缺省：生成 `randomUUID()`，作为新会话 id 传给 `runSession({ sessionId })`，返回 `created: true`。
 - 带 `sessionId`：先校验 `isValidSessionId`，再检查 `<harnessHome>/sessions/<id>/header.json` 是否存在；**header 检查先于 providers 解析**，未知会话优先返回 404，而不是 providers 缺失的 503。错误分型：`ENOENT` / `ENOTDIR` → `unknown_session`；header 损坏（`SessionCorruptionError`）→ `session_corrupt`（message 以「会话 header 损坏」开头）；`EACCES` / `EPERM` → `session_unreadable`（message 以「会话不可读」开头）；其他错误原样抛出，不伪装成未知会话。存在则读取 header，**使用 `header.model` 作为模型引用、省略 `cwd`**（让 `runSession` 回落到 `header.workdir`），调用 `runSession({ resume: true, sessionDir, sessionId })`，返回 `created: false`。header 无 `model` 时回落到默认模型。
@@ -245,7 +245,7 @@ export interface ApprovalRequestPayload {
 
 - `POST /api/actions` 与 `POST /api/approvals` 必须带 `Origin`，且 `Origin` 为 loopback、端口等于监听端口（`requireWriteRequest`）。缺少 `Origin` → 403 `forbidden_origin`；非 POST → 405 `method_not_allowed`。
 - `Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（允许 `; charset=utf-8` 等参数；`application/jsonp` 不放行），否则 415 `unsupported_media_type`。
-- Body 上限 32 KiB；超出 413 `payload_too_large`；JSON 解析失败或非普通对象 → 400 `invalid_body`。
+- Body 上限 64 KiB；超出 413 `payload_too_large`；JSON 解析失败或非普通对象 → 400 `invalid_body`。`text` 的 8000 字符上限不变；64 KiB 覆盖其最坏 JSON 转义（每 UTF-16 单元最多 6 字节，约 48 KiB）。
 - 读取超时 5s → 408 `request_timeout`；客户端断开按 400/无响应处理，不留下 pending。
 - 成功统一 202 + JSON；错误复用 `{ error: { code, message } }`。
 - 现有只读路由的 `requireLocalRequest` 行为不变。
