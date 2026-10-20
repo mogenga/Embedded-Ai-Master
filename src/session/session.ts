@@ -93,6 +93,17 @@ function needsCrashRecoveryInterrupted(events: readonly SessionEvent[]): boolean
   return true;
 }
 
+const PERMISSION_PRESETS: readonly PermissionPreset[] = [
+  "read-only",
+  "workspace-write",
+  "diagnose",
+  "danger-full-access",
+];
+
+function isPermissionPreset(value: unknown): value is PermissionPreset {
+  return typeof value === "string" && (PERMISSION_PRESETS as readonly string[]).includes(value);
+}
+
 function toPendingApproval(event: SessionEvent): PendingApproval | undefined {
   if (event.type !== "approval_request") return undefined;
   const { callId, tool, preset, paramsDigest, paramsKeys, access, paramsPreview } =
@@ -100,7 +111,7 @@ function toPendingApproval(event: SessionEvent): PendingApproval | undefined {
   if (
     typeof callId !== "string"
     || typeof tool !== "string"
-    || typeof preset !== "string"
+    || !isPermissionPreset(preset)
     || typeof paramsDigest !== "string"
     || !Array.isArray(paramsKeys)
     || !paramsKeys.every((key) => typeof key === "string")
@@ -110,7 +121,7 @@ function toPendingApproval(event: SessionEvent): PendingApproval | undefined {
   const approval: PendingApproval = {
     callId,
     tool,
-    preset: preset as PermissionPreset,
+    preset,
     paramsDigest,
     paramsKeys: paramsKeys as string[],
   };

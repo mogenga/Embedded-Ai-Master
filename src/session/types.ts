@@ -150,4 +150,5 @@ export interface ApprovalRequestPayload {
   paramsKeys: string[];
   paramsPreview?: Record<string, unknown>;
   deadlineAt: string;
+  effective?: never;
 }

@@ -495,6 +495,42 @@ describe("approval_request 事件", () => {
     expect(decision?.parent).toBeUndefined();
     expect(() => buildMessages(events)).not.toThrow();
     await resumed.close();
+
+    const again = await resumeSession(dir);
+    const decisions = again
+      .events()
+      .filter(
+        (event) =>
+          event.type === "permission_decision" && event.payload.callId === "call-1",
+      );
+    expect(decisions).toHaveLength(1);
+    await again.close();
+  });
+
+  it("resume 跳过 preset 非法的 approval_request,不补 permission_decision", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({
+      type: "approval_request",
+      payload: {
+        requestId: "req-1",
+        callId: "call-1",
+        tool: "shell",
+        action: "ask",
+        reason: "test:ask",
+        preset: "bogus",
+        paramsDigest: "digest",
+        paramsKeys: ["command"],
+        deadlineAt: "2026-10-20T00:01:00.000Z",
+      },
+    });
+    await session.close();
+
+    const resumed = await resumeSession(dir);
+    expect(
+      resumed.events().filter((event) => event.type === "permission_decision"),
+    ).toHaveLength(0);
+    await resumed.close();
   });
 });
 
