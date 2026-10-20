@@ -321,4 +321,96 @@ describe("createMcpTools", () => {
 
     await expect(tool.execute({}, ctx, signal)).rejects.toThrow("network down");
   });
+
+  it("成功结果的 structuredContent.deviceStatus 附加为 deviceStatus", async () => {
+    const { manager } = makeManager([makeInfo("probe", "attach")], async () => ({
+      isError: false,
+      code: "ok",
+      message: "",
+      text: "attached",
+      structuredContent: { deviceStatus: { probe: "attached" } },
+    }));
+    const [tool] = createMcpTools(manager);
+
+    const result = await tool.execute({}, ctx, signal);
+
+    expect(result.deviceStatus).toEqual({ server: "probe", state: { probe: "attached" } });
+    expect(result.deviceStatusInvalid).toBeUndefined();
+    expect(result.text).toBe("attached");
+  });
+
+  it("isError 结果即使带 deviceStatus 也不附加", async () => {
+    const { manager } = makeManager([makeInfo("probe", "attach")], async () => ({
+      isError: true,
+      code: "mcp_tool_error",
+      message: "boom",
+      text: "boom",
+      structuredContent: { deviceStatus: { probe: "attached" } },
+    }));
+    const [tool] = createMcpTools(manager);
+
+    const result = await tool.execute({}, ctx, signal);
+
+    expect(result.deviceStatus).toBeUndefined();
+    expect(result.deviceStatusInvalid).toBeUndefined();
+  });
+
+  it("非法 deviceStatus 记录 deviceStatusInvalid 原因且不附加状态", async () => {
+    const { manager } = makeManager([makeInfo("probe", "attach")], async () => ({
+      isError: false,
+      code: "ok",
+      message: "",
+      text: "ok",
+      structuredContent: { deviceStatus: [] },
+    }));
+    const [tool] = createMcpTools(manager);
+
+    const result = await tool.execute({}, ctx, signal);
+
+    expect(result.deviceStatus).toBeUndefined();
+    expect(typeof result.deviceStatusInvalid).toBe("string");
+    expect(result.deviceStatusInvalid!.length).toBeGreaterThan(0);
+  });
+
+  it("structuredContent 无 deviceStatus 时不附加任何状态", async () => {
+    const { manager } = makeManager([makeInfo("echo", "echo")], async () => ({
+      isError: false,
+      code: "ok",
+      message: "",
+      text: "ok",
+      structuredContent: { answer: 42 },
+    }));
+    const [tool] = createMcpTools(manager);
+
+    const result = await tool.execute({}, ctx, signal);
+
+    expect(result.deviceStatus).toBeUndefined();
+    expect(result.deviceStatusInvalid).toBeUndefined();
+  });
+
+  it("structuredContent.deviceStatus 是访问器时不读取 getter", async () => {
+    let getterCalls = 0;
+    const structuredContent: Record<string, unknown> = {};
+    Object.defineProperty(structuredContent, "deviceStatus", {
+      enumerable: true,
+      get() {
+        getterCalls += 1;
+        return { probe: "attached" };
+      },
+    });
+    const { manager } = makeManager([makeInfo("probe", "attach")], async () => ({
+      isError: false,
+      code: "ok",
+      message: "",
+      text: "ok",
+      structuredContent,
+    }));
+    const [tool] = createMcpTools(manager);
+
+    const result = await tool.execute({}, ctx, signal);
+
+    expect(getterCalls).toBe(0);
+    expect(result.deviceStatus).toBeUndefined();
+    expect(result.deviceStatusInvalid).toBeUndefined();
+  });
 });

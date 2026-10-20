@@ -13,6 +13,8 @@ export interface ToolResult {
   artifactPath?: string;
   text: string;
   evidence?: boolean;
+  deviceStatus?: { server: string; state: Record<string, unknown> };
+  deviceStatusInvalid?: string;
 }
 
 export interface ToolAnnotations {

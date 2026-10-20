@@ -20,6 +20,7 @@ export interface McpCallResult {
   message: string;
   detail?: unknown;
   text: string;
+  structuredContent?: unknown;
 }
 
 export type McpStatusKind =
@@ -456,6 +457,10 @@ export class McpManager {
     }
     const body = parts.join("\n");
     const text = truncated ? `${body}\n${TRUNCATED_MARKER}` : body;
+    const structured =
+      result.structuredContent === undefined
+        ? {}
+        : { structuredContent: result.structuredContent };
     if (result.isError === true) {
       return {
         isError: true,
@@ -463,6 +468,7 @@ export class McpManager {
         message: text || "MCP 工具返回错误",
         detail: truncated ? { truncated: true } : { content: result.content },
         text,
+        ...structured,
       };
     }
     return {
@@ -471,6 +477,7 @@ export class McpManager {
       message: "",
       ...(truncated ? { detail: { truncated: true } } : {}),
       text,
+      ...structured,
     };
   }
 

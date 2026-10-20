@@ -229,6 +229,17 @@ describe("McpManager 工具调用", () => {
     const structured = await manager.call("echo", "structured", {}, signal());
     expect(structured.isError).toBe(false);
     expect(JSON.parse(structured.text)).toEqual({ answer: 42 });
+    expect(structured.structuredContent).toEqual({ answer: 42 });
+  });
+
+  it("失败结果的 structuredContent 同样原样透传", async () => {
+    const manager = track(new McpManager([config("echo")]));
+    await manager.connectAll();
+
+    const failure = await manager.call("echo", "fail", {}, signal());
+
+    expect(failure.isError).toBe(true);
+    expect(failure.structuredContent).toEqual({ reason: "boom" });
   });
 
   it("inheritEnv:true 时继承 process.env、config.env 覆盖同名并透传 cwd", async () => {

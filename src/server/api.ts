@@ -5,15 +5,24 @@ import type { Dirent } from "node:fs";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import path from "node:path";
 import { resolveHarnessHome } from "../config/harness-home.js";
+import { createLogTailEventSource } from "../events/log-tail.js";
+import type { SessionEventSource } from "../events/types.js";
 import { SessionCorruptionError } from "../session/errors.js";
-import { validateHeader } from "../session/handle.js";
-import { listSessionLogFiles, readSessionDir } from "../session/persistence.js";
+import { isValidSessionId, validateHeader } from "../session/handle.js";
+import {
+  listSessionLogFiles,
+  readSessionDir,
+  readSessionSnapshot,
+} from "../session/persistence.js";
 import type { SessionEvent, SessionHeader } from "../session/types.js";
+import { createEventStreamHandler } from "./event-stream.js";
+import { HttpError, sendError, sendJson } from "./http.js";
 
 export interface ApiOptions {
   harnessHome?: string;
   staticRoot?: string;
   port?: number;
+  eventSource?: SessionEventSource;
 }
 
 export interface SessionSummary {
@@ -33,6 +42,7 @@ export interface KbNode {
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 const KB_MAX_DEPTH = 8;
+
 const KB_MAX_ENTRIES = 2000;
 
 const MIME_TYPES: Record<string, string> = {
@@ -48,29 +58,6 @@ const MIME_TYPES: Record<string, string> = {
   ".woff2": "font/woff2",
   ".txt": "text/plain; charset=utf-8",
 };
-
-class HttpError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string,
-    message: string,
-  ) {
-    super(message);
-    this.name = "HttpError";
-  }
-}
-
-function sendJson(res: ServerResponse, status: number, body: unknown): void {
-  const payload = JSON.stringify(body);
-  res.statusCode = status;
-  res.setHeader("Content-Type", "application/json; charset=utf-8");
-  res.setHeader("Content-Length", Buffer.byteLength(payload));
-  res.end(payload);
-}
-
-function sendError(res: ServerResponse, status: number, code: string, message: string): void {
-  sendJson(res, status, { error: { code, message } });
-}
 
 function isLoopbackHostname(hostname: string): boolean {
   return (
@@ -152,7 +139,7 @@ function decodeSegment(value: string): string {
 }
 
 function assertSessionId(id: string): void {
-  if (!SESSION_ID_PATTERN.test(id) || id === "." || id === "..") {
+  if (!isValidSessionId(id)) {
     throw new HttpError(400, "invalid_session_id", "非法的会话 id");
   }
 }
@@ -272,7 +259,13 @@ async function handleSession(
   }
   let result: { header: SessionHeader; events: SessionEvent[] };
   try {
-    result = readSessionDir(realTarget);
+    const header = readSessionHeader(realTarget);
+    result =
+      header.status === "open"
+        ? await readSessionSnapshot(realTarget, { allowTrailingPartial: true }).then(
+            (snapshot) => ({ header: snapshot.header, events: snapshot.events }),
+          )
+        : readSessionDir(realTarget);
   } catch (error) {
     if (error instanceof SessionCorruptionError) {
       throw new HttpError(500, "session_corrupt", `会话数据损坏（${error.code}）`);
@@ -383,6 +376,10 @@ export function createApiHandler(
 ): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
   const harnessHome = path.resolve(opts.harnessHome ?? resolveHarnessHome());
   const staticRoot = opts.staticRoot === undefined ? undefined : path.resolve(opts.staticRoot);
+  const eventSource =
+    opts.eventSource
+    ?? createLogTailEventSource({ sessionsRoot: path.join(harnessHome, "sessions") });
+  const eventStream = createEventStreamHandler({ eventSource });
 
   return async function handler(req, res): Promise<void> {
     try {
@@ -425,7 +422,8 @@ export function createApiHandler(
       }
       if (pathname === "/api/events") {
         requireMethod(method, "GET");
-        throw new HttpError(501, "event_stream_not_implemented", "事件流尚未实现");
+        await eventStream(req, res);
+        return;
       }
       if (pathname === "/api" || pathname.startsWith("/api/")) {
         throw new HttpError(404, "not_found", "接口不存在");
@@ -468,6 +466,7 @@ export function createUiServer(
         }
         server.close(() => resolve());
         server.closeIdleConnections();
+        server.closeAllConnections();
       });
     },
   };

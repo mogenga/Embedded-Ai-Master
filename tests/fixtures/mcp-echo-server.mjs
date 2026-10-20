@@ -66,6 +66,7 @@ async function main() {
     async () => ({
       content: [{ type: "text", text: "boom" }],
       isError: true,
+      structuredContent: { reason: "boom" },
     }),
   );
 
@@ -112,6 +113,20 @@ async function main() {
     async () => ({
       content: [],
       structuredContent: { answer: 42 },
+    }),
+  );
+
+  server.registerTool(
+    "device",
+    {
+      description: "Report an explicit device status",
+      annotations: { readOnlyHint: true },
+    },
+    async () => ({
+      content: [{ type: "text", text: "device-status" }],
+      structuredContent: {
+        deviceStatus: { probe: "attached", serial: "open", cpu: "halted", backend: "renode" },
+      },
     }),
   );
 

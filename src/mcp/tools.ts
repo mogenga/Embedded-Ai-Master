@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { parseDeviceStatus } from "./device-status.js";
 import type { McpCallResult, McpToolInfo } from "./manager.js";
-import type { ToolDef } from "../tools/types.js";
+import type { ToolDef, ToolResult } from "../tools/types.js";
 
 export interface McpToolSource {
   tools(): McpToolInfo[];
@@ -52,6 +53,23 @@ function isObjectSchema(schema: unknown): boolean {
     !Array.isArray(schema) &&
     (schema as { type?: unknown }).type === "object"
   );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function withDeviceStatus(result: McpCallResult, server: string): ToolResult {
+  if (result.isError === true) return result;
+  const structured = result.structuredContent;
+  if (!isRecord(structured)) return result;
+  const descriptor = Object.getOwnPropertyDescriptor(structured, "deviceStatus");
+  if (descriptor === undefined || !("value" in descriptor)) return result;
+  const parsed = parseDeviceStatus(descriptor.value);
+  if (parsed.ok) {
+    return { ...result, deviceStatus: { server, state: parsed.value.state } };
+  }
+  return { ...result, deviceStatusInvalid: parsed.reason };
 }
 
 export function mcpToolName(server: string, tool: string): string {
@@ -123,7 +141,10 @@ export function createMcpTools(
         evidence: info.evidence === true,
       },
       execute: async (input, _ctx, signal) =>
-        manager.call(info.server, info.tool, input, signal),
+        withDeviceStatus(
+          await manager.call(info.server, info.tool, input, signal),
+          info.server,
+        ),
     });
   }
 

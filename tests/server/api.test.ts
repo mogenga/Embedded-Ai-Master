@@ -258,11 +258,16 @@ describe("ui api", () => {
     expect(body).toEqual({ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" });
   });
 
-  it("写操作与事件流诚实返回 501", async () => {
+  it("写操作返回 501，事件流返回真实 SSE", async () => {
     const s = createUiServer({ harnessHome: makeHome() });
     close = s.close;
     expect((await fetch(`http://127.0.0.1:${s.port}/api/actions`, { method: "POST", body: "{}" })).status).toBe(501);
-    expect((await fetch(`http://127.0.0.1:${s.port}/api/events`)).status).toBe(501);
+    const res = await fetch(`http://127.0.0.1:${s.port}/api/events?sessionId=s1`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const body = await res.text();
+    expect(body).toContain("id: 0");
+    expect(body).toContain("event: stream_end");
   });
 
   it("拒绝非 loopback Host", async () => {
@@ -301,5 +306,41 @@ describe("ui api", () => {
       origin: `http://127.0.0.1:${s.port}`,
     });
     expect(res.status).toBe(200);
+  });
+
+  it("close 在 SSE 活跃连接下仍有界退出并终止请求", async () => {
+    const home = makeHome();
+    writeFileSync(path.join(home, "sessions", "s1", "header.json"), JSON.stringify({
+      id: "s1", createdAt: "2026-10-18T00:00:00.000Z", status: "open",
+    }));
+    const s = createUiServer({ harnessHome: home });
+    const res = await fetch(`http://127.0.0.1:${s.port}/api/events?sessionId=s1`);
+    expect(res.status).toBe(200);
+    const reader = res.body!.getReader();
+    await reader.read();
+
+    const started = Date.now();
+    await Promise.race([
+      s.close(),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("close 超时")), 1_000),
+      ),
+    ]);
+    expect(Date.now() - started).toBeLessThan(1_000);
+
+    const outcome = await Promise.race([
+      (async (): Promise<string> => {
+        for (;;) {
+          try {
+            const { done } = await reader.read();
+            if (done) return "done";
+          } catch {
+            return "error";
+          }
+        }
+      })(),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 1_000)),
+    ]);
+    expect(outcome).not.toBe("pending");
   });
 });
