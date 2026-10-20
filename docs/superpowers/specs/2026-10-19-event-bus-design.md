@@ -215,14 +215,15 @@ MCP 工具在**成功**结果（`isError !== true`）的 `structuredContent` 中
 }
 ```
 
-- `structuredContent` 必须是对象；`deviceStatus` 必须是普通 JSON 对象（非数组/null）。
+- 仅当 `structuredContent` 是对象且存在 `deviceStatus` 键时进入校验：`deviceStatus` 必须是普通 JSON 对象（非数组/null）。
 - 序列化后 ≤ 8 KiB、嵌套深度 ≤ 4；超出或类型不符时不产生 `device_status`，并写 `status` 事件 `{status:"device_status_invalid", tool, message}`（显式、可审计）。
+- `structuredContent` 非对象或缺少 `deviceStatus` 键时静默跳过，不产生任何状态事件。
 - `state` 的键与值完全由 MCP server 决定；内核与总线不解释、不补全、不推断。
 - 可选的 `outputSchema` 由 server 自行声明；客户端仍执行上述信封校验，避免信任第三方 schema。
 
 ### 10.2 适配与落盘
 
-- `McpManager` 的 `McpCallResult` 新增 `structuredContent?: unknown`，在 `callTool` 结果转换时原样透传（不把对象序列化进 `text` 再由上游反解）；`mcp/tools.ts` 在成功时读取 `structuredContent.deviceStatus`，校验后附加到工具结果（`ToolResult.deviceStatus = { server, state }`）。
+- `McpManager` 的 `McpCallResult` 新增 `structuredContent?: unknown`，在 `callTool` 结果转换时原样透传；保留既有“content 为空时把 structuredContent 序列化进 text”的兼容行为，模型仍能看到结构化输出，设备状态改用 raw 通道而非从 text 反解。`mcp/tools.ts` 在成功时读取 `structuredContent.deviceStatus`，校验后附加到工具结果（`ToolResult.deviceStatus = { server, state }`）。
 - `query` 在写 `tool_result` 后写 `device_status`，`parent` 指向同一 assistant 事件；`server` 来自 MCP 工具身份，`tool` 为该工具注册后的完整名称（冲突重命名时可能是 `..._<hash>`）。跨层关联以 `callId` 为准，不以工具名反推原始身份。
 - 工具失败、被权限拒绝、超时、取消：不产生 `device_status`。
 - UI 只消费 `device_status`，不从 `attach/reset/mem_read` 等工具名推导状态。

@@ -427,7 +427,7 @@ App
 - 连接状态用胶囊 + 状态点：已连接（accent）、未连接（中性）、仿真（中性）。
 - 控制按钮：暂停（主色）、继续（中性）、复位（危险色）。复位按钮必须带危险语义，点击进入确认流程（R2）。
 - 寄存器表：两列「寄存器 / 值」，等宽；异常值（如 `RCC_CFGR` 为 0）用 `--warn`，不得只靠颜色——同时保留原值文本。
-- 数据来源：探针工具的 `tool_result`，从会话日志投影；禁止在页面加载时直接重新查询硬件。
+- 数据来源：只消费 MCP 工具显式发布的 `device_status.payload.state`，按 `seq` 做字段 patch；缺失字段保留上一个值，未知键忽略。页面加载 / 缺口重拉时从完整历史重建；无 `device_status` 时才回退 `/api/device`。禁止从工具名、参数或文本推断，也禁止在加载阶段直接重新查询硬件。
 
 ### 7.13 PortSettings 端口设置
 
@@ -444,6 +444,7 @@ App
 - 文本中的路径与工具名用 `--accent` 或高亮，数值加粗。
 - 只追加不覆盖；自动滚动到底部，但用户上滚后暂停自动滚动。
 - 日志与会话事件同源，回放时按 `seq` 顺序重建。
+- MCP 状态区消费 `mcp_status`（含旧日志 `status` + `mcp_` 前缀）；状态缓冲保留最近 20 条，调试坞展示最近 5 条。展示 `kind`、server/tool、`toolCount` 与 `message`；`attempts`、`name/originalName`、`scope` 保留在 payload，当前未渲染。不进入对话正文。
 
 ### 7.15 StatusBar 状态栏
 
@@ -455,14 +456,15 @@ App
 
 ## 8. 数据契约与状态投影
 
-### 8.1 两个事件源
+### 8.1 事件模型与两条通道
 
-**持久化会话事件**（会话日志，回放的唯一事实源）：
+**持久化会话事件**（会话日志，回放与实时流的唯一事实源）：
 
 ```ts
 type EventType =
-  | "system" | "user" | "assistant" | "tool_call" | "tool_result"
-  | "usage" | "checkpoint" | "status" | "interrupted";
+  | "system" | "user" | "assistant" | "tool_call" | "tool_started"
+  | "tool_result" | "usage" | "checkpoint" | "status" | "mcp_status"
+  | "device_status" | "interrupted" | "compaction" | "permission_decision";
 
 interface SessionEvent {
   seq: number;
@@ -470,6 +472,39 @@ interface SessionEvent {
   type: EventType;
   payload: Record<string, unknown>;
   parent?: number;
+}
+
+interface SessionEventEnvelope extends SessionEvent {
+  sessionId: string;
+}
+
+interface ToolStartedPayload {
+  callId: string;
+  tool: string;
+  access?: ToolAccess;
+}
+
+interface McpStatusPayload {
+  kind:
+    | "connected" | "connect_failed" | "tools_changed" | "tools_refresh_failed"
+    | "tool_invalid_schema" | "listener_failed" | "call_failed"
+    | "config_failed" | "config_warning" | "project_config_skipped"
+    | "tool_name_renamed";
+  server?: string;
+  tool?: string;
+  toolCount?: number;
+  message?: string;
+  attempts?: number;
+  name?: string;
+  originalName?: string;
+  scope?: "global";
+}
+
+interface DeviceStatusPayload {
+  callId: string;
+  server: string;
+  tool: string;
+  state: Record<string, unknown>;
 }
 
 interface AssistantPayload {
@@ -488,10 +523,14 @@ interface ToolResultPayload {
   artifactPath?: string;
   code?: string;
   detail?: unknown;
+  evidence?: boolean;
+  toolName?: string;
 }
 ```
 
-**运行时循环事件**（实时渲染）：
+`tool_call` 仅用于旧日志回放，新代码不再产生；允许路径使用 `permission_decision → tool_started → tool_result`，拒绝/校验失败路径为 `permission_decision → tool_result`（不写 `tool_started`）。旧日志中的 MCP `status` 事件继续按 `mcp_` 前缀识别，新代码只写 `mcp_status`。
+
+**运行时循环事件**（库 API 与 demo 使用；Web 工作台实时渲染改由 §8.6 的 SSE 事件流驱动）：
 
 ```ts
 type LoopEvent =
@@ -512,14 +551,19 @@ type LoopEvent =
 |---|---|
 | `user` | 用户气泡 |
 | `assistant`（content 非空） | agent 气泡 |
-| `assistant`（toolCalls） | 工具卡骨架（待结果） |
+| `assistant`（toolCalls） | 工具卡骨架（待执行） |
+| `tool_started` | 对应工具卡进入「执行中」；`access` 仅用于展示授权口径，不推断设备状态 |
 | `tool_result` | 工具卡结果区（读数 / 命中 / 证据 / 错误） |
+| `permission_decision` | 会话内的权限条目：工具、动作、`effective`、理由；`action=ask,effective=deny` 显示「拒绝 / 未执行」 |
+| `mcp_status` | 调试坞 MCP 状态区，不进入对话正文 |
+| `device_status` | 设备面板 patch（§8.6），不进入对话正文 |
 | `usage` | 状态栏与费用统计 |
-| `status` | 诊断状态胶囊、状态栏 |
+| `status` | 诊断状态胶囊、状态栏；`device_status_invalid` 保留为显式状态事件（当前未单独渲染告警） |
 | `interrupted` | 中断提示（`--danger`），保留已产生的证据 |
 | `checkpoint` | 回放锚点，不直接渲染 |
+| `compaction` | 当前仅保留在事件数组，不进入 UI 投影（后续再补提示） |
 
-工具卡的结果渲染优先级：`detail`（结构化）> `text`（纯文本）> 错误占位。`ok=false` 时必须渲染 `code` 与错误文本。
+工具卡的结果渲染优先级：`detail`（结构化）> `text`（纯文本）> 错误占位。`ok=false` 时必须渲染 `code` 与错误文本。证据只来自 `tool_result.payload` 的 `evidence/artifactPath/detail`，不单列事件。
 
 ### 8.3 工具语义标记
 
@@ -551,6 +595,38 @@ interface ToolAnnotations {
 - 决策（2026-10-18）：**扩展 `LoopEvent.tool_result`**，使其与 `ToolResultPayload` 字段对齐，而不是让 UI 维护第二套投影。
 - 实施要求：`session.append` 与 yield 必须由同一份字段构造（避免两处漂移）；扩展后实时渲染与回放渲染共用 §8.2 的同一个归约函数，V13 才可验证。
 
+### 8.6 实时事件流与合并
+
+**通道与游标**
+
+- 实时通道为 SSE：`GET /api/events?sessionId=<id>&since=<seq>`；`since` 缺省读 `Last-Event-ID`，都缺省按 `-1` 从头补播。普通帧 `id: <seq>` + `data: <SessionEventEnvelope JSON>`，心跳 `: ping`。
+- 一条连接只绑定一个会话；切换会话必须先 `close()` 旧流，再以新会话历史末 `seq` 建流。游标由事件流客户端独占，`state` 只接收已接受的事件。
+- 首屏：先 `GET /api/sessions/:id` 取历史事件与 `lastSeq`，再以 `since=lastSeq` 打开 SSE；加载期间不因实时流提前改写历史数组。
+
+**统一事件数组**
+
+- `WorkbenchState.events: SessionEvent[]` 是唯一视图输入：历史与实时都追加到同一数组，统一交给 `transcriptFromSession` 投影；不保留 `liveView` / `replayView` 两套状态。
+- 接受事件前校验 `event.sessionId === activeSessionId`；`seq <= lastSeq` 直接丢弃（去重）；接受成功后 `lastSeq = event.seq`。游标只在投影成功后推进。
+- `tool_started` 与 `tool_result` 共用工具卡：前者进入 `running`，后者落在 `done/failed`；`permission_decision` 渲染为权限条目；`mcp_status` 只进调试坞；`device_status` 只更新设备面板。
+
+**缺口与重连**
+
+- `seq > lastSeq + 1`：关闭流，触发整量重拉（重新请求历史并重建视图），每次订阅最多 3 次（`start` 时重置）；超过后显示「实时事件流缺口过多，请重试」，不允许在缺口上继续拼接。
+- 连接断开 / `stream_error`：保留 `lastSeq` 并重连；连续 3 次未成功建流后报错（成功 `open` 后计数重置），客户端自行重连，间隔默认 1s，可注入测试值。`stream_end` 表示会话已关闭且补播完成，停止重连。
+- 重拉单飞按 `sessionId` 隔离；切换会话时旧流的回调一律通过 generation 令牌失效，避免旧会话事件写入新视图。
+
+**设备面板：patch 与重载重建**
+
+- `deviceFromSession(events)` 按 `seq` 顺序折叠 `device_status.payload.state`；每次 `state` 是部分更新：已知字段为字符串时覆盖，缺失字段保留，未知键与非字符串值忽略。设备字段固定为 `probe/serial/cpu/backend`。
+- 切换会话 / 新建会话从四个 `unknown` 开始，不继承上一会话；页面重载或缺口重拉时，先用完整历史重建，再接入 SSE。
+- `/api/device` 仅作为「没有 `device_status` 事件」时的兼容回退；已有事件投影不得被恒为 `unknown` 的接口结果覆盖。设备状态不从工具名、参数或文本推断（R3）。
+
+**权限与 MCP 状态的展示位置**
+
+- `permission_decision` 进入消息流/守卫区，展示工具、动作、`effective` 与理由；`action=ask,effective=deny` 必须显示「拒绝 / 未执行」，不能伪装成成功或静默跳过。
+- `mcp_status` 进入调试坞状态区（状态缓冲最近 20 条，展示最近 5 条），展示 `kind`、server/tool、`toolCount` 与 `message`；`attempts`、`name/originalName`、`scope` 保留在 payload，当前未渲染。不重复合成旧 `status` 条目。
+- 本轮不提供 Web 审批按钮或审批 API；`approval_request` 仅为阶段 2 保留类型，实时流只透传已落日志的 `permission_decision`。
+
 ---
 
 ## 9. 交互规范
@@ -562,6 +638,9 @@ interface ToolAnnotations {
 | 分区/树节点折叠 | 点击整行；`aria-expanded` 同步；chevron 旋转 160ms |
 | 发送消息 | Enter 发送，Shift+Enter 换行；空输入禁用发送 |
 | 回放 | 从会话日志重建；显示"回放中"状态，禁止并发查询硬件 |
+| 实时事件 | 只订阅当前会话；按 `seq` 去重后追加到统一事件数组；`tool_started` 立即进入执行中 |
+| 断线续传 | 以 `lastSeq` 重连，最多 3 次；`stream_end` 停止，缺口触发整量重拉 |
+| 权限拒绝 | `action=ask,effective=deny` 显示「拒绝 / 未执行」；本轮无 Web 审批按钮 |
 | 复位 / 写内存 | 二次确认，展示目标地址与值；确认后按钮进入执行中态 |
 | 长输出展开 | 折叠态显示摘要与规模；展开不改变消息流顺序 |
 | 滚动 | 日志与消息流在用户上滚后暂停自动跟随 |
@@ -645,3 +724,4 @@ interface ToolAnnotations {
 | v1.0 | 2026-10-18 | 首版：从 `prototypes/index.html` 提取令牌、栅格、组件与验收口径；对齐 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations` 实际类型；登记 6 项前端待决策 |
 | v1.1 | 2026-10-18 | 关闭 6 项决策：前端定为 Preact + Vite；实时通道定为 SSE + HTTP POST；决定扩展 `LoopEvent.tool_result`；波形与仪器联锁列为不做；虚拟滚动设触发条件；fork 仅做派生入口 |
 | v1.2 | 2026-10-18 | Task 10 视觉验收落地：V2 主区公式由笔误 `−664` 修正为 `−668`（264 + 404）；V3 明确滚动条占位从内容宽中扣除；V6 明确验收对象为厂商分流子树、整树超出走知识库区内部滚动；V11 明确覆盖原生表单控件；`applyTheme` 保留 `data-theme="system"` 交由 CSS 媒体查询解析 |
+| v1.3 | 2026-10-20 | 事件总线：事件模型补 `tool_started` / `mcp_status` / `device_status` / `permission_decision` 与对应 payload；明确统一事件数组、游标去重、缺口整量重拉、断线上限；设备面板按 `device_status` patch 并在重载时从历史重建；权限条目进消息流、MCP 状态进调试坞；本轮不含 Web 审批 |

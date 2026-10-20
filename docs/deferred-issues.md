@@ -456,7 +456,7 @@
 
 - **发现**: 2026-10-18,Task 10 视觉验收。
 - **现象**: `src/ui/main.tsx` 向 `VITE_ACTION_URL` POST `{ text }`,但未定义请求 id、会话 id、响应状态与错误映射;后端未接入时仅 `console.warn`,没有可观测的 UI 反馈。
-- **Task 15 更新**: 本地服务已提供 `/api/actions`(POST)与 `/api/events`(GET),但两者均诚实返回 501;请求/响应 schema、实时事件格式与错误映射仍未定义(详见 D-063)。
+- **Task 15 更新**: 本地服务当时已提供 `/api/actions`(POST)与 `/api/events`(GET),但两者均返回 501;action 请求/响应 schema 仍未定义(详见 D-063)。2026-10-20 起 `/api/events` 已实现为只读 SSE 事件流,`/api/actions` 仍为 501。
 - **影响**: 真实后端接入时端点路径与 schema 仍需重新约定;UI 无法区分「已受理 / 参数拒绝 / 网络失败」,也无法安全重试或去重。
 - **触发升级条件**: 接入首个真实 action 端点;需要失败重试、幂等或前端可观测的提交状态。
 - **修复建议**: 定义 action 请求/响应 schema(`requestId`、`sessionId`、`text`;202 受理、4xx 校验失败、5xx 可重试),前端落提交中/失败态,并按 `requestId` 去重。
@@ -515,7 +515,7 @@
 - **状态**: 数据来源已解决(2026-10-18,Task 14);设备连接状态仍待 D-052。
 - **原现象**: `App` 用 `DEMO_REGISTERS` / `DEMO_LOG_LINES` 渲染调试坞;`DeviceMonitor` 的芯片型号、探针连接、CPU 状态为字面量;复位确认后只进入「执行中,等待工具结果」,没有外部事件把它推进到「已执行」。
 - **修复**: 删除全部演示数据。`Dock` 的寄存器与日志改由 `TranscriptView` 的工具卡投影(`deriveRegisters` / `deriveLogLines`);设备字段来自 `/api/device`(当前恒为 `unknown`)。无读数时显示「暂无寄存器读数」。
-- **残余**: `/api/device` 尚无真实设备接入,状态恒为 `unknown`;复位确认后仍停在「执行中」,等待未来的 action/tool_result 通道(D-063)。
+- **残余**: 无 `device_status` 事件时 `/api/device` 仍恒为 `unknown`;复位确认后等待 action 通道。`tool_result` 与 `device_status` 已可经事件流投影,action 仍为 501(D-063 事件流部分已解决)。
 
 ### D-059 · 回放/导出按钮未接行为
 
@@ -531,8 +531,8 @@
 - **发现**: 2026-10-18,Task 11 第一轮整体审查修复。
 - **状态**: 已解决(2026-10-18,Task 14/15)。
 - **原现象**: `main.tsx` 中 `VITE_ACTION_URL` 未配置时 `console.warn` 后返回;配置了 `VITE_EVENT_STREAM_URL` 但无 action 端点时,Composer 仍清空输入且界面无失败提示。D-053 记录的是输入被清空,这里记录的是 SSE 与 action 两条通道不同步时的处理缺口。
-- **修复**: 未配置 `VITE_ACTION_URL` 时 `onSend` 不传入,`Composer` 发送按钮禁用并显示「未配置提交端点,输入不会发送」;未配置 `VITE_EVENT_STREAM_URL` 时不建立实时流,不出现「实时事件流中断」提示。两条通道不再互相暗示已提交。
-- **残余**: action/事件流本身仍未实现,见 D-063。
+- **修复**: 未配置 `VITE_ACTION_URL` 时 `onSend` 不传入,`Composer` 发送按钮禁用并显示「未配置提交端点,输入不会发送」;当时未配置 `VITE_EVENT_STREAM_URL` 时不建立实时流。2026-10-20 事件总线后默认连接 `/api/events`,两条通道仍不互相暗示已提交。
+- **残余**: action 仍未实现;事件流已实现,见 D-063(事件流部分已解决)与 D-137(审批未实现)。
 
 ### D-061 · StatusBar context/limit 来源未定
 
@@ -557,6 +557,7 @@
 - **影响**: 工作台只能读取既有会话与知识库,不能发起新对话、接收实时 LoopEvent 或回传写操作结果;复位提示会停留在「执行中,等待工具结果」。
 - **触发升级条件**: 接入 `runSession`/`query` 或 MCP 事件;需要提交、重试、中断;真机调试写入。
 - **修复建议**: 定义 action schema(`requestId`、`sessionId`、`text`,202 受理/4xx/5xx)与 SSE 事件(`LoopEvent` JSON、`id`/`Last-Event-ID` 重放);501 迁移为真实实现并补端到端测试。
+- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus`):`/api/events` 固定 501 已替换为真实 SSE 单会话事件流,支持 `since`/`Last-Event-ID` 补播、`tool_started`/`mcp_status`/`device_status` 投影、心跳/背压/`stream_end`/`stream_error`;契约见 README「实时事件流」,端到端覆盖见 `tests/events-e2e.test.ts`。`/api/actions` 仍为 501,Web 写操作与审批另见 D-051/D-137。
 
 ### D-064 · 知识库扫描深度与条目上限静默截断
 
@@ -982,7 +983,7 @@
 ### D-112 · 阶段 1 审批通道只有库层接口,Web/SSE 未实现;headless 下 ask 一律 deny
 
 - **发现**: 2026-10-19,M2 权限系统 Task 8。
-- **现象**: 阶段 1 只提供 `PermissionPrompter` 库接口;`runSession` 不内置审批器;headless demo 与 Web 后端不注入 prompter,`ask` 直接落 `effective: "deny"`(`reason: "approval_unavailable"`)。Web 的 `/api/actions` 与 `/api/events` 仍返回 501,前端没有审批 UI。
+- **现象**: 阶段 1 只提供 `PermissionPrompter` 库接口;`runSession` 不内置审批器;headless demo 与 Web 后端不注入 prompter,`ask` 直接落 `effective: "deny"`(`reason: "approval_unavailable"`)。Web 的 `/api/actions` 仍返回 501;`/api/events` 仅提供只读事件流,前端没有审批 UI(见 D-137)。
 - **影响**: 默认 `diagnose` 下写工具在 headless/Web 无法经人工批准执行,只能改预设或配置放行;审批记录只能从会话日志离线查看。
 - **触发升级条件**: 阶段 2 接入 Web 审批/SSE;需要人工在 UI 中批准工具调用;需要实时展示待审批请求。
 - **修复建议**: 定义审批请求/响应事件与 HTTP API,与 `permission_decision` 同源;前端展示工具名、参数摘要与原因并回传 allow/deny;保持“审计先于执行”和超时/取消语义。
@@ -1168,6 +1169,51 @@
 - **修复建议**: —。
 - **状态**: **已解决**(2026-10-19,`feat/m2-permission`):`errorMessage` 以 try/catch 兜底返回 `unknown error`,`describeValue` 兜底返回 `[object]`;新增 3 条回归用例(`message` getter、`toStringTag` getter、队列不被毒化),全量 1509 passed / 1 skipped,`src/permissions` lines 97.8%。
 
+### D-133 · 只支持单会话流,多会话复用/全局流未实现
+
+- **发现**: 2026-10-20,M2 事件总线 Task 7。
+- **现象**: `GET /api/events` 强制要求 `sessionId`,每条 SSE 连接只补播/跟随一个会话;切换会话由客户端关闭旧流并新建连接。没有多会话复用连接、订阅切换协议或全局聚合流。
+- **影响**: 同时观察多个会话需要多个连接/标签页;无法在单一连接上做全局活动列表或跨会话聚合。连接数随并发会话线性增长。
+- **触发升级条件**: 需要同时实时观察多个会话、全局事件面板,或连接数成为瓶颈。
+- **修复建议**: 在保持单会话帧语义的前提下增加多路复用协议(订阅/退订帧或每帧带 `sessionId`),或提供全局流并对客户端按会话过滤;复用现有 `SessionEventSource` 接口,避免另造事件模型。
+- **状态**: 未解决;本轮按 spec 明确只做单会话流。
+
+### D-134 · 进程内低延迟适配器未实现,当前依赖 200ms 日志轮询
+
+- **发现**: 2026-10-20,M2 事件总线 Task 7。
+- **现象**: `LogTailEventSource.follow` 以 200ms 间隔轮询增量字节;SSE 实际延迟还受文件读取与事件循环调度影响,未压测、无硬上限。没有 `EventEmitter`/共享注册表等进程内发布通道。
+- **影响**: 对毫秒级工具/设备状态反馈不足;高频事件会合并到轮询批次。跨进程仍是最兼容的方案,但同进程场景多付一次轮询延迟。
+- **触发升级条件**: 需要亚 100ms 延迟、高频设备事件,或轮询 I/O 成为开销。
+- **修复建议**: 在同一 `SessionEventSource` 接口下增加进程内适配器(append 后立即通知,仍以日志为事实源并保留文件跟随作为补偿),SSE 与客户端协议不变。
+- **状态**: 未解决;本轮按用户决策保留日志投影 + 轮询。
+
+### D-135 · 无独立 `evidence` 事件,evidence 由 `tool_result.payload` 承载
+
+- **发现**: 2026-10-20,M2 事件总线 Task 7。
+- **现象**: 证据标记 `evidence`、`artifactPath`、`detail` 都附在 `tool_result.payload` 中并原样透传;没有独立的 `evidence` 事件类型,也没有证据级游标/分页。
+- **影响**: 证据面板若要独立订阅、分页或跨调用去重,必须解析并缓存 `tool_result`;大 `detail` 会放大单条事件。当前 UI 投影够用,但不利于后续证据链独立演进。
+- **触发升级条件**: 证据面板需要独立订阅/分页,或 `tool_result.detail` 体积成为流瓶颈。
+- **修复建议**: 新增 `evidence` 事件并以 `callId`/`tool_result.seq` 关联,保留 `tool_result` 字段以兼容旧日志;先在 spec 定义去重与排序规则。
+- **状态**: 未解决;本轮明确不新增独立事件,避免与 `tool_result` 重复。
+
+### D-136 · 大日志/长断线补播的性能上限未压测;补播直写可能长时间占用连接
+
+- **发现**: 2026-10-20,M2 事件总线 Task 7。
+- **现象**: 补播按事件逐帧写响应,每帧有写超时(默认 30s),但没有补播总时长/总字节预算、批量化或分页。长断线或数十 MB 日志会持续占用连接,补播完成前无法开始跟随新增事件。
+- **影响**: 首屏或长时间断线后的恢复可能很慢;慢客户端会长期占住连接;未量化 CPU/内存/背压表现,无法给出容量承诺。
+- **触发升级条件**: 会话日志达到数十 MB、断线跨越大量事件,或实测补播超过可接受时延。
+- **修复建议**: 压测并记录基准;补播增加总预算/分批让出事件循环、可选分页或快照压缩;对超长补播返回明确的可恢复错误并让客户端换用分页游标。
+- **状态**: 未解决;本轮只保证正确性与单帧超时有界。
+
+### D-137 · Web 审批 API/UI 未实现;`approval_request` 仅为保留类型
+
+- **发现**: 2026-10-20,M2 事件总线 Task 7。
+- **现象**: 事件流只透传已落日志的 `permission_decision`;没有 `POST /api/approvals`、审批请求事件或 Web 端批准/拒绝按钮。`approval_request` 未进入 `EventType`,仅作为阶段 2 的保留类型。
+- **影响**: 在 Web 工作台无法响应 `ask` 审批;交互式审批仍依赖库层 `PermissionPrompter`(CLI/宿主)。Web 只能事后看到允许/拒绝结果,无法在诊断过程中操作。
+- **触发升级条件**: Web 工作台发起需要 `ask` 审批的会话,或需要浏览器内完成批准/拒绝。
+- **修复建议**: 定义 `approval_request` 事件与 `POST /api/approvals`(requestId/decision/超时/abort 语义),UI 在守卫区提供批准/拒绝并回显最终 `permission_decision`;复用现有审批队列与审计,不新造权限模型。
+- **状态**: 未解决;按 m2-roadmap 阶段 2 延后。
+
 ---
 
 ## 变更记录
@@ -1227,3 +1273,4 @@
 | 2026-10-19 | M2 权限系统 Task 8:录入 D-112 ~ D-117(Web/SSE 审批未实现、`paramsPreview` 敏感片段、规则非沙箱、串行审计崩溃窗口、内部 API 绕过、MCP 参数不应用 server 默认值);README 新增「权限与审批」 |
 | 2026-10-19 | M2 权限系统全量复验:录入 D-118 ~ D-131(审计摘要 `__proto__` 键丢失与 digest 冲突、`truncated` 参数被覆盖、`loadPermissionConfig` 不校验 inline、纯空白配置字段、不可 stat 的项目配置不披露、resume 重复 IO、四处测试缺口、symbol 键未防、EOF/空操作整洁性、恒真断言、串行路径缺口、审批 abort 语义);D-132 记录并标注已解决(`errorMessage`/`describeValue` 二次抛错导致审批队列卡死) |
 | 2026-10-19 | 权限系统高价值项修复(`feat/m2-permission`):D-118 `__proto__` 审计键丢失、D-119 截断标记改名 `previewTruncated`、D-120 inline 复用 schema 校验、D-121 空白字段拒绝、D-122 不可 stat 项目配置 fail-closed、D-125 测试 home 隔离、D-126 symbol 键拒绝、D-128 恒真断言替换;D-124/D-127/D-129 部分解决;README/spec 同步标记名 |
+| 2026-10-20 | M2 事件总线 Task 7 交付:D-063 标注已解决(`/api/events` 由 501 替换为真实 SSE,写操作仍 501);录入 D-133 ~ D-137(单会话流、无进程内低延迟适配器、无独立 evidence 事件、大日志补播未压测、Web 审批未实现);README 新增「实时事件流」,frontend-design 补统一事件数组/游标/缺口重拉/设备 patch/MCP 与权限展示 |
