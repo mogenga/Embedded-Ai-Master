@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -8,6 +8,21 @@ import { createSessionRunner, RunnerError } from "../../src/server/runner.js";
 import type { ActionInput, SessionRunner } from "../../src/server/runner.js";
 import { createSession } from "../../src/session/session.js";
 import type { SessionHandle } from "../../src/session/session.js";
+
+const headerOverride = vi.hoisted(() => ({
+  impl: undefined as undefined | ((dir: string) => unknown),
+}));
+
+vi.mock("../../src/session/persistence.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/session/persistence.js")>();
+  return {
+    ...actual,
+    readSessionHeader: (dir: string) => {
+      if (headerOverride.impl !== undefined) return headerOverride.impl(dir);
+      return actual.readSessionHeader(dir);
+    },
+  };
+});
 
 const PROVIDERS_TEXT = JSON.stringify({
   alpha: {
@@ -99,6 +114,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  headerOverride.impl = undefined;
   await Promise.allSettled(runners.splice(0).map((runner) => runner.close()));
   for (const home of homes.splice(0)) rmSync(home, { recursive: true, force: true });
   vi.unstubAllEnvs();
@@ -301,6 +317,54 @@ describe("createSessionRunner", () => {
     expect(error.message).toContain("boom");
     expect(error.message).not.toContain("模型不可用");
     expect(error.message).not.toContain("providers");
+  });
+
+  it("未知会话在 providers 缺失前优先返回 unknown_session", async () => {
+    const home = makeHome();
+    const runner = newRunner(home, { providersText: "" });
+
+    await expect(
+      runner.start({ text: "hi", sessionId: "no-such-session" }),
+    ).rejects.toMatchObject({ code: "unknown_session" });
+  });
+
+  it("header 损坏时抛 session_corrupt", async () => {
+    const home = makeHome();
+    const sessionId = "corrupt-session";
+    mkdirSync(path.join(home, "sessions", sessionId), { recursive: true });
+    writeFileSync(path.join(home, "sessions", sessionId, "header.json"), "{bad", "utf8");
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+    const error = await startError(runner, { text: "hi", sessionId });
+    expect(error.code).toBe("session_corrupt");
+    expect(error.message).toContain("会话 header 损坏");
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("header 权限错误时抛 session_unreadable", async () => {
+    const home = makeHome();
+    headerOverride.impl = () => {
+      throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+    };
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+    const error = await startError(runner, { text: "hi", sessionId: "existing-session" });
+    expect(error.code).toBe("session_unreadable");
+    expect(error.message).toContain("会话不可读");
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("close 后 start 抛 runner_unavailable", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+    await runner.close();
+
+    await expect(runner.start({ text: "hi" })).rejects.toMatchObject({
+      code: "runner_unavailable",
+    });
   });
 
   it("decide 对未知会话返回 unknown_session", async () => {

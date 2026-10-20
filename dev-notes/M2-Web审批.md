@@ -79,7 +79,7 @@
   6. HTTP：`src/server/api.ts` 落地 `/api/actions`、`/api/approvals`，`src/server/body.ts` 限制 8 KiB/5s/JSON；`vite.config.ts` 代理改写 `Origin`。
   7. 前端投影：`src/ui/view/transcript.ts` 的 `ApprovalModel` 与状态映射。
   8. 审批卡片与接线：`approval-notice.tsx`、`messages.tsx`、`header.tsx`（新会话）、`main.tsx`（发送/决策/epoch）、`styles.css`。
-  9. 端到端：`tests/web-approval-e2e.test.ts` 覆盖批准、拒绝、超时、无模型配置。
+  9. 端到端：`tests/web-approval-e2e.test.ts` 覆盖批准、拒绝、超时与缺少 Origin 的 403。
 - 文档（任务 10）：README「Web 会话与审批」；`frontend-design` §7.16 与状态机、§8.1/§8.2/§8.6/§9；`deferred-issues` D-137/D-139/D-112 已解决、新增 D-145 ~ D-152 与变更记录。
 
 **关键提交**（`d12d7c5..b2c31a4`）
@@ -96,8 +96,8 @@
 
 **偏差与未修项**
 
-- `/api/approvals` 的 200 响应实际为 `{ requestId, decision }`，未包含 spec §10.3 表格中的 `duplicate: true`；实现为准，文档按实现书写。
-- 审批端点额外返回 400 `invalid_request_id`（`requestId` 不在 1..200 字符），spec 错误表未列；`invalid_body` 同时覆盖字段缺失与类型错误。
+- `/api/approvals` 的 200 响应为 `{ requestId, decision, duplicate: true }`，与 spec §10.3 表格一致。
+- 审批端点的 `requestId` 校验失败统一返回 400 `invalid_body`（长度 1..200 且仅可打印 ASCII）；`invalid_body` 同时覆盖字段缺失与类型错误，不再有独立的 `invalid_request_id`。
 - 迟到决策：会话仍在运行但已超时/中断返回 410 `approval_expired`；会话已结束后注册表无该项，返回 404 `unknown_session`（spec 表格只写 410）。
 - 前端收到 409/410 时只显示错误并禁用按钮，不修改 `ApprovalModel.status`；终态仍等 `permission_decision`，因此「已决」文案由服务端消息承载。
 - 未修项已登记 `deferred-issues.md` D-145 ~ D-152：重启丢失 pending、仅 Origin 校验、摘要敏感片段、单会话串行、SSE 200ms 延迟、迟到决策 404/410 不一致、未响应 abort 占用 `session_busy`、在途发送切回会话。
@@ -111,3 +111,35 @@
 
 - 编辑 `frontend-design` §9 交互表时一次替换误删「回放 / 实时事件 / 断线续传」三行，随即补回并核对整表；无其他返工。
 - 追加本段时用 `cat >> … << 'EOF'` 写入含反引号的 Markdown，违反 AGENTS.md「写文档一律用 Write/Edit」的约束（引号 heredoc 未发生命令展开，已核对写入内容无误）；此后改用 Edit，教训是不用 shell 拼接文档正文。
+## 2026-10-20 · 最终审查修复
+
+**用户关键原话**
+
+- `Web 审批闭环已实现并通过全量测试，最终审查发现以下问题。请一次性修复`——清单 A-F：runner 错误披露、HTTP 契约、前端竞态、投影截断、测试稳定性、文档同步。
+
+**关键产出**
+
+- A. Runner 错误披露：追加会话读 header 先于 providers 解析；`ENOENT`/`ENOTDIR` → `unknown_session`（404），`SessionCorruptionError` → `session_corrupt`（500），`EACCES`/`EPERM` → `session_unreadable`（500），其他错误原样抛出；`close()` 后 `start` 抛 `runner_unavailable`（503）。
+- B. HTTP 契约：body 上限 32 KiB；`Content-Type` 仅接受 `application/json` 或 `application/json;` 前缀；`requestId` 限 1..200 个可打印 ASCII，违规统一 400 `invalid_body`。
+- C. 前端：`newSession()` 调用 `gate.begin()` 使在途加载失效；`send()` 仅在提交前无活动会话（新建）时 `selectSession`，追加只刷新列表并保持视图与 SSE；`ApprovalNotice` 到截止时间后停止 interval；修复 conversation 测试的一行格式。
+- D. 投影：`paramsPreviewText` 改为按 Unicode 码点截断，避免切断代理对。
+- E. e2e 超时用例 `approvalTimeoutMs` 300 → 1500，保留 deferred 门控与迟到 410 断言。
+- F. 文档：README/spec/`frontend-design`/`deferred-issues`/本文件按修复后实现同步；D-051 标已解决并指向 D-139。
+
+**验证结果**
+
+- `npx vitest run tests/server tests/web-approval-e2e.test.ts tests/ui`：28 files / 336 passed。
+- `npm run typecheck`、`npm run typecheck:web`：无错误输出。
+
+**被拒绝或纠偏的内容**
+
+- 未新增依赖、未执行危险命令、未派发子代理；只改清单涉及文件。
+
+**翻车与返工**
+
+- 首版 `errnoOf` 先读取顶层 `error.code`，导致 `SessionCorruptionError` 包裹的 `ENOENT` 被误判为 `session_corrupt`；测试失败后改为优先读取 `detail.cause.code`，未知会话恢复 404。
+
+**残余与冲突确认**
+
+- D-145 ~ D-152 与新错误码不冲突：D-150 的 404/410 判定仍在 `decide` 路径，本轮未改；D-151 仍是 `session_busy`；D-152（发送在途手动切换仍可能切回）未被本轮消除。
+- spec §10.3 按清单补了 `session_corrupt`/`session_unreadable`；审批端点本身不读 header，这两个码实际只由 `/api/actions` 的追加路径产生。

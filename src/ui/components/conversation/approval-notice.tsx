@@ -65,13 +65,14 @@ export function ApprovalNotice({
 
   useEffect(() => {
     if (!pending || deadlineAt === undefined) return;
+    if (now >= deadlineAt) return;
     const timer = setInterval(() => {
       setNow(Date.now());
     }, 1000);
     return () => {
       clearInterval(timer);
     };
-  }, [pending, deadlineAt]);
+  }, [pending, deadlineAt, now]);
 
   const timedOut = pending && deadlineAt !== undefined && now >= deadlineAt;
   const settled = !pending;

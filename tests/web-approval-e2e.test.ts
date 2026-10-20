@@ -356,7 +356,7 @@ describe("Web 审批端到端闭环", () => {
   it("超时：approval_timeout 落审计，迟到决策返回 410 且不执行工具", async () => {
     const secondResponse = deferred();
     const harness = await setup({
-      permissions: { version: 1, approvalTimeoutMs: 300 },
+      permissions: { version: 1, approvalTimeoutMs: 1500 },
       steps: [
         { body: toolCallBody("call-timeout", "echo timeout") },
         { body: DONE_BODY, waitFor: secondResponse.promise },

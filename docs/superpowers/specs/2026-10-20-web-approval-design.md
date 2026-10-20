@@ -117,8 +117,9 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner;
 - `start` 校验：`text` 为字符串、去空白后非空、长度 ≤ `maxTextLength`（默认 8000）；否则抛 `RunnerInputError(code: "invalid_text")`。
 - **受理边界**：`start` 必须等到会话 `header.json` 已落盘（即 `runSession` 调用 `onSession` 之后）才返回 202。实现用 readiness promise + 运行 promise 竞速；`readyTimeoutMs`（默认 10s）内未就绪则 abort 并抛 `session_start_timeout`。generator 在就绪前失败时把错误映射为对应的受理前错误（模型/配置），不留半成品会话目录由 `runSession` 自身清理。无法归类的启动失败（会话锁冲突、日志损坏、IO）保留现有 `model_unavailable` HTTP code 以维持契约，但 message 必须明确「会话启动失败」而不是声称模型不可用。
 - `sessionId` 缺省：生成 `randomUUID()`，作为新会话 id 传给 `runSession({ sessionId })`，返回 `created: true`。
-- 带 `sessionId`：先校验 `isValidSessionId`，再检查 `<harnessHome>/sessions/<id>/header.json` 是否存在；不存在抛 `unknown_session`。存在则读取 header，**使用 `header.model` 作为模型引用、省略 `cwd`**（让 `runSession` 回落到 `header.workdir`），调用 `runSession({ resume: true, sessionDir, sessionId })`，返回 `created: false`。header 无 `model` 时回落到默认模型。
+- 带 `sessionId`：先校验 `isValidSessionId`，再检查 `<harnessHome>/sessions/<id>/header.json` 是否存在；**header 检查先于 providers 解析**，未知会话优先返回 404，而不是 providers 缺失的 503。错误分型：`ENOENT` / `ENOTDIR` → `unknown_session`；header 损坏（`SessionCorruptionError`）→ `session_corrupt`（message 以「会话 header 损坏」开头）；`EACCES` / `EPERM` → `session_unreadable`（message 以「会话不可读」开头）；其他错误原样抛出，不伪装成未知会话。存在则读取 header，**使用 `header.model` 作为模型引用、省略 `cwd`**（让 `runSession` 回落到 `header.workdir`），调用 `runSession({ resume: true, sessionDir, sessionId })`，返回 `created: false`。header 无 `model` 时回落到默认模型。
 - 同一 `sessionId` 已有运行中的 promise → `session_busy`；运行 promise settle 后从注册表移除，并允许下一次追加。
+- `close()` 之后的 `start` 抛 `runner_unavailable`（HTTP 503），与未注入 runner 的场景共用同一 code。
 - 运行器维护 `Map<sessionId, RunningSession>`，`RunningSession` 含 `controller: AbortController`、`completion: Promise<void>`、`ready: Promise<void>`、`bridge: ApprovalBridge`。
 - 模型：`model` 选项 > `HARNESS_WEB_MODEL` > `providers.json` 中按 `Object.keys` 顺序的第一个 `<provider>/<model>`；追加会话优先用 `header.model`。runner 在受理前预加载 providers 并 `resolveModelRef` 校验，结果通过 `providersText` 传给 `runSession`，避免受理后才发现配置错误。providers 缺失、JSON/schema 错误、引用无效统一映射为 503 `model_unavailable`（message 区分原因）；不返回 500。
 - home：runner 把自己解析出的 `harnessHome` 通过新增的 `RunOptions.home` 传给 `runSession`，保证 header 检查、会话目录、providers 读取同源；不要依赖 `resolveHarnessHome()` 的隐式环境变量。
@@ -243,9 +244,9 @@ export interface ApprovalRequestPayload {
 ### 10.1 写请求通用约束
 
 - `POST /api/actions` 与 `POST /api/approvals` 必须带 `Origin`，且 `Origin` 为 loopback、端口等于监听端口（`requireWriteRequest`）。缺少 `Origin` → 403 `forbidden_origin`；非 POST → 405 `method_not_allowed`。
-- `Content-Type` 必须为 `application/json`（允许 `; charset=utf-8`），否则 415 `unsupported_media_type`。
-- Body 上限 8 KiB；超出 413 `payload_too_large`；JSON 解析失败或非普通对象 → 400 `invalid_body`。
-- 读取超时 5s；客户端断开按 400/无响应处理，不留下 pending。
+- `Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（允许 `; charset=utf-8` 等参数；`application/jsonp` 不放行），否则 415 `unsupported_media_type`。
+- Body 上限 32 KiB；超出 413 `payload_too_large`；JSON 解析失败或非普通对象 → 400 `invalid_body`。
+- 读取超时 5s → 408 `request_timeout`；客户端断开按 400/无响应处理，不留下 pending。
 - 成功统一 202 + JSON；错误复用 `{ error: { code, message } }`。
 - 现有只读路由的 `requireLocalRequest` 行为不变。
 
@@ -274,8 +275,11 @@ export interface ApprovalRequestPayload {
 | 400 | `invalid_session_id` | `sessionId` 非法 |
 | 404 | `unknown_session` | 指定会话不存在 |
 | 409 | `session_busy` | 同会话正在运行 |
+| 500 | `session_corrupt` | 追加会话的 header 损坏 |
+| 500 | `session_unreadable` | 追加会话的 header 不可读（EACCES/EPERM） |
 | 503 | `model_unavailable` | providers 缺失/无效/引用无效 |
 | 503 | `session_start_timeout` | `readyTimeoutMs` 内会话未就绪（runner 已 abort） |
+| 503 | `runner_unavailable` | 运行器已关闭或未注入 |
 
 `model_unavailable` 的 message 必须说明检查 `~/.harness/providers.json` 与 `HARNESS_WEB_MODEL`；`session_start_timeout` 的 message 说明会话未创建成功。
 
@@ -293,13 +297,17 @@ export interface ApprovalRequestPayload {
 |---|---|---|
 | 202 | `{ requestId, decision }` | 首次受理，已 resolve |
 | 200 | `{ requestId, decision, duplicate: true }` | 同决策重复提交 |
-| 400 | `invalid_body` / `invalid_decision` | 字段缺失/类型错误/`requestId` 超长、`decision` 不是 allow/deny |
+| 400 | `invalid_body` / `invalid_decision` | 字段缺失/类型错误/`requestId` 不是 1..200 个可打印 ASCII 字符、`decision` 不是 allow/deny |
 | 404 | `unknown_session` | 会话不在运行器注册表（含会话已结束） |
 | 404 | `unknown_request` | 运行中会话但从未见过该 requestId |
+| 408 | `request_timeout` | 读取请求体超过 5s |
 | 409 | `already_decided` | 已用相反决策结束 |
 | 410 | `approval_expired` | 会话仍在运行，但请求已超时/中断，当前不可再决 |
+| 500 | `session_corrupt` | 追加会话的 header 损坏 |
+| 500 | `session_unreadable` | 追加会话的 header 不可读（EACCES/EPERM） |
+| 503 | `runner_unavailable` | 运行器已关闭或未注入 |
 
-- `requestId` 只允许 1..200 字符可打印字符串；`sessionId` 用 `isValidSessionId`。
+- `requestId` 只允许 1..200 个可打印 ASCII 字符（`\x20-\x7E`）；`sessionId` 用 `isValidSessionId`。两者校验失败均为 400 `invalid_body` / `invalid_session_id`。
 - 202 只表示决策已送达 gate；最终结果以 `permission_decision` 事件为准，HTTP 不返回 `effective`。
 - 不记录请求 body 到日志。
 
@@ -332,9 +340,9 @@ export interface ApprovalRequestPayload {
 
 - `main.tsx`：
   - `actionUrl = VITE_ACTION_URL ?? "/api/actions"`，`approvalUrl = VITE_APPROVAL_URL ?? "/api/approvals"`。
-  - `onSend(text)`：调用 `POST /api/actions`，body 为 `{ text, sessionId: state.activeSessionId }`（无活动会话时省略）。成功后刷新会话列表并 `selectSession(result.sessionId)`；失败在 Composer 显示错误（复用现有错误处理）。
+  - `onSend(text)`：调用 `POST /api/actions`，body 为 `{ text, sessionId: state.activeSessionId }`（无活动会话时省略）。成功后刷新会话列表；**仅当提交前没有活动会话（新建）才 `selectSession(result.sessionId)`**，追加输入保持当前视图与 SSE 连接，不重载。失败在 Composer 显示错误（复用现有错误处理）。
   - `onApprovalDecision(sessionId, requestId, decision)`：调用 `POST /api/approvals`；失败抛错给组件展示。
-  - 「新会话」按钮（最小）：清空 `activeSessionId`、`events`、`view`，关闭 SSE；Composer 之后的发送走新建。按钮放在会话头部或 Composer 旁，文案「新会话」。
+  - 「新会话」按钮（最小）：清空 `activeSessionId`、`events`、`view`，关闭 SSE；Composer 之后的发送走新建。按钮放在会话头部或 Composer 旁，文案「新会话」。点击时使在途 `load()`/`selectSession()` 失效（请求代次），避免旧加载覆盖新会话。
 - 追加输入时保持当前 SSE 连接；新会话创建后按返回的 `sessionId` 重新加载并订阅。
 - 不本地伪造 `permission_decision`；只等待 SSE 更新。
 

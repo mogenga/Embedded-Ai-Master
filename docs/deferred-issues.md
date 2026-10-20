@@ -460,6 +460,7 @@
 - **影响**: 真实后端接入时端点路径与 schema 仍需重新约定;UI 无法区分「已受理 / 参数拒绝 / 网络失败」,也无法安全重试或去重。
 - **触发升级条件**: 接入首个真实 action 端点;需要失败重试、幂等或前端可观测的提交状态。
 - **修复建议**: 定义 action 请求/响应 schema(`requestId`、`sessionId`、`text`;202 受理、4xx 校验失败、5xx 可重试),前端落提交中/失败态,并按 `requestId` 去重。
+- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`,见 D-139):`POST /api/actions` 已落地并定义 `{ text, sessionId? }` 与 202/400/404/409/500/503 契约;`/api/events` 见 D-063;审批端点与 UI 见 D-137。旧稿中的 action `requestId` 字段未采用,去重只保留在审批端点。
 
 ### D-052 · StatusBar 状态点由 props 是否有值推断
 

@@ -4,6 +4,7 @@ import { loadProviders, parseProviders, resolveModelRef } from "../config/provid
 import type { ProvidersConfig } from "../config/providers.js";
 import { runSession } from "../index.js";
 import type { RunOptions } from "../index.js";
+import { SessionCorruptionError } from "../session/errors.js";
 import { isValidSessionId } from "../session/handle.js";
 import { readSessionHeader } from "../session/persistence.js";
 import { createApprovalBridge } from "./approvals.js";
@@ -25,8 +26,11 @@ export type RunnerErrorCode =
   | "invalid_session_id"
   | "unknown_session"
   | "session_busy"
+  | "session_corrupt"
+  | "session_unreadable"
   | "model_unavailable"
-  | "session_start_timeout";
+  | "session_start_timeout"
+  | "runner_unavailable";
 
 export class RunnerError extends Error {
   constructor(
@@ -69,6 +73,30 @@ interface RunnerEntry {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function causeOf(error: unknown): unknown {
+  return (error as { detail?: { cause?: unknown } } | undefined)?.detail?.cause;
+}
+
+function errnoOf(error: unknown): string | undefined {
+  const causeCode = (causeOf(error) as NodeJS.ErrnoException | undefined)?.code;
+  if (causeCode !== undefined) return causeCode;
+  return (error as NodeJS.ErrnoException | undefined)?.code;
+}
+
+function mapHeaderError(error: unknown, sessionId: string): never {
+  const code = errnoOf(error);
+  if (code === "ENOENT" || code === "ENOTDIR") {
+    throw new RunnerError("unknown_session", `会话不存在: ${sessionId}`);
+  }
+  if (code === "EACCES" || code === "EPERM") {
+    throw new RunnerError("session_unreadable", `会话不可读: ${messageOf(causeOf(error) ?? error)}`);
+  }
+  if (error instanceof SessionCorruptionError) {
+    throw new RunnerError("session_corrupt", `会话 header 损坏: ${messageOf(error)}`);
+  }
+  throw error;
 }
 
 function firstReference(providers: ProvidersConfig): string | undefined {
@@ -133,7 +161,7 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
   }
 
   async function start(input: ActionInput): Promise<ActionOutcome> {
-    if (closed) throw new RunnerError("session_busy", "runner 已关闭");
+    if (closed) throw new RunnerError("runner_unavailable", "runner 已关闭");
     assertText(input?.text);
 
     const requestedId = input?.sessionId;
@@ -146,7 +174,6 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
       }
     }
 
-    const providers = resolveProviders();
     let resumeDir: string | undefined;
     let sessionModel: string | undefined;
     if (requestedId !== undefined) {
@@ -154,10 +181,12 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
       try {
         sessionModel = readSessionHeader(dir).model;
         resumeDir = dir;
-      } catch {
-        throw new RunnerError("unknown_session", `会话不存在: ${requestedId}`);
+      } catch (error) {
+        mapHeaderError(error, requestedId);
       }
     }
+
+    const providers = resolveProviders();
     const modelRef = resolveModel(providers, sessionModel);
     const sessionId = requestedId ?? randomUUID();
 

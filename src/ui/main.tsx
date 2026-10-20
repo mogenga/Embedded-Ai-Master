@@ -190,6 +190,7 @@ let sessionEpoch = 0;
 
 async function send(text: string): Promise<void> {
   const epoch = sessionEpoch;
+  const wasNew = state.activeSessionId === undefined;
   let created: { sessionId: string };
   try {
     created = await postAction<{ sessionId: string }>(actionUrl, {
@@ -211,6 +212,8 @@ async function send(text: string): Promise<void> {
   }
   // 提交在途期间用户已开新会话：只刷新列表，不再把视图切回本次创建的会话。
   if (epoch !== sessionEpoch) return;
+  // 追加输入保持当前视图与 SSE；只有新建会话才切换。
+  if (!wasNew) return;
   await selectSession(created.sessionId);
 }
 
@@ -230,6 +233,7 @@ async function decideApproval(
 
 function newSession(): void {
   sessionEpoch += 1;
+  gate.begin();
   controller.close();
   state = applyNewSession(state);
   renderApp();

@@ -181,6 +181,8 @@ describe("approvals api", () => {
     ["requestId 非字符串", JSON.stringify({ sessionId: "s1", requestId: 42, decision: "allow" })],
     ["requestId 空串", JSON.stringify({ sessionId: "s1", requestId: "", decision: "allow" })],
     ["requestId 超长", JSON.stringify({ sessionId: "s1", requestId: "r".repeat(201), decision: "allow" })],
+    ["requestId 含控制字符", JSON.stringify({ sessionId: "s1", requestId: "r\u0000", decision: "allow" })],
+    ["requestId 非 ASCII", JSON.stringify({ sessionId: "s1", requestId: "审批", decision: "allow" })],
   ])("%s 返回 400 invalid_body 且不调用 runner", async (_label, payload) => {
     const runner = runnerReturning({ kind: "accepted" });
     const s = await makeServer(runner);

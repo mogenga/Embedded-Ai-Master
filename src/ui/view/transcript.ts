@@ -325,10 +325,14 @@ function toGuardModel(raw: Record<string, unknown>): GuardModel {
 const PREVIEW_MAX_KEYS = 8;
 const PREVIEW_MAX_VALUE_LENGTH = 200;
 
+function truncateCodePoints(text: string): string {
+  return Array.from(text).slice(0, PREVIEW_MAX_VALUE_LENGTH).join("");
+}
+
 function previewValueText(value: unknown): string {
-  if (typeof value === "string") return value.slice(0, PREVIEW_MAX_VALUE_LENGTH);
+  if (typeof value === "string") return truncateCodePoints(value);
   const text = JSON.stringify(value) ?? String(value);
-  return text.slice(0, PREVIEW_MAX_VALUE_LENGTH);
+  return truncateCodePoints(text);
 }
 
 function flattenPreview(preview: unknown): string | undefined {

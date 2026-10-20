@@ -391,6 +391,20 @@ describe("ui api", () => {
     }
   });
 
+  it("未知会话 + 无 providers 时优先返回 404 unknown_session", async () => {
+    const s = createUiServer({ harnessHome: makeHome() });
+    close = s.close;
+    const res = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      writeHeaders(s.port),
+      JSON.stringify({ text: "hi", sessionId: "no-such-session" }),
+    );
+    expect(res.status).toBe(404);
+    expect(errorCode(res.body)).toBe("unknown_session");
+  });
+
   it("Body 非法 JSON 返回 400 invalid_body", async () => {
     const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
     close = s.close;
@@ -421,7 +435,7 @@ describe("ui api", () => {
     expect(errorCode(res.body)).toBe("unsupported_media_type");
   });
 
-  it("Body 超过 8 KiB 返回 413 payload_too_large", async () => {
+  it("Body 超过 32 KiB 返回 413 payload_too_large", async () => {
     const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
     close = s.close;
     const res = await rawRequest(
@@ -429,10 +443,24 @@ describe("ui api", () => {
       "/api/actions",
       "POST",
       writeHeaders(s.port),
-      JSON.stringify({ text: "a".repeat(9_000) }),
+      JSON.stringify({ text: "a".repeat(33_000) }),
     );
     expect(res.status).toBe(413);
     expect(errorCode(res.body)).toBe("payload_too_large");
+  });
+
+  it("Content-Type application/jsonp 返回 415", async () => {
+    const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
+    close = s.close;
+    const res = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      { origin: `http://127.0.0.1:${s.port}`, "content-type": "application/jsonp" },
+      JSON.stringify({ text: "hi" }),
+    );
+    expect(res.status).toBe(415);
+    expect(errorCode(res.body)).toBe("unsupported_media_type");
   });
 
   it.each<[string, string]>([
@@ -459,8 +487,11 @@ describe("ui api", () => {
     ["invalid_session_id", 400],
     ["unknown_session", 404],
     ["session_busy", 409],
+    ["session_corrupt", 500],
+    ["session_unreadable", 500],
     ["model_unavailable", 503],
     ["session_start_timeout", 503],
+    ["runner_unavailable", 503],
   ])("RunnerError %s 映射为 %i", async (code, status) => {
     const runner = makeRunner({
       start: vi.fn(async () => { throw new RunnerError(code, "boom"); }),

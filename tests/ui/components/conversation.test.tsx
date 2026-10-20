@@ -18,7 +18,8 @@ describe("conversation", () => {
     expect(root.textContent).toContain("测试会话");
     expect(root.querySelector(".status")).not.toBeNull();
   });
-  it("路径条五步状态匹配 reduceStep", () => {    const root = document.createElement("div");
+  it("路径条五步状态匹配 reduceStep", () => {
+    const root = document.createElement("div");
     document.body.appendChild(root);
     render(<PathLine steps={reduceStep(makeSessionEvents())} />, root);
     expect(root.querySelectorAll(".step").length).toBe(5);

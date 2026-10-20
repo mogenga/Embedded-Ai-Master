@@ -421,8 +421,11 @@ npm run build:web && npm run build && npm run serve:ui
 | 400 | `invalid_session_id` | `sessionId` 非法 |
 | 404 | `unknown_session` | 指定会话不存在 |
 | 409 | `session_busy` | 同会话正在运行 |
+| 500 | `session_corrupt` | 追加会话的 header 损坏 |
+| 500 | `session_unreadable` | 追加会话的 header 不可读（EACCES/EPERM） |
 | 503 | `model_unavailable` | providers 缺失/无效/引用无效 |
 | 503 | `session_start_timeout` | 就绪超时（运行器已 abort） |
+| 503 | `runner_unavailable` | 运行器已关闭或未注入 |
 
 ### POST /api/approvals
 
@@ -435,15 +438,19 @@ npm run build:web && npm run build && npm run serve:ui
 | 状态 | body | 条件 |
 |---|---|---|
 | 202 | `{ requestId, decision }` | 首次受理，决策已送达等待中的 gate |
-| 200 | `{ requestId, decision }` | 同决策重复提交 |
-| 400 | `invalid_body` / `invalid_session_id` / `invalid_request_id` / `invalid_decision` | 字段缺失或类型错误、id 非法、`requestId` 不在 1..200 字符、决策不是 `allow`/`deny` |
+| 200 | `{ requestId, decision, duplicate: true }` | 同决策重复提交 |
+| 400 | `invalid_body` / `invalid_session_id` / `invalid_decision` | 字段缺失或类型错误、id 非法、`requestId` 不是 1..200 个可打印 ASCII 字符、决策不是 `allow`/`deny` |
 | 404 | `unknown_session` / `unknown_request` | 会话不在运行器注册表 / 运行中但从未见过该 `requestId` |
+| 408 | `request_timeout` | 读取请求体超过 5s |
 | 409 | `already_decided` | 已用相反决策结束 |
 | 410 | `approval_expired` | 已超时或中断，不可再决 |
+| 503 | `runner_unavailable` | 运行器已关闭或未注入 |
 
 **202 语义**：只表示决策已送达 gate，不表示工具已执行；最终结果以会话日志的 `permission_decision` 为准（批准为 `effective: "allow"` 且 reason 含 `approval_granted`，拒绝为 deny）。HTTP 不返回 `effective`，前端也不本地伪造终态，等待 SSE 更新。
 
-**写端点通用约束**：`POST /api/actions` 与 `POST /api/approvals` 必须携带 `Origin`，且为 loopback、端口等于监听端口，否则 403 `forbidden_origin`；`Content-Type` 必须为 `application/json`（415），body 上限 8 KiB（413），读取超时 5s。只读端点仍只校验 `Host` / `Origin`。
+**写端点通用约束**：`POST /api/actions` 与 `POST /api/approvals` 必须携带 `Origin`，且为 loopback、端口等于监听端口，否则 403 `forbidden_origin`；`Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（接受 `charset` 等参数，415），body 上限 32 KiB（413），读取超时 5s（408 `request_timeout`）。只读端点仍只校验 `Host` / `Origin`。
+
+**前端发送语义**：追加输入成功后只刷新会话列表，保持当前视图与 SSE 连接，不重载会话；只有新建会话（提交前没有 `activeSessionId`）才按返回的 `sessionId` 切换并订阅。
 
 **失败语义**：审批超时（`approvalTimeoutMs`，默认 120000ms）、用户拒绝、会话中断均不执行工具，日志以 `permission_decision` deny 收尾；迟到决策在运行中返回 410，会话结束后返回 404。服务重启后未决审批丢失，`resumeSession` 会补 `approval_aborted: crash_recovery` 审计。headless demo 与未注入审批桥的库调用仍是 `ask` → deny（`approval_unavailable`）。
 

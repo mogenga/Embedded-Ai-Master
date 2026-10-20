@@ -382,6 +382,21 @@ describe("transcript", () => {
     expect(events[2].payload.paramsPreview).toBe(preview);
   });
 
+  it("paramsPreview 按 Unicode 码点截断，不切断代理对", () => {
+    const events = approvalEvents();
+    events[2].payload = {
+      ...events[2].payload,
+      paramsPreview: { k1: "😀".repeat(210) },
+    };
+
+    const text = approvalOf(events).approval.paramsPreviewText as string;
+    expect(text).toContain(`k1=${"😀".repeat(200)}`);
+    expect(text).not.toContain("😀".repeat(201));
+    const value = text.slice(text.indexOf("k1=") + 3);
+    expect(Array.from(value)).toHaveLength(200);
+    expect(value).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/);
+  });
+
   it("无 paramsPreview 时 paramsPreviewText 缺省", () => {
     const events = approvalEvents();
     const payload = { ...events[2].payload };

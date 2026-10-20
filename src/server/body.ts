@@ -1,13 +1,13 @@
 import type { IncomingMessage } from "node:http";
 import { HttpError } from "./http.js";
 
-const DEFAULT_LIMIT_BYTES = 8192;
+const DEFAULT_LIMIT_BYTES = 32768;
 const READ_TIMEOUT_MS = 5000;
 
 function assertJsonContentType(req: IncomingMessage): void {
   const raw = req.headers["content-type"];
   const contentType = typeof raw === "string" ? raw.trim().toLowerCase() : "";
-  if (!contentType.startsWith("application/json")) {
+  if (contentType !== "application/json" && !contentType.startsWith("application/json;")) {
     throw new HttpError(415, "unsupported_media_type", "Content-Type 必须是 application/json");
   }
 }

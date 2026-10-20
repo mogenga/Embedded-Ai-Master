@@ -179,8 +179,12 @@ function mapRunnerError(error: RunnerError): HttpError {
       return new HttpError(404, error.code, error.message);
     case "session_busy":
       return new HttpError(409, error.code, error.message);
+    case "session_corrupt":
+    case "session_unreadable":
+      return new HttpError(500, error.code, error.message);
     case "model_unavailable":
     case "session_start_timeout":
+    case "runner_unavailable":
       return new HttpError(503, error.code, error.message);
   }
 }
@@ -228,8 +232,8 @@ async function handleApproval(
     throw new HttpError(400, "invalid_session_id", "非法的会话 id");
   }
   const requestId = body.requestId;
-  if (requestId.length < 1 || requestId.length > 200) {
-    throw new HttpError(400, "invalid_body", "requestId 长度必须在 1..200 之间");
+  if (!/^[\x20-\x7E]{1,200}$/.test(requestId)) {
+    throw new HttpError(400, "invalid_body", "requestId 必须是 1..200 个可打印 ASCII 字符");
   }
   const decision = body.decision;
   if (decision !== "allow" && decision !== "deny") {
