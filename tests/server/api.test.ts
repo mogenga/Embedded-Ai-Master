@@ -116,6 +116,20 @@ describe("ui api", () => {
     expect((await fetch(`http://127.0.0.1:${s.port}/api/sessions/dirA`)).status).toBe(200);
   });
 
+  it("列表与详情使用同一 id 规则：含点目录记 invalid_id 且不可打开", async () => {
+    const home = makeHome();
+    writeSession(home, "s1.old", "s1");
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/sessions`)).json() as {
+      sessions: Array<{ id: string }>;
+      errors: Array<{ dir: string; code: string }>;
+    };
+    expect(body.sessions.map((item) => item.id)).toEqual(["s1"]);
+    expect(body.errors).toContainEqual({ dir: "s1.old", code: "invalid_id" });
+    expect((await fetch(`http://127.0.0.1:${s.port}/api/sessions/s1.old`)).status).toBe(400);
+  });
+
   it("坏目录不静默且不影响好会话", async () => {
     const home = makeHome();
     mkdirSync(path.join(home, "sessions", "broken"));
@@ -140,6 +154,25 @@ describe("ui api", () => {
     };
     expect(body.sessions.map((item) => item.id)).toContain("s1");
     expect(body.errors).toEqual([]);
+  });
+
+  it.skipIf(!SYMLINK_SUPPORTED)("header 为符号链接时列表与详情都按损坏处理", async () => {
+    const home = makeHome();
+    const target = path.join(home, "outside-header.json");
+    writeFileSync(target, JSON.stringify({
+      id: "s1", createdAt: "2026-10-18T00:00:00.000Z", status: "closed",
+    }));
+    rmSync(path.join(home, "sessions", "s1", "header.json"));
+    symlinkSync(target, path.join(home, "sessions", "s1", "header.json"), "file");
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/sessions`)).json() as {
+      sessions: unknown[];
+      errors: Array<{ dir: string; code: string }>;
+    };
+    expect(body.sessions).toHaveLength(0);
+    expect(body.errors).toContainEqual({ dir: "s1", code: "invalid_header" });
+    expect((await fetch(`http://127.0.0.1:${s.port}/api/sessions/s1`)).status).toBe(500);
   });
 
   it("有效 header 但无日志文件进 errors", async () => {

@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, statSync } from "node:fs";
+import { statSync } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Dirent } from "node:fs";
@@ -8,10 +8,11 @@ import { resolveHarnessHome } from "../config/harness-home.js";
 import { createLogTailEventSource } from "../events/log-tail.js";
 import type { SessionEventSource } from "../events/types.js";
 import { SessionCorruptionError } from "../session/errors.js";
-import { isValidSessionId, validateHeader } from "../session/handle.js";
+import { isValidSessionId } from "../session/handle.js";
 import {
   listSessionLogFiles,
   readSessionDir,
+  readSessionHeader as persistenceReadSessionHeader,
   readSessionSnapshot,
 } from "../session/persistence.js";
 import type { SessionEvent, SessionHeader } from "../session/types.js";
@@ -40,7 +41,6 @@ export interface KbNode {
   children?: KbNode[];
 }
 
-const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 const KB_MAX_DEPTH = 8;
 
 const KB_MAX_ENTRIES = 2000;
@@ -163,30 +163,29 @@ function isLinkedDirectory(target: string): boolean {
   }
 }
 
+function permissionCause(error: unknown): unknown {
+  const cause = (error as { detail?: { cause?: unknown } }).detail?.cause;
+  return cause !== undefined && isPermissionError(cause) ? cause : undefined;
+}
+
+// 列表用的 header-only 读取:复用 persistence 的同一套校验,额外要求至少一个日志文件。
+// persistence 会把底层错误包进 detail.cause;权限错误在此还原上抛,列表归入 unreadable
+// 而不是损坏(D-070 的既有语义)。
 export function readSessionHeader(dir: string): SessionHeader {
-  const file = path.join(dir, "header.json");
+  let header: SessionHeader;
   try {
-    const info = lstatSync(file);
-    if (info.isSymbolicLink() || !info.isFile()) {
-      throw new SessionCorruptionError("invalid_header", `Invalid session header: ${file}`, {
-        file: "header.json",
-      });
-    }
-    const header = validateHeader(JSON.parse(readFileSync(file, "utf8")));
-    if (listSessionLogFiles(dir).length === 0) {
-      throw new SessionCorruptionError("invalid_header", `Session has no log files: ${dir}`, {
-        dir,
-      });
-    }
-    return header;
+    header = persistenceReadSessionHeader(dir);
   } catch (error) {
-    if (error instanceof SessionCorruptionError) throw error;
-    if (isPermissionError(error)) throw error;
-    throw new SessionCorruptionError("invalid_header", `Invalid session header: ${file}`, {
-      file: "header.json",
-      cause: error,
+    const cause = permissionCause(error);
+    if (cause !== undefined) throw cause;
+    throw error;
+  }
+  if (listSessionLogFiles(dir).length === 0) {
+    throw new SessionCorruptionError("invalid_header", `Session has no log files: ${dir}`, {
+      dir,
     });
   }
+  return header;
 }
 
 function summarize(header: SessionHeader): SessionSummary {
@@ -219,7 +218,8 @@ async function handleSessions(res: ServerResponse, harnessHome: string): Promise
       continue;
     }
     if (!entry.isDirectory()) continue;
-    if (!SESSION_ID_PATTERN.test(dir) || dir === "." || dir === "..") {
+    // 列表与详情必须用同一套 id 规则,否则列表会给出一个随后 400 的会话 id(D-069 邻接)。
+    if (!isValidSessionId(dir)) {
       errors.push({ dir, code: "invalid_id" });
       continue;
     }
