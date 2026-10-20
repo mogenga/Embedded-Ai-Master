@@ -74,7 +74,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const lookup: KbToolSpec = {
     name: 'kb_lookup',
     description:
-      '按自然语言问题检索知识库索引，返回候选条目（path/title/summary/score）。无命中时返回 found=false、reason="no_match"，必须如实告知用户，不得编造条目或内容。',
+      '按自然语言问题检索知识库索引，返回候选条目（path/title/summary/score）。无命中时返回 found=false、reason="no_match"；命中证据不足时返回 found=false、reason="low_confidence"。两种情况都必须如实告知用户，不得编造条目或内容。',
     inputSchema: lookupSchema,
     annotations: { readOnlyHint: true },
     handler: withSchema(lookupSchema, async (args) => {

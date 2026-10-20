@@ -77,6 +77,15 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 - `parseIndexYaml`：`id` / `title` / `path` / `tags` / `keywords` 缺失时抛错（错误信息含条目序号与字段名）；`summary` 可缺失，补 `''`；空文本或纯注释返回 `[]`。
 - `parseFrontmatter`：首行不是 `---`、缺少结束 `---`、出现缩进/嵌套结构、值无法解析（如未加引号的冒号）时返回 `parsed: false`，且 `body` 始终保留结束分隔线之后的原文；不抛错。解析失败时 `data` 返回空对象，调用方（`kb_read`）应保留原文并标注未解析。
 
+### 检索评分与拒答
+
+`KbService.lookup` 的分数为命中 keyword 长度和 + 2 × 命中 tag 数，并施加两项收紧：
+
+- 非 CJK keyword/tag 使用 ASCII 词边界匹配；长度 < 2 的纯英文 token 忽略（例如 tag `c` 不参与匹配）。
+- 查询中长度 ≥ 2 的 ASCII/十六进制 token 若不在索引 keyword/tag 词表中，按 `max(0, 1 - 0.75 × 未登录比例)` 折减分数。折减后最高分低于 `1.75` 时返回 `found: false`、`reason: "low_confidence"`；完全无词面命中返回 `no_match`。
+
+该门槛用于让 KB 外查询显式拒答，代价是少量相邻主题召回下降。2026-10-20 实测：index Recall@2 0.46 / Hit@1 0.40 / MRR 0.43，负样本拒答率 0.56（修改前 0.48 / 0.40 / 0.44 / 0.16）。基线见 `tests/regression-baseline.json`，回归脚本为 `npm run kb:regression`。
+
 ## 测试
 
 ```bash

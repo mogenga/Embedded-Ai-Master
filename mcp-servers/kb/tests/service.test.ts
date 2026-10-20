@@ -29,6 +29,13 @@ entries:
     tags: [i2c]
     keywords: [nack, 不应答]
     summary: 从机无 ACK
+
+  - id: toolchain-c
+    title: C 工具链
+    path: system/toolchain.md
+    tags: [c, toolchain]
+    keywords: [c]
+    summary: C 编译器与链接脚本
 `
 
 const NO_OUTPUT_FIXTURE = `---
@@ -83,6 +90,7 @@ describe('KbService', () => {
     writeFixture(root, 'cases/_about.md', ABOUT_FIXTURE)
     writeFixture(root, 'protocols/uart/no-output.md', NO_OUTPUT_FIXTURE)
     writeFixture(root, 'protocols/uart/garbled-data.md', GARBLED_FIXTURE)
+    writeFixture(root, 'system/toolchain.md', '# C 工具链\n链接脚本与优化\n')
     writeFixture(root, 'notes.txt', 'UART 但扩展名不在白名单\n')
     writeFixture(root, 'big.md', `${'x'.repeat(MIB)}\n`)
     service = new KbService(root)
@@ -107,16 +115,40 @@ describe('KbService', () => {
       expect(result.candidates).toHaveLength(1)
     })
 
-    it('分数 = 命中 keyword 长度和 + 3 × 命中 tag 数，并按分数降序', () => {
+    it('分数 = 命中 keyword 长度和 + 2 × 命中 tag 数，并按分数降序', () => {
       const result = service.lookup('uart 乱码')
 
       expect(result.candidates[0]).toMatchObject({
         path: 'protocols/uart/garbled-data.md',
-        score: 5,
+        score: 4,
       })
       expect(result.candidates[1]).toMatchObject({
         path: 'protocols/uart/no-output.md',
-        score: 3,
+        score: 2,
+      })
+    })
+
+    it('英文 token 按 ASCII 词边界匹配', () => {
+      expect(service.lookup('uartx')).toEqual({
+        found: false,
+        candidates: [],
+        reason: 'no_match',
+      })
+    })
+
+    it('忽略单字符英文 keyword/tag', () => {
+      expect(service.lookup('C 语言')).toEqual({
+        found: false,
+        candidates: [],
+        reason: 'no_match',
+      })
+    })
+
+    it('查询含大量未登录 token 时按低置信拒答', () => {
+      expect(service.lookup('乱码 xyz')).toEqual({
+        found: false,
+        candidates: [],
+        reason: 'low_confidence',
       })
     })
 
@@ -282,8 +314,8 @@ describe('KbService', () => {
     it('统计 markdown 文件数、索引条目与索引存在性', () => {
       expect(service.status()).toEqual({
         root: realpathSync(root),
-        fileCount: 6,
-        indexEntries: 3,
+        fileCount: 7,
+        indexEntries: 4,
         indexPresent: true,
       })
     })

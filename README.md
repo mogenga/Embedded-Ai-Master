@@ -219,7 +219,7 @@ npm run kb:regression          # 表格 + JSON；--json 仅 JSON，--baseline �
 
 脚本在缺少 `dist-mcp/kb/service.js`、`KB_ROOT`、`index.yaml` 或查询集时打印原因并以退出码 2 结束；脚本不设通过阈值。`mcp-servers/kb/tests/regression.test.ts` 直接 import `service.ts`、不启动 MCP server；语料或查询集缺失时 `describe.skip`，存在时断言各指标不低于 `regression-baseline.json`。
 
-2026-10-20 实测基线（只作下限，不是目标）：index 轨 Recall@2 0.48、Hit@1 0.40、MRR 0.44；search 轨 Hit@1 0.4333（`search(tokens, 20)` 返回结果中出现 gold 文件即算命中；引擎按路径排序，没有相关性 rank 语义）；负样本拒答率 0.16。search 轨偏低的主要原因是 `reference/*.md` 大量未进索引，且命中结果被前 20 条路径排序截断，属于当前实现的可观测上限。
+2026-10-20 实测基线（只作下限，不是目标）：index 轨 Recall@2 0.46、Hit@1 0.40、MRR 0.43；search 轨 Hit@1 0.4333（`search(tokens, 20)` 返回结果中出现 gold 文件即算命中；引擎按路径排序，没有相关性 rank 语义）；负样本拒答率 0.56（14/25 正确拒答）。`kb_lookup` 对英文 keyword/tag 使用 ASCII 词边界、忽略单字符英文 token，并按查询中未出现在索引词表的 token 比例折减分数；折减后最高分低于 1.75 时返回 `found: false`、`reason: "low_confidence"`，不再把弱匹配伪装成命中。相对收紧前（Recall@2 0.48、MRR 0.44、拒答率 0.16），Recall@2 下降 2pp、Hit@1 不变、拒答率提升 40pp。search 轨偏低的主要原因是 `reference/*.md` 大量未进索引，且命中结果被前 20 条路径排序截断，属于当前实现的可观测上限。
 
 ### 验证边界
 

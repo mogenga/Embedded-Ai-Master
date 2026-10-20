@@ -9,9 +9,9 @@
   },
   "index": {
     "total": 50,
-    "recallAt2": 0.48,
+    "recallAt2": 0.46,
     "hitAt1": 0.4,
-    "mrr": 0.44
+    "mrr": 0.43
   },
   "search": {
     "total": 30,
@@ -19,7 +19,7 @@
   },
   "negatives": {
     "total": 25,
-    "refusalRate": 0.16
+    "refusalRate": 0.56
   },
   "layers": {
     "goldIndexed": 69,

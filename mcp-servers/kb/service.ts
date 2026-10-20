@@ -14,7 +14,7 @@ export interface KbLookupCandidate {
 export interface KbLookupResult {
   found: boolean
   candidates: KbLookupCandidate[]
-  reason?: 'no_match' | 'empty_query' | 'index_missing'
+  reason?: 'no_match' | 'empty_query' | 'index_missing' | 'low_confidence'
 }
 
 export interface KbSearchHit {
@@ -62,7 +62,13 @@ const NAVIGATION_FILES = new Set(['_inbox.md', '_about.md'])
 const INDEX_FILE = 'index.yaml'
 const DEFAULT_LOOKUP_LIMIT = 2
 const DEFAULT_SEARCH_LIMIT = 20
-const TAG_WEIGHT = 3
+const TAG_WEIGHT = 2
+const CONFIDENCE_THRESHOLD = 1.75
+const OOV_PENALTY = 0.75
+const QUERY_TOKEN_PATTERN = /0x[0-9A-Fa-f]+|[A-Za-z_][A-Za-z0-9_]*/g
+const CJK_PATTERN = /[\u4e00-\u9fff]/
+const PURE_ASCII_WORD = /^[A-Za-z][A-Za-z0-9_]*$/
+const BOUNDARY_PATTERN_CACHE = new Map<string, RegExp>()
 
 function compareText(left: string, right: string): number {
   if (left < right) return -1
@@ -75,15 +81,67 @@ function isWithin(root: string, target: string): boolean {
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function boundaryPattern(token: string): RegExp {
+  const cached = BOUNDARY_PATTERN_CACHE.get(token)
+  if (cached !== undefined) return cached
+  const pattern = new RegExp(
+    `(?<![A-Za-z0-9_])${escapeRegExp(token)}(?![A-Za-z0-9_])`,
+    'i',
+  )
+  BOUNDARY_PATTERN_CACHE.set(token, pattern)
+  return pattern
+}
+
+function matchesToken(needle: string, token: string): boolean {
+  const normalized = token.trim().toLowerCase()
+  if (normalized === '') return false
+  if (CJK_PATTERN.test(normalized)) return needle.includes(normalized)
+  if (PURE_ASCII_WORD.test(normalized) && normalized.length < 2) return false
+  return boundaryPattern(normalized).test(needle)
+}
+
 function scoreEntry(entry: IndexEntry, needle: string): number {
   let score = 0
   for (const keyword of entry.keywords) {
-    if (keyword !== '' && needle.includes(keyword.toLowerCase())) score += keyword.length
+    if (matchesToken(needle, keyword)) score += keyword.trim().length
   }
   for (const tag of entry.tags) {
-    if (tag !== '' && needle.includes(tag.toLowerCase())) score += TAG_WEIGHT
+    if (matchesToken(needle, tag)) score += TAG_WEIGHT
   }
   return score
+}
+
+function extractQueryTokens(query: string): string[] {
+  const seen = new Set<string>()
+  for (const match of query.matchAll(QUERY_TOKEN_PATTERN)) {
+    const token = match[0].toLowerCase()
+    if (token.length < 2) continue
+    seen.add(token)
+  }
+  return [...seen]
+}
+
+function buildVocabulary(entries: IndexEntry[]): Set<string> {
+  const vocabulary = new Set<string>()
+  for (const entry of entries) {
+    for (const token of [...entry.keywords, ...entry.tags]) {
+      const normalized = token.trim().toLowerCase()
+      if (normalized !== '') vocabulary.add(normalized)
+    }
+  }
+  return vocabulary
+}
+
+function confidenceFactor(query: string, vocabulary: Set<string>): number {
+  const tokens = extractQueryTokens(query)
+  if (tokens.length === 0) return 1
+  const known = tokens.filter((token) => vocabulary.has(token)).length
+  const oovRatio = (tokens.length - known) / tokens.length
+  return Math.max(0, 1 - OOV_PENALTY * oovRatio)
 }
 
 function toPosix(relativePath: string): string {
@@ -107,19 +165,24 @@ export class KbService {
   }
 
   lookup(query: string, limit = DEFAULT_LOOKUP_LIMIT): KbLookupResult {
-    const needle = query.trim().toLowerCase()
-    if (needle === '') return { found: false, candidates: [], reason: 'empty_query' }
+    const trimmed = query.trim()
+    if (trimmed === '') return { found: false, candidates: [], reason: 'empty_query' }
 
     const entries = this.loadIndex()
     if (entries === null) return { found: false, candidates: [], reason: 'index_missing' }
 
-    const candidates = entries
-      .map((entry) => ({ entry, score: scoreEntry(entry, needle) }))
+    const needle = trimmed.toLowerCase()
+    const factor = confidenceFactor(trimmed, buildVocabulary(entries))
+    const scored = entries
+      .map((entry) => ({ entry, score: scoreEntry(entry, needle) * factor }))
       .filter((candidate) => candidate.score > 0)
       .sort(
         (left, right) =>
           right.score - left.score || compareText(left.entry.path, right.entry.path),
       )
+
+    const candidates = scored
+      .filter((candidate) => candidate.score >= CONFIDENCE_THRESHOLD)
       .slice(0, Math.max(0, limit))
       .map(({ entry, score }) => ({
         path: entry.path,
@@ -128,7 +191,13 @@ export class KbService {
         score,
       }))
 
-    if (candidates.length === 0) return { found: false, candidates: [], reason: 'no_match' }
+    if (candidates.length === 0) {
+      return {
+        found: false,
+        candidates: [],
+        reason: scored.length === 0 ? 'no_match' : 'low_confidence',
+      }
+    }
     return { found: true, candidates }
   }
 
