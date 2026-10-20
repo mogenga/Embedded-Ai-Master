@@ -161,15 +161,15 @@ function ToolBody({ tool, kind }: { tool: ToolCardModel; kind: ToolKind }): JSX.
 
 export function ToolCard({ tool }: { tool: ToolCardModel }): JSX.Element {
   const [expanded, setExpanded] = useState(false);
-  const pending = tool.pending === true;
-  const failed = !tool.ok || tool.kind === "error";
+  const running = tool.state === "running" || tool.state === "queued";
+  const failed = tool.state === "failed" || !tool.ok || tool.kind === "error";
   const kind: ToolKind = failed ? "error" : tool.kind;
   const count = rowCount(tool, kind);
   const textFoldable =
     tool.text !== undefined &&
     (tool.text.split("\n").length > TEXT_FOLD_LINES || textBytes(tool.text) > TEXT_FOLD_BYTES);
   const collapsible = kind !== "error" && (count > FOLD_LIMIT[kind] || textFoldable);
-  const showBody = kind !== "error" && !pending && (!collapsible || expanded);
+  const showBody = kind !== "error" && !running && (!collapsible || expanded);
   const errorText =
     tool.errorText !== undefined && tool.errorText.length > 0 ? tool.errorText : "工具未返回错误说明";
 
@@ -178,14 +178,14 @@ export function ToolCard({ tool }: { tool: ToolCardModel }): JSX.Element {
       class={tool.destructive === true ? "tool is-destructive" : "tool"}
       data-kind={kind}
       data-ro={tool.readOnly === true ? "true" : undefined}
-      data-pending={pending ? "true" : undefined}
+      data-pending={running ? "true" : undefined}
     >
       <header class="tool-head">
         <Icon name={KIND_ICON[kind]} size={14} />
         <span class="tool-name">{tool.name}</span>
         <span class="tool-args">{tool.args}</span>
         <span class="spacer" />
-        {pending ? (
+        {running ? (
           <span class="tool-flag tool-flag--pending">执行中</span>
         ) : failed ? (
           <span class="tool-flag tool-flag--error">
@@ -199,7 +199,7 @@ export function ToolCard({ tool }: { tool: ToolCardModel }): JSX.Element {
           </span>
         )}
       </header>
-      {pending ? null : kind === "error" ? (
+      {running ? null : kind === "error" ? (
         <div class="tool-body">
           <div class="tool-error" role="alert">
             <code>{tool.errorCode ?? "error"}</code>

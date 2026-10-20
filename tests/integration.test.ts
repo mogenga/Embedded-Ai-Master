@@ -16,6 +16,7 @@ import { ToolRegistry } from "../src/tools/registry.js";
 const resumeCloseFailure = vi.hoisted(() => ({ enabled: false }));
 const resumeCallCounter = vi.hoisted(() => ({ count: 0 }));
 const statusAppendFailure = vi.hoisted(() => ({ enabled: false }));
+const mcpStatusAppendFailure = vi.hoisted(() => ({ enabled: false }));
 
 vi.mock("../src/session/session.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/session/session.js")>();
@@ -26,14 +27,23 @@ vi.mock("../src/session/session.js", async (importOriginal) => {
       opts?: Parameters<typeof actual.createSession>[1],
     ) => {
       const handle = await actual.createSession(dir, opts);
-      if (!statusAppendFailure.enabled) return handle;
-      statusAppendFailure.enabled = false;
+      if (!statusAppendFailure.enabled && !mcpStatusAppendFailure.enabled) return handle;
       const originalAppend = handle.append.bind(handle);
       let failed = false;
+      if (statusAppendFailure.enabled) {
+        statusAppendFailure.enabled = false;
+        handle.append = (event) => {
+          if (failed) return originalAppend(event);
+          failed = true;
+          return Promise.reject(new Error("status append boom"));
+        };
+        return handle;
+      }
+      mcpStatusAppendFailure.enabled = false;
       handle.append = (event) => {
-        if (failed) return originalAppend(event);
+        if (failed || event.type !== "mcp_status") return originalAppend(event);
         failed = true;
-        return Promise.reject(new Error("status append boom"));
+        return Promise.reject(new Error("mcp status append boom"));
       };
       return handle;
     },
@@ -64,6 +74,7 @@ afterEach(async () => {
   resumeCloseFailure.enabled = false;
   resumeCallCounter.count = 0;
   statusAppendFailure.enabled = false;
+  mcpStatusAppendFailure.enabled = false;
   vi.unstubAllEnvs();
   for (const dir of tempDirs.splice(0)) await removeTempDir(dir);
 });
@@ -1806,6 +1817,12 @@ async function writeMcpConfig(
 
 function mcpStatusPayloads(sessionDir: string): Record<string, unknown>[] {
   return readSessionFile(path.join(sessionDir, "session.v1.jsonl"))
+    .filter((event) => event.type === "mcp_status")
+    .map((event) => event.payload);
+}
+
+function legacyMcpStatusPayloads(sessionDir: string): Record<string, unknown>[] {
+  return readSessionFile(path.join(sessionDir, "session.v1.jsonl"))
     .filter((event) => event.type === "status")
     .map((event) => event.payload)
     .filter((payload) => typeof payload.status === "string" && payload.status.startsWith("mcp_"));
@@ -1860,8 +1877,9 @@ describe("runSession MCP 装配", () => {
     );
     expect(result).toMatchObject({ ok: true, text: "hello-mcp" });
     expect(mcpStatusPayloads(sessionDir)).toContainEqual(
-      expect.objectContaining({ status: "mcp_connected", server: "echo" }),
+      expect.objectContaining({ kind: "connected", server: "echo" }),
     );
+    expect(legacyMcpStatusPayloads(sessionDir)).toEqual([]);
   });
 
   it("项目级 mcp.json 默认不加载并记录 skipped", async () => {
@@ -1892,7 +1910,7 @@ describe("runSession MCP 装配", () => {
     );
     expect(existsSync(pidFile)).toBe(false);
     expect(mcpStatusPayloads(sessionDir)).toContainEqual(
-      expect.objectContaining({ status: "mcp_project_config_skipped" }),
+      expect.objectContaining({ kind: "project_config_skipped" }),
     );
   });
 
@@ -1923,7 +1941,7 @@ describe("runSession MCP 装配", () => {
     expect(tools.map((tool) => tool.function.name)).toContain("mcp__echo__echo");
     expect(existsSync(pidFile)).toBe(true);
     expect(mcpStatusPayloads(sessionDir)).toContainEqual(
-      expect.objectContaining({ status: "mcp_connected", server: "echo" }),
+      expect.objectContaining({ kind: "connected", server: "echo" }),
     );
   });
 
@@ -2019,7 +2037,7 @@ describe("runSession MCP 装配", () => {
     expect(tools.map((tool) => tool.function.name)).toContain("mcp__echo__echo");
     expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
     expect(mcpStatusPayloads(sessionDir)).toContainEqual(
-      expect.objectContaining({ status: "mcp_connect_failed", server: "broken" }),
+      expect.objectContaining({ kind: "connect_failed", server: "broken" }),
     );
   });
 
@@ -2057,6 +2075,52 @@ describe("runSession MCP 装配", () => {
     }
   });
 
+  it("mcp_status 写入失败时降级且工具仍执行", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const configDir = await tempDir();
+    const userConfigPath = await writeMcpConfig(configDir, { echo: mcpEchoServer() });
+    const sessionDir = path.join(home, "mcp-status-event-failure");
+    const { impl } = mockFetch([
+      toolCallResponseNoUsage("mcp-call", "mcp__echo__echo", { text: "hello-mcp" }),
+      EMPTY_RESPONSE,
+    ]);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mcpStatusAppendFailure.enabled = true;
+    try {
+      const events = await collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          sessionDir,
+          fetchImpl: impl,
+          cwd: configDir,
+          mcp: { userConfigPath },
+        }),
+      );
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[mcp] status event append failed: mcp status append boom"),
+      );
+      expect(events).toContainEqual(
+        expect.objectContaining({ kind: "tool_result", id: "mcp-call", ok: true }),
+      );
+      expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
+      expect(
+        readSessionFile(path.join(sessionDir, "session.v1.jsonl")).some(
+          (event) =>
+            event.type === "tool_result"
+            && event.payload.id === "mcp-call"
+            && event.payload.ok === true,
+        ),
+      ).toBe(true);
+    } finally {
+      errorSpy.mockRestore();
+      mcpStatusAppendFailure.enabled = false;
+    }
+  });
+
   it("配置坏 JSON 记 mcp_config_failed 且会话继续", async () => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
@@ -2084,7 +2148,7 @@ describe("runSession MCP 装配", () => {
     );
     expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
     expect(mcpStatusPayloads(sessionDir)).toContainEqual(
-      expect.objectContaining({ status: "mcp_config_failed" }),
+      expect.objectContaining({ kind: "config_failed" }),
     );
   });
 
@@ -2115,7 +2179,7 @@ describe("runSession MCP 装配", () => {
       if (fetchCount === 1) {
         await waitFor(() =>
           mcpStatusPayloads(sessionDir).some(
-            (payload) => payload.status === "mcp_tools_changed",
+            (payload) => payload.kind === "tools_changed",
           ),
         );
       }
@@ -2160,7 +2224,7 @@ describe("runSession MCP 装配", () => {
       }),
     );
     expect(mcpStatusPayloads(sessionDir)).toContainEqual(
-      expect.objectContaining({ status: "mcp_tools_changed", server: "echo" }),
+      expect.objectContaining({ kind: "tools_changed", server: "echo" }),
     );
   });
 
@@ -2179,7 +2243,7 @@ describe("runSession MCP 装配", () => {
       if (fetchCount === 1) {
         await waitFor(() =>
           mcpStatusPayloads(sessionDir).some(
-            (payload) => payload.status === "mcp_tools_changed",
+            (payload) => payload.kind === "tools_changed",
           ),
         );
       }
@@ -2201,7 +2265,7 @@ describe("runSession MCP 装配", () => {
     );
 
     const renamed = mcpStatusPayloads(sessionDir).filter(
-      (payload) => payload.status === "mcp_tool_name_renamed",
+      (payload) => payload.kind === "tool_name_renamed",
     );
     expect(renamed).toHaveLength(1);
     expect(renamed[0]).toMatchObject({
@@ -2228,7 +2292,7 @@ describe("runSession MCP 装配", () => {
       if (fetchCount === 1) {
         await waitFor(() =>
           mcpStatusPayloads(sessionDir).some(
-            (payload) => payload.status === "mcp_tools_refresh_failed",
+            (payload) => payload.kind === "tools_refresh_failed",
           ),
         );
       }
@@ -2250,7 +2314,7 @@ describe("runSession MCP 装配", () => {
     );
 
     expect(mcpStatusPayloads(sessionDir)).toContainEqual(
-      expect.objectContaining({ status: "mcp_tools_refresh_failed", server: "echo" }),
+      expect.objectContaining({ kind: "tools_refresh_failed", server: "echo" }),
     );
     expect(
       events.some(
@@ -2279,7 +2343,7 @@ describe("runSession MCP 装配", () => {
       if (fetchCount === 1) {
         await waitFor(() =>
           mcpStatusPayloads(sessionDir).some(
-            (payload) => payload.status === "mcp_tools_refresh_failed",
+            (payload) => payload.kind === "tools_refresh_failed",
           ),
         );
       }
@@ -2301,7 +2365,7 @@ describe("runSession MCP 装配", () => {
     );
 
     expect(mcpStatusPayloads(sessionDir)).toContainEqual(
-      expect.objectContaining({ status: "mcp_tools_refresh_failed", server: "echo" }),
+      expect.objectContaining({ kind: "tools_refresh_failed", server: "echo" }),
     );
     expect(
       events.some(
@@ -2342,7 +2406,7 @@ describe("runSession MCP 装配", () => {
 
       expect(mcpStatusPayloads(sessionDir)).toContainEqual(
         expect.objectContaining({
-          status: "mcp_tools_refresh_failed",
+          kind: "tools_refresh_failed",
           scope: "global",
           message: expect.stringContaining("registry replace boom"),
         }),
@@ -2350,8 +2414,8 @@ describe("runSession MCP 装配", () => {
       expect(
         mcpStatusPayloads(sessionDir).some(
           (payload) =>
-            payload.status === "mcp_tool_name_renamed"
-            || payload.status === "mcp_tool_invalid_schema",
+            payload.kind === "tool_name_renamed"
+            || payload.kind === "tool_invalid_schema",
         ),
       ).toBe(false);
       expect(events).toContainEqual({ kind: "done", finishReason: "no_tool_calls" });
@@ -2400,7 +2464,7 @@ describe("runSession MCP 装配", () => {
 
       expect(mcpStatusPayloads(sessionDir)).toContainEqual(
         expect.objectContaining({
-          status: "mcp_tool_invalid_schema",
+          kind: "tool_invalid_schema",
           server: "echo",
           tool: "invalid",
         }),
@@ -2431,7 +2495,7 @@ describe("runSession MCP 装配", () => {
       if (fetchCount === 1) {
         await waitFor(() =>
           mcpStatusPayloads(sessionDir).some(
-            (payload) => payload.status === "mcp_tools_changed",
+            (payload) => payload.kind === "tools_changed",
           ),
         );
       }
@@ -2469,7 +2533,7 @@ describe("runSession MCP 装配", () => {
       ),
     ).toBe(true);
     expect(mcpStatusPayloads(sessionDir)).toContainEqual(
-      expect.objectContaining({ status: "mcp_tools_changed", server: "echo" }),
+      expect.objectContaining({ kind: "tools_changed", server: "echo" }),
     );
   });
 

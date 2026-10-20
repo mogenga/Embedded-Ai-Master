@@ -1,17 +1,12 @@
 import type { SessionEvent } from "../../../src/session/types.js";
-import type { DeviceStatus } from "../../../src/ui/api/client.js";
 import type { AppProps } from "../../../src/ui/app.js";
+import { UNKNOWN_DEVICE } from "../../../src/ui/view/device.js";
 import { transcriptFromSession } from "../../../src/ui/view/transcript.js";
 import type { TranscriptView } from "../../../src/ui/view/transcript.js";
 
-const TS = "2026-10-18T21:40:00.000Z";
+export { UNKNOWN_DEVICE };
 
-export const UNKNOWN_DEVICE: DeviceStatus = {
-  probe: "unknown",
-  serial: "unknown",
-  cpu: "unknown",
-  backend: "unknown",
-};
+const TS = "2026-10-18T21:40:00.000Z";
 
 export function makeSessionEvents(): SessionEvent[] {
   return [

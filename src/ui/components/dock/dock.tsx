@@ -1,5 +1,6 @@
 import type { JSX } from "preact";
 import { useState } from "preact/hooks";
+import type { McpStatusPayload } from "../../../session/types.js";
 import type { DeviceStatus } from "../../api/client.js";
 import { Icon } from "../../icons.js";
 import type { ToolCardModel, TranscriptView } from "../../view/transcript.js";
@@ -66,10 +67,12 @@ type SectionKey = "device" | "port" | "log";
 export function Dock({
   view,
   device,
+  mcpStatuses = [],
   state = "ready",
 }: {
   view: TranscriptView;
   device: DeviceStatus;
+  mcpStatuses?: McpStatusPayload[];
   state?: "loading" | "ready" | "error";
 }): JSX.Element {
   const [expanded, setExpanded] = useState<Record<SectionKey, boolean>>({
@@ -134,7 +137,7 @@ export function Dock({
         <section class="dock-sec">
           {head("log", "i-log", "调试日志", logDot, logLines.length)}
           <div class="dock-sec-body">
-            <DebugLog lines={logLines} />
+            <DebugLog lines={logLines} mcpStatuses={mcpStatuses} />
           </div>
         </section>
       </div> : null}

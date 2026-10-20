@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { emptyTranscriptView, transcriptFromSession, transcriptFromLoop, reduceStep } from "../../src/ui/view/transcript.js";
+import {
+  emptyTranscriptView,
+  TRANSCRIPT_KINDS,
+  transcriptFromSession,
+  transcriptFromLoop,
+  reduceStep,
+} from "../../src/ui/view/transcript.js";
 import type { TranscriptEvent } from "../../src/ui/view/transcript.js";
 import type { SessionEvent } from "../../src/session/types.js";
 import type { LoopEvent } from "../../src/loop/events.js";
@@ -97,13 +103,13 @@ describe("transcript", () => {
     expect(tool.tool.artifactPath).toBe("artifacts/read.bin");
     expect(tool.tool.kind).toBe("readout");
   });
-  it("工具骨架 pending，结果到达后清除", () => {
+  it("工具骨架 queued，结果到达后转 done", () => {
     const skeleton = transcriptFromSession(toolPair({}).slice(0, 1));
     const card = skeleton.events[0] as Extract<TranscriptEvent, { kind: "tool" }>;
-    expect(card.tool.pending).toBe(true);
+    expect(card.tool.state).toBe("queued");
     expect(card.tool.ok).toBe(true);
     const settled = lastTool(toolPair({ ok: true, text: "x" }));
-    expect(settled.tool.pending).toBeUndefined();
+    expect(settled.tool.state).toBe("done");
   });
   it("status done 投影为已完成", () => {
     const events: SessionEvent[] = [
@@ -184,7 +190,45 @@ describe("transcript", () => {
     ]);
     expect(invalid.cost).toBeUndefined();
   });
-  it("permission_decision 事件不产生卡片且状态不变", () => {
+  it("tool_started 使工具卡从 queued 进入 running，tool_result 进入 done/failed", () => {
+    const base: SessionEvent[] = [
+      { seq: 1, ts: "t", type: "user", payload: { content: "症状" } },
+      {
+        seq: 2,
+        ts: "t",
+        type: "assistant",
+        payload: {
+          content: "",
+          toolCalls: [
+            { id: "c1", name: "serial_read", arguments: { port: "COM3" } },
+            { id: "c2", name: "mem_read", arguments: { address: "0x0" } },
+          ],
+        },
+      },
+    ];
+    const queued = transcriptFromSession(base).events.filter((event) => event.kind === "tool") as Array<
+      Extract<TranscriptEvent, { kind: "tool" }>
+    >;
+    expect(queued.map((event) => event.tool.state)).toEqual(["queued", "queued"]);
+
+    const started = transcriptFromSession([
+      ...base,
+      { seq: 3, ts: "t", parent: 2, type: "tool_started", payload: { callId: "c1", tool: "serial_read", access: "read" } },
+      { seq: 4, ts: "t", parent: 2, type: "tool_result", payload: { id: "c1", ok: true, text: "ok" } },
+      { seq: 5, ts: "t", parent: 2, type: "tool_result", payload: { id: "c2", ok: false, code: "io", text: "boom" } },
+    ]).events.filter((event) => event.kind === "tool") as Array<Extract<TranscriptEvent, { kind: "tool" }>>;
+    expect(started.map((event) => event.tool.state)).toEqual(["done", "failed"]);
+    expect(started[0].tool.ok).toBe(true);
+    expect(started[1].tool.errorCode).toBe("io");
+
+    const running = transcriptFromSession([
+      ...base,
+      { seq: 3, ts: "t", parent: 2, type: "tool_started", payload: { callId: "c1", tool: "serial_read", access: "read" } },
+    ]).events.filter((event) => event.kind === "tool") as Array<Extract<TranscriptEvent, { kind: "tool" }>>;
+    expect(running.map((event) => event.tool.state)).toEqual(["running", "queued"]);
+  });
+
+  it("permission_decision 生成 permission 事件且不产生工具卡", () => {
     const events: SessionEvent[] = [
       { seq: 1, ts: "t", type: "user", payload: { content: "症状" } },
       {
@@ -193,7 +237,7 @@ describe("transcript", () => {
         type: "assistant",
         payload: {
           content: "",
-          toolCalls: [{ id: "c1", name: "serial_read", arguments: { port: "COM3" } }],
+          toolCalls: [{ id: "c1", name: "mem_write", arguments: { address: "0x0", value: "1" } }],
         },
       },
       {
@@ -203,15 +247,15 @@ describe("transcript", () => {
         type: "permission_decision",
         payload: {
           callId: "c1",
-          tool: "serial_read",
-          action: "allow",
-          effective: "allow",
-          reason: "test:allow",
+          tool: "mem_write",
+          action: "ask",
+          effective: "deny",
+          reason: "test:ask-denied",
           preset: "read-only",
           source: "builtin",
           paramsDigest: "digest",
-          paramsKeys: ["port"],
-          access: "read",
+          paramsKeys: ["address", "value"],
+          access: "write",
         },
       },
       {
@@ -219,17 +263,44 @@ describe("transcript", () => {
         ts: "t",
         parent: 2,
         type: "tool_result",
-        payload: { id: "c1", ok: true, code: "ok", text: "0x00" },
+        payload: { id: "c1", ok: false, code: "permission_denied", text: "denied" },
       },
     ];
 
     const view = transcriptFromSession(events);
-    const withoutAudit = events.filter((event) => event.type !== "permission_decision");
+    const permission = view.events.find((event) => event.kind === "permission");
+    expect(permission).toEqual({
+      id: "ev-3",
+      kind: "permission",
+      permission: {
+        callId: "c1",
+        tool: "mem_write",
+        action: "ask",
+        effective: "deny",
+        reason: "test:ask-denied",
+      },
+    });
+    expect(view.events.filter((event) => event.kind === "tool")).toHaveLength(1);
+    expect(reduceStep(events)).toStrictEqual(reduceStep(events.filter((event) => event.type !== "permission_decision")));
+  });
 
-    expect(view.events.map((event) => event.kind)).toStrictEqual(["user", "tool"]);
-    expect(view.events).toHaveLength(transcriptFromSession(withoutAudit).events.length);
-    expect(view.status).toBe("diagnosing");
-    expect(reduceStep(events)).toStrictEqual(reduceStep(withoutAudit));
+  it("TRANSCRIPT_KINDS 包含 permission", () => {
+    expect([...TRANSCRIPT_KINDS]).toContain("permission");
+  });
+
+  it("mcp_status 与 device_status 不进入正文事件", () => {
+    const events: SessionEvent[] = [
+      { seq: 1, ts: "t", type: "user", payload: { content: "症状" } },
+      { seq: 2, ts: "t", type: "mcp_status", payload: { kind: "connected", server: "echo" } },
+      {
+        seq: 3,
+        ts: "t",
+        type: "device_status",
+        payload: { callId: "c1", server: "probe", tool: "mcp__probe__attach", state: { probe: "attached" } },
+      },
+    ];
+    const view = transcriptFromSession(events);
+    expect(view.events.map((event) => event.kind)).toEqual(["user"]);
   });
   it("emptyTranscriptView 返回五步待办、idle 与空事件", () => {
     const view = emptyTranscriptView();

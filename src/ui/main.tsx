@@ -1,17 +1,18 @@
 import { render } from "preact";
-import type { LoopEvent } from "../loop/events.js";
 import { ApiError } from "./api/client.js";
 import type { DeviceStatus } from "./api/client.js";
+import { createSessionEventStream } from "./api/event-stream.js";
 import { loadSessionView, loadWorkbench } from "./api/load.js";
+import { createSessionStreamController } from "./api/session-stream.js";
 import { App } from "./app.js";
 import { SYMBOL_SPRITE } from "./icons.js";
 import {
   applyLoadFailure,
   applyLoadSuccess,
+  applySessionEvent,
   applySessionFailure,
   applySessionLoaded,
   applyStreamError,
-  applyStreamEvent,
   RequestGate,
   retryTarget,
   startLoad,
@@ -20,9 +21,9 @@ import {
 import type { WorkbenchState } from "./state.js";
 import { applyTheme, onChangeMedia, persistTheme, readStoredTheme } from "./theme.js";
 import type { ThemeChoice } from "./theme.js";
-import { createEventStream, postAction } from "./view/sse.js";
-import { emptyTranscriptView, transcriptFromLoop } from "./view/transcript.js";
-import type { TranscriptView } from "./view/transcript.js";
+import { UNKNOWN_DEVICE } from "./view/device.js";
+import { postAction } from "./view/sse.js";
+import { emptyTranscriptView } from "./view/transcript.js";
 import "./styles.css";
 
 const root = document.getElementById("root")!;
@@ -34,15 +35,8 @@ function readUrl(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-const streamUrl = readUrl(import.meta.env.VITE_EVENT_STREAM_URL);
+const eventsUrl = readUrl(import.meta.env.VITE_EVENT_STREAM_URL) ?? "/api/events";
 const actionUrl = readUrl(import.meta.env.VITE_ACTION_URL);
-
-const UNKNOWN_DEVICE: DeviceStatus = {
-  probe: "unknown",
-  serial: "unknown",
-  cpu: "unknown",
-  backend: "unknown",
-};
 
 let state: WorkbenchState = {
   connection: "loading",
@@ -51,11 +45,14 @@ let state: WorkbenchState = {
   kbTree: [],
   kbRoot: null,
   device: UNKNOWN_DEVICE,
+  events: [],
+  lastSeq: -1,
+  mcpStatuses: [],
 };
 
 let themeChoice: ThemeChoice = readStoredTheme();
 let dockOpen = true;
-let liveView: TranscriptView | undefined;
+let deviceFallback: DeviceStatus | undefined;
 const gate = new RequestGate();
 
 function errorMessageOf(error: unknown): string {
@@ -63,6 +60,37 @@ function errorMessageOf(error: unknown): string {
   if (error instanceof ApiError) return `接口返回错误（${error.code}，HTTP ${error.status}）`;
   return "无法连接本地服务，请确认已运行 node dist/server/serve.js";
 }
+
+const controller = createSessionStreamController({
+  loadSession: (id) =>
+    loadSessionView(id, {
+      fetchImpl,
+      ...(deviceFallback === undefined ? {} : { deviceFallback }),
+    }),
+  openStream: (id, since, handlers) =>
+    createSessionEventStream({ url: eventsUrl, sessionId: id, initialSince: since, handlers }),
+  onEvent: (_id, event) => {
+    state = applySessionEvent(state, event);
+    renderApp();
+  },
+  onOpen: () => {
+    state = { ...state, streamError: undefined };
+    renderApp();
+  },
+  onError: (_id, message) => {
+    state = applyStreamError(state, message);
+    renderApp();
+  },
+  onLoadError: (id, error) => {
+    state = applySessionFailure(state, id, errorMessageOf(error));
+    renderApp();
+  },
+  onLoaded: (id, loaded) => {
+    state = applySessionLoaded(state, id, loaded);
+    renderApp();
+  },
+  maxGapReloads: 3,
+});
 
 function renderApp(): void {
   render(
@@ -79,6 +107,7 @@ function renderApp(): void {
         kbTree={state.kbTree}
         kbRoot={state.kbRoot}
         device={state.device}
+        mcpStatuses={state.mcpStatuses}
         onSend={actionUrl === undefined ? undefined : (text) => postAction(actionUrl, { text })}
         canSend={actionUrl !== undefined}
         themeChoice={themeChoice}
@@ -109,13 +138,16 @@ function renderApp(): void {
 
 async function load(): Promise<void> {
   const isCurrent = gate.begin();
+  controller.close();
   state = startLoad(state);
   renderApp();
   try {
     const loaded = await loadWorkbench({ fetchImpl });
     if (!isCurrent() || abort.signal.aborted) return;
-    state = applyLoadSuccess(state, loaded, liveView);
+    deviceFallback = loaded.deviceFallback;
+    state = applyLoadSuccess(state, loaded);
     renderApp();
+    if (state.activeSessionId !== undefined) controller.start(state.activeSessionId, state.lastSeq);
   } catch (error) {
     if (!isCurrent() || abort.signal.aborted) return;
     state = applyLoadFailure(state, errorMessageOf(error));
@@ -127,11 +159,16 @@ async function selectSession(id: string): Promise<void> {
   const isCurrent = gate.begin();
   state = startSessionSwitch(state);
   renderApp();
+  controller.close();
   try {
-    const view = await loadSessionView(id, { fetchImpl });
+    const loaded = await loadSessionView(id, {
+      fetchImpl,
+      ...(deviceFallback === undefined ? {} : { deviceFallback }),
+    });
     if (!isCurrent() || abort.signal.aborted) return;
-    state = applySessionLoaded(state, id, view);
+    state = applySessionLoaded(state, id, loaded);
     renderApp();
+    controller.start(id, loaded.lastSeq);
   } catch (error) {
     if (!isCurrent() || abort.signal.aborted) return;
     state = applySessionFailure(state, id, errorMessageOf(error));
@@ -148,27 +185,8 @@ async function retry(): Promise<void> {
   await load();
 }
 
-if (streamUrl !== undefined) {
-  const streamed: LoopEvent[] = [];
-  createEventStream(streamUrl, {
-    onOpen: () => {
-      state = { ...state, streamError: undefined };
-      renderApp();
-    },
-    onEvent: (event) => {
-      streamed.push(event);
-      liveView = transcriptFromLoop(streamed);
-      state = applyStreamEvent(state, liveView);
-      renderApp();
-    },
-    onError: () => {
-      state = applyStreamError(state, "实时事件流中断或未建立");
-      renderApp();
-    },
-  });
-}
-
 window.addEventListener("beforeunload", () => {
+  controller.close();
   abort.abort();
 });
 

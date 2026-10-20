@@ -188,6 +188,7 @@ describe("query 主循环", () => {
       "checkpoint",
       "assistant",
       "status",
+      "tool_started",
       "tool_result",
       "checkpoint",
       "assistant",
@@ -265,6 +266,198 @@ describe("query 主循环", () => {
       toolName: "evidence",
       evidence: true,
     });
+  });
+
+  it("工具返回 deviceStatus 时在 tool_result 之后写 device_status", async () => {
+    const probeTool: ToolDef<{ text: string }> = {
+      name: "probe",
+      description: "返回设备状态",
+      schema: z.object({ text: z.string() }),
+      annotations: { readOnly: true },
+      execute: async () => ({
+        isError: false,
+        code: "ok",
+        message: "",
+        text: "attached",
+        deviceStatus: { server: "probe", state: { probe: "attached" } },
+      }),
+    };
+    const provider = scriptedProvider([
+      reply("探测", [{ id: "p1", name: "probe", arguments: { text: "attach" } }]),
+      reply("完成"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([probeTool]),
+    });
+
+    await collect(query(ctx, "探测", { maxTurns: 10 }));
+
+    const logged = session.events();
+    const resultIndex = logged.findIndex((event) => event.type === "tool_result");
+    const statusIndex = logged.findIndex((event) => event.type === "device_status");
+    const assistant = logged.find((event) => event.type === "assistant");
+    expect(resultIndex).toBeGreaterThanOrEqual(0);
+    expect(statusIndex).toBe(resultIndex + 1);
+    expect(logged[statusIndex]!.payload).toStrictEqual({
+      callId: "p1",
+      server: "probe",
+      tool: "probe",
+      state: { probe: "attached" },
+    });
+    expect(logged[statusIndex]!.parent).toBe(assistant?.seq);
+    expect(() => buildMessages(logged)).not.toThrow();
+  });
+
+  it("工具返回 deviceStatusInvalid 时写 device_status_invalid 状态事件", async () => {
+    const probeTool: ToolDef<{ text: string }> = {
+      name: "probe",
+      description: "返回非法设备状态",
+      schema: z.object({ text: z.string() }),
+      annotations: { readOnly: true },
+      execute: async () => ({
+        isError: false,
+        code: "ok",
+        message: "",
+        text: "ok",
+        deviceStatusInvalid: "deviceStatus 必须是普通对象",
+      }),
+    };
+    const provider = scriptedProvider([
+      reply("探测", [{ id: "p1", name: "probe", arguments: { text: "attach" } }]),
+      reply("完成"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([probeTool]),
+    });
+
+    await collect(query(ctx, "探测", { maxTurns: 10 }));
+
+    const logged = session.events();
+    const resultIndex = logged.findIndex((event) => event.type === "tool_result");
+    const statusEvent = logged.find(
+      (event) =>
+        event.type === "status" && event.payload.status === "device_status_invalid",
+    );
+    expect(statusEvent).toBeDefined();
+    expect(logged.indexOf(statusEvent!)).toBe(resultIndex + 1);
+    expect(statusEvent!.payload).toStrictEqual({
+      status: "device_status_invalid",
+      tool: "probe",
+      message: "deviceStatus 必须是普通对象",
+    });
+    expect(logged.some((event) => event.type === "device_status")).toBe(false);
+  });
+
+  it("device_status 追加失败：工具已执行、会话报错、每个 call 仅一条 tool_result", async () => {
+    let executed = 0;
+    const probeTool: ToolDef<{ text: string }> = {
+      name: "probe",
+      description: "返回设备状态",
+      schema: z.object({ text: z.string() }),
+      annotations: { readOnly: true },
+      execute: async () => {
+        executed += 1;
+        return {
+          isError: false,
+          code: "ok",
+          message: "",
+          text: "attached",
+          deviceStatus: { server: "probe", state: { probe: "attached" } },
+        };
+      },
+    };
+    const provider = scriptedProvider([
+      reply("并发探测", [
+        { id: "p1", name: "probe", arguments: { text: "a" } },
+        { id: "p2", name: "probe", arguments: { text: "b" } },
+      ]),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([probeTool]),
+    });
+    const failing: SessionHandle = {
+      id: session.id,
+      dir: session.dir,
+      header: session.header,
+      append: async (event) => {
+        if (event.type === "device_status") {
+          throw new Error("device_status append boom");
+        }
+        return session.append(event);
+      },
+      events: () => session.events(),
+      usageTotals: () => session.usageTotals(),
+      close: () => session.close(),
+    };
+    ctx.session = failing;
+
+    await expect(collect(query(ctx, "探测", { maxTurns: 10 }))).rejects.toThrow(
+      "device_status append boom",
+    );
+
+    expect(executed).toBe(2);
+    const results = session.events().filter((event) => event.type === "tool_result");
+    expect(results.map((event) => event.payload.id)).toStrictEqual(["p1", "p2"]);
+    expect(session.events().some((event) => event.type === "device_status")).toBe(false);
+    expect(() => buildMessages(session.events())).not.toThrow();
+  });
+
+  it("单个 call 的 device_status 失败不会把其他真实结果改写成 tool_result_lost", async () => {
+    const probeTool: ToolDef<{ text: string }> = {
+      name: "probe",
+      description: "返回设备状态",
+      schema: z.object({ text: z.string() }),
+      annotations: { readOnly: true },
+      execute: async () => ({
+        isError: false,
+        code: "ok",
+        message: "",
+        text: "attached",
+        deviceStatus: { server: "probe", state: { probe: "attached" } },
+      }),
+    };
+    const provider = scriptedProvider([
+      reply("并发探测", [
+        { id: "p1", name: "probe", arguments: { text: "a" } },
+        { id: "p2", name: "probe", arguments: { text: "b" } },
+      ]),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([probeTool]),
+    });
+    const failing: SessionHandle = {
+      id: session.id,
+      dir: session.dir,
+      header: session.header,
+      append: async (event) => {
+        if (event.type === "device_status" && event.payload.callId === "p1") {
+          throw new Error("p1 device_status boom");
+        }
+        return session.append(event);
+      },
+      events: () => session.events(),
+      usageTotals: () => session.usageTotals(),
+      close: () => session.close(),
+    };
+    ctx.session = failing;
+
+    await expect(collect(query(ctx, "探测", { maxTurns: 10 }))).rejects.toThrow(
+      "p1 device_status boom",
+    );
+
+    const results = session.events().filter((event) => event.type === "tool_result");
+    expect(results.map((event) => event.payload.id)).toStrictEqual(["p1", "p2"]);
+    expect(results.map((event) => [event.payload.ok, event.payload.code, event.payload.text]))
+      .toStrictEqual([
+        [true, "ok", "attached"],
+        [true, "ok", "attached"],
+      ]);
+    expect(
+      session.events().some(
+        (event) => event.type === "tool_result" && event.payload.code === "tool_result_lost",
+      ),
+    ).toBe(false);
+    expect(() => buildMessages(session.events())).not.toThrow();
   });
 
   it("model-visible means logged: 投影含 tool 消息", async () => {
@@ -350,6 +543,7 @@ describe("query 主循环", () => {
       "checkpoint",
       "assistant",
       "status",
+      "tool_started",
       "tool_result",
       "interrupted",
     ]);
@@ -960,14 +1154,16 @@ describe("query 主循环", () => {
       }),
     ]);
     const { ctx, session } = await makeCtx(provider);
-    let count = 0;
+    let failed = false;
     const failing: SessionHandle = {
       id: session.id,
       dir: session.dir,
       header: session.header,
       append: async (event) => {
-        count += 1;
-        if (count === 5) throw new Error("append boom");
+        if (event.type === "tool_result" && !failed) {
+          failed = true;
+          throw new Error("append boom");
+        }
         return session.append(event);
       },
       events: () => session.events(),
@@ -985,6 +1181,8 @@ describe("query 主循环", () => {
       "checkpoint",
       "assistant",
       "usage",
+      "tool_started",
+      "tool_started",
       "tool_result",
       "tool_result",
       "interrupted",

@@ -33,11 +33,14 @@ export interface EvidenceRow {
 
 export type ToolKind = "readout" | "hitlist" | "evidence" | "error";
 
+export type ToolRunState = "queued" | "running" | "done" | "failed";
+
 export interface ToolCardModel {
   id: string;
   name: string;
   args: string;
   ok: boolean;
+  state: ToolRunState;
   kind: ToolKind;
   ms?: number;
   readout?: ReadoutRow[];
@@ -45,7 +48,7 @@ export interface ToolCardModel {
   evidence?: EvidenceRow[];
   text?: string;
   artifactPath?: string;
-  pending?: boolean;
+
   errorCode?: string;
   errorText?: string;
   readOnly?: boolean;
@@ -67,6 +70,14 @@ export interface GuardModel {
   state: "待确认" | "已拒绝" | "已执行";
 }
 
+export interface PermissionModel {
+  callId: string;
+  tool: string;
+  action: "allow" | "ask" | "deny";
+  effective: "allow" | "deny";
+  reason: string;
+}
+
 export type TranscriptEvent =
   | { id: string; kind: "user"; text: string }
   | { id: string; kind: "assistant"; text: string }
@@ -74,6 +85,7 @@ export type TranscriptEvent =
   | { id: string; kind: "tool"; tool: ToolCardModel }
   | { id: string; kind: "verdict"; verdict: VerdictModel }
   | { id: string; kind: "guard"; guard: GuardModel }
+  | { id: string; kind: "permission"; permission: PermissionModel }
   | { id: string; kind: "interrupted"; reason: string };
 
 export interface TranscriptView {
@@ -146,7 +158,8 @@ function createToolCard(id: string, name: string, args: unknown): ToolCardModel 
     name,
     args: formatArgs(args),
     ok: true,
-    pending: true,
+    state: "queued",
+
     kind: defaultKind(name),
     readOnly: annotations?.readOnly === true,
     destructive: annotations?.destructive === true,
@@ -209,7 +222,8 @@ function evidenceRows(raw: unknown): EvidenceRow[] | undefined {
 
 function applyToolResult(card: ToolCardModel, payload: ToolResultPayload): void {
   card.ok = payload.ok;
-  card.pending = undefined;
+  card.state = payload.ok ? "done" : "failed";
+
   if (payload.artifactPath !== undefined) card.artifactPath = payload.artifactPath;
   const detail = isRecord(payload.detail) ? payload.detail : undefined;
   if (detail !== undefined) {
@@ -419,6 +433,47 @@ export function transcriptFromSession(events: readonly SessionEvent[]): Transcri
         out.push({ id: `ev-${event.seq}`, kind: "interrupted", reason });
         break;
       }
+      case "tool_started": {
+        const callId = asString(payload.callId);
+        if (callId === undefined) break;
+        const card = tools.get(callId);
+        if (card !== undefined) card.tool.state = "running";
+        break;
+      }
+      case "permission_decision": {
+        const callId = asString(payload.callId);
+        if (callId === undefined) break;
+        out.push({
+          id: `ev-${event.seq}`,
+          kind: "permission",
+          permission: {
+            callId,
+            tool: asString(payload.tool) ?? "",
+            action:
+              payload.action === "allow" || payload.action === "ask" || payload.action === "deny"
+                ? payload.action
+                : "deny",
+            effective: payload.effective === "allow" ? "allow" : "deny",
+            reason: asString(payload.reason) ?? "",
+          },
+        });
+        if (payload.effective !== "allow") {
+          const card = tools.get(callId);
+          if (card !== undefined) {
+            card.tool.state = "failed";
+            card.tool.ok = false;
+            if (card.tool.errorCode === undefined) card.tool.errorCode = "permission_denied";
+            if (card.tool.errorText === undefined) {
+              card.tool.errorText = asString(payload.reason) ?? "权限拒绝，未执行";
+            }
+          }
+        }
+        break;
+      }
+      case "mcp_status":
+      case "device_status": {
+        break;
+      }
       default:
         break;
     }
@@ -492,7 +547,16 @@ export function transcriptFromLoop(events: readonly LoopEvent[]): TranscriptView
   return buildView(out, { status, cost, interruptReason });
 }
 
-const TRANSCRIPT_KINDS = new Set(["user", "assistant", "ask", "tool", "verdict", "guard", "interrupted"]);
+export const TRANSCRIPT_KINDS: ReadonlySet<string> = new Set([
+  "user",
+  "assistant",
+  "ask",
+  "tool",
+  "verdict",
+  "guard",
+  "permission",
+  "interrupted",
+]);
 const LOOP_KINDS = new Set(["model_message", "tool_use", "tool_result", "turn_end", "compacted", "done"]);
 
 function isTranscriptEvent(value: unknown): value is TranscriptEvent {

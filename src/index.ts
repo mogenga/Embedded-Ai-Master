@@ -37,6 +37,7 @@ import { SessionResumeError } from "./session/errors.js";
 import { readSessionDir } from "./session/persistence.js";
 import { createSession, resumeSession } from "./session/session.js";
 import type { SessionHandle } from "./session/session.js";
+import type { McpStatusPayload, McpStatusPayloadKind } from "./session/types.js";
 import { createBuiltinTools } from "./tools/builtin.js";
 import { isWindowsReservedName } from "./tools/pipeline.js";
 import { ToolRegistry } from "./tools/registry.js";
@@ -183,7 +184,7 @@ function normalizePermissionOptions(raw: unknown): NormalizedPermissionOptions |
   return { options: value as RunPermissionOptions, inline };
 }
 
-interface McpSessionStatus {
+export interface McpSessionStatus {
   status:
     | "mcp_connected"
     | "mcp_connect_failed"
@@ -203,29 +204,69 @@ interface McpSessionStatus {
   message?: string;
 }
 
-function toSessionMcpStatus(event: McpStatusEvent): McpSessionStatus | undefined {
-  switch (event.kind) {
-    case "connected":
-      return { status: "mcp_connected", server: event.server, toolCount: event.toolCount };
-    case "connect_failed":
-      return { status: "mcp_connect_failed", server: event.server, message: event.message };
-    case "tools_changed":
-      return { status: "mcp_tools_changed", server: event.server, toolCount: event.toolCount };
-    case "tools_refresh_failed":
-      return {
-        status: "mcp_tools_refresh_failed",
-        server: event.server,
-        message: event.message,
-      };
-    case "tool_invalid_schema":
-      return {
-        status: "mcp_tool_invalid_schema",
-        server: event.server,
-        tool: event.tool,
-        message: event.message,
-      };
-    default:
-      return undefined;
+const MCP_STATUS_PAYLOAD_KINDS: ReadonlySet<string> = new Set<McpStatusPayloadKind>([
+  "connected",
+  "connect_failed",
+  "tools_changed",
+  "tools_refresh_failed",
+  "tool_invalid_schema",
+  "listener_failed",
+  "call_failed",
+  "config_failed",
+  "config_warning",
+  "project_config_skipped",
+  "tool_name_renamed",
+]);
+
+export function toMcpStatusPayload(
+  input: McpStatusEvent | McpSessionStatus,
+): McpStatusPayload | undefined {
+  const source = input as {
+    kind?: string;
+    status?: string;
+    server?: string;
+    tool?: string;
+    toolCount?: number;
+    message?: string;
+    attempts?: number;
+    name?: string;
+    originalName?: string;
+    scope?: "global";
+  };
+  const kind =
+    source.kind !== undefined
+      ? source.kind
+      : source.status?.startsWith("mcp_")
+        ? source.status.slice("mcp_".length)
+        : source.status;
+  // MCP 状态是观测性数据:未知 kind 直接跳过,不能把诊断通道升级为会话错误。
+  if (kind === undefined || !MCP_STATUS_PAYLOAD_KINDS.has(kind)) {
+    console.error(`[mcp] unknown status event skipped: ${String(kind)}`);
+    return undefined;
+  }
+  const payload: McpStatusPayload = { kind: kind as McpStatusPayloadKind };
+  if (source.server !== undefined) payload.server = source.server;
+  if (source.tool !== undefined) payload.tool = source.tool;
+  if (source.toolCount !== undefined) payload.toolCount = source.toolCount;
+  if (source.message !== undefined) payload.message = source.message;
+  if (source.attempts !== undefined) payload.attempts = source.attempts;
+  if (source.name !== undefined) payload.name = source.name;
+  if (source.originalName !== undefined) payload.originalName = source.originalName;
+  if (source.scope !== undefined) payload.scope = source.scope;
+  return payload;
+}
+
+// MCP 状态属于观测性事件:写入失败只降级为 false + stderr,不能中止正在进行的诊断。
+export async function appendMcpStatus(
+  session: SessionHandle,
+  payload: McpStatusPayload,
+): Promise<boolean> {
+  try {
+    await session.append({ type: "mcp_status", payload: { ...payload } });
+    return true;
+  } catch (error) {
+    console.error(`[mcp] status event append failed: ${messageOf(error)}`);
+    return false;
   }
 }
 
@@ -497,27 +538,19 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   let hasPrimaryError = false;
   let mcpManager: McpManager | undefined;
   let statusQueue: Promise<void> = Promise.resolve();
-  let statusWriteFailure: unknown;
   const seenMcpStatuses = new Set<string>();
-  const appendMcpStatus = (status: McpSessionStatus): void => {
-    statusQueue = statusQueue
-      .then(() => session.append({ type: "status", payload: { ...status } }))
-      .then(
-        () => undefined,
-        (error: unknown) => {
-          if (statusWriteFailure === undefined) {
-            statusWriteFailure = error;
-            console.error(`[mcp] status event append failed: ${messageOf(error)}`);
-          }
-        },
-      );
+  // 串行化写入,避免并发 append 打乱 seq;helper 内部已决定失败语义(降级、不抛)。
+  const enqueueMcpStatus = (status: McpStatusEvent | McpSessionStatus): void => {
+    const payload = toMcpStatusPayload(status);
+    if (payload === undefined) return;
+    statusQueue = statusQueue.then(() => appendMcpStatus(session, payload).then(() => undefined));
   };
   const appendMcpStatusOnce = (key: string, status: McpSessionStatus): void => {
     if (seenMcpStatuses.has(key)) {
       return;
     }
     seenMcpStatuses.add(key);
-    appendMcpStatus(status);
+    enqueueMcpStatus(status);
   };
 
   try {
@@ -576,7 +609,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
           opts.mcp?.trustProjectConfig === true || explicitProjectPath !== undefined;
         const defaultProjectPath = path.join(runCwd, ".harness", "mcp.json");
         if (!trustProject && existsSync(defaultProjectPath)) {
-          appendMcpStatus({
+          enqueueMcpStatus({
             status: "mcp_project_config_skipped",
             message: defaultProjectPath,
           });
@@ -603,10 +636,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
         });
         if (servers.length > 0) {
           const manager = new McpManager(servers, {
-            logger: (event) => {
-              const status = toSessionMcpStatus(event);
-              if (status !== undefined) appendMcpStatus(status);
-            },
+            logger: (event) => enqueueMcpStatus(event),
           });
           mcpManager = manager;
           const emitAdapterStatus = (status: McpToolAdapterStatus): void => {
@@ -640,7 +670,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
 
               registry.replace([...builtinTools, ...mcpTools]);
             } catch (error) {
-              appendMcpStatus({
+              enqueueMcpStatus({
                 status: "mcp_tools_refresh_failed",
                 scope: "global",
                 message: messageOf(error),
@@ -655,7 +685,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
         }
       } catch (error) {
         if (error instanceof McpConfigError) {
-          appendMcpStatus({ status: "mcp_config_failed", message: error.message });
+          enqueueMcpStatus({ status: "mcp_config_failed", message: error.message });
         } else {
           throw error;
         }

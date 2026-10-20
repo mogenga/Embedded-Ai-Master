@@ -5,7 +5,7 @@ import { heuristicCountTokens } from "../model/count.js";
 import type { PermissionGate, PermissionRequest } from "../permissions/types.js";
 import type { SessionHandle } from "../session/session.js";
 import type { ToolRegistry } from "./registry.js";
-import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
+import type { ToolAccess, ToolCtx, ToolDef, ToolResult } from "./types.js";
 
 export interface BatchCall {
   id: string;
@@ -30,6 +30,7 @@ export interface BatchOptions {
   timeoutMs?: number;
   settleGraceMs?: number;
   permission?: PermissionOptions;
+  onToolStarted?: (call: BatchCall, access: ToolAccess) => Promise<void>;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -299,6 +300,7 @@ interface ExecuteOutcome {
 interface AuthorizedCall {
   tool: ToolDef<any>;
   input: unknown;
+  access: ToolAccess;
 }
 
 type AuthorizationOutcome =
@@ -358,6 +360,8 @@ async function authorizeOne(
     };
   }
 
+  // 授权阶段不预写 tool_started:只有真正进入执行的调用才写,避免留下
+  // "已 started 但从未执行"的孤儿事件。
   if (opts.permission !== undefined) {
     const decision = await opts.permission.gate.check({
       callId: call.id,
@@ -369,18 +373,41 @@ async function authorizeOne(
     if (decision.effective !== "allow") {
       return { kind: "rejected", result: permissionDenied(decision) };
     }
+    return {
+      kind: "authorized",
+      authorized: { tool, input: parsed.data, access: decision.access },
+    };
   }
 
-  return { kind: "authorized", authorized: { tool, input: parsed.data } };
+  return {
+    kind: "authorized",
+    authorized: {
+      tool,
+      input: parsed.data,
+      access: tool.access?.(parsed.data) ?? "unknown",
+    },
+  };
 }
 
 async function executeAuthorized(
   session: SessionHandle,
+  call: BatchCall,
   authorized: AuthorizedCall,
   opts: BatchOptions,
 ): Promise<ExecuteOutcome> {
   // 审批期间调用方可能已中止;此时不能再依赖 executeAuthorized 内部注册的 abort
   // 监听(事件已派发),必须在启动执行前同步复查,否则不检查 signal 的工具仍会运行。
+  if (opts.signal.aborted) {
+    return { result: failure("tool_aborted", "tool aborted before execution") };
+  }
+
+  // 回调失败时直接上抛,该调用不执行;不要在这里吞掉异常或预先写 started。
+  if (opts.onToolStarted !== undefined) {
+    await opts.onToolStarted(call, authorized.access);
+  }
+
+  // started 写入期间调用方可能刚刚中止;abort 监听此时才注册会错过已派发的事件,
+  // 因此必须在启动执行前再次同步复查,否则忽略 signal 的工具仍会运行。
   if (opts.signal.aborted) {
     return { result: failure("tool_aborted", "tool aborted before execution") };
   }
@@ -465,7 +492,7 @@ async function runOne(
     const result = await finalizeResult(authorization.result, call.id, opts.artifactDir);
     return { id: call.id, result: { ...result, evidence } };
   }
-  const outcome = await executeAuthorized(session, authorization.authorized, opts);
+  const outcome = await executeAuthorized(session, call, authorization.authorized, opts);
   const result = await finalizeResult(outcome.result, call.id, opts.artifactDir);
   return {
     id: call.id,
@@ -574,7 +601,12 @@ export async function executeBatch(
     // 此时第二阶段尚未开始,任何工具都不会执行。
     type Prepared =
       | { kind: "final"; result: BatchResult }
-      | { kind: "authorized"; id: string; evidence: boolean; authorized: AuthorizedCall };
+      | {
+          kind: "authorized";
+          call: BatchCall;
+          evidence: boolean;
+          authorized: AuthorizedCall;
+        };
     const prepared: Prepared[] = [];
     for (let index = 0; index < calls.length; index += 1) {
       const call = calls[index]!;
@@ -598,7 +630,7 @@ export async function executeBatch(
       }
       prepared.push({
         kind: "authorized",
-        id: call.id,
+        call,
         evidence,
         authorized: authorization.authorized,
       });
@@ -608,9 +640,9 @@ export async function executeBatch(
     return Promise.all(
       prepared.map(async (entry): Promise<BatchResult> => {
         if (entry.kind === "final") return entry.result;
-        const outcome = await executeAuthorized(session, entry.authorized, opts);
-        const result = await finalizeResult(outcome.result, entry.id, opts.artifactDir);
-        return { id: entry.id, result: { ...result, evidence: entry.evidence } };
+        const outcome = await executeAuthorized(session, entry.call, entry.authorized, opts);
+        const result = await finalizeResult(outcome.result, entry.call.id, opts.artifactDir);
+        return { id: entry.call.id, result: { ...result, evidence: entry.evidence } };
       }),
     );
   }

@@ -1,4 +1,5 @@
 import type { JSX } from "preact";
+import type { McpStatusPayload } from "../session/types.js";
 import type { DeviceStatus, KbNode, SessionSummary } from "./api/client.js";
 import { Composer } from "./components/conversation/composer.js";
 import { ConversationHeader } from "./components/conversation/header.js";
@@ -21,6 +22,7 @@ export interface AppProps {
   kbTree: KbNode[];
   kbRoot?: string | null;
   device: DeviceStatus;
+  mcpStatuses?: McpStatusPayload[];
   onSend?: (text: string) => void;
   canSend?: boolean;
   themeChoice?: ThemeChoice;
@@ -71,6 +73,7 @@ export function App({
   kbTree,
   kbRoot = null,
   device,
+  mcpStatuses = [],
   onSend,
   canSend = true,
   themeChoice = "system",
@@ -151,7 +154,7 @@ export function App({
           />
         </main>
         <aside class="dock" id="dock" aria-label="调试坞">
-          <Dock view={view} device={device} state={connection} />
+          <Dock view={view} device={device} mcpStatuses={mcpStatuses} state={connection} />
         </aside>
       </div>
       <StatusBar

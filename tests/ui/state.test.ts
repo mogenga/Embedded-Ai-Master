@@ -1,19 +1,22 @@
 import { describe, expect, it } from "vitest";
+import type { SessionEvent, SessionEventEnvelope } from "../../src/session/types.js";
 import {
   applyLoadFailure,
   applyLoadSuccess,
+  applySessionEvent,
   applySessionFailure,
   applySessionLoaded,
   applyStreamError,
-  applyStreamEvent,
-  retryTarget,
   RequestGate,
+  retryTarget,
   startLoad,
   startSessionSwitch,
 } from "../../src/ui/state.js";
+import type { LoadedWorkbench } from "../../src/ui/api/load.js";
 import type { WorkbenchState } from "../../src/ui/state.js";
-import { UNKNOWN_DEVICE, makeTranscriptView } from "./support/builders.js";
-import { emptyTranscriptView } from "../../src/ui/view/transcript.js";
+import { deviceFromSession } from "../../src/ui/view/device.js";
+import { emptyTranscriptView, transcriptFromSession } from "../../src/ui/view/transcript.js";
+import { UNKNOWN_DEVICE, makeSessionEvents } from "./support/builders.js";
 
 function baseState(): WorkbenchState {
   return {
@@ -23,17 +26,45 @@ function baseState(): WorkbenchState {
     kbTree: [],
     kbRoot: null,
     device: UNKNOWN_DEVICE,
+    events: [],
+    lastSeq: -1,
+    mcpStatuses: [],
   };
 }
 
-const LOADED = {
+const EVENTS = makeSessionEvents();
+
+const LOADED: LoadedWorkbench = {
   sessions: [{ id: "s2", createdAt: "2026-10-18T21:40:00.000Z", status: "open" as const }],
   errors: [],
   activeSessionId: "s2",
-  view: { ...makeTranscriptView(), sessionId: "s2" },
+  view: { ...transcriptFromSession(EVENTS), sessionId: "s2" },
+  events: EVENTS,
+  lastSeq: EVENTS.at(-1)!.seq,
   kbTree: [],
   kbRoot: null,
-  device: UNKNOWN_DEVICE,
+  device: { probe: "attached", serial: "open", cpu: "halted", backend: "renode" },
+  deviceFallback: { probe: "OpenOCD", serial: "COM3", cpu: "Cortex-M4", backend: "Renode" },
+};
+
+function loadedSession(id: string, events: SessionEvent[] = []) {
+  return {
+    view: { ...transcriptFromSession(events), sessionId: id },
+    events,
+    lastSeq: events.at(-1)?.seq ?? -1,
+    device: deviceFromSession(events),
+  };
+}
+
+function envelope(event: SessionEvent, sessionId = "s2"): SessionEventEnvelope {
+  return { ...event, sessionId };
+}
+
+const DEVICE_EVENT: SessionEvent = {
+  seq: 50,
+  ts: "t",
+  type: "device_status",
+  payload: { callId: "c1", server: "probe", tool: "mcp__probe__attach", state: { probe: "attached" } },
 };
 
 describe("workbench state", () => {
@@ -44,26 +75,30 @@ describe("workbench state", () => {
     expect(state.detailError).toBeUndefined();
   });
 
-  it("加载成功写入会话、视图、KB 与设备", () => {
+  it("加载成功写入会话、事件、游标、视图、KB 与设备", () => {
     const state = applyLoadSuccess(baseState(), LOADED);
     expect(state.connection).toBe("ready");
     expect(state.activeSessionId).toBe("s2");
     expect(state.view.sessionId).toBe("s2");
+    expect(state.events).toBe(LOADED.events);
+    expect(state.lastSeq).toBe(12);
     expect(state.sessions.length).toBe(1);
     expect(state.switching).toBe(false);
-  });
-
-  it("加载成功时实时视图优先于回放", () => {
-    const live = { ...makeTranscriptView(), sessionId: "live" };
-    const state = applyLoadSuccess(baseState(), LOADED, live);
-    expect(state.view.sessionId).toBe("live");
-    expect(state.activeSessionId).toBe("s2");
+    expect(state.device.probe).toBe("attached");
   });
 
   it("加载成功且无会话时清除旧 activeSessionId", () => {
     const previous = { ...baseState(), activeSessionId: "s1" };
-    const state = applyLoadSuccess(previous, { ...LOADED, activeSessionId: undefined, sessions: [] });
+    const state = applyLoadSuccess(previous, {
+      ...LOADED,
+      activeSessionId: undefined,
+      sessions: [],
+      events: [],
+      lastSeq: -1,
+    });
     expect(state.activeSessionId).toBeUndefined();
+    expect(state.events).toEqual([]);
+    expect(state.lastSeq).toBe(-1);
   });
 
   it("加载失败进入错误态并保留重试信息", () => {
@@ -80,15 +115,42 @@ describe("workbench state", () => {
     expect(state.switching).toBe(true);
   });
 
-  it("会话加载成功后才切换 activeSessionId", () => {
-    const state = applySessionLoaded(startSessionSwitch({ ...baseState(), activeSessionId: "s1" }), "s2", {
-      ...makeTranscriptView(),
-      sessionId: "s2",
-    });
+  it("会话加载成功后才切换 activeSessionId 并写入事件", () => {
+    const events = makeSessionEvents().slice(0, 2);
+    const state = applySessionLoaded(
+      startSessionSwitch({ ...baseState(), activeSessionId: "s1" }),
+      "s2",
+      loadedSession("s2", events),
+    );
     expect(state.activeSessionId).toBe("s2");
     expect(state.view.sessionId).toBe("s2");
+    expect(state.events).toBe(events);
+    expect(state.lastSeq).toBe(2);
     expect(state.switching).toBe(false);
   });
+
+  it("切换会话重置 events/lastSeq/device/mcpStatuses", () => {
+    const previous: WorkbenchState = {
+      ...baseState(),
+      activeSessionId: "s1",
+      events: [DEVICE_EVENT],
+      lastSeq: 50,
+      device: { probe: "attached", serial: "open", cpu: "halted", backend: "renode" },
+      mcpStatuses: [{ kind: "connected", server: "echo" }],
+    };
+    const state = applySessionLoaded(previous, "s2", loadedSession("s2"));
+    expect(state.events).toEqual([]);
+    expect(state.lastSeq).toBe(-1);
+    expect(state.device).toEqual(UNKNOWN_DEVICE);
+    expect(state.mcpStatuses).toEqual([]);
+  });
+
+  it("无 device_status 时切换到会话保留初始 /api/device 回退值", () => {
+    const fallback = { probe: "OpenOCD", serial: "COM3", cpu: "Cortex-M4", backend: "Renode" };
+    const state = applySessionLoaded(baseState(), "s2", { ...loadedSession("s2"), device: fallback });
+    expect(state.device).toEqual(fallback);
+  });
+
 
   it("会话加载失败保留原 activeSessionId 并只设置详情错误", () => {
     const state = applySessionFailure(
@@ -106,7 +168,7 @@ describe("workbench state", () => {
   it("重试目标优先指向失败会话，加载成功后回到全量加载", () => {
     const failed = applySessionFailure({ ...baseState(), activeSessionId: "s1" }, "s2", "会话读取失败");
     expect(retryTarget(failed)).toEqual({ kind: "session", id: "s2" });
-    expect(retryTarget(applySessionLoaded(failed, "s2", makeTranscriptView()))).toEqual({ kind: "load" });
+    expect(retryTarget(applySessionLoaded(failed, "s2", loadedSession("s2")))).toEqual({ kind: "load" });
     expect(retryTarget(startLoad(failed))).toEqual({ kind: "load" });
     expect(retryTarget(applyLoadFailure(failed, "连接失败"))).toEqual({ kind: "load" });
   });
@@ -118,73 +180,89 @@ describe("workbench state", () => {
     expect(state.failedSessionId).toBeUndefined();
   });
 
-  it("进入回放清除实时流错误，避免残留横幅", () => {
-    const replay = applySessionLoaded(
-      { ...baseState(), streamError: "事件流中断" },
-      "s1",
-      { ...makeTranscriptView(), sessionId: "s1" },
+  it("实时事件合并进同一数组并推进游标与视图", () => {
+    const state = applySessionEvent(
+      { ...baseState(), activeSessionId: "s2", lastSeq: -1 },
+      envelope({ seq: 0, ts: "t", type: "user", payload: { content: "症状" } }),
     );
-    expect(replay.streamError).toBeUndefined();
+    expect(state.events.map((event) => event.seq)).toEqual([0]);
+    expect(state.lastSeq).toBe(0);
+    expect(state.view.events[0]).toMatchObject({ kind: "user", text: "症状" });
   });
 
-  it("live 状态切换会话后保持 live", () => {
-    const live = applyStreamEvent({ ...baseState(), viewSource: "live" } as WorkbenchState, makeTranscriptView());
-    const loaded = applySessionLoaded(live, "s2", makeTranscriptView());
-    expect(loaded.viewSource).toBe("live");
-  });
-
-  it("replay 状态切换后保持 replay", () => {
-    const loaded = applySessionLoaded({ ...baseState(), viewSource: "replay" } as WorkbenchState, "s2", makeTranscriptView());
-    expect(loaded.viewSource).toBe("replay");
-  });
-
-  it("未标记来源时切换按回放处理", () => {
-    const loaded = applySessionLoaded(baseState(), "s2", makeTranscriptView());
-    expect(loaded.viewSource).toBe("replay");
-  });
-
-  it("可显式指定切换后的视图来源", () => {
-    const loaded = applySessionLoaded(
-      { ...baseState(), viewSource: "live" } as WorkbenchState,
-      "s2",
-      makeTranscriptView(),
-      "replay",
+  it("忽略 sessionId 不匹配的实时事件（旧流串台）", () => {
+    const before: WorkbenchState = { ...baseState(), activeSessionId: "s2", lastSeq: 3 };
+    const after = applySessionEvent(
+      before,
+      envelope({ seq: 4, ts: "t", type: "user", payload: { content: "别的会话" } }, "s1"),
     );
-    expect(loaded.viewSource).toBe("replay");
+    expect(after).toBe(before);
   });
 
-  it("回放模式下实时事件不覆盖已选会话", () => {
-    const replay = applySessionLoaded(baseState(), "s1", { ...makeTranscriptView(), sessionId: "s1" });
-    const live = { ...makeTranscriptView(), sessionId: "live" };
-    expect(applyStreamEvent(replay, live)).toBe(replay);
-  });
-
-  it("初始加载成功后实时事件仍可接管视图", () => {
-    const loaded = applyLoadSuccess(baseState(), LOADED);
-    expect(loaded.viewSource).toBeUndefined();
-    const live = { ...makeTranscriptView(), sessionId: "live" };
-    const state = applyStreamEvent(loaded, live);
-    expect(state.view).toBe(live);
-    expect(state.viewSource).toBe("live");
-  });
-
-  it("实时事件不清除会话详情错误", () => {
-    const state = applyStreamEvent(
-      { ...baseState(), viewSource: "live", detailError: "会话读取失败" },
-      makeTranscriptView(),
+  it("忽略已消费序号的重复事件", () => {
+    const before: WorkbenchState = { ...baseState(), activeSessionId: "s2", lastSeq: 3 };
+    const after = applySessionEvent(
+      before,
+      envelope({ seq: 3, ts: "t", type: "user", payload: { content: "重复" } }),
     );
-    expect(state.detailError).toBe("会话读取失败");
+    expect(after).toBe(before);
   });
 
-  it("回放模式忽略事件流错误提示", () => {
-    const replay = applySessionLoaded(baseState(), "s1", makeTranscriptView());
-    expect(applyStreamError(replay, "事件流中断")).toBe(replay);
+  it("device_status 按 patch 更新设备面板", () => {
+    const first = applySessionEvent(
+      { ...baseState(), activeSessionId: "s2", lastSeq: 49 },
+      envelope(DEVICE_EVENT),
+    );
+    expect(first.device.probe).toBe("attached");
+    expect(first.device.serial).toBe("unknown");
+    const second = applySessionEvent(
+      first,
+      envelope({
+        seq: 51,
+        ts: "t",
+        type: "device_status",
+        payload: { callId: "c2", server: "serial", tool: "mcp__serial__open", state: { serial: "open" } },
+      }),
+    );
+    expect(second.device).toEqual({ probe: "attached", serial: "open", cpu: "unknown", backend: "unknown" });
   });
 
-  it("实时模式下事件写入视图并清事件流错误", () => {
-    const state = applyStreamEvent({ ...baseState(), viewSource: "live", streamError: "断线" }, makeTranscriptView());
-    expect(state.viewSource).toBe("live");
-    expect(state.streamError).toBeUndefined();
+  it("mcp_status 与旧 status(mcp_*) 映射进 mcpStatuses 且不重复", () => {
+    const events: SessionEvent[] = [
+      { seq: 0, ts: "t", type: "mcp_status", payload: { kind: "connected", server: "echo" } },
+      { seq: 1, ts: "t", type: "status", payload: { status: "mcp_tools_changed", server: "echo", toolCount: 3 } },
+    ];
+    const state = events.reduce<WorkbenchState>(
+      (current, event) => applySessionEvent(current, envelope(event)),
+      { ...baseState(), activeSessionId: "s2", lastSeq: -1 },
+    );
+    expect(state.mcpStatuses).toEqual([
+      { kind: "connected", server: "echo" },
+      { kind: "tools_changed", server: "echo", toolCount: 3 },
+    ]);
+  });
+
+  it("mcp statuses 只保留最新 N 条", () => {
+    const events: SessionEvent[] = Array.from({ length: 30 }, (_, index) => ({
+      seq: index,
+      ts: "t",
+      type: "mcp_status",
+      payload: { kind: "connected", server: `s${index}` },
+    }));
+    const state = events.reduce<WorkbenchState>(
+      (current, event) => applySessionEvent(current, envelope(event)),
+      { ...baseState(), activeSessionId: "s2", lastSeq: -1 },
+    );
+    expect(state.mcpStatuses.length).toBeLessThanOrEqual(20);
+    expect(state.mcpStatuses.at(-1)).toEqual({ kind: "connected", server: "s29" });
+  });
+
+  it("事件流错误只记录局部提示，不隐藏已有内容", () => {
+    const view = { ...emptyTranscriptView(), sessionId: "s1" };
+    const state = applyStreamError({ ...baseState(), view }, "事件流中断");
+    expect(state.view).toBe(view);
+    expect(state.streamError).toBe("事件流中断");
+    expect(state.connection).toBe("ready");
   });
 
   it("请求门只放行最新一次请求", () => {
@@ -196,21 +274,5 @@ describe("workbench state", () => {
     const third = gate.begin();
     expect(second()).toBe(false);
     expect(third()).toBe(true);
-  });
-
-  it("实时事件清空错误并写入视图", () => {
-    const view = makeTranscriptView();
-    const state = applyStreamEvent({ ...baseState(), streamError: "断线" }, view);
-    expect(state.view).toBe(view);
-    expect(state.streamError).toBeUndefined();
-    expect(state.connection).toBe("ready");
-  });
-
-  it("事件流错误只记录局部提示，不隐藏已有内容", () => {
-    const view = makeTranscriptView();
-    const state = applyStreamError({ ...baseState(), view }, "事件流中断");
-    expect(state.view).toBe(view);
-    expect(state.streamError).toBe("事件流中断");
-    expect(state.connection).toBe("ready");
   });
 });

@@ -8,7 +8,11 @@ import type {
 } from "../model/protocol.js";
 import type { PermissionGate } from "../permissions/types.js";
 import type { SessionHandle } from "../session/session.js";
-import type { PermissionDecisionPayload, ToolResultPayload } from "../session/types.js";
+import type {
+  PermissionDecisionPayload,
+  ToolResultPayload,
+  ToolStartedPayload,
+} from "../session/types.js";
 import { executeBatch } from "../tools/pipeline.js";
 import type { BatchCall, BatchOptions, BatchResult } from "../tools/pipeline.js";
 import { toModelToolSchemas } from "../tools/registry.js";
@@ -130,11 +134,6 @@ function lostToolResult(): ToolResult {
   };
 }
 
-function consumePending(pending: PendingBatch | undefined): PendingBatch | undefined {
-  if (pending === undefined) return undefined;
-  const calls = pending.calls.slice(1);
-  return calls.length === 0 ? undefined : { assistantSeq: pending.assistantSeq, calls };
-}
 
 function splitToolUses(toolCalls: CompletionResult["toolCalls"]): {
   calls: BatchCall[];
@@ -236,6 +235,62 @@ export async function* query(
   let pending: PendingBatch | undefined;
   let exitReason: ExitReason | undefined;
 
+  const removePending = (id: string): void => {
+    if (pending === undefined) return;
+    const calls = pending.calls.filter((call) => call.id !== id);
+    pending = calls.length === 0
+      ? undefined
+      : { assistantSeq: pending.assistantSeq, calls };
+  };
+
+  // 第一阶段:先让所有 tool_result 落盘,并立即把对应 call 移出 pending 账本。
+  // 第二阶段再写状态事件;即使状态写入失败,pending 已空,不会把已执行的真实结果
+  // 误补成 tool_result_lost。
+  const appendToolResult = async (
+    call: CompletionResult["toolCalls"][number],
+    result: ToolResult,
+    parent: number,
+  ): Promise<void> => {
+    await session.append({
+      type: "tool_result",
+      payload: toResultPayload(call.id, call.name, result),
+      parent,
+    });
+    removePending(call.id);
+  };
+
+  const appendDeviceStatus = async (
+    call: CompletionResult["toolCalls"][number],
+    result: ToolResult,
+    parent: number,
+  ): Promise<void> => {
+    if (result.isError) return;
+    if (result.deviceStatus !== undefined) {
+      await session.append({
+        type: "device_status",
+        payload: {
+          callId: call.id,
+          server: result.deviceStatus.server,
+          tool: call.name,
+          state: result.deviceStatus.state,
+        },
+        parent,
+      });
+      return;
+    }
+    if (result.deviceStatusInvalid !== undefined) {
+      await session.append({
+        type: "status",
+        payload: {
+          status: "device_status_invalid",
+          tool: call.name,
+          message: result.deviceStatusInvalid,
+        },
+        parent,
+      });
+    }
+  };
+
   try {
     while (true) {
       turn += 1;
@@ -329,12 +384,7 @@ export async function* query(
       if (ctx.signal.aborted) {
         for (const call of response.toolCalls) {
           const result = abortedToolResult();
-          await session.append({
-            type: "tool_result",
-            payload: toResultPayload(call.id, call.name, result),
-            parent: assistantEvent.seq,
-          });
-          pending = consumePending(pending);
+          await appendToolResult(call, result, assistantEvent.seq);
           yield toLoopToolResult(call.id, result);
         }
         pending = undefined;
@@ -360,6 +410,19 @@ export async function* query(
         artifactDir: ctx.artifactDir,
         ...(ctx.cwd === undefined ? {} : { cwd: ctx.cwd }),
         ...(ctx.timeoutMs === undefined ? {} : { timeoutMs: ctx.timeoutMs }),
+        // 由 pipeline 在每个调用真正执行前调用;写失败会让该调用不执行。
+        onToolStarted: async (call, access) => {
+          const payload: ToolStartedPayload = {
+            callId: call.id,
+            tool: call.name,
+            access,
+          };
+          await session.append({
+            type: "tool_started",
+            payload: { ...payload },
+            parent: assistantEvent.seq,
+          });
+        },
       };
       if (ctx.permissionGate !== undefined) {
         const gate = ctx.permissionGate;
@@ -395,17 +458,20 @@ export async function* query(
           ? []
           : await executeBatch(session, ctx.tools, split.calls, batchOptions);
 
+      const outcomes: Array<{
+        call: CompletionResult["toolCalls"][number];
+        result: ToolResult;
+      }> = [];
       for (let index = 0; index < response.toolCalls.length; index += 1) {
         const call = response.toolCalls[index];
         const slot = split.slots[index];
         const result = "marker" in slot ? slot.marker : batchResults[slot.index].result;
-        await session.append({
-          type: "tool_result",
-          payload: toResultPayload(call.id, call.name, result),
-          parent: assistantEvent.seq,
-        });
-        pending = consumePending(pending);
+        await appendToolResult(call, result, assistantEvent.seq);
+        outcomes.push({ call, result });
         yield toLoopToolResult(call.id, result);
+      }
+      for (const outcome of outcomes) {
+        await appendDeviceStatus(outcome.call, outcome.result, assistantEvent.seq);
       }
       pending = undefined;
 
@@ -414,13 +480,11 @@ export async function* query(
   } catch (error) {
     exitReason = "error";
     if (pending !== undefined) {
-      for (const call of pending.calls) {
+      const pendingCalls = pending.calls.slice();
+      const parent = pending.assistantSeq;
+      for (const call of pendingCalls) {
         try {
-          await session.append({
-            type: "tool_result",
-            payload: toResultPayload(call.id, call.name, lostToolResult()),
-            parent: pending.assistantSeq,
-          });
+          await appendToolResult(call, lostToolResult(), parent);
         } catch {}
       }
       pending = undefined;
@@ -432,13 +496,11 @@ export async function* query(
   } finally {
     if (exitReason === undefined) {
       if (pending !== undefined) {
-        for (const call of pending.calls) {
+        const pendingCalls = pending.calls.slice();
+        const parent = pending.assistantSeq;
+        for (const call of pendingCalls) {
           try {
-            await session.append({
-              type: "tool_result",
-              payload: toResultPayload(call.id, call.name, abortedToolResult()),
-              parent: pending.assistantSeq,
-            });
+            await appendToolResult(call, abortedToolResult(), parent);
           } catch {}
         }
         pending = undefined;

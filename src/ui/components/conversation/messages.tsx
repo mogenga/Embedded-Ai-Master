@@ -13,6 +13,7 @@ type UserEvent = Extract<TranscriptEvent, { kind: "user" }>;
 type AssistantEvent = Extract<TranscriptEvent, { kind: "assistant" }>;
 type AskEvent = Extract<TranscriptEvent, { kind: "ask" }>;
 type GuardEvent = Extract<TranscriptEvent, { kind: "guard" }>;
+type PermissionEvent = Extract<TranscriptEvent, { kind: "permission" }>;
 
 type InterruptedEvent = Extract<TranscriptEvent, { kind: "interrupted" }>;
 
@@ -88,6 +89,25 @@ function InterruptedNotice({ entry }: { entry: InterruptedEvent }): JSX.Element 
   );
 }
 
+function PermissionNotice({ entry }: { entry: PermissionEvent }): JSX.Element {
+  const permission = entry.permission;
+  const denied = permission.effective === "deny";
+  return (
+    <div class="permission" data-action={permission.action} data-effective={permission.effective}>
+      <div class="permission-head">
+        <Icon name={denied ? "i-alert" : "i-check"} size={14} />
+        <span class="permission-tool">{permission.tool}</span>
+        <code class="permission-action">{permission.action}</code>
+        <span class="permission-result">{denied ? "拒绝" : "允许"}</span>
+        {denied ? <span class="permission-note">未执行</span> : null}
+      </div>
+      {permission.reason.length === 0 ? null : (
+        <p class="permission-reason">{permission.reason}</p>
+      )}
+    </div>
+  );
+}
+
 function renderEvent(entry: TranscriptEvent, handlers: GuardHandlers): JSX.Element {
   switch (entry.kind) {
     case "user":
@@ -111,6 +131,8 @@ function renderEvent(entry: TranscriptEvent, handlers: GuardHandlers): JSX.Eleme
       );
     case "interrupted":
       return <InterruptedNotice key={entry.id} entry={entry} />;
+    case "permission":
+      return <PermissionNotice key={entry.id} entry={entry} />;
   }
 }
 

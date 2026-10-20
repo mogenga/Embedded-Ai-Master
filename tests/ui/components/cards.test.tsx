@@ -23,7 +23,7 @@ describe("cards", () => {
           id: "c",
           name: "serial_read",
           args: "COM3",
-          ok: false,
+          ok: false, state: "failed",
           kind: "error",
           errorCode: "io_timeout",
           errorText: "读取超时",
@@ -77,7 +77,7 @@ describe("cards", () => {
   it("大输出默认折叠为摘要行数与展开按钮", async () => {
     const readout = Array.from({ length: 8 }, (_, i) => ({ label: `行${i}`, value: String(i) }));
     const root = mount();
-    render(<ToolCard tool={{ id: "r", name: "mem_read", args: "0x0 · 32B", ok: true, kind: "readout", readout }} />, root);
+    render(<ToolCard tool={{ id: "r", name: "mem_read", args: "0x0 · 32B", ok: true, state: "done", kind: "readout", readout }} />, root);
     const btn = root.querySelector(".tool-fold-btn");
     expect(btn?.textContent).toContain("展开");
     expect(root.textContent).toContain("摘要");
@@ -96,7 +96,7 @@ describe("cards", () => {
           id: "w",
           name: "mem_write",
           args: "0x40004408 = 0x0009",
-          ok: true,
+          ok: true, state: "done",
           kind: "readout",
           destructive: true,
           readout: [{ label: "写入", value: "0x0009" }],
@@ -107,10 +107,10 @@ describe("cards", () => {
     expect(root.querySelector(".tool.is-destructive")).not.toBeNull();
     expect(root.querySelector(".tool.is-destructive .tool-head")).not.toBeNull();
   });
-  it("pending 工具卡显示执行中且不显示成功勾", () => {
+  it("running 工具卡显示执行中且不显示成功勾", () => {
     const root = mount();
     render(
-      <ToolCard tool={{ id: "p", name: "mem_read", args: "0x0", ok: true, kind: "readout", pending: true }} />,
+      <ToolCard tool={{ id: "p", name: "mem_read", args: "0x0", ok: true, state: "running", kind: "readout" }} />,
       root,
     );
     expect(root.textContent).toContain("执行中");
@@ -122,7 +122,7 @@ describe("cards", () => {
     const root = mount();
     render(
       <ToolCard
-        tool={{ id: "t", name: "serial_read", args: "COM3", ok: true, kind: "readout", text: "0x0000_002E" }}
+        tool={{ id: "t", name: "serial_read", args: "COM3", ok: true, state: "done", kind: "readout", text: "0x0000_002E" }}
       />,
       root,
     );
@@ -131,7 +131,7 @@ describe("cards", () => {
   it("text 折叠区显示行数与字节数并可展开", async () => {
     const root = mount();
     const text = Array.from({ length: 10 }, (_, i) => `line ${i}`).join("\n");
-    render(<ToolCard tool={{ id: "t", name: "serial_read", args: "COM3", ok: true, kind: "readout", text }} />, root);
+    render(<ToolCard tool={{ id: "t", name: "serial_read", args: "COM3", ok: true, state: "done", kind: "readout", text }} />, root);
     const count = root.querySelector(".tool-fold-count")?.textContent ?? "";
     expect(count).toContain("10 行");
     expect(count).toContain("B");
@@ -145,7 +145,7 @@ describe("cards", () => {
     const root = mount();
     render(
       <ToolCard
-        tool={{ id: "e", name: "serial_read", args: "COM3", ok: false, kind: "error", errorCode: "io_timeout", errorText: "" }}
+        tool={{ id: "e", name: "serial_read", args: "COM3", ok: false, state: "failed", kind: "error", errorCode: "io_timeout", errorText: "" }}
       />,
       root,
     );
@@ -155,7 +155,7 @@ describe("cards", () => {
     const root = mount();
     render(
       <ToolCard
-        tool={{ id: "r", name: "mem_read", args: "0x0", ok: true, kind: "readout", readOnly: true, readout: [] }}
+        tool={{ id: "r", name: "mem_read", args: "0x0", ok: true, state: "done", kind: "readout", readOnly: true, readout: [] }}
       />,
       root,
     );
@@ -165,7 +165,7 @@ describe("cards", () => {
     const root = mount();
     render(
       <ToolCard
-        tool={{ id: "a", name: "serial_read", args: "COM3", ok: true, kind: "readout", artifactPath: "artifacts/read.bin" }}
+        tool={{ id: "a", name: "serial_read", args: "COM3", ok: true, state: "done", kind: "readout", artifactPath: "artifacts/read.bin" }}
       />,
       root,
     );
@@ -174,7 +174,7 @@ describe("cards", () => {
   it("超长 text 的折叠摘要截断到 120 字符", () => {
     const root = mount();
     const text = "x".repeat(100000);
-    render(<ToolCard tool={{ id: "t", name: "serial_read", args: "COM3", ok: true, kind: "readout", text }} />, root);
+    render(<ToolCard tool={{ id: "t", name: "serial_read", args: "COM3", ok: true, state: "done", kind: "readout", text }} />, root);
     const sum = root.querySelector(".tool-fold-sum")?.textContent ?? "";
     expect(sum.length).toBeLessThanOrEqual(130);
   });
@@ -186,7 +186,7 @@ describe("cards", () => {
           id: "a",
           name: "serial_read",
           args: "COM3",
-          ok: true,
+          ok: true, state: "done",
           kind: "readout",
           text: "",
           artifactPath: "artifacts/large.bin",
