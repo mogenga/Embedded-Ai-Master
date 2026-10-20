@@ -4,6 +4,7 @@ node_modules/
 # 构建产物
 dist/
 dist-web/
+dist-mcp/
 .vite/
 *.tsbuildinfo
 
@@ -15,6 +16,8 @@ coverage/
 # 本地运行数据
 .harness/
 .arts/
+mcp-servers/kb/kb/
+mcp-servers/kb/data/
 
 # 工具与流程产物
 .codeartsdoer/

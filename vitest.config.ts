@@ -11,6 +11,7 @@ export default defineConfig({
   test: {
     include: [
       'tests/**/*.test.{ts,tsx,js}',
+      'mcp-servers/**/*.test.ts',
       ...(includesTmpTests ? ['.tmp/**/*.test.js'] : []),
     ],
     unstubEnvs: true,

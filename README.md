@@ -158,6 +158,77 @@ for await (const event of runSession({
 
 `mcp.enabled`、`mcp.trustProjectConfig` 必须是布尔值，`mcp` 必须是普通对象，否则在入口抛 `TypeError`。MCP server 由用户自行安装并在配置中给出 `command`；MCP SDK 包（`@modelcontextprotocol/client`，测试夹具用 `@modelcontextprotocol/server`）已写入 `package.json`，随用户执行 `npm install` 安装；本仓库的 agent 不执行任何依赖安装命令。运行期状态写入会话 `status` 事件（`mcp_connected` / `mcp_connect_failed` / `mcp_tools_changed` / `mcp_tools_refresh_failed` / `mcp_tool_name_renamed` / `mcp_tool_invalid_schema` / `mcp_config_failed` / `mcp_config_warning` / `mcp_project_config_skipped`）。未知配置字段不再静默：`loadMcpConfig` 通过 `onWarning` 交回，`runSession` 记一条 `mcp_config_warning`；`list_changed` 刷新失败会做 3 次有界退避重试，仍失败才保留旧缓存并记 `mcp_tools_refresh_failed`（含 `attempts`）。工具名按 `(server, tool)` 字典序稳定分配，不依赖 server 返回顺序。
 
+## 领域 MCP：探针（BR-2）
+
+`mcp-servers/probe` 提供 Renode / OpenOCD 探针工具（内存读写、复位、串口），以 stdio MCP server 挂载，内核不含领域逻辑。先构建再配置：
+
+```bash
+npm run build:mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "probe": {
+      "command": "node",
+      "args": ["<仓库根>/dist-mcp/probe/server.js"],
+      "env": { "RENODE_PATH": "D:/Renode/bin/Renode.exe" }
+    }
+  }
+}
+```
+
+`RENODE_PATH` 由 probe server 读取并传给 `RenodeBackend`（为空或未设置时使用默认 `C:/Program Files/Renode/bin/Renode.exe`）；`OPENOCD_PATH` 用于 OpenOCD 可用性检测。也可以直接在进程环境中设置。端到端演示会真实启动本机 Renode，只操作仿真内存：attach → halt → 读 `0x20000000` → 写 `78 56 34 12` → 回读校验 → reset → 恢复原值 → detach。
+
+```bash
+npm run probe:e2e
+```
+
+成功时输出 `{"backend":"renode","attach":true,...,"writeVerified":true,...}`；`dist-mcp/` 缺失时退出码 2 并提示 `npm run build:mcp`，其余失败退出码 1。写内存、复位与串口写入是破坏性操作，在 `diagnose` 预设下为 `ask`；headless（无审批器）时降级为拒绝且不执行工具。写操作返回 `declaration` 声明；`mem_read` 全 0 只返回警告，不推断“无故障”。`serial_read` 响应 MCP 取消信号：abort 后返回 `aborted`，不再继续等待或消费缓冲。
+
+OpenOCD 后端本轮只做“连接已运行的 OpenOCD telnet”，`attach` 不 spawn 进程；使用前请自行启动 `openocd -f <config>`（telnet 默认 `127.0.0.1:4444`）。`OPENOCD_PATH` 仅用于可用性检测；`openocdConfig` 参数已移除。真机验证登记 D-157。
+
+## 领域 MCP：知识库（BR-3）
+
+`mcp-servers/kb` 以 stdio MCP server 暴露 `kb_lookup` / `kb_read` / `kb_search` / `kb_status`，全部只读；`kb_read` 标记为 evidence。先构建再配置：
+
+```bash
+npm run build:mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "kb": {
+      "command": "node",
+      "args": ["<仓库根>/dist-mcp/kb/server.js"],
+      "env": { "KB_ROOT": "<仓库根>/mcp-servers/kb/kb" }
+    }
+  }
+}
+```
+
+`KB_ROOT` 缺省为相对 `process.cwd()` 的 `mcp-servers/kb/kb`；目录不存在时 server 仍可启动，`kb_status` 显式返回 `indexPresent: false`。
+
+### 本地语料与回归基线
+
+语料与查询集是**本地资产，不进版本库**（`.gitignore` 已忽略 `mcp-servers/kb/kb/` 与 `mcp-servers/kb/data/`），重新获取方式见 `mcp-servers/kb/README.md`。当前实测：108 个 md / 90 条索引（BRD 基线为 103 / 85），自建查询 80 条（index 50 / search 30）与负样本 25 条；其中 11/80 的 gold 未进入 `index.yaml`（全部为 search 轨的 `reference/*.md`）。数字以实测为准，不裁剪语料。
+
+```bash
+npm run build:mcp
+npm run kb:regression          # 表格 + JSON；--json 仅 JSON，--baseline 输出基线形状
+```
+
+脚本在缺少 `dist-mcp/kb/service.js`、`KB_ROOT`、`index.yaml` 或查询集时打印原因并以退出码 2 结束；脚本不设通过阈值。`mcp-servers/kb/tests/regression.test.ts` 直接 import `service.ts`、不启动 MCP server；语料或查询集缺失时 `describe.skip`，存在时断言各指标不低于 `regression-baseline.json`。
+
+2026-10-20 实测基线（只作下限，不是目标）：index 轨 Recall@2 0.44、Hit@1 0.38、MRR 0.41；search 轨严格 Hit@1 0.1333（第一条 hit 命中 gold）、`goldInTop20` 0.4333（gold 出现在 `search(tokens, 20)` 的任意命中中；引擎按路径排序，不承诺相关性 rank）；负样本拒答率 0.84（21/25 正确拒答）。`kb_lookup` 对英文 keyword/tag 使用 ASCII 词边界、忽略单字符英文 token，并按查询中未出现在索引词表的 token 比例折减分数；折减后最高分低于 1.75 时返回 `found: false`、`reason: "low_confidence"`。此外有两层覆盖度规则：**技术 token 覆盖度**从 query 提取 ASCII/十六进制/型号并过滤英文停用词与 `CPU`/`MCU`/`SoC` 等泛指词，单个技术 token 必须被条目覆盖，多个技术 token 必须覆盖超过一半；**中文覆盖度**只在查询没有 ASCII 技术 token 时生效，要求命中中文关键词字符数 ≥ 4，或命中 ≥ 2 个不同中文关键词，或关键词之外还有 ≥ 2 个中文字符上下文。因此 `优化`、`对齐`、`没反应` 这类孤立短词会按 `low_confidence` 拒答，而 `串口没输出`、`串口乱码` 与带上下文的长句仍可命中。相对上一版（Recall@2 0.46、Hit@1 0.40、MRR 0.43、拒答率 0.56、宽松 search Hit@1 0.4333），Recall@2 / Hit@1 / MRR 各下降 2pp，拒答率提升 28pp；search 轨严格 Hit@1 与 `goldInTop20` 分别披露排序与召回，避免再用宽松指标掩盖排序回归。残余 4 条误报中，3 条（neg-005、neg-008、neg-023）为主题相邻但细节未覆盖（`near_domain: true`），1 条 neg-011 为纯硬件供电问题（`near_domain: false`）；neg-011 是长句，中文覆盖度规则不会拒绝，差距与语义检索计划见 D-159。
+
+### 验证边界
+
+- Renode 探针路径已由 `npm run probe:e2e` 真实执行（只操作仿真内存）；`RENODE_PATH` 可覆盖默认可执行文件路径。
+- OpenOCD 后端只完成可用性检测、参数与错误路径验证，未连接真机；真串口设备同样未实测。
+- 真串口与真机 OpenOCD 验证登记为 D-157；KB 语料/查询集不入库导致 CI 无法运行回归，登记为 D-158。
+
 ## 权限与审批
 
 权限层在工具执行前判定 `allow` / `ask` / `deny`，默认预设为 `diagnose`。判定只决定是否调用工具；`allow` 后仍会经过 `shell` 危险命令黑名单与 `fs` 路径边界检查。权限规则是声明式匹配而非沙箱（D-114）。
