@@ -36,7 +36,15 @@ function providersText(): string {
 
 interface ScriptStep {
   body: unknown;
-  delayMs?: number;
+  waitFor?: Promise<void>;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, resolve: release };
 }
 
 function toolCallBody(id: string, command: string): unknown {
@@ -70,9 +78,7 @@ function fakeFetch(steps: ScriptStep[]): typeof fetch {
   return async () => {
     const step = steps[Math.min(index, steps.length - 1)]!;
     index += 1;
-    if (step.delayMs !== undefined && step.delayMs > 0) {
-      await new Promise((resolve) => setTimeout(resolve, step.delayMs));
-    }
+    if (step.waitFor !== undefined) await step.waitFor;
     return new Response(JSON.stringify(step.body), {
       status: 200,
       headers: { "Content-Type": "application/json" },
@@ -252,6 +258,10 @@ describe("Web 审批端到端闭环", () => {
       const callId = String(started.request.payload.callId);
       expect(callId).toBe("call-allow");
       expect(started.request.payload).toMatchObject({ action: "ask", tool: "shell" });
+      expect(started.request.payload.args).toBeUndefined();
+      expect(typeof started.request.payload.paramsDigest).toBe("string");
+      expect(String(started.request.payload.paramsDigest).length).toBeGreaterThan(0);
+      expect(Number.isNaN(Date.parse(String(started.request.payload.deadlineAt)))).toBe(false);
 
       const duringWait = started.sse.events.filter(
         (event) => event.type === "permission_decision" && event.payload.callId === callId,
@@ -344,11 +354,12 @@ describe("Web 审批端到端闭环", () => {
   }, 30_000);
 
   it("超时：approval_timeout 落审计，迟到决策返回 410 且不执行工具", async () => {
+    const secondResponse = deferred();
     const harness = await setup({
       permissions: { version: 1, approvalTimeoutMs: 300 },
       steps: [
         { body: toolCallBody("call-timeout", "echo timeout") },
-        { body: DONE_BODY, delayMs: 1_500 },
+        { body: DONE_BODY, waitFor: secondResponse.promise },
       ],
     });
     let sse: SseStream | undefined;
@@ -377,8 +388,11 @@ describe("Web 审批端到端闭环", () => {
         decision: "allow",
       });
       expect(late.status).toBe(410);
-      expect(((await late.json()) as { error: { code: string } }).error.code).toBe("expired");
+      expect(((await late.json()) as { error: { code: string } }).error.code).toBe(
+        "approval_expired",
+      );
 
+      secondResponse.resolve();
       await started.sse.waitFor(
         (event) => event.type === "status" && event.payload.status === "done",
       );
@@ -388,6 +402,7 @@ describe("Web 审批端到端闭环", () => {
         ),
       ).toBe(false);
     } finally {
+      secondResponse.resolve();
       sse?.close();
       await harness.close();
     }
