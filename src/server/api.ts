@@ -217,11 +217,18 @@ async function handleApproval(
   runner: SessionRunner,
 ): Promise<void> {
   const body = await readJsonBody(req);
+  if (
+    typeof body.sessionId !== "string"
+    || typeof body.requestId !== "string"
+    || typeof body.decision !== "string"
+  ) {
+    throw new HttpError(400, "invalid_body", "sessionId/requestId/decision 必须是字符串");
+  }
   if (!isValidSessionId(body.sessionId)) {
     throw new HttpError(400, "invalid_session_id", "非法的会话 id");
   }
   const requestId = body.requestId;
-  if (typeof requestId !== "string" || requestId.length < 1 || requestId.length > 200) {
+  if (requestId.length < 1 || requestId.length > 200) {
     throw new HttpError(400, "invalid_request_id", "requestId 长度必须在 1..200 之间");
   }
   const decision = body.decision;
@@ -242,7 +249,7 @@ async function handleApproval(
     case "already_decided":
       throw new HttpError(409, "already_decided", "审批请求已完成相反的决策");
     case "expired":
-      throw new HttpError(410, "expired", "审批请求已过期");
+      throw new HttpError(410, "approval_expired", "审批请求已过期");
   }
 }
 
