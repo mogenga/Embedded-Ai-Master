@@ -42,6 +42,7 @@ export type ProbeErrorCode =
   | "not_attached"
   | "not_implemented"
   | "invalid_argument"
+  | "serial_already_open"
   | "verification_failed"
   | "backend_unavailable"
   | "backend_error";

@@ -377,6 +377,51 @@ describe("RenodeBackend", () => {
     expect(serial.openCalls).toEqual([{ host: "127.0.0.1", port: 4322 }]);
   });
 
+  it("已打开时换端口抛 serial_already_open，不静默复用旧连接", async () => {
+    const serial = new FakeSerial();
+    const harness = createHarness(() => "", () => serial);
+    await harness.backend.attach();
+    await harness.backend.serialOpen("127.0.0.1", 4321);
+
+    const error = await harness.backend
+      .serialOpen("127.0.0.1", 4322)
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ProbeBackendError);
+    expect((error as ProbeBackendError).code).toBe("serial_already_open");
+    expect(serial.openCalls).toEqual([{ host: "127.0.0.1", port: 4321 }]);
+    expect(harness.monitors[0].commands).toHaveLength(4);
+    expect(harness.backend.serialStatus().port).toBe(4321);
+  });
+
+  it("serial_close 后可用新端口重新 open 并重建终端", async () => {
+    const serial = new FakeSerial();
+    const harness = createHarness(() => "", () => serial);
+    await harness.backend.attach();
+    await harness.backend.serialOpen("127.0.0.1", 4321);
+    await harness.backend.serialClose();
+
+    const status = await harness.backend.serialOpen("127.0.0.1", 4322);
+
+    expect(status).toEqual({
+      open: true,
+      host: "127.0.0.1",
+      port: 4322,
+      bytesRead: 0,
+      bytesWritten: 0,
+    });
+    expect(harness.monitors[0].commands.slice(2)).toEqual([
+      'emulation CreateServerSocketTerminal 4321 "cli"',
+      "connector Connect sysbus.usart2 cli",
+      'emulation CreateServerSocketTerminal 4322 "cli-4322"',
+      "connector Connect sysbus.usart2 cli-4322",
+    ]);
+    expect(serial.openCalls).toEqual([
+      { host: "127.0.0.1", port: 4321 },
+      { host: "127.0.0.1", port: 4322 },
+    ]);
+  });
+
   it("serial_read 保留真实字节与 timedOut，并标注无固件 warning", async () => {
     const serial = new FakeSerial();
     serial.readResult = { bytes: [0x48, 0x69], timedOut: true };

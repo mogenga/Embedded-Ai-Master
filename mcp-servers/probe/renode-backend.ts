@@ -103,7 +103,7 @@ export class RenodeBackend implements ProbeBackend {
 
   private monitor?: RenodeMonitorLike;
   private serial?: SerialClientLike;
-  private terminalCreated = false;
+  private terminalPort?: number;
   private attached = false;
   private cpu: DeviceStatus["cpu"] = "unknown";
 
@@ -253,18 +253,28 @@ export class RenodeBackend implements ProbeBackend {
       throw new ProbeBackendError("invalid_argument", `port 必须是 1..65535 的整数: ${port}`);
     }
     const monitor = this.requireAttached();
+    const targetHost = host.trim() || DEFAULT_SERIAL_HOST;
 
-    if (this.serial?.status().open) return this.serial.status();
+    const current = this.serial?.status();
+    if (current?.open) {
+      if (current.host === targetHost && current.port === port) return current;
+      throw new ProbeBackendError(
+        "serial_already_open",
+        `串口已打开(${current.host ?? DEFAULT_SERIAL_HOST}:${current.port})，` +
+          `拒绝静默切换到 ${targetHost}:${port}；请先 serial_close`,
+      );
+    }
 
-    if (!this.terminalCreated) {
-      await monitor.send(`emulation CreateServerSocketTerminal ${port} "cli"`);
-      await monitor.send("connector Connect sysbus.usart2 cli");
-      this.terminalCreated = true;
+    if (this.terminalPort !== port) {
+      const terminal = this.terminalPort === undefined ? "cli" : `cli-${port}`;
+      await monitor.send(`emulation CreateServerSocketTerminal ${port} "${terminal}"`);
+      await monitor.send(`connector Connect sysbus.usart2 ${terminal}`);
+      this.terminalPort = port;
     }
 
     const serial = this.serial ?? this.serialFactory();
     this.serial = serial;
-    await serial.open(host.trim() || DEFAULT_SERIAL_HOST, port);
+    await serial.open(targetHost, port);
     return serial.status();
   }
 
@@ -332,7 +342,7 @@ export class RenodeBackend implements ProbeBackend {
   private async closeSerialSilently(): Promise<void> {
     const serial = this.serial;
     this.serial = undefined;
-    this.terminalCreated = false;
+    this.terminalPort = undefined;
     if (!serial) return;
     try {
       await serial.close();
