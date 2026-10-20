@@ -1214,6 +1214,69 @@
 - **修复建议**: 定义 `approval_request` 事件与 `POST /api/approvals`(requestId/decision/超时/abort 语义),UI 在守卫区提供批准/拒绝并回显最终 `permission_decision`;复用现有审批队列与审计,不新造权限模型。
 - **状态**: 未解决;按 m2-roadmap 阶段 2 延后。
 
+### D-138 · 实时事件流的慢客户端检测依赖单帧写超时,写超时前不感知停读
+
+- **发现**: 2026-10-20,事件总线全量复验(构建产物探针)。
+- **现象**: 修复前实时阶段的 `writeBlock` 不带超时,`consume` 卡在首个 `drain` 等待上;完全不读的客户端既收不到 `stream_error {code:"slow_consumer"}`(队列溢出分支永远不可达),连接也不会被服务端关闭。探针:64 KiB 帧、`liveQueueMax=5`、socket `pause()` 20s → `closed_at_ms=never`。已通过 `liveWriteTimeoutMs`(默认取补播超时 30s)修复:实时单帧写超时即按慢客户端处理,发 `stream_error` 后关闭;默认配置下 handler 约 31s 有界退出。
+- **影响(残余)**: 停读客户端在写超时(默认 30s)前仍占一个连接与有界队列;超时值可配置,未按会话/带宽自适应。
+- **触发升级条件**: 需要秒级发现停读客户端;并发连接数成为瓶颈;需要按带宽预算而非固定超时判断慢客户端。
+- **修复建议**: 用 `res.socket` 的 `writableLength`/`drain` 事件驱动的心跳探测替代固定超时,或在心跳帧上也加超时判定;补跨平台(Windows/macOS)的真实 socket 停读用例进回归。
+- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus` 复验修复):新增 `liveWriteTimeoutMs`(默认沿用 `replayTimeoutMs`),实时单帧写超时映射为 `slow_consumer` 并关闭;`tests/server/event-stream.test.ts` 新增「实时阶段完全不读的客户端在写超时后收到 slow_consumer 并关闭」。残余的「超时前仍占连接」按本条目保留。
+
+### D-139 · `POST /api/actions` 仍为 501,Web 提交通道未实现
+
+- **发现**: 2026-10-20,事件总线全量复验(端点实测)。
+- **现象**: `/api/actions` 固定返回 501 `action_not_implemented`;D-063 只解决了事件流部分。前端未配置 `VITE_ACTION_URL` 时发送按钮禁用并提示「未配置提交端点」。
+- **影响**: Web 工作台只读:可以订阅实时事件与回放,但不能发起新会话、追加输入或响应审批。
+- **触发升级条件**: 需要从 Web 发起 runSession 或提交审批决定。
+- **修复建议**: 见 D-051 的 action schema(`requestId`/`sessionId`/`text`、202/4xx/5xx)与 D-137 的审批端点;两者共用同一套请求去重与错误映射。
+- **状态**: 未解决;按 m2-roadmap 阶段 2 / M3 延后。
+
+### D-140 · 会话列表与 `isValidSessionId` 的 id 规则已统一,但大小写别名(Windows)未处理
+
+- **发现**: 2026-10-20,事件总线全量复验。
+- **现象**: 修复前 `/api/sessions` 用宽松正则 `^[A-Za-z0-9._-]{1,128}$`,会把 `s1.old`、`s1.` 这类目录放进列表,而 `GET /api/sessions/:id` 走 `isValidSessionId` 返回 400——列表给出一个随后打不开的 id。已改为两处共用 `isValidSessionId`。D-069 的 Windows 大小写别名(`s1` 与 `S1`)仍按原条目跟踪。
+- **影响**: 列表不再给出不可打开的 id;大小写别名与尾随点语义(D-068/D-069)不受本次改动影响。
+- **触发升级条件**: 需要跨平台一致的 id 字符串语义。
+- **修复建议**: 按 D-069 处理。
+- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus` 复验修复):`/api/sessions` 改用 `isValidSessionId`,`tests/server/api.test.ts` 新增「列表与详情使用同一 id 规则」用例。
+
+### D-141 · `readSessionHeader` 曾重复实现,列表与详情校验规则可能漂移
+
+- **发现**: 2026-10-20,事件总线全量复验(代码审查)。
+- **现象**: `src/server/api.ts` 曾自行实现 `readSessionHeader`(lstat + JSON.parse + validateHeader),与 `src/session/persistence.ts` 的同名函数并存;两处对符号链接、权限错误、日志文件缺失的处理各自演化。已改为复用 persistence 实现,列表侧只额外要求「至少一个日志文件」,并把 `detail.cause` 中的 EACCES/EPERM 还原上抛供列表归入 `unreadable`。
+- **影响**: 单一校验来源;`D-070` 的「权限错误记 unreadable」语义由新增的 EACCES 注入用例看守(此前无真实用例)。
+- **触发升级条件**: 再出现第二份 header 解析实现。
+- **修复建议**: 保持 `persistence.readSessionHeader` 为唯一入口;列表特有约束放在调用侧。
+- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus` 复验修复):`tests/server/api-unreadable.test.ts` 用 `vi.mock("node:fs")` 注入 EACCES,断言列表记 `unreadable`。
+
+### D-142 · 旧 `LoopEvent` SSE 客户端与 `splitCompleteLines` 为无生产调用方的死代码
+
+- **发现**: 2026-10-20,事件总线全量复验(引用扫描)。
+- **现象**: `src/ui/view/sse.ts` 的 `createEventStream`(解析 `LoopEvent` 的 SSE 客户端)在 `src/ui/api/event-stream.ts` 落地后已无生产调用方,仅测试引用;`src/events/log-tail.ts` 的 `splitCompleteLines` 只被测试引用。两者都会让读者以为存在第二条实时链路或第二套分帧实现。
+- **影响**: 误导性死代码;维护时会与真实实现漂移。
+- **触发升级条件**: —
+- **修复建议**: 删除死代码及其测试;需要时从实现中提取真正的共享函数。
+- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus` 复验修复):`sse.ts` 只保留 `postAction`/`HttpError`;`splitCompleteLines` 与其单测删除(多字节跨块由 `follow` 的真实路径用例覆盖)。
+
+### D-143 · `applySessionEvent` 每条实时事件全量重算 `transcriptFromSession`
+
+- **发现**: 2026-10-20,事件总线全量复验(代码审查)。
+- **现象**: `src/ui/state.ts` 的 `applySessionEvent` 每次收到事件都对整个 `events` 数组调用 `transcriptFromSession` 重建 `TranscriptView`;会话事件数为 n 时累计 O(n²)。`mcpStatuses` 同样每次重建。
+- **影响**: 长会话(数千事件)实时刷新时 CPU 与 GC 压力上升,可能拖慢流消费;当前会话规模下未观察到卡顿。
+- **触发升级条件**: 单会话事件数达数千;UI 出现掉帧或流消费落后;启用 D-136 的大补播。
+- **修复建议**: 让投影器支持增量 append(保留 fold 状态),或按 `seq` 分块缓存;补一条大事件数组的基准测试。
+- **状态**: 未解决;性能边界。
+
+### D-144 · 文档曾称 SSE 载荷为 `LoopEvent` 且 `since` 超前语义未写明
+
+- **发现**: 2026-10-20,事件总线全量复验(文档核对)。
+- **现象**: `docs/frontend-design.md` 第 49 行写「SSE 推送与 `LoopEvent` 同构的事件」,§8.5 仍以「已决:扩展 LoopEvent 透传结构化结果」表述,与实现的 `SessionEventEnvelope` 不符;README/spec 未写明 `since` 大于会话最大 `seq` 时会被夹紧到该 `seq`(实现如此,且属容错语义)。
+- **影响**: 读者会按 `LoopEvent` 结构对接实时流;重连游标超前的行为只能从代码推断。
+- **触发升级条件**: 第三方按文档实现 SSE 消费方。
+- **修复建议**: 文档改为 `SessionEventEnvelope`,并写明 `since` 夹紧语义。
+- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus` 复验修复):`frontend-design` §2/§8.5 改为 `SessionEventEnvelope` 并标注 §8.6;README 与 spec §11.1 补 `since` 夹紧说明。
+
 ---
 
 ## 变更记录
@@ -1274,3 +1337,4 @@
 | 2026-10-19 | M2 权限系统全量复验:录入 D-118 ~ D-131(审计摘要 `__proto__` 键丢失与 digest 冲突、`truncated` 参数被覆盖、`loadPermissionConfig` 不校验 inline、纯空白配置字段、不可 stat 的项目配置不披露、resume 重复 IO、四处测试缺口、symbol 键未防、EOF/空操作整洁性、恒真断言、串行路径缺口、审批 abort 语义);D-132 记录并标注已解决(`errorMessage`/`describeValue` 二次抛错导致审批队列卡死) |
 | 2026-10-19 | 权限系统高价值项修复(`feat/m2-permission`):D-118 `__proto__` 审计键丢失、D-119 截断标记改名 `previewTruncated`、D-120 inline 复用 schema 校验、D-121 空白字段拒绝、D-122 不可 stat 项目配置 fail-closed、D-125 测试 home 隔离、D-126 symbol 键拒绝、D-128 恒真断言替换;D-124/D-127/D-129 部分解决;README/spec 同步标记名 |
 | 2026-10-20 | M2 事件总线 Task 7 交付:D-063 标注已解决(`/api/events` 由 501 替换为真实 SSE,写操作仍 501);录入 D-133 ~ D-137(单会话流、无进程内低延迟适配器、无独立 evidence 事件、大日志补播未压测、Web 审批未实现);README 新增「实时事件流」,frontend-design 补统一事件数组/游标/缺口重拉/设备 patch/MCP 与权限展示 |
+| 2026-10-20 | 事件总线全量复验与修复(`feat/m2-event-bus`):D-138 实时单帧写超时→`slow_consumer`(已解决,残余记入条目);D-140 列表与详情共用 `isValidSessionId`(已解决);D-141 `readSessionHeader` 收敛到 persistence 并补 EACCES 用例(已解决);D-142 删除死代码 `createEventStream`/`splitCompleteLines`(已解决);D-144 文档改为 `SessionEventEnvelope` 并补 `since` 夹紧语义(已解决);录入 D-139(`/api/actions` 仍 501)与 D-143(`applySessionEvent` O(n²))为未解决 |

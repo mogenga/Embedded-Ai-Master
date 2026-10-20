@@ -235,7 +235,7 @@ MCP 工具在**成功**结果（`isError !== true`）的 `structuredContent` 中
 `GET /api/events?sessionId=<id>&since=<seq>`
 
 - `sessionId` 必填；非法 ID → 400 `invalid_session_id`。ID 规则统一使用 `session/handle.ts` 的 `isValidSessionId`（比现有 API 的宽松正则更严格，`.`/`..` 与 symlink 均拒绝）。
-- `since` 可选，整数 ≥ -1；非法 → 400 `invalid_cursor`。
+- `since` 可选，整数 ≥ -1；非法 → 400 `invalid_cursor`。`since` 大于会话当前最大 `seq` 时夹紧到该 `seq`（从尾部继续跟随），不报错。
 - 无 `since` 时读取 `Last-Event-ID`；两者都有时 query 优先；两者都缺省时 `since = -1`。
 - `Last-Event-ID` 非法（非整数、<-1）→ 400 `invalid_cursor`，不回退为 -1。
 - 会话不存在 → 404 `session_not_found`；日志损坏 → 500 `session_corrupt`（与现有 API 错误模型一致）。
@@ -271,7 +271,8 @@ data: {"code":"slow_consumer","lastSeq":37}
 - `follow` 迭代中抛错（损坏、seq 不连续、closed 尾部不完整）→ 发 `stream_error` `{code:"session_corrupt"|"internal_error", lastSeq}` 后关闭；不得只关闭连接。
 - **`lastSeq` 是已成功写入并 flush/drain 的最大 seq**，不是从日志读到的最新 seq；慢消费者重连时从真正送达的位置补播。
 - **补播与实时增量的背压分开**：补播阶段直接写响应并等待 `drain`，不进入 500 条队列，避免长断线后“补播再次溢出”的活锁；实时增量使用每连接有界队列 500 条，溢出发送 `stream_error` `{code:"slow_consumer", lastSeq}` 后关闭。客户端用 `lastSeq` 重连补播，不丢数据。
-- 补播本身受客户端断开信号约束：等待 `drain` 必须与 `AbortSignal` 竞速，断开时立即停止写入并走 `finally` 清理；客户端过慢时连接阻塞而不增长内存，由浏览器/HTTP 超时或客户端主动断开收场。
+- **实时阶段单帧写超时**：实时增量同样给每一帧写入设超时（默认取补播超时，30s）。到期即按慢客户端处理——发 `stream_error` `{code:"slow_consumer", lastSeq}` 后关闭。没有这条，完全不读的客户端会让 `drain` 等待永不返回，队列溢出分支永远不可达，`slow_consumer` 与连接关闭都不会发生（2026-10-20 复验修复）。
+- 补播本身受客户端断开信号约束：等待 `drain` 必须与 `AbortSignal` 竞速，断开时立即停止写入并走 `finally` 清理；补播阶段每帧同样有写超时，超时即关闭连接。
 - 客户端断开通过 `AbortSignal` 终止轮询与文件读取；handler 在 `finally` 清理心跳 timer、队列与监听器。
 
 ## 12. 客户端

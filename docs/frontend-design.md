@@ -46,7 +46,7 @@
 - **模型适配层**：自研极简适配器，仅 `complete` / `countTokens`；P0 只实现 OpenAI 兼容端点。
 - **内核**：主循环、会话、工具系统、上下文、MCP 生命周期全部自研，不引入现成 harness。
 - **前端框架**：**Preact + Vite**（2026-10-18 定案）。Preact 只承担组件化与增量 diff；会话状态必须留在纯函数投影（§8.2 的 `TranscriptView`）中，不得塞进组件内部状态。构建产物为 ESM，与 Node 24 内核同构；Vite 仅用于开发期与打包，不引入第二套模块系统。
-- **实时通道**：**SSE + HTTP POST**（2026-10-18 定案）。服务端经 SSE 推送与 `LoopEvent` 同构的事件，客户端动作走 HTTP POST；客户端保留 `EventSource` 抽象，便于未来替换为进程内实现。
+- **实时通道**：**SSE + HTTP POST**（2026-10-18 定案，2026-10-20 修订事件载荷）。服务端经 SSE 推送 `SessionEventEnvelope`（`SessionEvent` + `sessionId`，见 §8.1）；`LoopEvent` 只用于库 API 与 demo，不再是 Web 实时流的载荷。客户端动作走 HTTP POST；客户端保留 `EventSource` 抽象，便于未来替换为进程内实现。
 - **浏览器基线**：Chromium 系（含桌面端内置 WebView）与 Firefox 当前稳定版；主题与滚动条使用 CSS 标准属性，旧 Chromium / Safari 降级到 `::-webkit-scrollbar`。
 - **零 emoji**：界面图标一律为内联 SVG（页内 `<symbol>` sprite + `<use>`）；状态点、连接线、分隔线用 CSS 绘制；文案中不使用 emoji。
 - **安全边界落到界面**：写内存 / 复位类操作在界面上必须呈现"待确认"状态并展示目标地址与值；只读工具不得渲染为危险操作；工具失败必须显式展示错误，不得以空值或全 0 读数伪装成正常。
@@ -589,11 +589,10 @@ interface ToolAnnotations {
 - 回放与实时渲染必须复用同一个归约函数，避免两套渲染路径产生差异。
 - 回放完成的会话，输入栏进入只读或"派生新会话"模式（会话 fork）。
 
-### 8.5 已决：扩展 LoopEvent 透传结构化结果
+### 8.5 已决：实时渲染与回放共用同一份结构化结果
 
-- 现状：`toResultPayload()` 已把完整 `ToolResultPayload`（含 `code` / `detail` / `artifactPath`）写入会话日志，但 `LoopEvent.tool_result` 只 yield `{ id, ok, text }`，实时渲染缺少证据表与错误码所需字段。
-- 决策（2026-10-18）：**扩展 `LoopEvent.tool_result`**，使其与 `ToolResultPayload` 字段对齐，而不是让 UI 维护第二套投影。
-- 实施要求：`session.append` 与 yield 必须由同一份字段构造（避免两处漂移）；扩展后实时渲染与回放渲染共用 §8.2 的同一个归约函数，V13 才可验证。
+- 决策（2026-10-18）：**扩展 `LoopEvent.tool_result`**，使其与 `ToolResultPayload` 字段对齐，而不是让 UI 维护第二套投影。`LoopEvent.tool_result` 现已是 `{ kind: "tool_result" } & ToolResultPayload`。
+- 2026-10-20 演进：Web 实时流的载荷改为 `SessionEventEnvelope`（§8.6），`tool_result` 直接携带会话日志里的完整 payload；`LoopEvent` 只服务于库 API 与 demo。实时与回放共用同一个归约函数这一点不变，V13 仍以 `transcript-consistency` 验证。
 
 ### 8.6 实时事件流与合并
 

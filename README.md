@@ -364,13 +364,13 @@ npm run serve:ui    # 真实数据服务，默认 http://127.0.0.1:5174/
 
 Web 工作台通过 SSE 订阅单个会话的日志投影。实时流与回放共用同一份 `SessionEvent`，不维护第二套事件模型；所有实时事件必须先成功落会话日志再被投影。
 
-- **端点**：`GET /api/events?sessionId=<id>&since=<seq>`。`sessionId` 必填（规则同 `isValidSessionId`）；`since` 为不小于 `-1` 的整数，缺省时读取 `Last-Event-ID`，两者都缺省按 `-1` 从头补播；query 优先于 header。非法 id / cursor 返回 400（`invalid_session_id` / `invalid_cursor`），会话不存在 404 `session_not_found`，日志损坏 500 `session_corrupt`。
+- **端点**：`GET /api/events?sessionId=<id>&since=<seq>`。`sessionId` 必填（规则同 `isValidSessionId`）；`since` 为不小于 `-1` 的整数，缺省时读取 `Last-Event-ID`，两者都缺省按 `-1` 从头补播；query 优先于 header。`since` 大于会话当前最大 `seq` 时按该 `seq` 夹紧（等价于从尾部继续跟随），不报错。非法 id / cursor 返回 400（`invalid_session_id` / `invalid_cursor`），会话不存在 404 `session_not_found`，日志损坏 500 `session_corrupt`。
 - **单会话绑定**：每条连接只跟随一个会话；切换会话必须关闭旧流，并以新会话的 `lastSeq` 重新建流。多会话复用与全局流未实现（D-133）。
 - **帧格式**：普通事件为 `id: <seq>` + `data: <SessionEventEnvelope JSON>`；`retry: 3000`；每 15s 一条注释心跳 `: ping`；会话已关闭且补播完成后发 `event: stream_end`（`data: {"lastSeq":N}`）；异常发 `event: stream_error`（`data: {"code","lastSeq"}`）后关闭。
 - **事件类型**：`tool_started`（`{callId,tool,access?}`）、`tool_result`、`permission_decision`、`mcp_status`、`device_status`，以及既有 `system/user/assistant/usage/checkpoint/status/interrupted/compaction`。`tool_call` 仅用于旧日志回放，新代码不再产生。`permission_decision` 中 `action=ask,effective=deny` 表示最终未获批准且工具未执行（原因可能是 `approval_unavailable` / `approval_denied` / `approval_timeout` / `approval_aborted`，需看 `reason`）；`mcp_status` 的 `kind` 覆盖 `connected/connect_failed/tools_changed/tools_refresh_failed/tool_invalid_schema/listener_failed/call_failed/config_failed/config_warning/project_config_skipped/tool_name_renamed`。
 - **设备状态契约**：MCP 工具在**成功**结果（`isError !== true`）的 `structuredContent.deviceStatus` 返回普通 JSON 对象；序列化后 ≤ 8 KiB、深度 ≤ 4。内核校验后写 `device_status`，payload 为 `{callId, server, tool, state}`。`state` 的键与值完全由 MCP server 决定，内核与 UI 不解释、不补全、不推断；UI 只 patch 已知字符串字段 `probe/serial/cpu/backend`，未知键与非字符串值忽略。失败、权限拒绝、超时/取消不产生 `device_status`；`deviceStatus` 存在但解析失败（非普通对象、超限、访问器/循环等）时写 `status {status:"device_status_invalid", tool, message}` 显式审计；`structuredContent` 非对象或缺少 `deviceStatus` 键时静默跳过，不猜测状态。
 - **断线续传**：客户端独占游标 `lastSeq`，重连以 `since=lastSeq` 建流并按 `seq` 去重；连续 3 次未成功建流后显示流错误（成功 `open` 后计数重置）。收到 `seq > lastSeq + 1` 视为缺口，关闭流并整量重拉会话（每次订阅最多 3 次），避免静默拼接错误；`stream_end` 停止重连，`stream_error` 按同一上限重连。
-- **慢客户端**：服务端实时队列上限 500 条；下游写不出去时发 `stream_error {code:"slow_consumer", lastSeq}` 并关闭连接，客户端凭游标重连续传。补播阶段每帧有写超时（默认 30s），不读响应体的连接会被关闭；大日志 / 长断线补播的性能上限未压测（D-136）。
+- **慢客户端**：服务端实时队列上限 500 条；实时阶段单帧写超时（默认同补播超时，30s）到期即视为慢客户端，或队列溢出时同样处理：发 `stream_error {code:"slow_consumer", lastSeq}` 并关闭连接，客户端凭游标重连续传。补播阶段每帧也有写超时，完全不读响应体的连接会被关闭；大日志 / 长断线补播的性能上限未压测（D-136）。
 - **延迟与证据**：当前由 200ms 日志轮询跟随，实际延迟还受文件读取与事件循环调度影响，无硬上限，也未压测；进程内低延迟适配器未实现（D-134）。证据由 `tool_result.payload` 的 `evidence/artifactPath/detail` 承载，没有独立 `evidence` 事件（D-135）。
 - **本轮不含 Web 审批**：只暴露已落日志的 `permission_decision`；`approval_request` 是阶段 2 的保留类型，审批 API / UI 未实现（D-137）。
 
