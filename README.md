@@ -158,6 +158,33 @@ for await (const event of runSession({
 
 `mcp.enabled`、`mcp.trustProjectConfig` 必须是布尔值，`mcp` 必须是普通对象，否则在入口抛 `TypeError`。MCP server 由用户自行安装并在配置中给出 `command`；MCP SDK 包（`@modelcontextprotocol/client`，测试夹具用 `@modelcontextprotocol/server`）已写入 `package.json`，随用户执行 `npm install` 安装；本仓库的 agent 不执行任何依赖安装命令。运行期状态写入会话 `status` 事件（`mcp_connected` / `mcp_connect_failed` / `mcp_tools_changed` / `mcp_tools_refresh_failed` / `mcp_tool_name_renamed` / `mcp_tool_invalid_schema` / `mcp_config_failed` / `mcp_config_warning` / `mcp_project_config_skipped`）。未知配置字段不再静默：`loadMcpConfig` 通过 `onWarning` 交回，`runSession` 记一条 `mcp_config_warning`；`list_changed` 刷新失败会做 3 次有界退避重试，仍失败才保留旧缓存并记 `mcp_tools_refresh_failed`（含 `attempts`）。工具名按 `(server, tool)` 字典序稳定分配，不依赖 server 返回顺序。
 
+## 领域 MCP：探针（BR-2）
+
+`mcp-servers/probe` 提供 Renode / OpenOCD 探针工具（内存读写、复位、串口），以 stdio MCP server 挂载，内核不含领域逻辑。先构建再配置：
+
+```bash
+npm run build:mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "probe": {
+      "command": "node",
+      "args": ["<仓库根>/dist-mcp/probe/server.js"]
+    }
+  }
+}
+```
+
+端到端演示会真实启动本机 Renode（默认 `C:/Program Files/Renode/bin/Renode.exe`，可用 `RENODE_PATH` 覆盖），只操作仿真内存：attach → halt → 读 `0x20000000` → 写 `78 56 34 12` → 回读校验 → reset → 恢复原值 → detach。
+
+```bash
+npm run probe:e2e
+```
+
+成功时输出 `{"backend":"renode","attach":true,...,"writeVerified":true,...}`；`dist-mcp/` 缺失时退出码 2 并提示 `npm run build:mcp`，其余失败退出码 1。写内存、复位与串口写入是破坏性操作，在 `diagnose` 预设下为 `ask`；headless（无审批器）时降级为拒绝且不执行工具。写操作返回 `declaration` 声明；`mem_read` 全 0 只返回警告，不推断“无故障”。
+
 ## 权限与审批
 
 权限层在工具执行前判定 `allow` / `ask` / `deny`，默认预设为 `diagnose`。判定只决定是否调用工具；`allow` 后仍会经过 `shell` 危险命令黑名单与 `fs` 路径边界检查。权限规则是声明式匹配而非沙箱（D-114）。
