@@ -186,6 +186,47 @@ npm run probe:e2e
 
 成功时输出 `{"backend":"renode","attach":true,...,"writeVerified":true,...}`；`dist-mcp/` 缺失时退出码 2 并提示 `npm run build:mcp`，其余失败退出码 1。写内存、复位与串口写入是破坏性操作，在 `diagnose` 预设下为 `ask`；headless（无审批器）时降级为拒绝且不执行工具。写操作返回 `declaration` 声明；`mem_read` 全 0 只返回警告，不推断“无故障”。
 
+## 领域 MCP：知识库（BR-3）
+
+`mcp-servers/kb` 以 stdio MCP server 暴露 `kb_lookup` / `kb_read` / `kb_search` / `kb_status`，全部只读；`kb_read` 标记为 evidence。先构建再配置：
+
+```bash
+npm run build:mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "kb": {
+      "command": "node",
+      "args": ["<仓库根>/dist-mcp/kb/server.js"],
+      "env": { "KB_ROOT": "<仓库根>/mcp-servers/kb/kb" }
+    }
+  }
+}
+```
+
+`KB_ROOT` 缺省为相对 `process.cwd()` 的 `mcp-servers/kb/kb`；目录不存在时 server 仍可启动，`kb_status` 显式返回 `indexPresent: false`。
+
+### 本地语料与回归基线
+
+语料与查询集是**本地资产，不进版本库**（`.gitignore` 已忽略 `mcp-servers/kb/kb/` 与 `mcp-servers/kb/data/`），重新获取方式见 `mcp-servers/kb/README.md`。当前实测：108 个 md / 90 条索引（BRD 基线为 103 / 85），自建查询 80 条（index 50 / search 30）与负样本 25 条；其中 11/80 的 gold 未进入 `index.yaml`（全部为 search 轨的 `reference/*.md`）。数字以实测为准，不裁剪语料。
+
+```bash
+npm run build:mcp
+npm run kb:regression          # 表格 + JSON；--json 仅 JSON，--baseline 输出基线形状
+```
+
+脚本在缺少 `dist-mcp/kb/service.js`、`KB_ROOT`、`index.yaml` 或查询集时打印原因并以退出码 2 结束；脚本不设通过阈值。`mcp-servers/kb/tests/regression.test.ts` 直接 import `service.ts`、不启动 MCP server；语料或查询集缺失时 `describe.skip`，存在时断言各指标不低于 `regression-baseline.json`。
+
+2026-10-20 实测基线（只作下限，不是目标）：index 轨 Recall@2 0.48、Hit@1 0.40、MRR 0.44；search 轨 Hit@1 0.4333（`search(tokens, 20)` 返回结果中出现 gold 文件即算命中；引擎按路径排序，没有相关性 rank 语义）；负样本拒答率 0.16。search 轨偏低的主要原因是 `reference/*.md` 大量未进索引，且命中结果被前 20 条路径排序截断，属于当前实现的可观测上限。
+
+### 验证边界
+
+- Renode 探针路径已由 `npm run probe:e2e` 真实执行（只操作仿真内存）；`RENODE_PATH` 可覆盖默认可执行文件路径。
+- OpenOCD 后端只完成可用性检测、参数与错误路径验证，未连接真机；真串口设备同样未实测。
+- 真串口与真机 OpenOCD 验证登记为 D-157；KB 语料/查询集不入库导致 CI 无法运行回归，登记为 D-158。
+
 ## 权限与审批
 
 权限层在工具执行前判定 `allow` / `ask` / `deny`，默认预设为 `diagnose`。判定只决定是否调用工具；`allow` 后仍会经过 `shell` 危险命令黑名单与 `fs` 路径边界检查。权限规则是声明式匹配而非沙箱（D-114）。

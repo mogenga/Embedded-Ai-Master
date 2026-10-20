@@ -1386,6 +1386,24 @@
 - **修复建议**: 断言改为「不阻塞」而非绝对耗时(例如比较并发与串行完成的相对关系),或为这两条用例单独设置更宽的 `testTimeout` / 用假时钟替换 `Date.now()`;不改生产代码。
 - **状态**: **已解决**(2026-10-20):两条用例各加 30s `testTimeout` 并注明「测的是故障隔离 / 超时注入是否生效,不是绝对耗时」;`连接超时可注入…` 的耗时上限从 3000ms 放宽到 10000ms——注入值是 300ms、默认值是 15s,10s 仍能区分二者,同时容纳并发负载下的 spawn 抖动。仅改测试,未改生产代码。
 
+### D-157 · 真串口与真机 OpenOCD 未实测
+
+- **发现**: 2026-10-20,BR-2/BR-3 回归与文档(Task 11)。
+- **现象**: BR-2 的探针后端只在 Renode 仿真内存上跑通真实端到端闭环;`OpenOcdBackend` 的可用性检测与错误路径有测试,但没有连接任何真实 MCU;串口工具也没有对真实 USB 转串口设备做过读写与超时验证。
+- **影响**: Renode 与真机在复位语义、内存访问时序、串口缓冲/流控、USB 枚举失败模式上存在差异;真机上的权限声明、超时与错误映射可能暴露当前测试覆盖不到的问题。
+- **触发升级条件**: 获得可复现的真机/串口环境;或用户报告 OpenOCD/串口路径的实际失败。
+- **修复建议**: 在真机上执行 attach → halt → read → write → 回读 → reset → detach,并单独验证串口打开、写、读超时与断开;把实测结果写入 `dev-notes`,不把硬件依赖加入默认 `npm test`。
+- **状态**: 未解决。
+
+### D-158 · KB 语料与查询集不入库导致 CI 回归覆盖缺口
+
+- **发现**: 2026-10-20,BR-2/BR-3 回归与文档(Task 11)。
+- **现象**: `mcp-servers/kb/kb/` 与 `mcp-servers/kb/data/` 因许可口径被 `.gitignore` 排除;`regression.test.ts` 在这两个目录缺失时 `describe.skip`,CI 环境因此不会执行任何 KB 检索指标断言。
+- **影响**: 本地基线能防住检索质量回退,但 CI 只能验证解析器与工具层的夹具测试;语料或查询集在本地被替换、损坏时,CI 不会报警。
+- **触发升级条件**: 建立 CI;或需要对外分发 KB 回归能力。
+- **修复建议**: 提供可公开的合成夹具语料与等价查询集供 CI 使用,真实语料仍留在本地;或在 CI 中显式下载受控语料并校验 `manifest.sha256`。不得把受限语料提交进仓库。
+- **状态**: 未解决。
+
 ---
 
 ## 变更记录
@@ -1450,3 +1468,4 @@
 | 2026-10-20 | M2 Web 审批闭环(`feat/m2-web-approval`):D-137(`approval_request` + `POST /api/approvals` + 审批 UI)与 D-139(`/api/actions` 落地)标已解决;D-112 的 Web 部分标已解决;录入 D-145 ~ D-152(重启丢失 pending、仅 Origin 校验、摘要敏感片段、单会话串行、SSE 200ms 延迟、迟到决策 404/410 不一致、未响应 abort 占用 `session_busy`、在途发送切回会话);README 新增「Web 会话与审批」,frontend-design 补审批卡片与状态机 |
 | 2026-10-20 | M2 Web 审批红队修复(`feat/m2-web-approval`):审批标识改为 gate 生成的独立 UUID(与 `callId` 解耦),`permission_decision`/崩溃恢复/transcript 按 `requestId` 配对;408 不再销毁连接;写端点拒绝 `Sec-Fetch-Site: cross-site`;启动前失败写 `interrupted(start_failed)`;D-146 补浏览器跨源面;录入 D-153(port 0 写端点 403)与 D-154(close 后 decide 返回 404) |
 | 2026-10-20 | 权限引擎与 Web 审批全量复验(`feat/m2-web-approval`):构建产物探针实测通过 135 项断言;D-154 复现并补记与 README/spec 的措辞冲突;录入 D-155(spec 三处残留 `requestId === callId` 旧描述)与 D-156(`tests/mcp-manager.test.ts` 时间阈值用例在并行负载下偶发失败);本轮未改生产代码 |
+| 2026-10-20 | BR-2/BR-3 Task 11:新增 `scripts/kb-regression.mjs`(index/search/负样本三轨,缺少本地资产时退出码 2)与 `regression.test.ts`/`regression-baseline.json`;README 新增 KB MCP 配置、语料偏差与实测基线;录入 D-157(真串口与真机 OpenOCD 未实测)与 D-158(KB 本地资产不入库导致 CI 回归覆盖缺口) |

@@ -1,0 +1,28 @@
+{
+  "date": "2026-10-20",
+  "corpus": {
+    "markdownFiles": 108,
+    "indexEntries": 90,
+    "indexQueries": 50,
+    "searchQueries": 30,
+    "negatives": 25
+  },
+  "index": {
+    "total": 50,
+    "recallAt2": 0.48,
+    "hitAt1": 0.4,
+    "mrr": 0.44
+  },
+  "search": {
+    "total": 30,
+    "hitAt1": 0.43333333333333335
+  },
+  "negatives": {
+    "total": 25,
+    "refusalRate": 0.16
+  },
+  "layers": {
+    "goldIndexed": 69,
+    "goldNotIndexed": 11
+  }
+}
