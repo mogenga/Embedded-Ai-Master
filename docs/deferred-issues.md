@@ -1291,7 +1291,7 @@
 
 - **发现**: 2026-10-20,M2 Web 审批 Task 10。
 - **现象**: `POST /api/actions` 与 `POST /api/approvals` 校验 `Host`/`Origin` 必须为 loopback 且端口匹配,并拒绝浏览器自动发送的 `Sec-Fetch-Site: cross-site`;但不校验 token、会话 cookie 或 CSRF 头,也不区分浏览器标签页。
-- **影响**: 同机其他进程或非浏览器客户端只要能以 loopback Origin 发请求,就能提交动作或审批;`Sec-Fetch-Site` 只覆盖浏览器跨源页面(含 localhost 上另一个 dev 代理页面),不覆盖非浏览器客户端或同源页面内的脚本。该机制只阻断跨源网页(DNS rebinding / 跨源 POST),不是本机攻击者隔离。
+- **影响**: 同机其他进程或非浏览器客户端只要能以 loopback Origin 发请求,就能提交动作或审批;`Sec-Fetch-Site` 只覆盖浏览器真正跨站的请求,同 site 不同端口的页面(如 `localhost:5173` 写 `127.0.0.1:5174`)标记为 `same-site`,由 `Origin` 的 loopback + 端口校验拦截;不覆盖非浏览器客户端或同源页面内的脚本。该机制只阻断跨源网页(DNS rebinding / 跨源 POST),不是本机攻击者隔离。
 - **触发升级条件**: 多用户、远程访问,或需要防本机其他应用。
 - **修复建议**: 引入一次性 token / 会话 cookie + CSRF 头,或改用 Unix socket / 命名管道并做 OS 级鉴权。
 - **状态**: 未解决;按 2026-10-20 决策不引入 token;浏览器跨源面已由 `Sec-Fetch-Site` 检查收紧。

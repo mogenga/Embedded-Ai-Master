@@ -340,7 +340,7 @@ npm run serve:ui    # 真实数据服务，默认 http://127.0.0.1:5174/
 ```
 
 - **环境变量**：`HARNESS_UI_PORT` 改监听端口（默认 `5174`）；`HARNESS_HOME` 指定会话与知识库根目录（默认 `~/.harness`）；`HARNESS_UI_STATIC` 指定前端静态产物目录（默认 `dist-web`）；`HARNESS_WEB_MODEL` 指定 Web 会话默认模型引用；`VITE_EVENT_STREAM_URL` 覆盖事件流地址（默认 `/api/events`）。服务只监听 `127.0.0.1`。
-- **本机边界**：`/api/*` 校验 `Host` / `Origin` 必须为 `127.0.0.1` / `localhost` / `::1` 且端口等于监听端口；跨源返回 403 `forbidden_host` / `forbidden_origin`，用于阻断 DNS rebinding 与跨源读取（D-067 已解决）。写端点额外拒绝浏览器自动发送的 `Sec-Fetch-Site: cross-site`（403 `forbidden_origin`），覆盖另一个 loopback 页面经 dev 代理发起的跨源写请求；非浏览器客户端不发送该头，仍以 `Origin` 为准（D-146）。
+- **本机边界**：`/api/*` 校验 `Host` / `Origin` 必须为 `127.0.0.1` / `localhost` / `::1` 且端口等于监听端口；跨源返回 403 `forbidden_host` / `forbidden_origin`，用于阻断 DNS rebinding 与跨源读取（D-067 已解决）。写端点额外拒绝浏览器自动发送的 `Sec-Fetch-Site: cross-site`（403 `forbidden_origin`），覆盖真正的跨站页面；同 site 但不同端口（如 `localhost:5173` 页面写 `127.0.0.1:5174`）通常标记为 `same-site`，由 `Origin` 的 loopback + 端口一致性校验拦截。非浏览器客户端不发送该头，仍以 `Origin` 为准（D-146）。
 - **架构**：Preact 只承担组件化与增量 diff；全部业务状态经 `src/ui/view/transcript.ts` 的纯函数投影 `TranscriptView`。前端类型直接复用内核 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations`，不维护第二套事件模型。
 - **数据加载**：首屏并行请求 `/api/sessions`、`/api/kb`、`/api/device`，再按会话列表首项请求 `/api/sessions/<id>` 的真实事件日志；切换会话重新拉取。调试坞的寄存器与日志由工具卡投影，不再使用静态演示数据。
 - **API**：
@@ -450,11 +450,11 @@ npm run build:web && npm run build && npm run serve:ui
 
 **202 语义**：只表示决策已送达 gate，不表示工具已执行；最终结果以会话日志的 `permission_decision` 为准（批准为 `effective: "allow"` 且 reason 含 `approval_granted`，拒绝为 deny）。HTTP 不返回 `effective`，前端也不本地伪造终态，等待 SSE 更新。
 
-**写端点通用约束**：`POST /api/actions` 与 `POST /api/approvals` 必须携带 `Origin`，且为 loopback、端口等于监听端口，否则 403 `forbidden_origin`；浏览器带 `Sec-Fetch-Site: cross-site` 时同样 403（即使 Origin 是另一个 loopback 页面），非浏览器客户端仍以 `Origin` 为准。`Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（接受 `charset` 等参数，415），body 上限 64 KiB（413），读取超时 5s（408 `request_timeout`）。超时只返回 408，不销毁连接；handler 丢弃剩余 body。`text` 仍保留 8000 字符上限；64 KiB 足以覆盖其最坏 JSON 转义（约 48 KiB）。只读端点仍只校验 `Host` / `Origin`。
+**写端点通用约束**：`POST /api/actions` 与 `POST /api/approvals` 必须携带 `Origin`，且为 loopback、端口等于监听端口，否则 403 `forbidden_origin`；浏览器带 `Sec-Fetch-Site: cross-site`（不同 site）时同样 403；同 site 不同端口由 `Origin` 的端口一致性校验拦截，非浏览器客户端仍以 `Origin` 为准。`Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（接受 `charset` 等参数，415），body 上限 64 KiB（413），读取超时 5s（408 `request_timeout`）。超时只返回 408，不销毁连接；handler 丢弃剩余 body。`text` 仍保留 8000 字符上限；64 KiB 足以覆盖其最坏 JSON 转义（约 48 KiB）。只读端点仍只校验 `Host` / `Origin`。
 
 **前端发送语义**：追加输入成功后只刷新会话列表，保持当前视图与 SSE 连接，不重载会话；只有新建会话（提交前没有 `activeSessionId`）才按返回的 `sessionId` 切换并订阅。
 
-**失败语义**：审批超时（`approvalTimeoutMs`，默认 120000ms）、用户拒绝、会话中断均不执行工具，日志以 `permission_decision` deny 收尾；迟到决策在运行中返回 410，会话结束后返回 404。服务重启后未决审批丢失，`resumeSession` 会补 `approval_aborted: crash_recovery` 审计（按 `requestId` 配对，同 `callId` 的已决审批不会重复补写）。`query` 启动前的失败会写 `interrupted`（`reason: "start_failed"`）。headless demo 与未注入审批桥的库调用仍是 `ask` → deny（`approval_unavailable`）。
+**失败语义**：审批超时（`approvalTimeoutMs`，默认 120000ms）、用户拒绝、会话中断均不执行工具，日志以 `permission_decision` deny 收尾；迟到决策在运行中返回 410，会话结束后返回 404。服务重启后未决审批丢失，`resumeSession` 会补 `approval_aborted: crash_recovery` 审计（按事件顺序配对：`requestId` 优先，旧日志无 `requestId` 时按 `callId` 配对最早一条待决；同 `callId` 的已决审批不会重复补写）。`query` 启动前的失败会写 `interrupted`（`reason: "start_failed"`）。headless demo 与未注入审批桥的库调用仍是 `ask` → deny（`approval_unavailable`）。
 
 **演示**：启动后在输入栏发送需要 `ask` 的指令（默认 `diagnose` 下让 `shell` 执行无害命令，或让 `fs` 写临时文件），页面出现审批卡片；批准后工具执行，拒绝后不执行。过程记录见 `dev-notes/M2-Web审批.md`。
 

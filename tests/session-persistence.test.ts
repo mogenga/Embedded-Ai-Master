@@ -599,6 +599,131 @@ describe("approval_request 事件", () => {
     await again.close();
   });
 
+  it("旧格式：approval_request.requestId 等于 callId 且 decision 无 requestId 时不补审计", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({
+      type: "approval_request",
+      payload: {
+        requestId: "call-1",
+        callId: "call-1",
+        tool: "shell",
+        action: "ask",
+        reason: "test:ask",
+        preset: "read-only",
+        paramsDigest: "digest",
+        paramsKeys: ["command"],
+        deadlineAt: "2026-10-20T00:01:00.000Z",
+      },
+    });
+    await session.append({
+      type: "permission_decision",
+      payload: {
+        callId: "call-1",
+        tool: "shell",
+        action: "ask",
+        effective: "allow",
+        reason: "approval_granted",
+        preset: "read-only",
+        source: "builtin",
+        paramsDigest: "digest",
+        paramsKeys: ["command"],
+      },
+    });
+    await session.close();
+
+    const resumed = await resumeSession(dir);
+    const events = resumed.events();
+    expect(
+      events.filter((event) => event.type === "permission_decision"),
+    ).toHaveLength(1);
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "permission_decision" &&
+          event.payload.reason === "approval_aborted: crash_recovery",
+      ),
+    ).toHaveLength(0);
+    await resumed.close();
+
+    const again = await resumeSession(dir);
+    expect(
+      again
+        .events()
+        .filter(
+          (event) =>
+            event.type === "permission_decision" &&
+            event.payload.reason === "approval_aborted: crash_recovery",
+        ),
+    ).toHaveLength(0);
+    await again.close();
+  });
+
+  it("旧格式跨轮：一条无 requestId 的 decision 只配对最早一条同 callId 审批", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    for (const digest of ["digest-1", "digest-2"]) {
+      await session.append({
+        type: "approval_request",
+        payload: {
+          requestId: "call-1",
+          callId: "call-1",
+          tool: "shell",
+          action: "ask",
+          reason: "test:ask",
+          preset: "read-only",
+          paramsDigest: digest,
+          paramsKeys: ["command"],
+          deadlineAt: "2026-10-20T00:01:00.000Z",
+        },
+      });
+    }
+    await session.append({
+      type: "permission_decision",
+      payload: {
+        callId: "call-1",
+        tool: "shell",
+        action: "ask",
+        effective: "allow",
+        reason: "approval_granted",
+        preset: "read-only",
+        source: "builtin",
+        paramsDigest: "digest-1",
+        paramsKeys: ["command"],
+      },
+    });
+    await session.close();
+
+    const resumed = await resumeSession(dir);
+    const recoveryDecisions = resumed
+      .events()
+      .filter(
+        (event) =>
+          event.type === "permission_decision" &&
+          event.payload.reason === "approval_aborted: crash_recovery",
+      );
+    expect(recoveryDecisions).toHaveLength(1);
+    expect(recoveryDecisions[0]!.payload).toMatchObject({
+      requestId: "call-1",
+      callId: "call-1",
+      paramsDigest: "digest-2",
+      effective: "deny",
+    });
+    await resumed.close();
+
+    const again = await resumeSession(dir);
+    expect(
+      again
+        .events()
+        .filter(
+          (event) =>
+            event.type === "permission_decision" &&
+            event.payload.reason === "approval_aborted: crash_recovery",
+        ),
+    ).toHaveLength(1);
+    await again.close();
+  });
+
   it("resume 跳过 preset 非法的 approval_request,不补 permission_decision", async () => {
     const dir = makeTempDir();
     const session = await createSession(dir);

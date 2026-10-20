@@ -238,7 +238,7 @@ export interface ApprovalRequestPayload {
       paramsDigest, paramsKeys
   } }
   ```
-  配对按 `requestId`（收集 `permission_decision.payload.requestId`），不再使用全局 `callId` 集合；`approval_request` 缺非空 `requestId` 时跳过，不补决策。写入时同时带 `requestId`，保证再次 resume 不会重复补写。
+  配对按事件顺序进行：`approval_request` 同时登记到 `requestId` 与 `callId` 两张待决表；`permission_decision` 有 `requestId` 且能命中时移除该待决，否则按 `callId` 移除最早一条待决（兼容旧日志 `requestId === callId`、`permission_decision` 无 `requestId` 的格式）。遍历结束仍未配对的审批按事件顺序补 deny；`approval_request` 缺非空 `requestId` 时跳过。写入时同时带 `requestId`，保证新旧格式再次 resume 都不会重复补写。
   不设置 `parent`：`approval_request` 由 prompter 写入，`BatchCall` 不含 assistant seq；`parent` 是可选字段，`buildMessages` 忽略该事件类型，不影响投影。不新增 `interrupted` 语义；已有 `interrupted` 补写逻辑保持不变。
 - 该恢复只在 `resumeSession` 时发生；Web 页面在服务未运行时按 `deadlineAt` 显示过期提示，不伪造决策。
 
@@ -247,7 +247,7 @@ export interface ApprovalRequestPayload {
 ### 10.1 写请求通用约束
 
 - `POST /api/actions` 与 `POST /api/approvals` 必须带 `Origin`，且 `Origin` 为 loopback、端口等于监听端口（`requireWriteRequest`）。缺少 `Origin` → 403 `forbidden_origin`；非 POST → 405 `method_not_allowed`。
-- 浏览器跨源：请求携带 `Sec-Fetch-Site: cross-site` 时直接 403 `forbidden_origin`，即使 `Origin` 是另一个 loopback 页面（例如 dev 代理页面）。该头由浏览器自动发送；非浏览器客户端不发送，仍由 `Origin` 校验兜底。
+- 浏览器跨源：请求携带 `Sec-Fetch-Site: cross-site`（不同 site）时直接 403 `forbidden_origin`；同 site 不同端口（如 `localhost:5173` 页面写 `127.0.0.1:5174`）通常标记为 `same-site`，由 `Origin` 的 loopback + 端口一致性校验拦截。该头由浏览器自动发送；非浏览器客户端不发送，仍由 `Origin` 校验兜底。
 - `Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（允许 `; charset=utf-8` 等参数；`application/jsonp` 不放行），否则 415 `unsupported_media_type`。
 - Body 上限 64 KiB；超出 413 `payload_too_large`；JSON 解析失败或非普通对象 → 400 `invalid_body`。`text` 的 8000 字符上限不变；64 KiB 覆盖其最坏 JSON 转义（每 UTF-16 单元最多 6 字节，约 48 KiB）。
 - 读取超时 5s → 408 `request_timeout`：超时只让 `readJsonBody` 以 408 拒绝，不销毁 socket；handler 的 catch 执行 `req.resume()` 丢弃剩余 body 后写出 408 响应。客户端断开按 400/无响应处理，不留下 pending。

@@ -177,3 +177,28 @@
 **残余**
 
 - D-153（`port: 0` 时写端点 403）、D-154（runner 关闭后 decide 返回 404）本轮只登记未修；D-150/D-151/D-152 不变。
+
+## 升级兼容修复（2026-10-20，复验后）
+
+**用户关键原话**
+
+- `复验发现一个升级兼容 Important`；`旧格式（approval_request.requestId === callId，permission_decision 无 requestId）会导致所有历史已决审批被误判为未决`；改为顺序配对，并补三种用例。
+
+**关键产出**
+
+- `findUnresolvedApprovals` 改为按事件顺序配对：`approval_request` 同时进 `requestId`/`callId` 待决队列；`permission_decision` 优先按 `requestId` 匹配，否则按 `callId` 取最早未匹配；返回未匹配条目并保持事件顺序。
+- 新增旧格式单轮、旧格式跨轮用例，均含二次 resume 幂等断言；新格式跨轮沿用既有用例。
+- README / D-146 / spec §10.1 修正 `Sec-Fetch-Site` 措辞：它拦真正跨站；同 site 不同端口由 `Origin` 端口校验拦截。spec §9.2 同步顺序配对语义。
+
+**RED/GREEN**
+
+- RED（stash 实现）：旧格式两用例失败，跨轮补的是 `digest-1` 而非 `digest-2`。
+- GREEN：`tests/session-persistence.test.ts` + `tests/web-approval-e2e.test.ts` 89 passed；`npm run typecheck` 通过。
+
+**翻车与返工**
+
+- 首版算法若只维护 `requestId` 单值表，旧格式跨轮会互相覆盖且二次 resume 不幂等；改为按 requestId 的待决队列 + `matched` 标记后解决。
+
+**残余**
+
+- 全量 `npm test` 中 `tests/mcp-manager.test.ts` 在并行负载下 3 个时间阈值用例超时，单独复跑 36 passed，与本轮无关。

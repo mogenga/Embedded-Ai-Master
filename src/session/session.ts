@@ -135,27 +135,57 @@ function toPendingApproval(event: SessionEvent): PendingApproval | undefined {
 }
 
 function findUnresolvedApprovals(events: readonly SessionEvent[]): PendingApproval[] {
-  const decided = new Set<string>();
-  for (const event of events) {
-    if (event.type !== "permission_decision") continue;
-    const requestId = event.payload.requestId;
-    if (typeof requestId === "string") decided.add(requestId);
+  interface ApprovalEntry {
+    approval: PendingApproval;
+    matched: boolean;
   }
-  const seen = new Set<string>();
-  const pending: PendingApproval[] = [];
+
+  const byRequestId = new Map<string, ApprovalEntry[]>();
+  const byCallId = new Map<string, ApprovalEntry[]>();
+  const entries: ApprovalEntry[] = [];
+
+  const takeUnmatched = (queue: ApprovalEntry[] | undefined): ApprovalEntry | undefined => {
+    if (queue === undefined) return undefined;
+    while (queue.length > 0) {
+      const entry = queue.shift()!;
+      if (!entry.matched) return entry;
+    }
+    return undefined;
+  };
+
   for (const event of events) {
-    const approval = toPendingApproval(event);
-    if (
-      approval === undefined
-      || decided.has(approval.requestId)
-      || seen.has(approval.requestId)
-    ) {
+    if (event.type === "approval_request") {
+      const approval = toPendingApproval(event);
+      if (approval === undefined) continue;
+      const entry: ApprovalEntry = { approval, matched: false };
+      entries.push(entry);
+      const requestQueue = byRequestId.get(approval.requestId);
+      if (requestQueue === undefined) byRequestId.set(approval.requestId, [entry]);
+      else requestQueue.push(entry);
+      const callQueue = byCallId.get(approval.callId);
+      if (callQueue === undefined) byCallId.set(approval.callId, [entry]);
+      else callQueue.push(entry);
       continue;
     }
-    seen.add(approval.requestId);
-    pending.push(approval);
+    if (event.type !== "permission_decision") continue;
+
+    // 新格式优先按 requestId 配对；旧日志没有 requestId（或该 id 已无待决）时
+    // 按 callId 配对最早一条待决，兼容 requestId === callId 的旧日志与跨轮复用。
+    const requestId = event.payload.requestId;
+    if (typeof requestId === "string") {
+      const matched = takeUnmatched(byRequestId.get(requestId));
+      if (matched !== undefined) {
+        matched.matched = true;
+        continue;
+      }
+    }
+    const callId = event.payload.callId;
+    if (typeof callId !== "string") continue;
+    const matched = takeUnmatched(byCallId.get(callId));
+    if (matched !== undefined) matched.matched = true;
   }
-  return pending;
+
+  return entries.filter((entry) => !entry.matched).map((entry) => entry.approval);
 }
 
 // 只恢复「最后一个 assistant 批次缺 tool_result」这一种崩溃尾部；
