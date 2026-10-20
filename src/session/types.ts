@@ -11,6 +11,9 @@ export type EventType =
   | "assistant"
   | "tool_call"
   | "tool_result"
+  | "tool_started"
+  | "mcp_status"
+  | "device_status"
   | "usage"
   | "checkpoint"
   | "status"
@@ -34,6 +37,48 @@ export interface SessionEvent {
   type: EventType;
   payload: Record<string, unknown>;
   parent?: number;
+}
+
+export interface SessionEventEnvelope extends SessionEvent {
+  sessionId: string;
+}
+
+export interface ToolStartedPayload {
+  callId: string;
+  tool: string;
+  access?: ToolAccess;
+}
+
+export type McpStatusPayloadKind =
+  | "connected"
+  | "connect_failed"
+  | "tools_changed"
+  | "tools_refresh_failed"
+  | "tool_invalid_schema"
+  | "listener_failed"
+  | "call_failed"
+  | "config_failed"
+  | "config_warning"
+  | "project_config_skipped"
+  | "tool_name_renamed";
+
+export interface McpStatusPayload {
+  kind: McpStatusPayloadKind;
+  server?: string;
+  tool?: string;
+  toolCount?: number;
+  message?: string;
+  attempts?: number;
+  name?: string;
+  originalName?: string;
+  scope?: "global";
+}
+
+export interface DeviceStatusPayload {
+  callId: string;
+  server: string;
+  tool: string;
+  state: Record<string, unknown>;
 }
 
 export interface AssistantPayload {

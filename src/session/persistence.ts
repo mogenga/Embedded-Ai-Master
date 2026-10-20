@@ -4,6 +4,7 @@ import { copyFile, lstat, mkdir, realpath, rm, stat, writeFile } from "node:fs/p
 import path from "node:path";
 import { resolveHarnessHome } from "../config/harness-home.js";
 import { buildMessages } from "../context/build.js";
+import type { SessionGenerationState, SessionSnapshot } from "../events/types.js";
 import { SessionCorruptionError, SessionForkError } from "./errors.js";
 import {
   isValidSessionId,
@@ -25,6 +26,9 @@ const EVENT_TYPES: Record<EventType, true> = {
   assistant: true,
   tool_call: true,
   tool_result: true,
+  tool_started: true,
+  mcp_status: true,
+  device_status: true,
   usage: true,
   checkpoint: true,
   status: true,
@@ -93,6 +97,10 @@ function readHeader(dir: string): SessionHeader {
   }
 }
 
+export function readSessionHeader(dir: string): SessionHeader {
+  return readHeader(dir);
+}
+
 function parseGeneration(name: string): number | null {
   const match = SESSION_LOG_PATTERN.exec(name);
   if (match === null) return null;
@@ -113,7 +121,7 @@ export function listSessionLogFiles(dir: string): string[] {
 }
 
 // 代文件必须从 v1 连续递增;缺档可能是删除、截断或同步失败,静默接受会破坏审计链(D-048)。
-function assertGenerationsContiguous(files: readonly string[], dir: string): void {
+export function assertGenerationsContiguous(files: readonly string[], dir: string): void {
   for (let index = 0; index < files.length; index += 1) {
     const expected = index + 1;
     const actual = parseGeneration(files[index]!);
@@ -127,6 +135,69 @@ function assertGenerationsContiguous(files: readonly string[], dir: string): voi
   }
 }
 
+export function decodeEventLine(bytes: Buffer): string {
+  let end = bytes.length;
+  if (end > 0 && bytes[end - 1] === 0x0d) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
+export function parseEventLineText(text: string, file: string, line: number): SessionEvent {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    throw new SessionCorruptionError("invalid_event_line", `Invalid event line: ${file}:${line}`, {
+      file,
+      line,
+      cause: error,
+    });
+  }
+  return parseEventObject(parsed, file, line);
+}
+
+export function parseEventObject(parsed: unknown, file: string, line: number): SessionEvent {
+  if (!isRecord(parsed)) {
+    throw new SessionCorruptionError(
+      "invalid_event_line",
+      `Invalid event line: ${file}:${line}`,
+      { file, line },
+    );
+  }
+  if (!isRecord(parsed.payload)) {
+    throw new SessionCorruptionError(
+      "invalid_event_line",
+      `Invalid event payload: ${file}:${line}`,
+      { file, line },
+    );
+  }
+  if (typeof parsed.type !== "string" || !Object.hasOwn(EVENT_TYPES, parsed.type)) {
+    throw new SessionCorruptionError(
+      "unknown_event_type",
+      `Unknown event type at ${file}:${line}`,
+      { file, line, type: parsed.type },
+    );
+  }
+  return parsed as unknown as SessionEvent;
+}
+
+export function parseEventLine(
+  text: string,
+  file: string,
+  line: number,
+  expectedSeq: number,
+): SessionEvent {
+  const event = parseEventLineText(text, file, line);
+  if (event.seq !== expectedSeq) {
+    throw new SessionCorruptionError("invalid_seq", `Invalid seq at ${file}:${line}`, {
+      file,
+      line,
+      expected: expectedSeq,
+      actual: event.seq,
+    });
+  }
+  return event;
+}
+
 function readEvents(dir: string, files: string[]): SessionEvent[] {
   const events: SessionEvent[] = [];
   for (const name of files) {
@@ -135,48 +206,7 @@ function readEvents(dir: string, files: string[]): SessionEvent[] {
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index];
       if (line.length === 0) continue;
-      const lineNo = index + 1;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line);
-      } catch (error) {
-        throw new SessionCorruptionError("invalid_event_line", `Invalid event line: ${name}:${lineNo}`, {
-          file: name,
-          line: lineNo,
-          cause: error,
-        });
-      }
-      if (!isRecord(parsed)) {
-        throw new SessionCorruptionError(
-          "invalid_event_line",
-          `Invalid event line: ${name}:${lineNo}`,
-          { file: name, line: lineNo },
-        );
-      }
-      if (!isRecord(parsed.payload)) {
-        throw new SessionCorruptionError(
-          "invalid_event_line",
-          `Invalid event payload: ${name}:${lineNo}`,
-          { file: name, line: lineNo },
-        );
-      }
-      if (typeof parsed.type !== "string" || !Object.hasOwn(EVENT_TYPES, parsed.type)) {
-        throw new SessionCorruptionError(
-          "unknown_event_type",
-          `Unknown event type at ${name}:${lineNo}`,
-          { file: name, line: lineNo, type: parsed.type },
-        );
-      }
-      const expected = events.length;
-      if (parsed.seq !== expected) {
-        throw new SessionCorruptionError("invalid_seq", `Invalid seq at ${name}:${lineNo}`, {
-          file: name,
-          line: lineNo,
-          expected,
-          actual: parsed.seq,
-        });
-      }
-      events.push(parsed as unknown as SessionEvent);
+      events.push(parseEventLine(line, name, index + 1, events.length));
     }
   }
   return events;
@@ -196,6 +226,75 @@ export function readSessionDir(dir: string): {
   }
   assertGenerationsContiguous(files, dir);
   return { header, events: readEvents(dir, files), logFiles: files };
+}
+
+export interface ReadSessionSnapshotOptions {
+  allowTrailingPartial?: boolean;
+}
+
+// 容错快照:完整行必须合法;尾部无换行的一段若自身是完整 JSON 则按事件处理,
+// 否则仅在 open 会话的最后一代理容为 pendingTail(按字节保留,避免截断多字节字符)。
+export async function readSessionSnapshot(
+  dir: string,
+  opts: ReadSessionSnapshotOptions = {},
+): Promise<SessionSnapshot> {
+  const header = readHeader(dir);
+  const files = listSessionLogFiles(dir);
+  if (files.length === 0) {
+    throw new SessionCorruptionError("invalid_header", `Session has no log files: ${dir}`, {
+      dir,
+    });
+  }
+  assertGenerationsContiguous(files, dir);
+  const events: SessionEvent[] = [];
+  const generations: SessionGenerationState[] = [];
+  let pendingTail: SessionSnapshot["pendingTail"];
+  for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
+    const name = files[fileIndex]!;
+    const bytes = readFileSync(path.join(dir, name));
+    let start = 0;
+    let lineNo = 0;
+    for (;;) {
+      const newline = bytes.indexOf(0x0a, start);
+      if (newline < 0) break;
+      lineNo += 1;
+      const text = decodeEventLine(bytes.subarray(start, newline));
+      start = newline + 1;
+      if (text.trim().length === 0) continue;
+      events.push(parseEventLine(text, name, lineNo, events.length));
+    }
+    if (start < bytes.length) {
+      const tail = bytes.subarray(start);
+      const text = decodeEventLine(tail);
+      if (text.trim().length > 0) {
+        let jsonParsed = true;
+        try {
+          JSON.parse(text);
+        } catch {
+          jsonParsed = false;
+        }
+        if (jsonParsed) {
+          events.push(parseEventLine(text, name, lineNo + 1, events.length));
+          start = bytes.length;
+        } else {
+          const isLastGeneration = fileIndex === files.length - 1;
+          if (opts.allowTrailingPartial === true && header.status === "open" && isLastGeneration) {
+            pendingTail = { bytes: Buffer.from(tail), file: name, offset: start };
+          } else {
+            throw new SessionCorruptionError(
+              "invalid_event_line",
+              `Invalid event line: ${name}:${lineNo + 1}`,
+              { file: name, line: lineNo + 1 },
+            );
+          }
+        }
+      }
+    }
+    generations.push({ file: name, offset: start });
+  }
+  return pendingTail === undefined
+    ? { header, events, generations }
+    : { header, events, generations, pendingTail };
 }
 
 function assertForkBoundary(events: readonly SessionEvent[], atSeq: number): void {

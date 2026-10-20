@@ -282,6 +282,9 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
         break;
       }
       case "tool_call":
+      case "tool_started":
+      case "mcp_status":
+      case "device_status":
       case "usage":
       case "checkpoint":
       case "status":

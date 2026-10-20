@@ -266,6 +266,14 @@ describe("readSessionDir", () => {
     expect(error.detail).toMatchObject({ file: "session.v1.jsonl", line: 2 });
   });
 
+  it("纯空白行 → invalid_event_line（readSessionDir 保持严格语义）", () => {
+    const dir = makeTempDir();
+    writeHeader(dir, defaultHeader());
+    writeLines(dir, "session.v1.jsonl", ["   "]);
+
+    expect(captureCorruption(() => readSessionDir(dir)).code).toBe("invalid_event_line");
+  });
+
   it("JSON 合法但非对象 → invalid_event_line", () => {
     const dir = makeTempDir();
     writeHeader(dir, defaultHeader());
@@ -399,6 +407,68 @@ describe("permission_decision 事件", () => {
 
     expect(result.events.map((event) => event.type)).toEqual(["user", "usage"]);
     expect(result.events.some((event) => event.type === "permission_decision")).toBe(false);
+  });
+});
+
+describe("tool_started / mcp_status / device_status 事件", () => {
+  it("写入三种新事件后可读且 seq 连续", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "u" } });
+    await session.append({
+      type: "tool_started",
+      payload: { callId: "c1", tool: "fs", access: "read" },
+    });
+    await session.append({
+      type: "mcp_status",
+      payload: { kind: "connected", server: "probe", toolCount: 2 },
+    });
+    await session.append({
+      type: "device_status",
+      payload: {
+        callId: "c1",
+        server: "probe",
+        tool: "mcp__probe__attach",
+        state: { probe: "attached" },
+      },
+    });
+    await session.close();
+
+    const result = readSessionDir(dir);
+
+    expect(result.events.map((event) => event.type)).toEqual([
+      "user",
+      "tool_started",
+      "mcp_status",
+      "device_status",
+    ]);
+    expect(result.events.map((event) => event.seq)).toEqual([0, 1, 2, 3]);
+    expect(result.events[1]?.payload).toMatchObject({ callId: "c1", tool: "fs", access: "read" });
+    expect(result.events[2]?.payload).toMatchObject({ kind: "connected", toolCount: 2 });
+    expect(result.events[3]?.payload).toMatchObject({ server: "probe", state: { probe: "attached" } });
+  });
+
+  it("旧日志不含新类型时读取正常", () => {
+    const dir = makeTempDir();
+    writeHeader(dir, defaultHeader());
+    writeLines(dir, "session.v1.jsonl", [
+      JSON.stringify(makeEvent(0, "user")),
+      JSON.stringify(makeEvent(1, "status")),
+    ]);
+
+    const result = readSessionDir(dir);
+
+    expect(result.events.map((event) => event.type)).toEqual(["user", "status"]);
+  });
+
+  it("未知事件类型仍抛 unknown_event_type", () => {
+    const dir = makeTempDir();
+    writeHeader(dir, defaultHeader());
+    writeLines(dir, "session.v1.jsonl", [
+      JSON.stringify({ ...makeEvent(0), type: "tool_finished" }),
+    ]);
+
+    expect(captureCorruption(() => readSessionDir(dir)).code).toBe("unknown_event_type");
   });
 });
 
