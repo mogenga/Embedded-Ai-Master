@@ -192,7 +192,7 @@ async function handleAction(
 ): Promise<void> {
   const body = await readJsonBody(req);
   if (typeof body.text !== "string") {
-    throw new HttpError(400, "invalid_text", "text 必须是字符串");
+    throw new HttpError(400, "invalid_body", "text 必须是字符串");
   }
   if (body.sessionId !== undefined && typeof body.sessionId !== "string") {
     throw new HttpError(400, "invalid_session_id", "sessionId 必须是字符串");
@@ -217,23 +217,24 @@ async function handleApproval(
   runner: SessionRunner,
 ): Promise<void> {
   const body = await readJsonBody(req);
-  if (typeof body.sessionId !== "string" || body.sessionId === "") {
-    throw new HttpError(400, "invalid_session_id", "sessionId 必须是非空字符串");
+  if (!isValidSessionId(body.sessionId)) {
+    throw new HttpError(400, "invalid_session_id", "非法的会话 id");
   }
-  if (typeof body.requestId !== "string" || body.requestId === "") {
-    throw new HttpError(400, "invalid_request_id", "requestId 必须是非空字符串");
+  const requestId = body.requestId;
+  if (typeof requestId !== "string" || requestId.length < 1 || requestId.length > 200) {
+    throw new HttpError(400, "invalid_request_id", "requestId 长度必须在 1..200 之间");
   }
   const decision = body.decision;
   if (decision !== "allow" && decision !== "deny") {
     throw new HttpError(400, "invalid_decision", "decision 必须是 allow 或 deny");
   }
-  const outcome = await runner.decide(body.sessionId, body.requestId, decision);
+  const outcome = await runner.decide(body.sessionId, requestId, decision);
   switch (outcome.kind) {
     case "accepted":
-      sendJson(res, 202, { requestId: body.requestId, decision });
+      sendJson(res, 202, { requestId, decision });
       return;
     case "duplicate":
-      sendJson(res, 200, { requestId: body.requestId, decision });
+      sendJson(res, 200, { requestId, decision });
       return;
     case "unknown_session":
     case "unknown_request":

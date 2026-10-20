@@ -435,7 +435,10 @@ describe("ui api", () => {
     expect(errorCode(res.body)).toBe("payload_too_large");
   });
 
-  it("text 非字符串返回 400 invalid_text 且不调用 runner", async () => {
+  it.each<[string, string]>([
+    ["非字符串", JSON.stringify({ text: 42 })],
+    ["缺失", JSON.stringify({})],
+  ])("text %s 返回 400 invalid_body 且不调用 runner", async (_label, payload) => {
     const runner = makeRunner();
     const s = createUiServer({ harnessHome: makeHome(), runner });
     close = s.close;
@@ -444,10 +447,10 @@ describe("ui api", () => {
       "/api/actions",
       "POST",
       writeHeaders(s.port),
-      JSON.stringify({ text: 42 }),
+      payload,
     );
     expect(res.status).toBe(400);
-    expect(errorCode(res.body)).toBe("invalid_text");
+    expect(errorCode(res.body)).toBe("invalid_body");
     expect(vi.mocked(runner.start)).not.toHaveBeenCalled();
   });
 

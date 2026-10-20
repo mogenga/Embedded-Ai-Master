@@ -153,6 +153,54 @@ describe("approvals api", () => {
     expect(vi.mocked(runner.decide)).not.toHaveBeenCalled();
   });
 
+  it.each<[string, unknown]>([
+    ["路径穿越", "../evil"],
+    ["含点", "s1.old"],
+    ["空串", ""],
+    ["非字符串", 42],
+  ])("非法 sessionId（%s）返回 400 invalid_session_id 且不调用 runner", async (_label, sessionId) => {
+    const runner = runnerReturning({ kind: "accepted" });
+    const s = await makeServer(runner);
+    close = s.close;
+    const res = await rawRequest(s.port, "/api/approvals", "POST", {
+      origin: `http://127.0.0.1:${s.port}`,
+      "content-type": "application/json",
+    }, JSON.stringify({ sessionId, requestId: "r1", decision: "allow" }));
+    expect(res.status).toBe(400);
+    expect(errorCode(res.body)).toBe("invalid_session_id");
+    expect(vi.mocked(runner.decide)).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, unknown]>([
+    ["空串", ""],
+    ["超长", "r".repeat(201)],
+    ["非字符串", 42],
+  ])("非法 requestId（%s）返回 400 invalid_request_id 且不调用 runner", async (_label, requestId) => {
+    const runner = runnerReturning({ kind: "accepted" });
+    const s = await makeServer(runner);
+    close = s.close;
+    const res = await rawRequest(s.port, "/api/approvals", "POST", {
+      origin: `http://127.0.0.1:${s.port}`,
+      "content-type": "application/json",
+    }, JSON.stringify({ sessionId: "s1", requestId, decision: "allow" }));
+    expect(res.status).toBe(400);
+    expect(errorCode(res.body)).toBe("invalid_request_id");
+    expect(vi.mocked(runner.decide)).not.toHaveBeenCalled();
+  });
+
+  it("requestId 恰好 200 字符时放行", async () => {
+    const runner = runnerReturning({ kind: "accepted" });
+    const s = await makeServer(runner);
+    close = s.close;
+    const requestId = "r".repeat(200);
+    const res = await rawRequest(s.port, "/api/approvals", "POST", {
+      origin: `http://127.0.0.1:${s.port}`,
+      "content-type": "application/json",
+    }, JSON.stringify({ sessionId: "s1", requestId, decision: "allow" }));
+    expect(res.status).toBe(202);
+    expect(vi.mocked(runner.decide)).toHaveBeenCalledWith("s1", requestId, "allow");
+  });
+
   it("缺少 Origin 返回 403 forbidden_origin", async () => {
     const runner = runnerReturning({ kind: "accepted" });
     const s = await makeServer(runner);
