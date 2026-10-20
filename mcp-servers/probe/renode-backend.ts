@@ -105,8 +105,41 @@ function parseByteOutput(address: number, output: string): number {
   return value;
 }
 
+function parseDoubleWordOutput(address: number, output: string): number {
+  const match = /^(?:0x)?([0-9a-f]{1,8})$/i.exec(output.trim());
+  const value = match ? Number.parseInt(match[1], 16) : Number.NaN;
+  if (!match || !Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new ProbeBackendError(
+      "backend_error",
+      `无法解析 sysbus ReadDoubleWord 0x${address.toString(16)} 的输出: ${output}`,
+    );
+  }
+  return value >>> 0;
+}
+
 function toHexByte(value: number): string {
   return value.toString(16).padStart(2, "0");
+}
+
+async function readAlignedWords(
+  monitor: RenodeMonitorLike,
+  address: number,
+  length: number,
+  signal?: AbortSignal,
+): Promise<MemoryReadResult> {
+  const bytes: number[] = [];
+  for (let offset = 0; offset < length; offset += 4) {
+    throwIfAborted(signal);
+    const current = address + offset;
+    const output = await sendMemoryCommand(
+      monitor,
+      `sysbus ReadDoubleWord 0x${current.toString(16)}`,
+      signal,
+    );
+    const word = parseDoubleWordOutput(current, output);
+    bytes.push(word & 0xff, (word >>> 8) & 0xff, (word >>> 16) & 0xff, (word >>> 24) & 0xff);
+  }
+  return buildReadResult(address, bytes);
 }
 
 function buildReadResult(address: number, bytes: number[]): MemoryReadResult {
@@ -238,6 +271,16 @@ export class RenodeBackend implements ProbeBackend {
     assertRange(address, length);
     throwIfAborted(signal);
     const monitor = this.requireAttached();
+
+    if (address % 4 === 0 && length % 4 === 0) {
+      try {
+        return await readAlignedWords(monitor, address, length, signal);
+      } catch (error) {
+        if (error instanceof ProbeBackendError && error.code === "aborted") throw error;
+        throwIfAborted(signal);
+        // 部分外设/未映射地址不支持字访问：回退逐字节读取，保持既有错误与 warning 语义。
+      }
+    }
 
     const bytes: number[] = [];
     for (let offset = 0; offset < length; offset += 1) {

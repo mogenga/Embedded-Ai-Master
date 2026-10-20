@@ -160,6 +160,30 @@ describe("createMcpTools", () => {
     });
   });
 
+  it("evidence 工具的结果带 evidence 标记", async () => {
+    const { manager } = makeManager([
+      makeInfo("s", "ro", { readOnly: true, evidence: true }),
+      makeInfo("s", "plain", {}),
+    ]);
+    const tools = createMcpTools(manager);
+    const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+    const evidence = await byName.get("mcp__s__ro")!.execute({}, ctx, signal);
+    expect(evidence.evidence).toBe(true);
+
+    const plain = await byName.get("mcp__s__plain")!.execute({}, ctx, signal);
+    expect(plain.evidence).toBeUndefined();
+
+    const failing = makeManager(
+      [makeInfo("s", "bad", { evidence: true })],
+      async () => ({ isError: true, code: "mcp_tool_error", message: "失败", text: "失败" }),
+    );
+    const bad = createMcpTools(failing.manager).find((tool) => tool.name === "mcp__s__bad")!;
+    const failed = await bad.execute({}, ctx, signal);
+    expect(failed.isError).toBe(true);
+    expect(failed.evidence).toBeUndefined();
+  });
+
   it("同 server 内名称冲突时后一个追加 hash 并记录 renamed", () => {
     const statuses: McpToolAdapterStatus[] = [];
     const tools = createMcpTools(

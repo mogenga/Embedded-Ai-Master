@@ -140,11 +140,15 @@ export function createMcpTools(
         destructive: info.destructive === true,
         evidence: info.evidence === true,
       },
-      execute: async (input, _ctx, signal) =>
-        withDeviceStatus(
+      execute: async (input, _ctx, signal) => {
+        const result = withDeviceStatus(
           await manager.call(info.server, info.tool, input, signal),
           info.server,
-        ),
+        );
+        return info.evidence === true && result.isError !== true
+          ? { ...result, evidence: true }
+          : result;
+      },
     });
   }
 

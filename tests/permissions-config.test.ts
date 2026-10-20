@@ -165,6 +165,18 @@ describe("parsePermissionConfig 字段校验", () => {
       { version: 1, rules: [{ tool: "fs", params: [{ key: "address", range: [0, Number.POSITIVE_INFINITY] }], action: "allow" }] },
     ],
     ["in 为空", { version: 1, rules: [{ tool: "fs", params: [{ key: "port", in: [] }], action: "allow" }] }],
+    [
+      "extentKey 无 range",
+      { version: 1, rules: [{ tool: "fs", params: [{ key: "address", eq: 1, extentKey: "bytes" }], action: "allow" }] },
+    ],
+    [
+      "extentKey 纯空白",
+      { version: 1, rules: [{ tool: "fs", params: [{ key: "address", range: [0, 15], extentKey: "   " }], action: "allow" }] },
+    ],
+    [
+      "extentKey 含空段",
+      { version: 1, rules: [{ tool: "fs", params: [{ key: "address", range: [0, 15], extentKey: "bytes..length" }], action: "allow" }] },
+    ],
     ["key 含空段", { version: 1, rules: [{ tool: "fs", params: [{ key: "a..b", eq: 1 }], action: "allow" }] }],
     ["key 为空", { version: 1, rules: [{ tool: "fs", params: [{ key: "", eq: 1 }], action: "allow" }] }],
     ["key 超长", { version: 1, rules: [{ tool: "fs", params: [{ key: "a".repeat(201), eq: 1 }], action: "allow" }] }],
@@ -228,6 +240,23 @@ describe("parsePermissionConfig 字段校验", () => {
       "p.json",
     );
     expect(config.rules?.[0]?.params?.[0]?.range).toEqual([3, 3]);
+  });
+
+  it("接受 range 与 extentKey 组合", () => {
+    const config = parsePermissionConfig(
+      JSON.stringify({
+        version: 1,
+        rules: [
+          {
+            tool: "mcp__probe__mem_write",
+            params: [{ key: "address", range: [0x20000000, 0x2001ffff], extentKey: "bytes.length" }],
+            action: "allow",
+          },
+        ],
+      }),
+      "p.json",
+    );
+    expect(config.rules?.[0]?.params?.[0]?.extentKey).toBe("bytes.length");
   });
 
   it("带 BOM 的文件也能解析", () => {

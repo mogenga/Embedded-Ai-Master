@@ -86,6 +86,15 @@ function matchRange(range: [number, number], value: unknown): boolean {
   return value >= lower && value <= upper;
 }
 
+function readExtent(input: unknown, key: string | undefined): number | undefined {
+  if (key === undefined) return undefined;
+  const extent = readPath(input, key);
+  if (!extent.found) return undefined;
+  if (Array.isArray(extent.value)) return extent.value.length;
+  if (typeof extent.value === "number" && Number.isFinite(extent.value)) return extent.value;
+  return undefined;
+}
+
 export function matchParam(matcher: ParamMatcher, input: unknown): boolean {
   if (countOperators(matcher) !== 1) return false;
 
@@ -102,7 +111,11 @@ export function matchParam(matcher: ParamMatcher, input: unknown): boolean {
   }
   if (matcher.range !== undefined) {
     if (!Array.isArray(matcher.range) || matcher.range.length !== 2) return false;
-    return matchRange(matcher.range, path.value);
+    if (!matchRange(matcher.range, path.value)) return false;
+    if (matcher.extentKey === undefined) return true;
+    const extent = readExtent(input, matcher.extentKey);
+    if (extent === undefined || !Number.isFinite(extent) || extent < 1) return false;
+    return (path.value as number) + extent - 1 <= matcher.range[1];
   }
   return false;
 }

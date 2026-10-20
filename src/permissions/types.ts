@@ -12,6 +12,7 @@ export interface ParamMatcher {
   glob?: string;
   in?: Array<string | number | boolean | null>;
   range?: [number, number];
+  extentKey?: string;
 }
 
 export interface PermissionRule {

@@ -118,6 +118,28 @@ describe("matchParam", () => {
     expect(matchParam({ key: "v", range: [2, 1] }, { v: 1.5 })).toBe(false);
   });
 
+  it("matches ranges extended by an array length", () => {
+    const matcher = {
+      key: "address",
+      range: [0x20000000, 0x2000000f] as [number, number],
+      extentKey: "bytes",
+    };
+    expect(matchParam(matcher, { address: 0x20000008, bytes: [1, 2, 3, 4, 5, 6, 7, 8] })).toBe(true);
+    expect(matchParam(matcher, { address: 0x20000000, bytes: new Array(16).fill(0) })).toBe(true);
+    expect(matchParam(matcher, { address: 0x20000008, bytes: new Array(9).fill(0) })).toBe(false);
+    expect(matchParam(matcher, { address: 0x20000010, bytes: [1] })).toBe(false);
+  });
+
+  it("accepts a numeric extent and rejects missing or invalid extents", () => {
+    const matcher = { key: "address", range: [0, 9] as [number, number], extentKey: "length" };
+    expect(matchParam(matcher, { address: 5, length: 5 })).toBe(true);
+    expect(matchParam(matcher, { address: 5, length: 6 })).toBe(false);
+    expect(matchParam(matcher, { address: 5, length: 0 })).toBe(false);
+    expect(matchParam(matcher, { address: 5, length: "5" })).toBe(false);
+    expect(matchParam(matcher, { address: 5 })).toBe(false);
+    expect(matchParam(matcher, { address: 5, length: Number.NaN })).toBe(false);
+  });
+
   it("does not match when the key is absent", () => {
     expect(matchParam({ key: "missing", eq: "read" }, { op: "read" })).toBe(false);
   });

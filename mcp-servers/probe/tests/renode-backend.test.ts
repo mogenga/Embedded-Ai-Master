@@ -119,6 +119,15 @@ function readByteHandler(initial: ReadonlyMap<number, number>): CommandHandler {
       memory.set(Number.parseInt(write[1], 16), Number.parseInt(write[2], 16));
       return "";
     }
+    const readWord = /^sysbus ReadDoubleWord 0x([0-9a-f]+)$/.exec(command);
+    if (readWord) {
+      const base = Number.parseInt(readWord[1], 16);
+      let word = 0;
+      for (let offset = 0; offset < 4; offset += 1) {
+        word += (memory.get(base + offset) ?? 0) * 2 ** (8 * offset);
+      }
+      return `0x${(word >>> 0).toString(16)}`;
+    }
     const read = /^sysbus ReadByte 0x([0-9a-f]+)$/.exec(command);
     if (read) {
       const value = memory.get(Number.parseInt(read[1], 16)) ?? 0;
@@ -229,7 +238,7 @@ describe("RenodeBackend", () => {
     });
   });
 
-  it("readMemory 逐字节发送 ReadByte，按地址升序返回字节与小端 u32", async () => {
+  it("readMemory 对 4 字节对齐区域用 ReadDoubleWord，按小端拆字节", async () => {
     const harness = createHarness(
       readByteHandler(
         new Map([
@@ -255,6 +264,28 @@ describe("RenodeBackend", () => {
     expect(u32).toBe(0x78563412);
 
     expect(harness.monitors[0].commands.slice(2)).toEqual([
+      "sysbus ReadDoubleWord 0x20000000",
+    ]);
+  });
+
+  it("ReadDoubleWord 不可用时回退逐字节读取", async () => {
+    const harness = createHarness((command) => {
+      if (command.startsWith("sysbus ReadDoubleWord")) {
+        throw new Error("No such command or device");
+      }
+      if (command === "sysbus ReadByte 0x20000000") return "0x12";
+      if (command === "sysbus ReadByte 0x20000001") return "0x34";
+      if (command === "sysbus ReadByte 0x20000002") return "0x56";
+      if (command === "sysbus ReadByte 0x20000003") return "0x78";
+      return "";
+    });
+    await harness.backend.attach();
+
+    const result = await harness.backend.readMemory(0x20000000, 4);
+
+    expect(result.bytes).toEqual([0x12, 0x34, 0x56, 0x78]);
+    expect(harness.monitors[0].commands.slice(2)).toEqual([
+      "sysbus ReadDoubleWord 0x20000000",
       "sysbus ReadByte 0x20000000",
       "sysbus ReadByte 0x20000001",
       "sysbus ReadByte 0x20000002",
