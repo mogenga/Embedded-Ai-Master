@@ -202,3 +202,30 @@
 **残余**
 
 - 全量 `npm test` 中 `tests/mcp-manager.test.ts` 在并行负载下 3 个时间阈值用例超时，单独复跑 36 passed，与本轮无关。
+## 2026-10-20 · 最终两轮核验与收尾
+
+**第一轮标准审查**
+
+- 结论：With fixes。核心安全属性成立（先落盘、fail-closed、202 不预判、拒绝/超时/中断不执行）。
+- 修复：runner header 错误分型（session_corrupt/session_unreadable）、newSession 使在途加载失效、README/dev-notes 契约纠偏、body 上限与 8000 字符兼容、e2e 超时窗口、追加输入保持 SSE。
+- 提交：`9943374`、`107225f`。
+
+**第二轮红队审查**
+
+- 发现 Critical：callId 跨轮复用导致崩溃恢复配对失效、迟到决策可能命中新调用。
+- 修复：gate 生成独立 `requestId`（UUID），`permission_decision` 携带 requestId；恢复与 bridge 全按 requestId；408 不再 destroy socket；写端点拒绝 `Sec-Fetch-Site: cross-site`；query 前启动失败写 `interrupted`。
+- 复验发现旧格式恢复回归：改为 requestId 优先、callId FIFO 兜底的顺序配对。
+- 提交：`9571b2b`、`e0a719d`、`fd0bb84`（静默正常关闭的中止日志）。
+
+**最终验证（fresh）**
+
+- `npm test`：73 files / **1792 passed**，1 skipped。
+- `npm run coverage`：lines **91.32%**、branches 83.48%、statements 88.73%、functions 91.50%（lines 阈值 85%）。
+- `npm run typecheck` / `npm run lint` / `npm run build`：exit 0。
+- `npm run test:ui`：22 files / **225 passed**；`npm run typecheck:web` / `npm run build:web`：exit 0（37 modules，JS 72.42 kB / CSS 32.67 kB）。
+
+**未合并 / 已知边界**
+
+- 分支 `feat/m2-web-approval` 未合并 main，等用户确认。
+- 已登记 D-145 ~ D-154：重启丢失 pending、仅 Origin 校验（含 dev 代理面）、摘要敏感片段、单会话串行、SSE 200ms 延迟、迟到决策 404/410、abort 不响应占用 session_busy、发送在途切会话、port 0 写端点 403、关闭后 decide 404。
+- 旧格式跨轮审批共享同一 requestId，只能按 callId FIFO 配对；极端乱序历史日志可能偏移，属于旧格式固有限制。
