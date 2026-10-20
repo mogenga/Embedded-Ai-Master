@@ -16,14 +16,20 @@ import {
   readSessionSnapshot,
 } from "../session/persistence.js";
 import type { SessionEvent, SessionHeader } from "../session/types.js";
+import { readJsonBody } from "./body.js";
 import { createEventStreamHandler } from "./event-stream.js";
 import { HttpError, sendError, sendJson } from "./http.js";
+import { createSessionRunner, RunnerError } from "./runner.js";
+import type { SessionRunner } from "./runner.js";
 
 export interface ApiOptions {
   harnessHome?: string;
   staticRoot?: string;
   port?: number;
   eventSource?: SessionEventSource;
+  runner?: SessionRunner;
+  model?: string;
+  fetchImpl?: typeof fetch;
 }
 
 export interface SessionSummary {
@@ -147,6 +153,95 @@ function assertSessionId(id: string): void {
 function requireMethod(method: string, expected: string): void {
   if (method !== expected) {
     throw new HttpError(405, "method_not_allowed", "不支持的请求方法");
+  }
+}
+
+function requireWriteRequest(req: IncomingMessage, port: number | undefined): void {
+  requireLocalRequest(req, port);
+  if (req.headers.origin === undefined) {
+    throw new HttpError(403, "forbidden_origin", "写请求必须携带 Origin");
+  }
+}
+
+function requireRunner(runner: SessionRunner | undefined): SessionRunner {
+  if (runner === undefined) {
+    throw new HttpError(503, "runner_unavailable", "会话运行器不可用");
+  }
+  return runner;
+}
+
+function mapRunnerError(error: RunnerError): HttpError {
+  switch (error.code) {
+    case "invalid_text":
+    case "invalid_session_id":
+      return new HttpError(400, error.code, error.message);
+    case "unknown_session":
+      return new HttpError(404, error.code, error.message);
+    case "session_busy":
+      return new HttpError(409, error.code, error.message);
+    case "model_unavailable":
+    case "session_start_timeout":
+      return new HttpError(503, error.code, error.message);
+  }
+}
+
+async function handleAction(
+  req: IncomingMessage,
+  res: ServerResponse,
+  runner: SessionRunner,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  if (typeof body.text !== "string") {
+    throw new HttpError(400, "invalid_text", "text 必须是字符串");
+  }
+  if (body.sessionId !== undefined && typeof body.sessionId !== "string") {
+    throw new HttpError(400, "invalid_session_id", "sessionId 必须是字符串");
+  }
+  const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
+  let outcome: Awaited<ReturnType<SessionRunner["start"]>>;
+  try {
+    outcome = await runner.start({
+      text: body.text,
+      ...(sessionId === undefined ? {} : { sessionId }),
+    });
+  } catch (error) {
+    if (error instanceof RunnerError) throw mapRunnerError(error);
+    throw error;
+  }
+  sendJson(res, 202, outcome);
+}
+
+async function handleApproval(
+  req: IncomingMessage,
+  res: ServerResponse,
+  runner: SessionRunner,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  if (typeof body.sessionId !== "string" || body.sessionId === "") {
+    throw new HttpError(400, "invalid_session_id", "sessionId 必须是非空字符串");
+  }
+  if (typeof body.requestId !== "string" || body.requestId === "") {
+    throw new HttpError(400, "invalid_request_id", "requestId 必须是非空字符串");
+  }
+  const decision = body.decision;
+  if (decision !== "allow" && decision !== "deny") {
+    throw new HttpError(400, "invalid_decision", "decision 必须是 allow 或 deny");
+  }
+  const outcome = await runner.decide(body.sessionId, body.requestId, decision);
+  switch (outcome.kind) {
+    case "accepted":
+      sendJson(res, 202, { requestId: body.requestId, decision });
+      return;
+    case "duplicate":
+      sendJson(res, 200, { requestId: body.requestId, decision });
+      return;
+    case "unknown_session":
+    case "unknown_request":
+      throw new HttpError(404, outcome.kind, "审批请求不存在");
+    case "already_decided":
+      throw new HttpError(409, "already_decided", "审批请求已完成相反的决策");
+    case "expired":
+      throw new HttpError(410, "expired", "审批请求已过期");
   }
 }
 
@@ -418,7 +513,15 @@ export function createApiHandler(
       }
       if (pathname === "/api/actions") {
         requireMethod(method, "POST");
-        throw new HttpError(501, "action_not_implemented", "写操作尚未实现");
+        requireWriteRequest(req, opts.port);
+        await handleAction(req, res, requireRunner(opts.runner));
+        return;
+      }
+      if (pathname === "/api/approvals") {
+        requireMethod(method, "POST");
+        requireWriteRequest(req, opts.port);
+        await handleApproval(req, res, requireRunner(opts.runner));
+        return;
       }
       if (pathname === "/api/events") {
         requireMethod(method, "GET");
@@ -450,7 +553,20 @@ export function createUiServer(
 ): { server: Server; port: number; close(): Promise<void> } {
   const port = opts.port ?? 5174;
   const host = opts.host ?? "127.0.0.1";
-  const handler = createApiHandler({ ...opts, port });
+  const harnessHome = path.resolve(opts.harnessHome ?? resolveHarnessHome());
+  const internalRunner = opts.runner === undefined
+    ? createSessionRunner({
+        harnessHome,
+        ...(opts.model === undefined ? {} : { model: opts.model }),
+        ...(opts.fetchImpl === undefined ? {} : { fetchImpl: opts.fetchImpl }),
+      })
+    : undefined;
+  const handler = createApiHandler({
+    ...opts,
+    harnessHome,
+    port,
+    ...(internalRunner === undefined ? {} : { runner: internalRunner }),
+  });
   const server = createServer((req, res) => {
     void handler(req, res);
   });
@@ -458,8 +574,8 @@ export function createUiServer(
   return {
     server,
     port,
-    close(): Promise<void> {
-      return new Promise((resolve) => {
+    async close(): Promise<void> {
+      await new Promise<void>((resolve) => {
         if (!server.listening) {
           resolve();
           return;
@@ -468,6 +584,7 @@ export function createUiServer(
         server.closeIdleConnections();
         server.closeAllConnections();
       });
+      if (internalRunner !== undefined) await internalRunner.close();
     },
   };
 }

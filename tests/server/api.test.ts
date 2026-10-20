@@ -1,9 +1,12 @@
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { request } from "node:http";
+import { createServer, request } from "node:http";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { createUiServer } from "../../src/server/api.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createApiHandler, createUiServer } from "../../src/server/api.js";
+import { RunnerError } from "../../src/server/runner.js";
+import type { RunnerErrorCode, SessionRunner } from "../../src/server/runner.js";
 
 function makeHome(): string {
   const home = mkdtempSync(path.join(tmpdir(), "eam-ui-api-"));
@@ -32,6 +35,7 @@ function rawRequest(
   urlPath: string,
   method = "GET",
   headers: Record<string, string> = {},
+  payload?: string,
 ): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
     const req = request({
@@ -50,8 +54,41 @@ function rawRequest(
       }));
     });
     req.on("error", reject);
-    req.end();
+    req.end(payload);
   });
+}
+
+function makeRunner(overrides: Partial<SessionRunner> = {}): SessionRunner {
+  return {
+    start: vi.fn(async () => ({ sessionId: "created-1", created: true })),
+    decide: vi.fn(async () => ({ kind: "accepted" as const })),
+    close: vi.fn(async () => {}),
+    ...overrides,
+  };
+}
+
+function writeHeaders(port: number): Record<string, string> {
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    "content-type": "application/json; charset=utf-8",
+  };
+}
+
+async function startApi(
+  handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>,
+): Promise<{ port: number; close(): Promise<void> }> {
+  const server = createServer((req, res) => { void handler(req, res); });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  return {
+    port,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+function errorCode(body: string): string {
+  return (JSON.parse(body) as { error: { code: string } }).error.code;
 }
 
 function canSymlink(): boolean {
@@ -291,17 +328,153 @@ describe("ui api", () => {
     expect(body).toEqual({ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" });
   });
 
-  it("写操作返回 501，事件流返回真实 SSE", async () => {
-    const s = createUiServer({ harnessHome: makeHome() });
+  it("写操作接入 runner 返回 202，事件流返回真实 SSE", async () => {
+    const runner = makeRunner();
+    const s = createUiServer({ harnessHome: makeHome(), runner });
     close = s.close;
-    expect((await fetch(`http://127.0.0.1:${s.port}/api/actions`, { method: "POST", body: "{}" })).status).toBe(501);
-    const res = await fetch(`http://127.0.0.1:${s.port}/api/events?sessionId=s1`);
-    expect(res.status).toBe(200);
-    expect(res.headers.get("content-type")).toContain("text/event-stream");
-    const body = await res.text();
+    const res = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      writeHeaders(s.port),
+      JSON.stringify({ text: "你好" }),
+    );
+    expect(res.status).toBe(202);
+    expect(JSON.parse(res.body)).toEqual({ sessionId: "created-1", created: true });
+    expect(vi.mocked(runner.start)).toHaveBeenCalledWith({ text: "你好" });
+
+    const events = await fetch(`http://127.0.0.1:${s.port}/api/events?sessionId=s1`);
+    expect(events.status).toBe(200);
+    expect(events.headers.get("content-type")).toContain("text/event-stream");
+    const body = await events.text();
     expect(body).toContain("id: 0");
     expect(body).toContain("event: stream_end");
   });
+
+  it("写端点缺少 Origin 返回 403 forbidden_origin", async () => {
+    const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
+    close = s.close;
+    const res = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      { "content-type": "application/json" },
+      JSON.stringify({ text: "hi" }),
+    );
+    expect(res.status).toBe(403);
+    expect(errorCode(res.body)).toBe("forbidden_origin");
+  });
+
+  it("GET /api/actions 返回 405", async () => {
+    const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
+    close = s.close;
+    const res = await rawRequest(s.port, "/api/actions", "GET");
+    expect(res.status).toBe(405);
+    expect(errorCode(res.body)).toBe("method_not_allowed");
+  });
+
+  it("无 runner 时返回 503 runner_unavailable", async () => {
+    const handler = createApiHandler({ harnessHome: makeHome() });
+    const api = await startApi(handler);
+    try {
+      const res = await rawRequest(
+        api.port,
+        "/api/actions",
+        "POST",
+        { origin: "http://127.0.0.1", "content-type": "application/json" },
+        JSON.stringify({ text: "hi" }),
+      );
+      expect(res.status).toBe(503);
+      expect(errorCode(res.body)).toBe("runner_unavailable");
+    } finally {
+      await api.close();
+    }
+  });
+
+  it("Body 非法 JSON 返回 400 invalid_body", async () => {
+    const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
+    close = s.close;
+    const res = await rawRequest(s.port, "/api/actions", "POST", writeHeaders(s.port), "{bad");
+    expect(res.status).toBe(400);
+    expect(errorCode(res.body)).toBe("invalid_body");
+  });
+
+  it("Body 非普通对象返回 400 invalid_body", async () => {
+    const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
+    close = s.close;
+    const res = await rawRequest(s.port, "/api/actions", "POST", writeHeaders(s.port), "[1,2]");
+    expect(res.status).toBe(400);
+    expect(errorCode(res.body)).toBe("invalid_body");
+  });
+
+  it("Content-Type 非 JSON 返回 415 unsupported_media_type", async () => {
+    const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
+    close = s.close;
+    const res = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      { origin: `http://127.0.0.1:${s.port}`, "content-type": "text/plain" },
+      JSON.stringify({ text: "hi" }),
+    );
+    expect(res.status).toBe(415);
+    expect(errorCode(res.body)).toBe("unsupported_media_type");
+  });
+
+  it("Body 超过 8 KiB 返回 413 payload_too_large", async () => {
+    const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
+    close = s.close;
+    const res = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      writeHeaders(s.port),
+      JSON.stringify({ text: "a".repeat(9_000) }),
+    );
+    expect(res.status).toBe(413);
+    expect(errorCode(res.body)).toBe("payload_too_large");
+  });
+
+  it("text 非字符串返回 400 invalid_text 且不调用 runner", async () => {
+    const runner = makeRunner();
+    const s = createUiServer({ harnessHome: makeHome(), runner });
+    close = s.close;
+    const res = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      writeHeaders(s.port),
+      JSON.stringify({ text: 42 }),
+    );
+    expect(res.status).toBe(400);
+    expect(errorCode(res.body)).toBe("invalid_text");
+    expect(vi.mocked(runner.start)).not.toHaveBeenCalled();
+  });
+
+  it.each<[RunnerErrorCode, number]>([
+    ["invalid_text", 400],
+    ["invalid_session_id", 400],
+    ["unknown_session", 404],
+    ["session_busy", 409],
+    ["model_unavailable", 503],
+    ["session_start_timeout", 503],
+  ])("RunnerError %s 映射为 %i", async (code, status) => {
+    const runner = makeRunner({
+      start: vi.fn(async () => { throw new RunnerError(code, "boom"); }),
+    });
+    const s = createUiServer({ harnessHome: makeHome(), runner });
+    close = s.close;
+    const res = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      writeHeaders(s.port),
+      JSON.stringify({ text: "hi" }),
+    );
+    expect(res.status).toBe(status);
+    expect(errorCode(res.body)).toBe(code);
+  });
+
 
   it("拒绝非 loopback Host", async () => {
     const s = createUiServer({ harnessHome: makeHome() });
