@@ -229,7 +229,7 @@ async function handleApproval(
   }
   const requestId = body.requestId;
   if (requestId.length < 1 || requestId.length > 200) {
-    throw new HttpError(400, "invalid_request_id", "requestId 长度必须在 1..200 之间");
+    throw new HttpError(400, "invalid_body", "requestId 长度必须在 1..200 之间");
   }
   const decision = body.decision;
   if (decision !== "allow" && decision !== "deny") {
@@ -241,7 +241,7 @@ async function handleApproval(
       sendJson(res, 202, { requestId, decision });
       return;
     case "duplicate":
-      sendJson(res, 200, { requestId, decision });
+      sendJson(res, 200, { requestId, decision, duplicate: true });
       return;
     case "unknown_session":
     case "unknown_request":
