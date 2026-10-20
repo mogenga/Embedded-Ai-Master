@@ -57,6 +57,8 @@ export interface RunOptions {
   maxCostUsd?: number;
   cwd?: string;
   timeoutMs?: number;
+  home?: string;
+  onSession?: (session: SessionHandle) => void;
   compaction?: {
     enabled?: boolean;
     keepRecentTurns?: number;
@@ -429,7 +431,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       "resume requires an explicit sessionDir",
     );
   }
-  const home = resolveHarnessHome();
+  const home = opts.home ?? resolveHarnessHome();
   const providers =
     opts.providersText === undefined ? loadProviders(home) : parseProviders(opts.providersText);
   const { providerName, provider, modelName, model } = resolveModelRef(providers, opts.model);
@@ -543,6 +545,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   };
 
   try {
+    opts.onSession?.(session);
     if (systemPromptToAppend !== undefined) {
       await session.append({ type: "system", payload: { content: systemPromptToAppend } });
     }

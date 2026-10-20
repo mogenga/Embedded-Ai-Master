@@ -399,6 +399,86 @@ describe("runSession 端到端装配", () => {
     expect(existsSync(path.join(dir, "artifacts"))).toBe(false);
   });
 
+  it("home 显式注入时会话写入该目录", async () => {
+    const defaultHome = await tempDir();
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", defaultHome);
+    const { impl, calls } = mockFetch([EMPTY_RESPONSE]);
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        fetchImpl: impl,
+        sessionId: "explicit-home",
+        home,
+      }),
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(existsSync(path.join(home, "sessions", "explicit-home", "session.v1.jsonl"))).toBe(
+      true,
+    );
+    expect(existsSync(path.join(defaultHome, "sessions"))).toBe(false);
+  });
+
+  it("onSession 在会话创建后、首个业务事件前调用", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+    let seenId: string | undefined;
+    let seenDir: string | undefined;
+    let sawBusinessEvent: boolean | undefined;
+
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/flash",
+        providersText: providersText(),
+        fetchImpl: impl,
+        sessionId: "on-session",
+        systemPrompt: "be brief",
+        onSession: (session) => {
+          seenId = session.id;
+          seenDir = session.dir;
+          sawBusinessEvent = session
+            .events()
+            .some((event) => event.type === "user" || event.type === "assistant");
+        },
+      }),
+    );
+
+    expect(seenId).toBe("on-session");
+    expect(seenDir).toBe(path.join(home, "sessions", "on-session"));
+    expect(sawBusinessEvent).toBe(false);
+  });
+
+  it("onSession 抛错按启动失败处理并释放会话锁", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const { impl } = mockFetch([EMPTY_RESPONSE]);
+
+    await expect(
+      collect(
+        runSession({
+          input: "hi",
+          model: "gw/flash",
+          providersText: providersText(),
+          fetchImpl: impl,
+          sessionId: "on-session-boom",
+          onSession: () => {
+            throw new Error("onSession boom");
+          },
+        }),
+      ),
+    ).rejects.toThrow("onSession boom");
+
+    expect(existsSync(path.join(home, "sessions", "on-session-boom", "session.lock"))).toBe(
+      false,
+    );
+  });
+
   it("maxTurns=1 且模型持续调用工具时以 interrupted 与 done(max_turns) 结束", async () => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
