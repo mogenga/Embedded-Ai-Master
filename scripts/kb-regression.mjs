@@ -5,6 +5,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = fileURLToPath(new URL("../", import.meta.url));
 const SERVICE_MODULE = path.join(ROOT, "dist-mcp", "kb", "service.js");
+const REPORT_MODULE = path.join(ROOT, "dist-mcp", "kb", "regression-report.js");
 const YAML_MODULE = path.join(ROOT, "dist-mcp", "kb", "yaml.js");
 const DEFAULT_KB_ROOT = path.join(ROOT, "mcp-servers", "kb", "kb");
 const DATA_DIR = path.join(ROOT, "mcp-servers", "kb", "data");
@@ -174,8 +175,9 @@ function printTable(report) {
   }
   console.log(`search misses (${report.search.misses.length}):`);
   for (const miss of report.search.misses) {
+    const first = miss.firstHit ? ` first=${miss.firstHit}` : "";
     console.log(
-      `  ${miss.id} gold=${miss.gold.join(",")} tokens=[${miss.tokens.join(", ")}] (${miss.reason})`,
+      `  ${miss.id} gold=${miss.gold.join(",")} tokens=[${miss.tokens.join(", ")}]${first} (${miss.reason})`,
     );
   }
   console.log(`negative false positives (${report.negatives.falsePositives.length}):`);
@@ -247,6 +249,9 @@ async function main() {
   }
 
   const { KbService } = await import(pathToFileURL(SERVICE_MODULE).href);
+  const { createSearchAccumulator, recordSearchResult } = await import(
+    pathToFileURL(REPORT_MODULE).href
+  );
   const { parseIndexYaml } = await import(pathToFileURL(YAML_MODULE).href);
   const service = new KbService(kbRoot);
   const status = service.status();
@@ -271,40 +276,15 @@ async function main() {
     addIndexQuery(goldIndexed ? indexedLayer : notIndexedLayer, query, service);
   }
 
-  const search = {
-    total: 0,
-    hitAt1: 0,
-    goldInTop20: 0,
-    misses: [],
-  };
+  const search = createSearchAccumulator();
   for (const query of searchQueries) {
     const tokens = extractTokens(query.text);
-    search.total += 1;
     if (tokens.length === 0) {
-      search.misses.push({
-        id: query.id,
-        gold: query.gold,
-        tokens,
-        reason: "no_ascii_or_hex_token",
-      });
+      recordSearchResult(search, query, tokens, { found: false, hits: [] });
       continue;
     }
     const result = service.search(tokens, SEARCH_LIMIT);
-    const hitPaths = [...new Set(result.hits.map((hit) => hit.path))];
-    const goldInTop20 = query.gold.some((gold) => hitPaths.includes(gold));
-    if (goldInTop20) search.goldInTop20 += 1;
-    if (result.hits.length > 0 && query.gold.includes(result.hits[0].path)) {
-      search.hitAt1 += 1;
-    }
-    if (!goldInTop20) {
-      search.misses.push({
-        id: query.id,
-        gold: query.gold,
-        tokens,
-        hitPaths: hitPaths.slice(0, 5),
-        reason: result.found ? "gold_not_in_top_20_hits" : "no_hits",
-      });
-    }
+    recordSearchResult(search, query, tokens, result);
   }
 
   const negativesReport = {

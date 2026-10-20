@@ -4,6 +4,10 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import { KbService } from '../service.js'
+import {
+  createSearchAccumulator,
+  recordSearchResult,
+} from '../regression-report.js'
 
 interface QueryRecord {
   id: string
@@ -68,11 +72,74 @@ const baseline =
     ? (JSON.parse(readFileSync(BASELINE_PATH, 'utf8')) as RegressionBaseline)
     : undefined
 
-const suite = missingAssets.length === 0 ? describe : describe.skip
+describe('search 回归 miss 分类', () => {
+  const query = { id: 'q-1', gold: ['gold.md'] }
+
+  it('gold 在 top20 但不是第一条时记录 not_first', () => {
+    const accumulator = createSearchAccumulator()
+    recordSearchResult(accumulator, query, ['uart'], {
+      found: true,
+      hits: [{ path: 'other.md' }, { path: 'gold.md' }],
+    })
+
+    expect(accumulator.hitAt1).toBe(0)
+    expect(accumulator.goldInTop20).toBe(1)
+    expect(accumulator.misses).toEqual([
+      {
+        id: 'q-1',
+        gold: ['gold.md'],
+        tokens: ['uart'],
+        hitPaths: ['other.md', 'gold.md'],
+        firstHit: 'other.md',
+        reason: 'gold_in_top_20_but_not_first',
+      },
+    ])
+  })
+
+  it('gold 未进 top20 与无命中分别记录', () => {
+    const accumulator = createSearchAccumulator()
+    recordSearchResult(accumulator, query, ['uart'], {
+      found: true,
+      hits: [{ path: 'other.md' }],
+    })
+    recordSearchResult(accumulator, { id: 'q-2', gold: ['gold.md'] }, ['uart'], {
+      found: false,
+      hits: [],
+    })
+
+    expect(accumulator.misses.map((miss) => miss.reason)).toEqual([
+      'gold_not_in_top_20_hits',
+      'no_hits',
+    ])
+  })
+
+  it('第一条命中时严格 Hit@1 与 goldInTop20 都计数且无 miss', () => {
+    const accumulator = createSearchAccumulator()
+    recordSearchResult(accumulator, query, ['uart'], {
+      found: true,
+      hits: [{ path: 'gold.md' }, { path: 'other.md' }],
+    })
+
+    expect(accumulator.hitAt1).toBe(1)
+    expect(accumulator.goldInTop20).toBe(1)
+    expect(accumulator.misses).toEqual([])
+  })
+
+  it('无 token 查询计入总数并记录原因', () => {
+    const accumulator = createSearchAccumulator()
+    recordSearchResult(accumulator, query, [], { found: false, hits: [] })
+
+    expect(accumulator.total).toBe(1)
+    expect(accumulator.misses[0]?.reason).toBe('no_ascii_or_hex_token')
+  })
+})
+
 const suiteName =
   missingAssets.length === 0
     ? 'KB 双轨回归（本地语料）'
     : `KB 双轨回归（已跳过：缺少 ${missingAssets.join('、')}）`
+
+const suite = missingAssets.length === 0 ? describe : describe.skip
 
 suite(suiteName, () => {
   const expected = baseline as RegressionBaseline

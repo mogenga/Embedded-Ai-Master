@@ -66,8 +66,11 @@ const TAG_WEIGHT = 2
 const CONFIDENCE_THRESHOLD = 1.75
 const OOV_PENALTY = 0.75
 const TECH_COVERAGE_RATIO = 0.5
+const MIN_CJK_HIT_CHARS = 4
+const MIN_CJK_CONTEXT_CHARS = 2
 const QUERY_TOKEN_PATTERN = /0x[0-9A-Fa-f]+|[A-Za-z_][A-Za-z0-9_]*/g
 const CJK_PATTERN = /[\u4e00-\u9fff]/
+const CJK_RUN_PATTERN = /[\u4e00-\u9fff]+/g
 const PURE_ASCII_WORD = /^[A-Za-z][A-Za-z0-9_]*$/
 const BOUNDARY_PATTERN_CACHE = new Map<string, RegExp>()
 const ENGLISH_STOPWORDS = new Set([
@@ -225,6 +228,39 @@ function hasEnoughTechCoverage(covered: number, total: number): boolean {
   return covered / total > TECH_COVERAGE_RATIO
 }
 
+function countCjkChars(text: string): number {
+  let count = 0
+  for (const run of text.match(CJK_RUN_PATTERN) ?? []) count += [...run].length
+  return count
+}
+
+interface CjkMatchStats {
+  hitChars: number
+  keywordCount: number
+}
+
+function cjkMatchStats(entry: IndexEntry, needle: string): CjkMatchStats {
+  const seen = new Set<string>()
+  let hitChars = 0
+  for (const keyword of entry.keywords) {
+    const normalized = keyword.trim().toLowerCase()
+    if (normalized === '' || !CJK_PATTERN.test(normalized) || seen.has(normalized)) continue
+    if (!needle.includes(normalized)) continue
+    seen.add(normalized)
+    hitChars += countCjkChars(normalized)
+  }
+  return { hitChars, keywordCount: seen.size }
+}
+
+function hasEnoughChineseConfidence(
+  stats: CjkMatchStats,
+  queryCjkChars: number,
+): boolean {
+  if (stats.hitChars >= MIN_CJK_HIT_CHARS) return true
+  if (stats.keywordCount >= 2) return true
+  return queryCjkChars - stats.hitChars >= MIN_CJK_CONTEXT_CHARS
+}
+
 function buildVocabulary(entries: IndexEntry[]): Set<string> {
   const vocabulary = new Set<string>()
   for (const entry of entries) {
@@ -274,17 +310,24 @@ export class KbService {
     const needle = trimmed.toLowerCase()
     const factor = confidenceFactor(trimmed, buildVocabulary(entries))
     const techTokens = extractTechTokens(trimmed)
+    const queryCjkChars = countCjkChars(needle)
     const lexical = entries
       .map((entry) => ({
         entry,
         score: scoreEntry(entry, needle) * factor,
         techCovered: countTechCoverage(entry, techTokens),
+        cjk: cjkMatchStats(entry, needle),
       }))
       .filter((candidate) => candidate.score > 0)
 
     const scored = lexical
       .filter((candidate) =>
         hasEnoughTechCoverage(candidate.techCovered, techTokens.length),
+      )
+      .filter(
+        (candidate) =>
+          techTokens.length > 0 ||
+          hasEnoughChineseConfidence(candidate.cjk, queryCjkChars),
       )
       .sort(
         (left, right) =>

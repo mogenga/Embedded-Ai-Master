@@ -13,7 +13,7 @@ entries:
     title: 串口无输出
     path: protocols/uart/no-output.md
     tags: [uart, serial, rs232]
-    keywords: [没输出, 无输出, 收不到]
+    keywords: [没输出, 无输出, 收不到, 没反应]
     summary: 完全无输出或对端收不到
 
   - id: uart-garbled
@@ -34,7 +34,7 @@ entries:
     title: C 工具链
     path: system/toolchain.md
     tags: [c, toolchain]
-    keywords: [c]
+    keywords: [c, 优化, 对齐]
     summary: C 编译器与链接脚本
 `
 
@@ -180,6 +180,35 @@ describe('KbService', () => {
 
       expect(result.found).toBe(true)
       expect(result.candidates[0]?.path).toBe('protocols/i2c/nack.md')
+    })
+
+    it('短中文通用词不单独支撑命中', () => {
+      for (const query of ['优化', '对齐', '没反应']) {
+        expect(service.lookup(query)).toEqual({
+          found: false,
+          candidates: [],
+          reason: 'low_confidence',
+        })
+      }
+    })
+
+    it('中文关键词之外的上下文足够时仍命中', () => {
+      expect(service.lookup('串口没输出').found).toBe(true)
+      expect(service.lookup('串口乱码').found).toBe(true)
+    })
+
+    it('长中文查询即使只命中一个短关键词也仍命中', () => {
+      const result = service.lookup('调试版本一切正常,换成优化版本之后数据就错了')
+
+      expect(result.found).toBe(true)
+      expect(result.candidates[0]?.path).toBe('system/toolchain.md')
+    })
+
+    it('命中两个不同中文关键词时视为信息量足够', () => {
+      const result = service.lookup('优化 对齐')
+
+      expect(result.found).toBe(true)
+      expect(result.candidates[0]?.path).toBe('system/toolchain.md')
     })
 
     it('同分按 path 字典序稳定排序，limit 截断', () => {
