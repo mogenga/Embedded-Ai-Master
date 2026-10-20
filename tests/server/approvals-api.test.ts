@@ -227,6 +227,18 @@ describe("approvals api", () => {
     expect(vi.mocked(runner.decide)).toHaveBeenCalledWith("s1", requestId, "allow");
   });
 
+  it("运行器已关闭返回 503 runner_unavailable，不复用 404", async () => {
+    const runner = runnerReturning({ kind: "runner_unavailable" });
+    const s = await makeServer(runner);
+    close = s.close;
+    const res = await rawRequest(s.port, "/api/approvals", "POST", {
+      origin: `http://127.0.0.1:${s.port}`,
+      "content-type": "application/json",
+    }, PAYLOAD);
+    expect(res.status).toBe(503);
+    expect(errorCode(res.body)).toBe("runner_unavailable");
+  });
+
   it("缺少 Origin 返回 403 forbidden_origin", async () => {
     const runner = runnerReturning({ kind: "accepted" });
     const s = await makeServer(runner);

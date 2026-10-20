@@ -68,7 +68,7 @@ POST /api/actions ──► SessionRunner ──► runSession(generator)
 
 - 运行器与审批桥都在 Web 服务进程内；SSE 仍只读日志，不新增推送通道。
 - 每次 `POST /api/actions` 触发一次 `runSession`；同一会话的多次请求按到达顺序串行，运行期间再次提交返回 409。
-- `requestId` 即工具调用的 `callId`；同一会话内由模型工具调用 id 唯一性保证。
+- `requestId` 是权限 gate 为每次审批生成的独立 UUID（见 §8.1），与模型工具调用 `callId` 解耦；同一 `callId` 跨轮复用时两次审批的 `requestId` 不同。
 
 ## 7. 会话运行器
 
@@ -101,7 +101,8 @@ export type DecideOutcome =
   | { kind: "unknown_session" }
   | { kind: "unknown_request" }
   | { kind: "expired" }
-  | { kind: "already_decided" };
+  | { kind: "already_decided" }
+  | { kind: "runner_unavailable" };   // 运行器已关闭；由 runner 层返回，bridge 不产生
 
 export interface SessionRunner {
   start(input: ActionInput): Promise<ActionOutcome>;
@@ -119,7 +120,7 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner;
 - `sessionId` 缺省：生成 `randomUUID()`，作为新会话 id 传给 `runSession({ sessionId })`，返回 `created: true`。
 - 带 `sessionId`：先校验 `isValidSessionId`，再检查 `<harnessHome>/sessions/<id>/header.json` 是否存在；**header 检查先于 providers 解析**，未知会话优先返回 404，而不是 providers 缺失的 503。错误分型：`ENOENT` / `ENOTDIR` → `unknown_session`；header 损坏（`SessionCorruptionError`）→ `session_corrupt`（message 以「会话 header 损坏」开头）；`EACCES` / `EPERM` → `session_unreadable`（message 固定为「会话不可读」，不回传底层错误文本）；其他错误原样抛出，不伪装成未知会话。存在则读取 header，**使用 `header.model` 作为模型引用、省略 `cwd`**（让 `runSession` 回落到 `header.workdir`），调用 `runSession({ resume: true, sessionDir, sessionId })`，返回 `created: false`。header 无 `model` 时回落到默认模型。
 - 同一 `sessionId` 已有运行中的 promise → `session_busy`；运行 promise settle 后从注册表移除，并允许下一次追加。
-- `close()` 之后的 `start` 抛 `runner_unavailable`（HTTP 503），与未注入 runner 的场景共用同一 code。
+- `close()` 之后的 `start` 抛 `runner_unavailable`（HTTP 503），`decide` 返回 `{ kind: "runner_unavailable" }`（同样映射 503），与未注入 runner 的场景共用同一 code；不得把「运行器已关闭」伪装成 404 `unknown_session`。
 - 运行器维护 `Map<sessionId, RunningSession>`，`RunningSession` 含 `controller: AbortController`、`completion: Promise<void>`、`ready: Promise<void>`、`bridge: ApprovalBridge`。
 - 模型：`model` 选项 > `HARNESS_WEB_MODEL` > `providers.json` 中按 `Object.keys` 顺序的第一个 `<provider>/<model>`；追加会话优先用 `header.model`。runner 在受理前预加载 providers 并 `resolveModelRef` 校验，结果通过 `providersText` 传给 `runSession`，避免受理后才发现配置错误。providers 缺失、JSON/schema 错误、引用无效统一映射为 503 `model_unavailable`（message 区分原因）；不返回 500。
 - home：runner 把自己解析出的 `harnessHome` 通过新增的 `RunOptions.home` 传给 `runSession`，保证 header 检查、会话目录、providers 读取同源；不要依赖 `resolveHarnessHome()` 的隐式环境变量。
@@ -143,7 +144,7 @@ export interface ApprovalBridge extends PermissionPrompter {
 - 每个运行中的会话一个 bridge，作为 `permissions.prompter` 传入 `runSession`。
 - `bindSession` 由 `runSession` 新增的 `onSession` 回调触发；未绑定即收到审批请求时返回 `deny`（fail-closed），不写事件。
 - `request` 流程：
-  1. 用 `requestId = req.callId`；若已存在同 id pending，按内部错误 deny（防御）。
+  1. 用 `requestId = req.requestId`（gate 生成的独立 UUID）；若已存在同 id pending，按内部错误 deny（防御）。
   2. `session.append({ type: "approval_request", payload })`；失败则抛错（gate 映射 `approval_error`，工具不执行）。
   3. 登记 pending `{ resolve, requestId, deadlineAt, settled: false }`，监听 `req.signal`。
   4. 返回一个 Promise，只可能以 `"allow"` / `"deny"` settle；signal abort 时清理并 resolve `deny`（gate 的 race 已先行 settle，迟到结果被忽略）。
@@ -370,7 +371,7 @@ export interface ApprovalRequestPayload {
 
 ### 13.1 权限与桥
 
-- `PermissionPrompter` 新字段：gate 传出 `requestId=callId`、`deadlineAt`、摘要字段；现有 allow/deny/timeout/abort/串行用例保持通过。
+- `PermissionPrompter` 新字段：gate 传出独立 UUID `requestId`（不等于 `callId`）、`deadlineAt`、摘要字段；断言同一 `callId` 的两次审批 `requestId` 不同；现有 allow/deny/timeout/abort/串行用例保持通过。
 - bridge：写 `approval_request` 的顺序与 payload；allow/deny resolve；signal abort 清理；append 失败抛错；重复/相反/未知/过期 decide；settled 表上限；`close` 清理。
 - 崩溃恢复：带未决 `approval_request` 的会话 resume 后补 `permission_decision`，`buildMessages` 可投影，重复 resume 不重复补。
 

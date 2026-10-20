@@ -381,6 +381,18 @@ describe("createSessionRunner", () => {
     });
   });
 
+  it("close 后 decide 返回 runner_unavailable 而不是 unknown_session", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+    await runner.close();
+
+    // 与 start 的 closed 语义一致:关闭后不可再决,不能把「运行器已关闭」伪装成「会话不存在」(D-154)。
+    await expect(runner.decide("s1", "r1", "allow")).resolves.toEqual({
+      kind: "runner_unavailable",
+    });
+  });
+
   it("close 中止运行中的会话", async () => {
     const home = makeHome();
     const fake = createFakeRunSession({ hang: true });

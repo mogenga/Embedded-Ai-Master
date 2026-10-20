@@ -1366,7 +1366,25 @@
 - **影响**: 客户端把「运行器已关闭」误判为「会话不存在」;不产生错误决策。
 - **触发升级条件**: 服务关闭流程与在途审批决策并发,或需要客户端区分可重试状态。
 - **修复建议**: `decide` 先检查 `closed` 并返回 `runner_unavailable`;补 close 后 decide 的 HTTP 用例。
-- **状态**: 未解决;D-150 已覆盖运行中/会话结束后的 404/410 语义。
+- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`):`RunnerDecideOutcome` 增加 `{ kind: "runner_unavailable" }`,`SessionRunner.decide` 在查注册表前先判 `closed`,`src/server/api.ts` 映射为 503 `runner_unavailable`;新增 `tests/server/runner.test.ts` 的 close 后 decide 用例与 `tests/server/approvals-api.test.ts` 的 503 用例(删掉 api.ts 映射时该用例转 RED,恢复后 GREEN)。构建产物探针复验:`runner.close()` 后 `/api/approvals` 与 `/api/actions` 均返回 503 `runner_unavailable`,与 README / spec 一致。D-150 的运行中/会话结束后 404/410 语义不变。
+
+### D-155 · 权限 / Web 审批 spec 仍保留 `requestId === callId` 的旧描述
+
+- **发现**: 2026-10-20,权限引擎与 Web 审批全量复验。
+- **现象**: 红队修复已把审批标识改为 gate 每次生成独立 UUID,但 `docs/superpowers/specs/2026-10-20-web-approval-design.md` 仍有三处旧描述:§6 第 71 行「`requestId` 即工具调用的 `callId`」、§7.3 第 146 行「用 `requestId = req.callId`」、§13.1 第 373 行「gate 传出 `requestId=callId`」。
+- **影响**: 文档与实现(§8.1「每次 `check` 生成 `randomUUID()`」)自相矛盾;按 spec 实现后续功能的人可能重新引入「跨轮复用 `callId` 时两次审批共享标识」的缺陷,这正是第二轮红队修复的 Critical。
+- **触发升级条件**: 任何人按该 spec 修改审批标识相关代码。
+- **修复建议**: 三处改为「`requestId` 是 gate 为每次审批生成的独立 UUID,与模型 `callId` 解耦」,并在 §13.1 补一条「`requestId` 不等于 `callId`」的断言描述。
+- **状态**: **已解决**(2026-10-20):spec §6、§7.3 第 1 步、§13.1 三处改为独立 UUID 语义,§7.3 的 `requestId = req.callId` 更正为 `req.requestId`;同时把 `runner_unavailable` 补进 §7.1 `DecideOutcome` 与 §7.2 的 close 语义(见 D-154)。
+
+### D-156 · `tests/mcp-manager.test.ts` 时间阈值用例在并行负载下偶发失败
+
+- **发现**: 2026-10-20,权限引擎与 Web 审批全量复验(coverage 运行)。
+- **现象**: `单个 server 失败不阻塞其他 server` 在默认 5s 超时下偶发 `Test timed out`;`连接超时可注入并记录 connect_failed,且回收子进程` 偶发 `Date.now() - started` 达到 3024ms,超过 3000ms 断言。同一文件单独复跑 36/36 通过,连续全量复跑多数通过。
+- **影响**: 全量 `npm test` / `npm run coverage` 偶发红灯,需要人工判断是否为真回归;不影响产品行为。同类现象在 dev-notes 上一轮已记录过一次,但当时未登记。
+- **触发升级条件**: 再次出现;或 CI 要求稳定全绿。
+- **修复建议**: 断言改为「不阻塞」而非绝对耗时(例如比较并发与串行完成的相对关系),或为这两条用例单独设置更宽的 `testTimeout` / 用假时钟替换 `Date.now()`;不改生产代码。
+- **状态**: **已解决**(2026-10-20):两条用例各加 30s `testTimeout` 并注明「测的是故障隔离 / 超时注入是否生效,不是绝对耗时」;`连接超时可注入…` 的耗时上限从 3000ms 放宽到 10000ms——注入值是 300ms、默认值是 15s,10s 仍能区分二者,同时容纳并发负载下的 spawn 抖动。仅改测试,未改生产代码。
 
 ---
 
@@ -1431,3 +1449,4 @@
 | 2026-10-20 | 事件总线全量复验与修复(`feat/m2-event-bus`):D-138 实时单帧写超时→`slow_consumer`(已解决,残余记入条目);D-140 列表与详情共用 `isValidSessionId`(已解决);D-141 `readSessionHeader` 收敛到 persistence 并补 EACCES 用例(已解决);D-142 删除死代码 `createEventStream`/`splitCompleteLines`(已解决);D-144 文档改为 `SessionEventEnvelope` 并补 `since` 夹紧语义(已解决);录入 D-139(`/api/actions` 仍 501)与 D-143(`applySessionEvent` O(n²))为未解决 |
 | 2026-10-20 | M2 Web 审批闭环(`feat/m2-web-approval`):D-137(`approval_request` + `POST /api/approvals` + 审批 UI)与 D-139(`/api/actions` 落地)标已解决;D-112 的 Web 部分标已解决;录入 D-145 ~ D-152(重启丢失 pending、仅 Origin 校验、摘要敏感片段、单会话串行、SSE 200ms 延迟、迟到决策 404/410 不一致、未响应 abort 占用 `session_busy`、在途发送切回会话);README 新增「Web 会话与审批」,frontend-design 补审批卡片与状态机 |
 | 2026-10-20 | M2 Web 审批红队修复(`feat/m2-web-approval`):审批标识改为 gate 生成的独立 UUID(与 `callId` 解耦),`permission_decision`/崩溃恢复/transcript 按 `requestId` 配对;408 不再销毁连接;写端点拒绝 `Sec-Fetch-Site: cross-site`;启动前失败写 `interrupted(start_failed)`;D-146 补浏览器跨源面;录入 D-153(port 0 写端点 403)与 D-154(close 后 decide 返回 404) |
+| 2026-10-20 | 权限引擎与 Web 审批全量复验(`feat/m2-web-approval`):构建产物探针实测通过 135 项断言;D-154 复现并补记与 README/spec 的措辞冲突;录入 D-155(spec 三处残留 `requestId === callId` 旧描述)与 D-156(`tests/mcp-manager.test.ts` 时间阈值用例在并行负载下偶发失败);本轮未改生产代码 |

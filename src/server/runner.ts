@@ -42,7 +42,10 @@ export class RunnerError extends Error {
   }
 }
 
-export type RunnerDecideOutcome = DecideOutcome | { kind: "unknown_session" };
+export type RunnerDecideOutcome =
+  | DecideOutcome
+  | { kind: "unknown_session" }
+  | { kind: "runner_unavailable" };
 
 export interface SessionRunner {
   start(input: ActionInput): Promise<ActionOutcome>;
@@ -305,6 +308,8 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
     requestId: string,
     decision: "allow" | "deny",
   ): Promise<RunnerDecideOutcome> {
+    // 关闭后注册表已清空;若不先判 closed,「运行器已关闭」会被伪装成「会话不存在」(D-154)。
+    if (closed) return { kind: "runner_unavailable" };
     const entry = registry.get(sessionId);
     if (entry === undefined) return { kind: "unknown_session" };
     return entry.bridge.decide(requestId, decision);

@@ -90,6 +90,8 @@ describe("McpManager 连接与工具发现", () => {
     expect(events.find((event) => event.kind === "connected")?.toolCount).toBeGreaterThan(0);
   });
 
+  // 这条测的是「故障隔离」而不是耗时：并发跑整套测试时，spawn 两次子进程可能超过 vitest
+  // 默认 5s，从而把负载抖动误报成隔离失败（D-156）。隔离性本身由下方断言保证。
   it("单个 server 失败不阻塞其他 server", async () => {
     const events: McpStatusEvent[] = [];
     const manager = track(
@@ -107,7 +109,7 @@ describe("McpManager 连接与工具发现", () => {
     expect(manager.tools().some((tool) => tool.server === "echo")).toBe(true);
     expect(manager.tools().some((tool) => tool.server === "broken")).toBe(false);
     expect(events).toContainEqual(expect.objectContaining({ kind: "connect_failed", server: "broken" }));
-  });
+  }, 30_000);
 
   it("connectAll 与 close 幂等", async () => {
     const root = tempRoot();
@@ -140,11 +142,13 @@ describe("McpManager 连接与工具发现", () => {
     await manager.connectAll();
     const pid = Number(readFileSync(pidFile, "utf8"));
 
-    expect(Date.now() - started).toBeLessThan(3_000);
+    // 断言的是「注入的 300ms 生效」而不是「耗时接近 300ms」：并发跑整套测试时，
+    // spawn 与回收子进程本身可能耗时数秒（D-156）。只要远小于默认 15s 就证明注入生效。
+    expect(Date.now() - started).toBeLessThan(10_000);
     expect(manager.tools()).toEqual([]);
     expect(events).toContainEqual(expect.objectContaining({ kind: "connect_failed", server: "silent" }));
     await waitFor(() => !isAlive(pid), 3_000);
-  });
+  }, 30_000);
 
   it("connectAll 并行连接多个 server", async () => {
     const connectedAt: number[] = [];

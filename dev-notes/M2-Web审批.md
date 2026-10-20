@@ -229,3 +229,101 @@
 - 分支 `feat/m2-web-approval` 未合并 main，等用户确认。
 - 已登记 D-145 ~ D-154：重启丢失 pending、仅 Origin 校验（含 dev 代理面）、摘要敏感片段、单会话串行、SSE 200ms 延迟、迟到决策 404/410、abort 不响应占用 session_busy、发送在途切会话、port 0 写端点 403、关闭后 decide 404。
 - 旧格式跨轮审批共享同一 requestId，只能按 callId FIFO 配对；极端乱序历史日志可能偏移，属于旧格式固有限制。
+
+## 2026-10-20 · 全量复验（权限引擎 + Web 审批 API）
+
+**用户关键原话**
+
+- `全量复验权限引擎与web审批api`
+- 复验前 `/compact`，要求删除关于邮件的会话上下文；本轮只做技术复验。
+
+**基线**
+
+- 分支 `feat/m2-web-approval`，HEAD `f328bcd`，工作区干净。
+- 复验对象：权限引擎（`src/permissions/`、管线接入、审计、配置加载）+ Web 审批（`src/server/{runner,approvals,api,body}.ts`、审批事件与崩溃恢复、UI 投影与卡片）。
+
+**验证命令与结果（fresh）**
+
+- `npm test`：73 files / **1792 passed + 1 skipped**（live 网关用例）。复跑 3 次，其中 1 次（coverage 运行）`tests/mcp-manager.test.ts` 2 个时间阈值用例失败，单独复跑 36/36 通过。
+- `npm run coverage`：lines **91.32%**（5086/5569，阈值 85%）、statements 88.73%、branches 83.52%、functions 91.5%；`src/permissions` lines 97.84%，`src/server` lines 90.97%，`transcript.ts` lines 93.95%。
+- `npm run typecheck` / `npm run lint` / `npm run build`：exit 0。
+- `npm run test:ui`：22 files / **225 passed**；`npm run typecheck:web` / `npm run build:web`：exit 0（37 modules，JS 72.42 kB）。
+- `npm run verify:ui`：**14/14 PASS**，V0 附加 1/1 PASS。
+
+**构建产物探针（只用 `dist/`，不依赖测试夹具；假模型为本地 HTTP 服务，不触网）**
+
+共 135 项断言通过；另有 2 项失败经定位为探针自身时序误用（见本节末「探针自身修正」），不是产品缺陷。逐组：
+
+1. 权限锚点（24 项）：默认 `diagnose` 下 fs 读/glob/grep allow、fs 写/shell deny 且 `execute` 未调用（无 marker 文件、无写文件）、headless `ask → approval_unavailable` 150ms 内结束不挂起、每次判定恰好一条审计且字段完整（`requestId` 为独立 UUID ≠ `callId`）、审计先于 `tool_result`、MCP readOnly/destructive/unknown 映射为 allow/deny/deny 且 destructive 未调用 `call`、参数规则 allow 覆盖预设并保留 `source=user`/`ruleIndex=0`、坏配置在创建会话前失败且不留目录。
+2. Web 审批 HTTP（24 + 33 项）：actions 202 + header 已落盘、approval_request 不含参数原文、缺 Origin 403、批准后事件顺序 `approval_request → permission_decision(allow, approval_granted) → tool_started → tool_result`、拒绝不产生 `tool_started` 且结果 `permission_denied`、超时审计 `approval_timeout`、同会话并发审批串行（同一时刻只有一个待审批）、重复决策 200 `duplicate`、相反决策 409、未知 requestId 404、`session_busy` 409 且结束后可追加、规则 allow 不产生审批、参数谓词 deny 不执行、read-only 下 fs 写直接 deny、跨站 403 / 415 / 413 / 405 / 坏 JSON 400、跨源 Origin 403。
+3. MCP 经真实审批链路（11 项）：`mem_read` allow 执行、`mem_write` 产生 `approval_request(access=write)` 批准后执行、无标注工具 `preset:diagnose:unknown` 直接 deny 且无 `tool_started`。
+4. 浏览器闭环（20 项，无头 Chrome + CDP）：空态文案、发送按钮、审批卡片 pending 展示工具/ask/理由/参数/截止时间、等待期间不伪造成功、点击批准后卡片 `allowed`、工具真实输出 `ui-probe` 出现在页面、最终回答出现、“新会话”后第二轮卡片出现、拒绝后卡片 `denied` 且工具卡 `permission_denied`、无 `exit=0`。
+5. 跨会话隔离（11 项）：两会话并行各自待审批、用 B 的 `sessionId` 提交 A 的 `requestId` 返回 404 且不改变 A 的审计、A 批准执行、B 拒绝不执行。
+6. 复用与预设（19 项）：同一 `callId` 跨轮复用两次审批 `requestId` 不同，旧 `requestId` 迟到决策返回 409 且不命中新审批，两轮各自审计正确；超时后旧 `requestId` 410、新 `requestId` 202；workspace-write 的 fs 写按内置规则 allow；danger-full-access 不产生审批且 shell 执行。
+7. 崩溃恢复（7 项）：SIGKILL 服务后重启 resume，补写 `approval_aborted: crash_recovery` 且保留 `requestId` 配对、工具未执行、二次 resume 不重复补写。
+8. 回放（6 项）：HTTP 详情与 SSE 补播均含 `approval_request`/`permission_decision` 且顺序正确、`stream_end` 收尾、seq 单调。
+
+探针自身修正两处，均非产品缺陷：① 超时场景在会话 `done` 之后才提交迟到决策，命中 D-150 的「会话结束后 404」，改为会话仍在运行时断言 410；② 优雅 `close()` 已由 abort 路径写 `approval_aborted`，不能用来验证「崩溃恢复」，改为 `SIGKILL` 强杀。
+
+**发现的问题（本轮未改生产代码，等授权）**
+
+1. **D-154 可复现，且与 README/spec 措辞冲突**：`runner.close()` 之后 `/api/approvals` 返回 404 `unknown_session`，`/api/actions` 返回 503 `runner_unavailable`；README 与 spec 的审批错误表都写「运行器已关闭或未注入 → 503」。构建产物探针实测：`approvals after close: 404`、`actions after close: 503`。
+2. **spec 残留 `requestId === callId` 的旧描述**：`2026-10-20-web-approval-design.md` §6 第 71 行、§7.3 第 146 行、§13.1 第 373 行仍写「`requestId` 即 `callId` / `requestId = req.callId`」，与 §8.1（gate 生成 `randomUUID()`）矛盾。红队修复只同步了 §7.2/§8.1/§9.1/§9.2/§10.1/§10.3。
+3. **`tests/mcp-manager.test.ts` 的时间阈值用例在并行负载下不稳定**：`单个 server 失败不阻塞其他 server`（默认 5s 超时）与 `连接超时可注入…`（`Date.now() - started < 3000`）在 coverage/全量并行时偶发失败，单独复跑 36/36 通过。dev-notes 上一轮已记录同类现象，但未登记到 `deferred-issues.md`。
+
+**被拒绝或纠偏的内容**
+
+- 未改生产代码、未新增依赖、未派发子代理；所有探针在 `.tmp/`（已 gitignore），使用本地假模型与无头浏览器，未触网、未执行危险命令。
+- 未把探针失败当作产品缺陷：两处失败经定位均为探针时序或关闭语义误用，见上。
+
+**下一步**
+
+- 等用户决定是否修 D-154（`decide` 先检查 `closed` 返回 `runner_unavailable`）与同步 spec 三处残留；测试不稳定项登记 deferred。
+
+## 2026-10-20 · 三项修复（D-154 / D-155 / D-156）
+
+**用户关键原话**
+
+- `修三项`
+
+**D-154 · close 后 decide 返回 503**
+
+- TDD：先在 `tests/server/runner.test.ts` 加 `close 后 decide 返回 runner_unavailable 而不是 unknown_session`，跑出 RED（`expected { kind: 'unknown_session' } to deeply equal { kind: 'runner_unavailable' }`）。
+- 实现：`RunnerDecideOutcome` 增加 `{ kind: "runner_unavailable" }`；`decide` 在查注册表前先判 `closed`；`src/server/api.ts` 的 `handleApproval` switch 增加 503 映射。
+- HTTP 层：`tests/server/approvals-api.test.ts` 新增「运行器已关闭返回 503」；变异验证——临时删掉 `api.ts` 的新增 case 后该用例 RED，恢复后 23/23 通过。
+- 构建产物复验：`runner.close()` 后 `/api/approvals` 与 `/api/actions` 均返回 503 `runner_unavailable`（修复前 approvals 为 404）。
+
+**D-155 · spec 三处 `requestId === callId`**
+
+- §6 改为「gate 生成的独立 UUID，与 `callId` 解耦」；§7.3 第 1 步 `requestId = req.callId` → `req.requestId`；§13.1 改为「独立 UUID（不等于 `callId`）」并补断言要求。
+- 顺带把 `runner_unavailable` 补进 §7.1 `DecideOutcome` 与 §7.2 的 close 语义，避免 spec 与 D-154 修复再次分叉。
+
+**D-156 · mcp-manager 时间阈值用例**
+
+- `单个 server 失败不阻塞其他 server`：加 30s `testTimeout`。断言本体（echo 成功、broken 失败、含 `connect_failed`）未动，测的是故障隔离而非耗时。
+- `连接超时可注入…`：耗时上限 3000ms → 10000ms，并加 30s `testTimeout`。注入值 300ms、默认值 15s，10s 仍能区分「注入生效」与「走默认超时」。
+- 变异验证：临时删掉 `connectTimeoutMs: 300` 后该用例 RED（`expected 17054 to be less than 10000`，即回落到默认 15s），恢复后 GREEN——证明放宽后仍看守「注入生效」这一行为。
+- 未改任何生产代码。
+
+**验证结果（fresh）**
+
+- `npm test`：73 files / **1794 passed + 1 skipped**（新增 2 条用例），exit 0。
+- `npm run coverage`：73 files 全通过，lines **91.33%**、statements 88.74%、branches 83.49%、functions 91.50%；`src/server` lines 90.99%。
+- `npm run typecheck` / `lint` / `typecheck:web` / `build`：exit 0。
+- `npm run test:ui`：22 files / 225 passed；`npm run verify:ui`：**14/14 PASS** + V0 1/1。
+- 构建产物探针 8 组 **141 项断言全通过**（含浏览器闭环 20 项）；修复后重跑全部通过。
+
+**探针修正（本轮，非产品问题）**
+
+- `verify-approval-artifacts.mjs` 的「迟到决策 410」原先让模型第二轮返回 `done`，会话先结束，命中 D-150 的 404；改为模型始终返回工具调用，使会话在提交迟到决策时仍在运行。
+- `verify-approval-artifacts-2.mjs` 的「崩溃恢复」用优雅 `close()` 验证，实际走 abort 路径（写 `approval_aborted`，不产生未配对审批）；改为断言优雅关闭语义，真正的 SIGKILL 恢复交由 `verify-crash-recovery.mjs`。
+
+**被拒绝或纠偏的内容**
+
+- 未改 `@vitest` 全局 `testTimeout`：只对两条负载敏感用例单独放宽，避免掩盖其他用例的慢路径。
+- 未把 D-156 的断言改成「相对并发耗时」：需要引入基准对比与更多时序耦合，收益不抵复杂度；放宽上限 + 说明语义已足够。
+
+**残余**
+
+- 工作区 8 个文件未提交（2 个源文件、3 个测试、3 个文档），按「未授权不提交」等待用户指令。
+

@@ -259,6 +259,8 @@ async function handleApproval(
       throw new HttpError(409, "already_decided", "审批请求已完成相反的决策");
     case "expired":
       throw new HttpError(410, "approval_expired", "审批请求已过期");
+    case "runner_unavailable":
+      throw new HttpError(503, "runner_unavailable", "会话运行器不可用");
   }
 }
 
