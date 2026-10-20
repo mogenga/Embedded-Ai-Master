@@ -41,7 +41,9 @@ export function createApprovalBridge(opts: ApprovalBridgeOptions = {}): Approval
   const settledMax = opts.settledMax ?? DEFAULT_SETTLED_MAX;
   const pending = new Map<string, PendingEntry>();
   const settled = new Map<string, SettledEntry>();
+  const inFlight = new Set<string>();
   let session: Pick<SessionHandle, "append"> | undefined;
+  let closed = false;
 
   function detach(entry: PendingEntry): void {
     entry.signal.removeEventListener("abort", entry.onAbort);
@@ -73,10 +75,15 @@ export function createApprovalBridge(opts: ApprovalBridgeOptions = {}): Approval
     },
 
     async request(req: PermissionPromptRequest): Promise<"allow" | "deny"> {
-      if (session === undefined) return "deny";
+      if (closed || session === undefined) return "deny";
+
+      const { requestId } = req;
+      if (pending.has(requestId) || inFlight.has(requestId)) {
+        throw new Error(`duplicate approval request id: ${requestId}`);
+      }
 
       const payload: ApprovalRequestPayload = {
-        requestId: req.requestId,
+        requestId,
         callId: req.callId,
         tool: req.tool,
         action: "ask",
@@ -89,18 +96,18 @@ export function createApprovalBridge(opts: ApprovalBridgeOptions = {}): Approval
         deadlineAt: req.deadlineAt,
       };
 
-      await session.append({ type: "approval_request", payload: { ...payload } });
-
-      if (req.signal.aborted) {
-        recordSettled(req.requestId, undefined, Date.now());
-        return "deny";
+      inFlight.add(requestId);
+      try {
+        await session.append({ type: "approval_request", payload: { ...payload } });
+      } finally {
+        inFlight.delete(requestId);
       }
 
-      const previous = pending.get(req.requestId);
-      if (previous !== undefined) {
-        pending.delete(req.requestId);
-        detach(previous);
-        previous.resolve("deny");
+      if (closed) return "deny";
+
+      if (req.signal.aborted) {
+        recordSettled(requestId, undefined, Date.now());
+        return "deny";
       }
 
       let resolveDecision!: (decision: "allow" | "deny") => void;
@@ -110,15 +117,15 @@ export function createApprovalBridge(opts: ApprovalBridgeOptions = {}): Approval
 
       let entry!: PendingEntry;
       const onAbort = (): void => {
-        if (pending.get(req.requestId) !== entry) return;
-        pending.delete(req.requestId);
+        if (pending.get(requestId) !== entry) return;
+        pending.delete(requestId);
         detach(entry);
-        recordSettled(req.requestId, undefined, Date.now());
+        recordSettled(requestId, undefined, Date.now());
         resolveDecision("deny");
       };
 
       entry = { signal: req.signal, onAbort, resolve: resolveDecision };
-      pending.set(req.requestId, entry);
+      pending.set(requestId, entry);
       req.signal.addEventListener("abort", onAbort, { once: true });
 
       return outcome;
@@ -147,6 +154,8 @@ export function createApprovalBridge(opts: ApprovalBridgeOptions = {}): Approval
     },
 
     close(): void {
+      if (closed) return;
+      closed = true;
       for (const [requestId, entry] of pending) {
         pending.delete(requestId);
         detach(entry);

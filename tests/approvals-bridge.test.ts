@@ -152,6 +152,22 @@ describe("ApprovalBridge", () => {
     expect(bridge.decide("call-5", "allow")).toEqual({ kind: "unknown_request" });
   });
 
+  it("同一 requestId 已有 pending 时新请求 reject 且不写日志", async () => {
+    const handle = fakeHandle();
+    const bridge = createApprovalBridge();
+    bridge.bindSession(handle);
+    const first = bridge.request(promptReq("dup"));
+    await flush();
+    expect(handle.append).toHaveBeenCalledTimes(1);
+    await expect(bridge.request(promptReq("dup"))).rejects.toThrow(
+      "duplicate approval request id: dup",
+    );
+    expect(handle.append).toHaveBeenCalledTimes(1);
+    expect(bridge.pendingCount()).toBe(1);
+    expect(bridge.decide("dup", "allow")).toEqual({ kind: "accepted" });
+    await expect(first).resolves.toBe("allow");
+  });
+
   it("相同决策重复返回 duplicate", async () => {
     const bridge = createApprovalBridge();
     bridge.bindSession(fakeHandle());
@@ -214,6 +230,35 @@ describe("ApprovalBridge", () => {
     await expect(first).resolves.toBe("deny");
     expect(bridge.pendingCount()).toBe(0);
     expect(bridge.decide("call-10", "allow")).toEqual({ kind: "unknown_request" });
+  });
+
+  it("close 后 request 返回 deny 且不写日志", async () => {
+    const handle = fakeHandle();
+    const bridge = createApprovalBridge();
+    bridge.bindSession(handle);
+    bridge.close();
+    await expect(bridge.request(promptReq("after-close"))).resolves.toBe("deny");
+    expect(handle.append).not.toHaveBeenCalled();
+    expect(bridge.pendingCount()).toBe(0);
+    expect(bridge.decide("after-close", "allow")).toEqual({ kind: "unknown_request" });
+  });
+
+  it("append 期间 close 不登记 pending", async () => {
+    let release!: () => void;
+    const append = vi.fn(
+      (ev: Omit<SessionEvent, "seq" | "ts">) =>
+        new Promise<SessionEvent>((resolve) => {
+          release = () => resolve({ ...ev, seq: 0, ts: "" });
+        }),
+    );
+    const bridge = createApprovalBridge();
+    bridge.bindSession({ append });
+    const promise = bridge.request(promptReq("closing"));
+    bridge.close();
+    release();
+    await expect(promise).resolves.toBe("deny");
+    expect(bridge.pendingCount()).toBe(0);
+    expect(bridge.decide("closing", "allow")).toEqual({ kind: "unknown_request" });
   });
 
   it("未绑定 session 返回 deny 且不写日志", async () => {
