@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "preset": "diagnose",
+  "rules": [
+    {
+      "tool": "mcp__probe__mem_write",
+      "params": [
+        {
+          "key": "address",
+          "range": [536870912, 536903679],
+          "extentKey": "bytes"
+        }
+      ],
+      "action": "allow",
+      "reason": "示例：仅允许写 STM32F4 SRAM 窗口 0x20000000-0x2001FFFF"
+    },
+    {
+      "tool": "mcp__probe__serial_open",
+      "params": [
+        { "key": "host", "in": ["127.0.0.1"] },
+        { "key": "port", "in": [3456, 3457] }
+      ],
+      "action": "allow",
+      "reason": "示例：仅允许本机 3456/3457 两个仿真串口目标"
+    },
+    {
+      "tool": "mcp__probe__reset",
+      "action": "deny",
+      "reason": "示例默认禁止复位；需要复位时人工改为 ask 或 allow"
+    }
+  ]
+}

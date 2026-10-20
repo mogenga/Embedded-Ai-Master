@@ -248,7 +248,9 @@ npm run kb:regression          # 表格 + JSON；--json 仅 JSON，--baseline �
 | `diagnose`（默认） | allow | ask | deny |
 | `danger-full-access` | allow | allow | allow |
 
-规则 `tool` 支持 `*`（任意串）与 `?`（单字符），整串大小写敏感匹配；`params` 为 AND，`key` 是点路径（如 `target.port`、`items.0`），每个 matcher 必须且只能提供 `eq` / `glob` / `in` / `range` 之一。`eq` 为 JSON 严格相等，`glob` 只匹配字符串，`in` 为非空数组，`range` 为闭区间且仅匹配有限 number。
+规则 `tool` 支持 `*`（任意串）与 `?`（单字符），整串大小写敏感匹配；`params` 为 AND，`key` 是点路径（如 `target.port`、`items.0`），每个 matcher 必须且只能提供 `eq` / `glob` / `in` / `range` 之一。`eq` 为 JSON 严格相等，`glob` 只匹配字符串，`in` 为非空数组，`range` 为闭区间且仅匹配有限 number。`range` 可附加 `extentKey`（点路径）表达“起始值 + 跨度”：值为数组时取 `length`，为数字时取数值，要求 `start >= lower` 且 `start + extent - 1 <= upper`；`extentKey` 只能与 `range` 同用。
+
+`serial_open` 默认不是只读工具：`diagnose` 预设下未显式授权会被拒绝。可复制的 probe 领域策略模板见 `mcp-servers/probe/permissions.example.json`（SRAM 写窗口、串口白名单、复位拒绝）；模板**不会自动加载**，复制到 `.harness/permissions.json` 或通过 `permissions.rules` 内联后才生效。
 
 ```json
 {
@@ -258,19 +260,17 @@ npm run kb:regression          # 表格 + JSON；--json 仅 JSON，--baseline �
   "rules": [
     {
       "tool": "mcp__probe__mem_write",
-      "params": [{ "key": "address", "range": [536870912, 536870943] }],
+      "params": [{ "key": "address", "range": [536870912, 536903679], "extentKey": "bytes" }],
       "action": "allow",
       "reason": "SRAM 调试窗口"
     },
     {
-      "tool": "mcp__serial__open",
-      "params": [{ "key": "port", "glob": "COM?" }],
+      "tool": "mcp__probe__serial_open",
+      "params": [
+        { "key": "host", "in": ["127.0.0.1"] },
+        { "key": "port", "in": [3456, 3457] }
+      ],
       "action": "allow"
-    },
-    {
-      "tool": "mcp__serial__write",
-      "params": [{ "key": "port", "in": ["COM3", "/dev/ttyUSB0"] }],
-      "action": "ask"
     },
     {
       "tool": "fs",

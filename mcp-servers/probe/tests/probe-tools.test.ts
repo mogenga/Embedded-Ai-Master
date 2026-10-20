@@ -224,7 +224,6 @@ describe("probeTools 工具面", () => {
       "detach",
       "halt",
       "resume",
-      "serial_open",
       "serial_status",
       "serial_read",
       "serial_close",
@@ -234,14 +233,15 @@ describe("probeTools 工具面", () => {
     for (const name of ["reset", "mem_write", "serial_write"]) {
       expect(findTool(tools, name).annotations?.destructiveHint, name).toBe(true);
     }
+    expect(findTool(tools, "serial_open").annotations?.readOnlyHint, "serial_open").toBe(false);
     expect(findTool(tools, "mem_read").meta?.evidence).toBe(true);
     expect(findTool(tools, "serial_read").meta?.evidence).toBe(true);
   });
 
-  it("diagnose 预设下串口通道工具映射为 read/allow，写入映射为 write/ask", () => {
+  it("diagnose 预设下串口读工具 allow，open 需显式授权，写入 ask", () => {
     const tools = probeTools({ renode: new FakeBackend("renode") });
 
-    for (const name of ["serial_open", "serial_status", "serial_read", "serial_close"]) {
+    for (const name of ["serial_status", "serial_read", "serial_close"]) {
       const evaluation = evaluatePolicy({
         preset: "diagnose",
         rules: [],
@@ -251,6 +251,15 @@ describe("probeTools 工具面", () => {
       expect(evaluation.access, name).toBe("read");
       expect(evaluation.action, name).toBe("allow");
     }
+
+    const open = evaluatePolicy({
+      preset: "diagnose",
+      rules: [],
+      tool: permissionTool(findTool(tools, "serial_open")),
+      args: {},
+    });
+    expect(open.access).toBe("unknown");
+    expect(open.action).toBe("deny");
 
     const write = evaluatePolicy({
       preset: "diagnose",

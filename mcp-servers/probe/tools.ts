@@ -283,9 +283,9 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
     },
     {
       name: "serial_open",
-      description: "打开目标串口通道",
+      description: "打开目标串口通道；默认 diagnose 预设下需显式授权目标白名单",
       inputSchema: serialOpenSchema,
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: false },
       handler: withSchema(serialOpenSchema, async (args) => {
         const serialStatus = await requireActive().serialOpen(args.host, args.port);
         return ok({ serialStatus, deviceStatus: deviceStatus() });

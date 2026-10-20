@@ -69,6 +69,7 @@ const MatcherSchema = z
     glob: GlobSchema.optional(),
     in: z.array(MatcherValueSchema).min(1, "in 不能为空数组").optional(),
     range: z.tuple([z.number(), z.number()]).optional(),
+    extentKey: KeySchema.optional(),
   })
   .superRefine((matcher, ctx) => {
     const operatorCount = [matcher.eq, matcher.glob, matcher.in, matcher.range].filter(
@@ -78,6 +79,13 @@ const MatcherSchema = z
       ctx.addIssue({
         code: "custom",
         message: "matcher 必须且只能提供 eq/glob/in/range 中的一个操作符",
+      });
+    }
+    if (matcher.extentKey !== undefined && matcher.range === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["extentKey"],
+        message: "extentKey 只能与 range 一起使用",
       });
     }
     if (matcher.range !== undefined && matcher.range[0] > matcher.range[1]) {
