@@ -27,8 +27,8 @@ def test_example_template_parses_and_has_no_secret() -> None:
     example = PROJECT_ROOT / "config" / "models.example.yaml"
     text = example.read_text(encoding="utf-8")
     config = load_models(example)
-    assert len(config.llm) == 2
-    assert len(config.embedding) == 2
+    assert len(config.llm) == 1
+    assert len(config.embedding) == 1
     assert all(candidate.api_key is None for candidate in config.llm)
     assert all(candidate.api_key is None for candidate in config.embedding)
     assert "sk-" not in text

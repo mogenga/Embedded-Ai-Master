@@ -75,7 +75,7 @@ uv run raglab models
 
 - 打印每个候选的 `usable` 与 `block_reason`，不发起任何请求。
 - `openai_compatible` 候选要求 `base_url` 与 `model` 齐全。
-- `local` 候选要求 `model` 齐全且 `requires` 声明的可选依赖组已安装（当前 `local-embed` → `sentence-transformers`）。
+- `local` 候选要求 `model` 齐全且 `requires` 声明的可选依赖组已安装。**当前没有本地候选**（原有两个因缺 `model` / 缺 `sentence-transformers` 已移除），该分支暂无人使用。
 - 全部候选都不可用时退出码 3。
 - `config/models.yaml` 缺失时返回空配置（M4 未就绪的合法状态），不报错。
 

@@ -23,6 +23,8 @@ from .errors import ConfigurationError
 SCHEMES = ("A", "B", "C", "C_prime", "D")
 
 # 可选依赖组 → 用于探测的模块名。用于判断本地候选是否真的能跑。
+# 当前没有本地候选在用（见 models.yaml 说明），但 spec §6.3 的 embedder 网格
+# 保留了"本地候选"这一档，能力留在代码里，删掉会让该档无法恢复。
 OPTIONAL_GROUP_MODULES: dict[str, str] = {
     "local-embed": "sentence_transformers",
 }

@@ -4,8 +4,10 @@
 #   cp config/models.example.yaml config/models.yaml
 # models.yaml 已被 .gitignore 忽略，密钥不会进版本库。
 #
-# 选择规则写死（不可在 test 上改）：dev Recall@2 最高；
-# 差距 < 2pp 时优先本地/低成本候选。
+# 选择规则写死（不可在 test 上改）：dev Recall@2 最高。
+#
+# 当前只保留 OpenAI 兼容候选：本地候选（local-flash / local-bge-m3）在 2026-10-20
+# 实测中均不可运行（缺 model、缺可选依赖组），已按"用不到就删"移除。
 
 llm:
   candidates:
@@ -21,22 +23,8 @@ llm:
       repeat: 3
       supports_seed: false
 
-    - id: local-flash
-      kind: openai_compatible
-      base_url: http://127.0.0.1:8080/v1
-      model: null
-      api_key: null
-      temperature: 0.0
-      repeat: 1
-      supports_seed: false
-
 embedding:
   candidates:
-    - id: local-bge-m3
-      kind: local
-      model: BAAI/bge-m3
-      requires: local-embed
-
     - id: api-embed-1
       kind: openai_compatible
       base_url: null

@@ -47,8 +47,10 @@ H1-H7 定义见 [`docs/rag-vs-agentic-search-todo.md`](../../../docs/rag-vs-agen
 
 | 用途 | 候选 | 选择规则 |
 |---|---|---|
-| LLM | `remote-llm-1`（`step-5-preview`） | dev Recall@2 最高；差距 < 2pp 时优先本地/低成本 |
-| Embedding | `api-embed-1`（`BAAI/bge-m3`）/ `local-bge-m3`（当前不可用） | 同上 |
+| LLM | `remote-llm-1`（`step-5-preview`） | dev Recall@2 最高 |
+| Embedding | `api-embed-1`（`BAAI/bge-m3`） | dev Recall@2 最高 |
+
+> 本地候选（原 `local-flash` / `local-bge-m3`）已于 2026-10-20 移除：前者缺 `model`，后者依赖未安装的 `sentence-transformers`，均无法运行。**后果**：spec §6.3 中方案 A 的 "embedder ∈ {本地候选 1, API 候选 1}" 网格退化为单值，验收时需按单候选处理，不得声称做过 embedder 选择。若后续补上本地 embedder，此为对预注册网格的修订，需在冻结记录中标注。
 
 端点、模型名与密钥只在本地 `config/models.yaml`（已被 `.gitignore` 忽略，模板见 `config/models.example.yaml`）。**任何情况下不进版本库**；冻结时记录候选 `id` 与 `model`，不记录密钥。
 

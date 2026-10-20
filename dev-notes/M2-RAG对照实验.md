@@ -397,3 +397,33 @@
 - 候选前缀逻辑最初写在循环内部反复遍历 `report.rows`，多候选时会重复加前缀；改为 `Report.prefix_since(start, id)` 只处理本次新增的行。
 
 **测试**：164 → **169 passed**（新增 5 项脚本守卫）。
+
+## 2026-10-20 · 删除两个不可运行的本地候选
+
+**用户关键原话**：`- id: local-flash ... - id: local-bge-m3 ... 用不到就删了`。
+
+**判断**：这两条候选在上一轮实测中都是 `usable: false`——`local-flash` 缺 `model`，`local-bge-m3` 依赖未安装的 `sentence-transformers`。留着只会让 `raglab models` 与 `env.json` 每次都输出两条必然不可用的记录，掩盖真正的候选状态。按"用不到就删"移除 YAML 条目。
+
+**关键产出**
+
+- `config/models.yaml`（本地，已 gitignore）：删掉 `local-flash` 与 `local-bge-m3`，只留 `remote-llm-1` + `api-embed-1`。
+- `config/models.example.yaml`：同步删除，并在头部注明删除原因与日期。
+- `tests/test_models_config.py`：模板候选数断言 2 → 1。
+- `docs/runbook.md`：`local` 分支说明改为"当前没有本地候选"。
+- **`PREREGISTRATION.md`：补记后果。** spec §6.3 方案 A 的网格是 `embedder ∈ {本地候选 1, API 候选 1}`，删掉本地候选后该档只剩一个值。**验收时不得声称做过 embedder 选择**；若以后补回本地 embedder，那是预注册网格的修订，必须在冻结记录里标注。
+- `docs/fairness-protocol.md` T4：状态改为"两处候选各仅一个，当前无候选可选，须声明未做模型选择"。
+
+**刻意保留的东西（没有跟着删）**
+
+- **`kind: local` 的代码能力**（`OPTIONAL_GROUP_MODULES` / `_optional_available` / `usable` 的 local 分支）与 `pyproject.toml` 的 `local-embed` 可选组：spec §6.3 的 embedder 网格保留了"本地候选"这一档，删掉代码会让该档无法恢复，未来补候选时还得重写一遍判定逻辑。**删的是数据，不是能力。**
+- 对应测试 `test_local_candidate_without_optional_dep_is_unusable` / `test_unknown_optional_group_is_unusable` 保留，它们验证的是判定逻辑而非某个具体候选。
+
+**被拒绝或纠偏的内容**
+
+- 一度顺手把 `OPTIONAL_GROUP_MODULES`、`_optional_available` 及 `import importlib.util` 一并删掉，并打算加 `KNOWN_KINDS` 白名单。**这是过度改动**：用户要求删的是两条跑不起来的候选数据，不是删掉"本地 embedding"这条能力线。已回退到原状，只在注释里说明"当前没有本地候选在用"。
+
+**翻车与返工**
+
+- 上述过度改动在写完后自查发现：`git diff` 显示 `config.py` 被删到只剩注释，而 spec §6.3 仍需该档。回退时逐条恢复 `importlib` 导入、`OPTIONAL_GROUP_MODULES` 与 `_optional_available`，并保留注释说明。
+
+**测试**：169 passed（数量不变；只有模板候选数断言的值从 2 改为 1）。

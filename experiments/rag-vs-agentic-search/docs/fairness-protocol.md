@@ -7,7 +7,7 @@
 | T1 | 各方案看到不同语料 | `corpus.build_manifest` / `verify_manifest`；`intake.run_intake` 校验 | 已实现（纯逻辑） |
 | T2 | 在 test 上调参 | `splitting` 固定 seed 切分；`prereg.require_confirmatory_ready` 禁止 dev 上确认性评分、要求预注册冻结与 resolved 配置齐备 | 已实现 |
 | T3 | 调参预算不对称 | `config/schemes/*.yaml` 的预注册网格 | 配置已建，网格跑批未实现 |
-| T4 | 模型货比三家 | `config/models.yaml` 候选清单 + `ModelCandidate.usable` 可运行判定 + `raglab models`；选择规则（dev 最高，差距 < 2pp 取本地）写在 `PREREGISTRATION.md` | 候选已就位并实测可用；选择规则待冻结 |
+| T4 | 模型货比三家 | `config/models.yaml` 候选清单 + `ModelCandidate.usable` 可运行判定 + `raglab models`；选择规则写在 `PREREGISTRATION.md` | 两处候选各仅一个（`remote-llm-1` / `api-embed-1`），**当前无候选可选**：须在报告中声明"未做模型选择"，不得声称做过 |
 | T5 | B 与一次性检索口径不同 | `schemes.base.RetrievalScheme.run` 统一出口；B 必须 `submit` | 出口已实现；B 未实现 |
 | T6 | 失败被静默剔除 | `runner.run_queries` 单查询失败记 `error` 并继续；ITT 分母不变 | 已实现 |
 | T7 | 标注偏向某方案 | `assets.parse_multi_gold` 要求 `blind` 字段 | 已实现（字段级） |
