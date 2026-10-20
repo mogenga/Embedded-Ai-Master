@@ -1,5 +1,7 @@
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import net from "node:net";
+import { isAbsolute } from "node:path";
 import { ProbeBackendError } from "./backend.js";
 import type {
   AttachOptions,
@@ -18,6 +20,7 @@ export const MAX_MEMORY_LENGTH = 256;
 
 const MAX_ADDRESS = 0xffff_ffff;
 const PROMPT = "> ";
+const ERROR_LINE = /^Error(?::|\s|$)/;
 
 export interface TelnetTransport {
   send(command: string): Promise<string>;
@@ -27,6 +30,7 @@ export interface TelnetTransport {
 export interface OpenOcdBackendOptions {
   transportFactory?: (host: string, port: number) => Promise<TelnetTransport>;
   existsImpl?: (path: string) => boolean;
+  resolveImpl?: (name: string) => boolean;
   openocdPath?: string;
   host?: string;
   monitorPort?: number;
@@ -47,6 +51,20 @@ function toHex(address: number): string {
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function resolveOnPath(name: string): boolean {
+  const command = process.platform === "win32" ? "where" : "which";
+  const result = spawnSync(command, [name], { stdio: "ignore", windowsHide: true });
+  return result.status === 0;
+}
+
+function findCommandError(output: string): string | undefined {
+  for (const line of output.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (ERROR_LINE.test(trimmed)) return trimmed;
+  }
+  return undefined;
 }
 
 function assertAddress(address: number): void {
@@ -215,6 +233,7 @@ export class OpenOcdBackend implements ProbeBackend {
 
   private readonly transportFactory: (host: string, port: number) => Promise<TelnetTransport>;
   private readonly existsImpl: (path: string) => boolean;
+  private readonly resolveImpl: (name: string) => boolean;
   private readonly openocdPath: string;
   private readonly host: string;
   private readonly monitorPort: number;
@@ -231,13 +250,17 @@ export class OpenOcdBackend implements ProbeBackend {
     this.monitorPort = options.monitorPort ?? DEFAULT_OPENOCD_TELNET_PORT;
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_TELNET_TIMEOUT_MS;
     this.existsImpl = options.existsImpl ?? ((path) => existsSync(path));
+    this.resolveImpl = options.resolveImpl ?? resolveOnPath;
     this.transportFactory =
       options.transportFactory ??
       ((host, port) => createTelnetTransport(host, port, this.commandTimeoutMs));
   }
 
   available(): boolean {
-    return this.existsImpl(this.openocdPath);
+    if (isAbsolute(this.openocdPath)) return this.existsImpl(this.openocdPath);
+    const fromEnv = process.env.OPENOCD_PATH?.trim();
+    if (fromEnv) return this.existsImpl(fromEnv);
+    return this.resolveImpl(DEFAULT_OPENOCD_PATH);
   }
 
   async attach(options: AttachOptions = {}): Promise<DeviceStatus> {
@@ -441,8 +464,9 @@ export class OpenOcdBackend implements ProbeBackend {
   }
 
   private async execute(transport: TelnetTransport, command: string): Promise<string> {
+    let output: string;
     try {
-      return await transport.send(command);
+      output = await transport.send(command);
     } catch (error) {
       if (error instanceof ProbeBackendError) throw error;
       throw new ProbeBackendError(
@@ -450,5 +474,14 @@ export class OpenOcdBackend implements ProbeBackend {
         `OpenOCD 命令执行失败(${command}): ${errorMessage(error)}`,
       );
     }
+
+    const failure = findCommandError(output);
+    if (failure) {
+      throw new ProbeBackendError(
+        "backend_error",
+        `OpenOCD 命令返回错误(${command}): ${failure}; output=${output.trim()}`,
+      );
+    }
+    return output;
   }
 }

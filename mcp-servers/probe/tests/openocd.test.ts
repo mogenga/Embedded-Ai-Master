@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ProbeBackendError } from "../backend.js";
 import { OpenOcdBackend } from "../openocd.js";
 import type { OpenOcdBackendOptions, TelnetTransport } from "../openocd.js";
+import { RenodeBackend } from "../renode-backend.js";
 
 type CommandHandler = (command: string) => string | Promise<string>;
 
@@ -28,11 +29,16 @@ function setup(
   const transport = new FakeTransport(handler);
   const backend = new OpenOcdBackend({
     existsImpl: () => true,
+    resolveImpl: () => true,
     transportFactory: async () => transport,
     ...options,
   });
   return { backend, transport };
 }
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 async function codeOf(action: () => Promise<unknown>): Promise<string | undefined> {
   try {
@@ -76,6 +82,7 @@ describe("OpenOcdBackend 命令映射", () => {
     const transport = new FakeTransport(() => "");
     const backend = new OpenOcdBackend({
       existsImpl: () => true,
+      resolveImpl: () => true,
       transportFactory: async (host, port) => {
         calls.push({ host, port });
         return transport;
@@ -124,6 +131,47 @@ describe("OpenOcdBackend 命令映射", () => {
 
     expect(backend.available()).toBe(true);
     expect(checked).toEqual(["C:/tools/openocd.exe"]);
+  });
+
+  it("非绝对 openocdPath 时优先使用 OPENOCD_PATH", () => {
+    const checked: string[] = [];
+    let resolved = 0;
+    vi.stubEnv("OPENOCD_PATH", "C:/custom/openocd.exe");
+    const backend = new OpenOcdBackend({
+      openocdPath: "openocd-custom",
+      existsImpl: (path) => {
+        checked.push(path);
+        return path === "C:/custom/openocd.exe";
+      },
+      resolveImpl: () => {
+        resolved += 1;
+        return false;
+      },
+    });
+
+    expect(backend.available()).toBe(true);
+    expect(checked).toEqual(["C:/custom/openocd.exe"]);
+    expect(resolved).toBe(0);
+  });
+
+  it("无 OPENOCD_PATH 时用注入的 resolveImpl 查 PATH", () => {
+    vi.stubEnv("OPENOCD_PATH", "");
+    let resolved = 0;
+    let existsCalls = 0;
+    const backend = new OpenOcdBackend({
+      existsImpl: () => {
+        existsCalls += 1;
+        return false;
+      },
+      resolveImpl: () => {
+        resolved += 1;
+        return true;
+      },
+    });
+
+    expect(backend.available()).toBe(true);
+    expect(resolved).toBe(1);
+    expect(existsCalls).toBe(0);
   });
 });
 
@@ -236,6 +284,28 @@ describe("OpenOcdBackend 内存写入", () => {
   });
 });
 
+describe("OpenOcdBackend 错误输出", () => {
+  it("输出含 Error: 时 halt/read 均抛 backend_error 并附命令与输出", async () => {
+    const { backend } = setup(() => "Error: target not halted");
+    await backend.attach();
+
+    expect(await codeOf(() => backend.halt())).toBe("backend_error");
+    await expect(backend.halt()).rejects.toThrow(/halt/);
+    await expect(backend.halt()).rejects.toThrow(/Error: target not halted/);
+    await expect(backend.readMemory(0x20000000, 4)).rejects.toThrow(/mdw 0x20000000 1/);
+  });
+
+  it("兼容行首 Error 无冒号，并保持大小写敏感", async () => {
+    const { backend: plain } = setup(() => "Error target not halted");
+    await plain.attach();
+    expect(await codeOf(() => plain.halt())).toBe("backend_error");
+
+    const { backend: lower } = setup(() => "error: warning only");
+    await lower.attach();
+    await expect(lower.halt()).resolves.toBeUndefined();
+  });
+});
+
 describe("OpenOcdBackend 错误传播", () => {
   it("未 attach 时所有设备命令抛 not_attached", async () => {
     let factoryCalls = 0;
@@ -272,6 +342,7 @@ describe("OpenOcdBackend 错误传播", () => {
   it("attach 时 transportFactory 失败会传播且保持未连接", async () => {
     const backend = new OpenOcdBackend({
       existsImpl: () => true,
+      resolveImpl: () => true,
       transportFactory: async () => {
         throw new Error("connect ECONNREFUSED");
       },
@@ -305,7 +376,10 @@ describe("probe server 接线", () => {
     ] as const) {
       const tools = probeTools({
         renode: new RenodeBackend(),
-        openocd: new OpenOcdBackend({ existsImpl: () => exists }),
+        openocd: new OpenOcdBackend({
+          openocdPath: "C:/test/openocd.exe",
+          existsImpl: () => exists,
+        }),
       });
       const result = await tools.find((tool) => tool.name === "device_list")?.handler({});
       const backends = (result?.structuredContent as { backends: Array<{ kind: string; available: boolean }> })
@@ -319,7 +393,10 @@ describe("probe server 接线", () => {
 
     expect(() => createProbeServer()).not.toThrow();
 
-    const tools = createProbeTools();
+    const tools = createProbeTools({
+      renode: new RenodeBackend(),
+      openocd: new OpenOcdBackend({ resolveImpl: () => true }),
+    });
     const deviceList = tools.find((tool) => tool.name === "device_list");
     expect(deviceList).toBeDefined();
 
