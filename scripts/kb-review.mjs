@@ -212,12 +212,21 @@ async function main() {
       // removeProposal 已重写文件；此分支只用于提示实现异常，不改变退出码。
       console.error("kb review: inbox 未发生预期变化");
     }
-    const reviewedPath = inboxModule.appendReviewed(root, {
-      id: parsed.id,
-      status: "rejected",
-      reviewedAt: new Date().toISOString(),
-      reason: parsed.reason.trim(),
-    });
+    const reviewedPath = (() => {
+      try {
+        return inboxModule.appendReviewed(root, {
+          id: parsed.id,
+          status: "rejected",
+          reviewedAt: new Date().toISOString(),
+          reason: parsed.reason.trim(),
+        });
+      } catch (error) {
+        inboxModule.appendProposal(root, removed);
+        fail(`写入审核记录失败，已回滚 inbox: ${errorMessage(error)}`, 2);
+        return undefined;
+      }
+    })();
+    if (reviewedPath === undefined) return;
     console.log(JSON.stringify({ id: parsed.id, status: "rejected", reviewedPath }));
     return;
   }
@@ -255,15 +264,24 @@ async function main() {
     fail(`移除提案失败: ${parsed.id}`, 1);
     return;
   }
-  const reviewedPath = inboxModule.appendReviewed(root, {
-    id: parsed.id,
-    status: "accepted",
-    reviewedAt: new Date().toISOString(),
-    target: target.relative,
-    ...(typeof parsed.note === "string" && parsed.note.trim() !== ""
-      ? { reason: parsed.note.trim() }
-      : {}),
-  });
+  const reviewedPath = (() => {
+    try {
+      return inboxModule.appendReviewed(root, {
+        id: parsed.id,
+        status: "accepted",
+        reviewedAt: new Date().toISOString(),
+        target: target.relative,
+        ...(typeof parsed.note === "string" && parsed.note.trim() !== ""
+          ? { reason: parsed.note.trim() }
+          : {}),
+      });
+    } catch (error) {
+      inboxModule.appendProposal(root, removed);
+      fail(`写入审核记录失败，已回滚 inbox: ${errorMessage(error)}`, 2);
+      return undefined;
+    }
+  })();
+  if (reviewedPath === undefined) return;
 
   try {
     const indexed = yamlModule

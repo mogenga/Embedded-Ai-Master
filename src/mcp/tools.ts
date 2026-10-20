@@ -145,7 +145,9 @@ export function createMcpTools(
           await manager.call(info.server, info.tool, input, signal),
           info.server,
         );
-        return info.evidence === true ? { ...result, evidence: true } : result;
+        return info.evidence === true && result.isError !== true
+          ? { ...result, evidence: true }
+          : result;
       },
     });
   }

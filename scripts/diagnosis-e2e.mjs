@@ -111,6 +111,9 @@ function parseText(text) {
 }
 
 function hexToInt(hex) {
+  // Renode 对外设寄存器的 ReadByte 返回寄存器显示顺序（实测 USART2.CR1 为
+  // "c0000000" 对应 0xC0000000），因此按大端解析 hex 得到寄存器值。内存读写
+  // 的字节序不在本脚本范围；这里只读 STM32 外设寄存器。
   const value = Number.parseInt(hex, 16);
   if (!Number.isFinite(value)) throw new Error(`无法解析 hex: ${hex}`);
   return value;
@@ -128,11 +131,18 @@ function requireToolResult(events, toolName, count) {
 
 function registerSnapshot(events) {
   const byAddress = new Map();
+  const warnings = [];
   for (const event of requireToolResult(events, "mcp__probe__mem_read", 5)) {
     const parsed = parseText(event.payload.text);
     const memory = parsed?.memory;
     if (memory === undefined || typeof memory.address !== "number" || typeof memory.hex !== "string") {
       throw new Error(`mem_read 结果缺少 memory.address/hex: ${event.payload.text}`);
+    }
+    if (memory.allZero === true) {
+      warnings.push({
+        address: `0x${memory.address.toString(16)}`,
+        warning: typeof memory.warning === "string" ? memory.warning : "all_zero",
+      });
     }
     byAddress.set(memory.address, hexToInt(memory.hex));
   }
@@ -142,7 +152,7 @@ function registerSnapshot(events) {
     if (value === undefined) throw new Error(`缺少地址 0x${address.toString(16)} 的读数`);
     snapshot[name] = value;
   }
-  return snapshot;
+  return { snapshot, warnings };
 }
 
 function assert(condition, message) {
@@ -271,15 +281,27 @@ async function main() {
       assert(result.payload.evidence === true, `mem_read ${result.payload.id} 未标记 evidence`);
     }
 
-    const snapshot = registerSnapshot(onlineEvents);
-    const verdict = analyzeUartBaseline(snapshot);
-    assert(verdict.rootCause.includes("未初始化"), `根因不符合预期: ${verdict.rootCause}`);
-    assert(verdict.matchedKbSteps.includes(7), "根因未匹配 KB 第 7 步");
-    assert(verdict.matchedKbSteps.includes(8), "根因未匹配 KB 第 8 步");
+    const { snapshot, warnings: registerWarnings } = registerSnapshot(onlineEvents);
+    const warningFields = {};
+    for (const warning of registerWarnings) {
+      for (const [name, address] of Object.entries(REGISTERS)) {
+        if (warning.address === `0x${address.toString(16)}`) warningFields[name] = true;
+      }
+    }
+    const verdict = analyzeUartBaseline({ ...snapshot, warnings: warningFields });
+    assert(
+      verdict.rootCause.includes("未初始化") || verdict.rootCause.includes("证据不足"),
+      `根因不符合预期: ${verdict.rootCause}`,
+    );
+    assert(verdict.matchedKbSteps.length > 0, "根因未匹配任何 KB 鉴别步骤");
     assert(verdict.falsifiablePrediction.length > 0, "缺少可证伪预测");
     assert(
       verdict.limitations.some((item) => item.includes("复位基线")),
       "缺少仿真复位基线局限声明",
+    );
+    assert(
+      verdict.limitations.some((item) => item.includes("全 0")),
+      "缺少全 0/未映射读数局限声明",
     );
 
     const lifecycle = onlineEvents.filter((event) =>
@@ -336,6 +358,7 @@ async function main() {
         registers: Object.fromEntries(
           Object.entries(snapshot).map(([key, value]) => [key, `0x${value.toString(16)}`]),
         ),
+        registerWarnings,
         replayEvents: replay.events.length,
         toolSequence: onlineTools,
       }),

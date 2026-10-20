@@ -44,6 +44,7 @@ export interface KbStatus {
   indexEntries: number
   indexPresent: boolean
   inboxPending: number
+  inboxError?: string
 }
 
 export type KbServiceErrorCode = 'path_denied' | 'file_too_large' | 'not_found'
@@ -445,12 +446,13 @@ export class KbService {
     }
 
     let inboxPending = 0
+    let inboxError: string | undefined
     const inboxFile = path.join(this.root, '_inbox.md')
     if (this.isRegularFile(inboxFile)) {
       try {
         inboxPending = parseInbox(readFileSync(inboxFile, 'utf8')).length
-      } catch {
-        inboxPending = 0
+      } catch (error) {
+        inboxError = error instanceof Error ? error.message : String(error)
       }
     }
 
@@ -460,6 +462,7 @@ export class KbService {
       indexEntries,
       indexPresent,
       inboxPending,
+      ...(inboxError === undefined ? {} : { inboxError }),
     }
   }
 

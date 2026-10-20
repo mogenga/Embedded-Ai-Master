@@ -71,6 +71,24 @@ describe('parseInbox', () => {
   it('忽略没有正文的空块', () => {
     expect(parseInbox('---\nid: x\nkind: trap\n---\n')).toEqual([])
   })
+
+  it('content 中的 Name: value 行不会被当成新字段', () => {
+    const text = `---
+id: x
+kind: trap
+domain: uart
+source: s
+content: 第一行
+Note: 这里是正文
+source: 不是字段
+最后一行
+---
+`
+    const proposals = parseInbox(text)
+    expect(proposals).toHaveLength(1)
+    expect(proposals[0]?.source).toBe('s')
+    expect(proposals[0]?.content).toBe('第一行\nNote: 这里是正文\nsource: 不是字段\n最后一行')
+  })
 })
 
 describe('formatProposal', () => {

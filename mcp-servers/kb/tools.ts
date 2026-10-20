@@ -34,6 +34,7 @@ const searchSchema = z.object({
 })
 
 const singleLine = (value: string) => !/[\r\n]/.test(value)
+const notBlank = (value: string) => value.trim() !== ''
 const notSeparatorLine = (value: string) => !/^\s*---\s*$/m.test(value)
 
 const proposeSchema = z.object({
@@ -42,21 +43,25 @@ const proposeSchema = z.object({
     .string()
     .min(1)
     .max(64)
+    .refine(notBlank, 'domain 不能只含空白')
     .refine(singleLine, 'domain 不能包含换行'),
   source: z
     .string()
     .min(1)
     .max(200)
+    .refine(notBlank, 'source 不能只含空白')
     .refine(singleLine, 'source 不能包含换行'),
   content: z
     .string()
     .min(1)
     .max(8000)
+    .refine(notBlank, 'content 不能只含空白')
     .refine(notSeparatorLine, 'content 不能包含单独成行的 ---'),
   title: z
     .string()
     .min(1)
     .max(200)
+    .refine(notBlank, 'title 不能只含空白')
     .refine(singleLine, 'title 不能包含换行')
     .optional(),
 })
@@ -149,7 +154,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const status: KbToolSpec = {
     name: 'kb_status',
     description:
-      '查看知识库根路径、markdown 文件数、索引条目数、待审提案数与索引是否存在。索引缺失时返回 indexPresent=false；索引损坏时返回 index_invalid。',
+      '查看知识库根路径、markdown 文件数、索引条目数、待审提案数与索引是否存在。索引缺失时返回 indexPresent=false；索引损坏时返回 index_invalid；inbox 读取失败时返回 inboxError。',
     annotations: { readOnlyHint: true },
     handler: async () => {
       try {

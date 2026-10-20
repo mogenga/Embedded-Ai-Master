@@ -89,6 +89,24 @@ describe('kb_propose', () => {
     expect(empty.isError).toBe(true)
     expect(structured(empty).code).toBe('invalid_argument')
 
+    const blank = await findTool(tools, 'kb_propose').handler({
+      kind: 'trap',
+      domain: 'uart',
+      source: 's',
+      content: '   ',
+    })
+    expect(blank.isError).toBe(true)
+    expect(structured(blank).code).toBe('invalid_argument')
+
+    const blankDomain = await findTool(tools, 'kb_propose').handler({
+      kind: 'trap',
+      domain: '   ',
+      source: 's',
+      content: '正文',
+    })
+    expect(blankDomain.isError).toBe(true)
+    expect(structured(blankDomain).code).toBe('invalid_argument')
+
     const separator = await findTool(tools, 'kb_propose').handler({
       kind: 'trap',
       domain: 'uart',

@@ -94,7 +94,8 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 - `kb_propose` 把新知识写入 `<KB 根>/_inbox.md`，返回 `proposalId` 与 `status: "pending_review"`。它**只写待审区**：`kb_search` 排除 `_inbox.md`，`kb_lookup` 只读 `index.yaml`，因此未审内容不会进入检索。
 - 同一 `kind + domain + content` 重复提交不会重复写入，返回已有 `proposalId` 与 `duplicate: true`。
 - 审核是人工步骤：先把内容合并进正式条目，再运行 `npm run kb:review -- --accept <id> --target <正式条目路径>`；回归指标低于基线时脚本拒绝接受、inbox 不变。拒绝用 `npm run kb:review -- --reject <id> --reason "..."`。
-- `kb_status.inboxPending` 报告待审条数。
+- `kb_status.inboxPending` 报告待审条数；inbox 读取失败时返回 `inboxError`，不把错误吞成 0。
+- 旧 inbox 块没有 `id`，列表/审核时按出现顺序生成 `legacy-<n>`；删除前置块后编号会漂移。新提案始终写入稳定 id，审核时优先使用新 id。
 
 ## 测试
 

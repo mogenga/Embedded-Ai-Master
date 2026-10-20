@@ -240,7 +240,7 @@ npm run build && npm run build:mcp
 npm run diagnosis:e2e
 ```
 
-脚本用真实 Renode、真实 KB MCP 与真实内核事件日志跑一次只读取证：`kb_lookup("串口没输出")` → `kb_read` → `attach`/`halt` → 读 `VTOR`、`RCC_APB1ENR`、`GPIOA_MODER`、`USART2 CR1/BRR` → 证据对表 → 根因与可证伪预测 → `LogTailEventSource` 回放。输出 JSON 含 `rootCause`、`evidence`、`falsifiablePrediction`、`limitations`、`replayEvents`；缺 `dist`/`dist-mcp` 或 KB 资产退出码 2，缺 Renode 或断言失败退出码 1。
+脚本用真实 Renode、真实 KB MCP 与真实内核事件日志跑一次只读取证：`kb_lookup("串口没输出")` → `kb_read` → `attach`/`halt` → 读 `VTOR`、`RCC_APB1ENR`、`GPIOA_MODER`、`USART2 CR1/BRR` → 证据对表 → 根因与可证伪预测 → `LogTailEventSource` 回放。输出 JSON 含 `rootCause`、`evidence`、`registerWarnings`、`falsifiablePrediction`、`limitations`、`replayEvents`；若关键读数带 all-zero/unmapped warning，根因降级为“证据不足”并匹配 KB 第 3 步，不把 0 解码为“未配置”。缺 `dist`/`dist-mcp` 或 KB 资产退出码 2，缺 Renode 或断言失败退出码 1。
 
 该验收是**仿真复位基线取证**，不是真实板卡故障复现：`VTOR=0` 只表示未加载固件，结论不能外推到线序、共地、电平等真板问题。真机验证仍由 D-157 跟踪。
 

@@ -66,6 +66,7 @@
 - `preset: "diagnose"`；
 - `mcp__probe__mem_write` 的 `address` 允许 `[0x20000000, 0x2001FFFF]`（STM32F4 SRAM 128 KiB），`extentKey: "bytes"`，action `allow`；
 - `mcp__probe__serial_open` 的 `host in ["127.0.0.1"]` 且 `port in [3456, 3457]`，action `allow`；
+- `serial_open` 标为非只读（access=`unknown`）：未显式 allow 时 `diagnose` 默认 deny；这是相对阶段 2 的安全收紧；
 - `mcp__probe__reset` action `deny`，reason 明确“示例默认禁止复位，需人工改配置”；
 - 其余写/复位回落 `diagnose` 的 `ask`（headless 下 `approval_unavailable` → deny）。
 
@@ -78,7 +79,7 @@
   - SRAM 内 `mem_write` → allow；
   - `0x2001FFF0` + 32 字节 → 不命中 allow，回落 ask；
   - `0x08000000` → ask；
-  - `serial_open` 白名单 → allow，非白名单 → ask；
+  - `serial_open` 白名单 → allow，非白名单 → deny；
   - `reset` → deny；
   - `serial_write` → ask。
 - 测试只构造 `ToolDef` 假对象，不执行 probe 后端，不 spawn 进程。
@@ -218,10 +219,11 @@ export function analyzeUartBaseline(input: UartBaselineRegisters): DiagnosisVerd
 - `USART2EN = (apb1enr >> 17) & 1`；
 - `PA2_MODE = (gpioaModer >> 4) & 3`，`PA3_MODE = (gpioaModer >> 6) & 3`；
 - `UE = (usartCr1 >> 13) & 1`，`TE = (usartCr1 >> 3) & 1`；
-- 全部复位态（EN=0、PA2/PA3 非 AF、UE=0、TE=0、BRR=0）→ 根因“USART2 未初始化（时钟/引脚/波特率均未配置）”，matchedKbSteps `[7, 8]`；
+- 全部复位态（EN=0、PA2/PA3 非 AF、UE=0、TE=0、BRR=0，且关键读数无 all-zero warning）→ 根因“USART2 未初始化（时钟/引脚/波特率均未配置）”，matchedKbSteps `[7, 8]`；
 - 已初始化（EN=1、PA2/PA3 至少一个 AF、UE=1、BRR>0）→ 根因“仿真基线显示 USART2 已初始化，本证据不能证明线序/共地/电平正常”，matchedKbSteps `[]`，limitations 明确要求真板继续排查；
+- 关键读数（APB1ENR/GPIOA_MODER/BRR）带 all-zero warning → 不得把 0 解码为“未配置”；根因改为“仿真基线证据不足”，matchedKbSteps `[3]`，并列出仍可信的证据（如 CR1 的 UE/TE=0）；
 - 混合状态 → 根因“USART2 初始化不完整”，列出未满足项；
-- 无论哪种情况，`limitations` 都包含“Renode 复位基线不等于真实板卡故障；VTOR=0 表示未加载固件”。
+- 无论哪种情况，`limitations` 都包含“Renode 复位基线不等于真实板卡故障；VTOR=0 表示未加载固件”“全 0 读数可能来自未映射地址，不能单独证明寄存器值为 0”。
 
 可证伪预测固定为：“若在固件中使能 USART2 时钟、将 PA2/PA3 配为 AF7、置 UE|TE 并写入与 PCLK 匹配的 BRR，则 TX 应产生字节；若仍无输出，则本根因判断被证伪。”
 
@@ -240,7 +242,7 @@ export function analyzeUartBaseline(input: UartBaselineRegisters): DiagnosisVerd
    - `kb_lookup` `found=true` 且首候选为 `protocols/uart/no-output.md`；
    - `kb_read` 内容包含 `probe_attach`、`BRR`、`pinmux`；
    - 5 个 `mem_read` 都有 `evidence: true`；
-   - 根因包含“未初始化”，`matchedKbSteps` 含 7/8；
+   - 根因包含“未初始化”或“证据不足”，`matchedKbSteps` 非空（全 0 warning 时为 #3）；
    - 结论含可证伪预测；
    - `LogTailEventSource.read(sessionId, -1)` 的事件 seq 连续（`since=0` 会排除 seq 0），工具调用序列与在线一致，`permission_decision` 先于对应 `tool_started`。
 6. 输出一行 JSON（`symptom/kbEntry/rootCause/evidence/replayEvents`）；任何断言失败退出码 1。

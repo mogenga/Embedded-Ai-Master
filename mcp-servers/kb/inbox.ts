@@ -51,14 +51,24 @@ function unquote(value: string): string {
   return value
 }
 
+const KNOWN_FIELDS = new Set(['id', 'date', 'kind', 'domain', 'source', 'title', 'content'])
+
 function parseFields(raw: string): Record<string, string> {
   const fields: Record<string, string> = {}
   let currentKey: string | undefined
+  let inContent = false
   for (const line of raw.split(/\r?\n/)) {
+    // content 是块内最后一个字段；一旦开始，后续形如 "Name: value" 的正文行
+    // 不得再被识别为字段，否则正文会被截断、重复检测失效。
+    if (inContent) {
+      fields.content = `${fields.content}\n${line}`
+      continue
+    }
     const match = FIELD_PATTERN.exec(line)
-    if (match !== null) {
+    if (match !== null && KNOWN_FIELDS.has(match[1]!)) {
       currentKey = match[1]!
       fields[currentKey] = match[2] ?? ''
+      if (currentKey === 'content') inContent = true
       continue
     }
     if (currentKey !== undefined) {
