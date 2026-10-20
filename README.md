@@ -478,7 +478,7 @@ Web 工作台通过 SSE 订阅单个会话的日志投影。实时流与回放�
 - **事件类型**：`approval_request`（参数摘要与截止时间，不含参数原文）、`tool_started`（`{callId,tool,access?}`）、`tool_result`、`permission_decision`、`mcp_status`、`device_status`，以及既有 `system/user/assistant/usage/checkpoint/status/interrupted/compaction`。`tool_call` 仅用于旧日志回放，新代码不再产生。`permission_decision` 中 `action=ask,effective=deny` 表示最终未获批准且工具未执行（原因可能是 `approval_unavailable` / `approval_denied` / `approval_timeout` / `approval_aborted`，需看 `reason`）；`mcp_status` 的 `kind` 覆盖 `connected/connect_failed/tools_changed/tools_refresh_failed/tool_invalid_schema/listener_failed/call_failed/config_failed/config_warning/project_config_skipped/tool_name_renamed`。
 - **流式回答**：模型适配层默认请求 OpenAI 流式响应（`stream:true` + `stream_options.include_usage`），按 SSE 帧解析 `delta.content` 与 `delta.tool_calls`；网关拒绝流式时自动降级为一次性响应，该 provider 后续不再试探。内核把增量写进 `assistant_delta` 事件（`{text}`，按批落盘：默认 60ms 或 400 字符），`assistant` 事件仍承载这一轮的完整内容，投影层忽略 delta、只用 `assistant` 重建模型上下文。
 - **设备状态契约**：MCP 工具在**成功**结果（`isError !== true`）的 `structuredContent.deviceStatus` 返回普通 JSON 对象；序列化后 ≤ 8 KiB、深度 ≤ 4。内核校验后写 `device_status`，payload 为 `{callId, server, tool, state}`。`state` 的键与值完全由 MCP server 决定，内核与 UI 不解释、不补全、不推断；UI 只 patch 已知字符串字段 `probe/serial/cpu/backend`，未知键与非字符串值忽略。失败、权限拒绝、超时/取消不产生 `device_status`；`deviceStatus` 存在但解析失败（非普通对象、超限、访问器/循环等）时写 `status {status:"device_status_invalid", tool, message}` 显式审计；`structuredContent` 非对象或缺少 `deviceStatus` 键时静默跳过，不猜测状态。
-- **断线续传**：客户端独占游标 `lastSeq`，重连以 `since=lastSeq` 建流并按 `seq` 去重；连续 3 次未成功建流后显示流错误（成功 `open` 后计数重置）。收到 `seq > lastSeq + 1` 视为缺口，关闭流并整量重拉会话（每次订阅最多 3 次），避免静默拼接错误；`stream_end` 停止重连，`stream_error` 按同一上限重连。
+- **断线续传**：客户端独占游标 `lastSeq`，按 `seq` 去重（协议层丢弃 `seq <= lastSeq` 的事件）。服务端 `retry: 3000`，浏览器 `EventSource` 自行重连；`stream_end` 停止重连。**缺口检测（`seq > lastSeq + 1` → 整量重拉）与建流失败上限尚未实现**（`bridge.js` 无主动重连逻辑，重连时 `since` 仍为建流时的固定值，重复事件由去重兜住）；见 `docs/frontend-design.md` §15。
 - **慢客户端**：服务端实时队列上限 500 条；实时阶段单帧写超时（默认同补播超时，30s）到期即视为慢客户端，或队列溢出时同样处理：发 `stream_error {code:"slow_consumer", lastSeq}` 并关闭连接，客户端凭游标重连续传。补播阶段每帧也有写超时，完全不读响应体的连接会被关闭；大日志 / 长断线补播的性能上限未压测（D-136）。
 - **延迟与证据**：当前由 200ms 日志轮询跟随，实际延迟还受文件读取与事件循环调度影响，无硬上限，也未压测；进程内低延迟适配器未实现（D-134）。证据由 `tool_result.payload` 的 `evidence/artifactPath/detail` 承载，没有独立 `evidence` 事件（D-135）。
 - **审批事件**：`approval_request` 由审批桥在等待前写入日志，再由 SSE 投影为待审批卡片；决策与执行结果见「Web 会话与审批」。
@@ -684,20 +684,19 @@ MCP：
 
 - SSE 实时事件流已实现（单会话、`since`/`Last-Event-ID` 续传）；写操作与审批已落地，见「Web 会话与审批」（D-137/D-139 已解决；D-051 的 action 契约已收敛为 `text` + 可选 `sessionId`）。
 - 实时总线只做日志投影：延迟约 200-250ms，无进程内低延迟适配器（D-134）；只支持单会话流（D-133）。
+- 客户端缺口检测与整量重拉尚未实现（详见「实时事件流」的断线续传一条与 `docs/frontend-design.md` §15）。
 - 设备面板只消费 MCP 显式发布的 `device_status`，无该事件时 `/api/device` 仍恒为 `unknown`，缺少显式连接状态枚举（D-052、D-058）。
-- 回放/导出按钮已渲染但未接行为（D-059）。
+- 浏览器形态的权限模式选择只改前端状态，不改变内核的权限预设（`bridge.js` 的 `setMode` 无网络请求）；桌面形态则真实生效。
+- 前端未覆盖的能力（git/PR、终端、worktree、导出、回放等）在 UI 隐藏入口，宿主/bridge 回显式 `notice`；清单见 `desktop/MATRIX.md`（D-166）。
 - 会话列表的坏目录进 `errors`，界面在会话面板底部显示「N 个会话目录不可读」（D-065 已解决）。
 - 知识库扫描深度上限 8、条目上限 2000，超出会静默截断（D-064）。
-- 717px 工作区下知识库整树需内部滚动（D-054）；V3/V11 的验收口径边界见 D-055、D-056。
-- Chromium 非标准安装需设置 `CHROME_PATH`（D-057）。
 
 ## 设计文档
 
 - `docs/BRD.md` — 业务需求与路线图
 - `docs/p0-kernel-design.md` — P0 内核设计
-- `docs/frontend-design.md` — 前端设计规范（布局、令牌、组件、验收）
+- `docs/frontend-design.md` — 前端设计规范（布局、令牌、组件、验收；v2.0 以 `desktop/renderer` 实现为准）
+- `desktop/MATRIX.md` — 前端命令/事件能力矩阵（已支持 / 隐藏 / 原因）
 - `docs/superpowers/specs/2026-10-16-p0-kernel-dims-1-2-design.md` — 维度 1+2 可实现设计
 - `docs/superpowers/plans/2026-10-16-p0-kernel-dims-1-2.md` — 实现计划
-- `docs/superpowers/specs/2026-10-18-ui-workbench-design.md` — 前端工程实现设计
-- `docs/superpowers/plans/2026-10-18-ui-workbench.md` — 前端实现计划
 - `docs/deferred-issues.md` — 已知问题与升级条件

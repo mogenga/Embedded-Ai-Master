@@ -10,7 +10,8 @@
 - `docs/rag-vs-agentic-search-todo.md` — 待办对照实验（决策点 #2 的判据）。
 - `docs/ontology-scope-note.md` — Ontology 暂缓纳入检索比对的**范围决策**与重启条件（2026-10-19）。它不是待办缺陷，不登记进 `deferred-issues.md`；未经重启条件触发，不要主动把它并入方案比对。
 - `docs/m2-roadmap.md` — M2 路线图（决策点 #5/#9 已关闭项、M2 任务分期）。
-- `docs/frontend-design.md` — 前端设计规范（布局、令牌、组件、验收口径）。
+- `docs/frontend-design.md` — 前端设计规范（布局、令牌、组件、验收口径）。**v2.0 起以 `desktop/renderer/` 的实现为准**；v1.4 及更早基于已删除的 Preact 工作台，仅历史留档。
+- `desktop/MATRIX.md` — 前端命令/事件能力矩阵（已支持 / 隐藏 / 原因），是前端能力边界的事实源。
 - `docs/deferred-issues.md` — 已知但暂不修的缺陷与覆盖缺口，含升级触发条件；改动前先查，避免重复发现。
 
 架构为两层：**平台层**（领域无关 harness，模型接入/上下文/工具/会话/权限）与**领域层**（嵌入式调试能力，经 MCP / 插件挂载）。内核代码不得含领域逻辑——嵌入式取证一律走 MCP，不进内核。
@@ -29,6 +30,7 @@
    - **内核（必须自研，禁止整体引入现成 harness）**：主循环 / 会话 / 工具系统 / 上下文管理 / MCP 生命周期。可借鉴 Claude Code / dsh / opencode 源码语义，但不得 vendor 任何现成 harness。
    - **模型适配层（必须自研）**：极简适配器，仅 `complete` / `countTokens` 两方法；P0 只实现 OpenAI 兼容（`/v1/chat/completions`）；可借鉴 dsh llm-pi-ai 语法，但不整体引 pi-ai。
    - **测试**：vitest。
+   - **前端（2026-10-20 移植定案）**：纯 ES 模块，**无框架、无打包器、无构建步骤**——`desktop/renderer/` 直接被浏览器与 Electron 加载，渲染层是 JavaScript（内核才是 TypeScript）。不要引入 Vite/Preact/React 等构建链或 UI 框架。桌面形态经 `desktop/host/host.js`（NDJSON over stdio）接内核，浏览器形态经 `desktop/renderer/bridge.js`（HTTP + SSE）接内核，两者共用 `desktop/renderer/protocol.js` 这一层纯映射。内核不支持的能力**隐藏入口**而不是伪造（宿主/bridge 回显式 `notice`，R3）。
    - **查证规则**：凡涉及库/框架用法（含上列已定案库的 API 细节），**必须先经 Context7 MCP 查证**（已配置：`.codeartsdoer/mcp/mcp_settings.json` → context7）核实版本、运行时要求与用法后再引入；禁止凭记忆臆造任何 API、版本号或配置项。
 2. 安全边界（散见于 BRD §8）：R1 LLM 永不直接控制仪器；R2 探针写内存/复位前先声明；R3 工具必须诚实（读失败显式报错、全 0 不得解码为"无故障"）。
 

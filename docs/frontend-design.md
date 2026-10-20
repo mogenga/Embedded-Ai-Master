@@ -1,9 +1,24 @@
 # 前端设计文档 · 诊断工作台
 
-> 版本 v1.4 · 2026-10-20 · 状态：**设计基线，前端选型已定**
-> 视觉基线：`prototypes/index.html`（单文件、零外部依赖，所有令牌与尺寸已内联于本文，不依赖打开原型）
-> 业务依据：症状驱动诊断闭环、诊断过程可视化与会话回放、动作三类归属与安全边界（写内存/复位前先声明、工具必须诚实）
+> 版本 v2.0 · 2026-10-20 · 状态：**以实现为准的设计基线**（v1.4 及更早版本基于已删除的 Preact 工作台 `src/ui/`，整体作废，保留在 §13 决策表与 §14 变更记录中）
+> 实现位置：`desktop/renderer/`（纯 ES 模块，无框架、无打包器、无构建步骤）
+> 业务依据：症状驱动诊断闭环、动作三类归属与安全边界（写内存/复位前先声明、工具必须诚实）
 > 本文边界：只定义前端的设计契约、组件规格与验收口径；不定义内核实现，不定义 MCP server 的工具清单。
+> 能力清单的事实源是 `desktop/MATRIX.md`（逐条命令/事件的支持、隐藏与原因）。
+
+---
+
+## 0. 与 v1.4 的关系
+
+v1.4 描述的是一套**从未按此实现**的设计基线（Preact + Vite、三栏诊断工作台、日/夜/跟随系统三态主题、纯简体中文、`TranscriptView` 归约模型）。2026-10-20 的前端移植把整套前端替换为 Prometheus 渲染器，v1.4 的 §2 技术约束、§3 信息架构、§4 布局、§5 令牌、§6 主题、§7 组件规格、§11 响应式、§12 验收清单**全部作废**。
+
+仍然有效并保留在本版的有三块，它们描述的是**内核契约**而非前端实现：
+
+- §8.1 的 `SessionEvent` 事件模型与 payload（内核事实源，前端只消费不改写）；
+- §1.3 / §8.3 的安全边界（R1–R3）与工具语义标记；
+- §13 决策表中除 OPEN-UI-01/02 外的结论。
+
+本版按**已落地实现**重写，每条规格都能在 `desktop/renderer/` 里找到对应代码位置。
 
 ---
 
@@ -11,27 +26,35 @@
 
 ### 1.1 设计目标
 
-1. **一眼看懂诊断处于哪一步**：症状、分流提问、KB 检索、探针取证、根因判决构成一条可读的路径，而不是一屏散落的日志。
-2. **证据优先**：工具调用不是"正在调用某工具"的黑盒，而是可核对的读数（地址、值、字段、判定），支撑「可证伪」的诊断结论。
-3. **调试坞随开随用**：设备监控、端口设置、调试日志在右侧按需展开，不打断主对话的阅读动线。
+1. **一眼看懂诊断处于哪一步**：症状、分流提问、KB 检索、探针取证、根因判决构成一条可读的路径。
+2. **证据优先**：工具调用不是"正在调用某工具"的黑盒，而是可核对的读数，支撑「可证伪」的诊断结论。
+3. **诚实优先于完整**：内核没有的能力**隐藏入口**而不是伪造一个假的。点不动的按钮比会骗人的按钮好。
 4. **专业、克制、可长时间注视**：以仪器面板的克制语言为主，不用装饰性图形、不用 emoji、不用大面积高饱和色。
-5. **回放可复现**：界面状态必须能从会话日志重建，禁止"只能靠重新查硬件才能显示"的状态。
+5. **两种形态、同一套 UI**：Electron 桌面与浏览器形态跑**同一份** renderer 代码，对同一份会话日志给出同一套界面。
 
 ### 1.2 范围内
 
-- 三栏工作台布局与响应式降级；
-- 日间 / 夜间 / 跟随系统三态主题；
-- 诊断会话的消息流、工具取证卡、证据表、根因判决卡、动作归属与安全提示；
-- 左栏知识库检索与树形浏览、诊断会话列表；
-- 右侧调试坞：设备监控、端口设置、调试日志；
-- 状态栏、键盘操作、可访问性、视觉验收口径。
+- 两栏布局（可拖拽侧栏 + 主对话区 + 可选工作台面板）与响应式降级；
+- 四态主题（跟随系统 / 日间 / 夜间 / 高对比）与若干正交偏好（密度、宽度、视图、缩放、动效）；
+- 会话列表（按工作目录分组、搜索、过滤、归档）、转录、工具行、审批条、消息流；
+- 右侧工作台面板（板卡 / 串口两个 tab）；
+- 设置页（通用 / 外观 / 关于）；
+- 键盘操作、可访问性、视觉验收口径。
 
 ### 1.3 非目标
 
-- 不在界面内直接控制仪器（逻辑分析仪 / 示波器 / 程控电源）；界面只呈现建议步骤，由人执行。
-- 不做实时波形与逻辑分析仪时序图；信号物理层诊断属人工执行域，仪器联锁不在 M3 范围（结论见 §13）。
-- 不做多语言；文案当前仅简体中文。
-- 不做移动端优先布局；窄屏只保证"可用降级"，不是主场景。
+- **不在界面内直接控制仪器**（逻辑分析仪 / 示波器 / 程控电源）。R1 禁止 LLM 直接控制仪器；设备相关动作一律作为会话输入下发，仍经内核权限与审批。
+- 不做实时波形与时序图；信号物理层诊断属人工执行域。
+- **不做多窗口写同一会话**；桌面形态保持单窗口。
+- 不做移动端优先布局；窄屏只保证"可用降级"。
+
+### 1.4 明确不在范围内的能力（内核无后端，已隐藏）
+
+以下入口在 DOM 中保留但带 `hidden`，宿主/bridge 收到对应命令时回显式 `notice`（R3，不静默吞掉）。逐条见 `desktop/MATRIX.md`：
+
+git / PR、终端、worktree、packs、browser、skills / memory / instructions / hooks、subagents、goals、文件树、导出、检查点恢复、附件与 @ 补全、斜杠命令、会话 fork/删除/改名、压缩、工作目录切换、板卡/串口的写操作、模型与 effort 直设。
+
+> **「始终允许」按钮不渲染**：内核审批桥只有单次 allow/deny，没有持久规则。渲染出来就是一句兑现不了的承诺。
 
 ---
 
@@ -39,17 +62,41 @@
 
 以下为已定案、实施时不得自行更改的约束：
 
-- **语言与运行时**：TypeScript + Node 24，ESM-only，禁止 CommonJS 混用；`package.json` 声明 `"engines": { "node": ">=24" }`。
+- **内核语言与运行时**：TypeScript + Node 24，ESM-only，禁止 CommonJS 混用；`package.json` 声明 `"engines": { "node": ">=24" }`。
 - **协议层**：MCP 官方 TypeScript SDK v2——`@modelcontextprotocol/client`、`@modelcontextprotocol/server`、`@modelcontextprotocol/server/stdio`。
 - **Schema**：Zod v4（MCP SDK v2 走 Standard Schema）。
-- **测试**：vitest（当前仓库 `vitest ^4.1.6`）。
+- **测试**：vitest 4。前端测试位于 `tests/desktop/`，不混入 `tests/ui/`（后者已随 Preact 工作台删除）。
 - **模型适配层**：自研极简适配器，仅 `complete` / `countTokens`；P0 只实现 OpenAI 兼容端点。
 - **内核**：主循环、会话、工具系统、上下文、MCP 生命周期全部自研，不引入现成 harness。
-- **前端框架**：**Preact + Vite**（2026-10-18 定案）。Preact 只承担组件化与增量 diff；会话状态必须留在纯函数投影（§8.2 的 `TranscriptView`）中，不得塞进组件内部状态。构建产物为 ESM，与 Node 24 内核同构；Vite 仅用于开发期与打包，不引入第二套模块系统。
-- **实时通道**：**SSE + HTTP POST**（2026-10-18 定案，2026-10-20 修订事件载荷）。服务端经 SSE 推送 `SessionEventEnvelope`（`SessionEvent` + `sessionId`，见 §8.1）；`LoopEvent` 只用于库 API 与 demo，不再是 Web 实时流的载荷。客户端动作走 HTTP POST；客户端保留 `EventSource` 抽象，便于未来替换为进程内实现。
-- **浏览器基线**：Chromium 系（含桌面端内置 WebView）与 Firefox 当前稳定版；主题与滚动条使用 CSS 标准属性，旧 Chromium / Safari 降级到 `::-webkit-scrollbar`。
-- **零 emoji**：界面图标一律为内联 SVG（页内 `<symbol>` sprite + `<use>`）；状态点、连接线、分隔线用 CSS 绘制；文案中不使用 emoji。
-- **安全边界落到界面**：写内存 / 复位类操作在界面上必须呈现"待确认"状态并展示目标地址与值；只读工具不得渲染为危险操作；工具失败必须显式展示错误，不得以空值或全 0 读数伪装成正常。
+
+### 2.1 前端技术栈（2026-10-20 移植定案）
+
+- **无框架、无打包器、无构建步骤**：renderer 是原生 ES 模块，浏览器与 Electron 直接加载 `index.html` 里的两个 `<script type="module">`。
+- **渲染层语言是 JavaScript，不是 TypeScript**：TypeScript 只用于内核 `src/` 与 MCP server。`desktop/renderer/*.js` 是 `.js` 文件，靠 `protocol.d.ts` 提供协议层的类型提示。**这条与 v1.4 相反**。
+- **无 UI 框架、无组件系统**：`app.js`（5853 行）是命令式 DOM 操作（`addUserTurn` / `addAssistantTurn` / `addToolRow` / `attachToolOutput` …），状态在一个 `state` 对象里，没有 `TranscriptView` 那样的纯函数归约层。
+- **样式**：手写 CSS 变量体系，两张表（`styles.css` 5473 行 + `settings.css` 1243 行），无 CSS 预处理器。
+- **Markdown**：零依赖手写渲染器（`markdown.js`），带 `IncrementalRenderer` 增量 diff。
+- **图标**：内联 SVG sprite（`icons.js`），单一 24×24 网格、`stroke-width: 1.75`。**零 emoji**。
+- **i18n**：`i18n.js`（en 437 键 / zh 438 键）+ `settings-i18n.js`（604 行），中英双语，默认跟随系统语言。
+
+> 根 `package.json` 的 `devDependencies` 里 `vite` 已是死依赖（仓库内无任何引用，`vite.config.ts` 已删），可清理；`vitest` 自身仍需要它。
+
+### 2.2 实时通道（双形态不同）
+
+| 形态 | 传输 | 客户端动作 | 事件推送 |
+|---|---|---|---|
+| 浏览器 | HTTP + SSE | `fetch` POST | `EventSource`（`GET /api/events`） |
+| 桌面 | NDJSON over stdio | Electron IPC → 宿主 stdin | 宿主 stdout → IPC → 渲染器 |
+
+两种形态**共用** `desktop/renderer/protocol.js` 这一层纯函数映射，保证同一份会话日志在两侧给出同一套 UI。
+
+### 2.3 安全边界落到界面
+
+- 写内存 / 复位类操作在界面上必须呈现"待确认"状态；确认后只显示"等待工具结果"，**不得**在前端伪造"已执行"（R2）。
+- 只读工具不得渲染为危险操作。
+- 工具失败必须显式展示错误码与文本，不得以空值或全 0 读数伪装成正常（R3）。
+- 浏览器形态的写端点要求 loopback `Origin`；同源部署时浏览器自动携带。
+- CSP：`default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src 'self'`。**无 `unsafe-inline` 脚本、无 `unsafe-eval`**。
 
 ---
 
@@ -57,427 +104,376 @@
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ A 顶栏  品牌 │ 目标芯片 · 分支 · 后端 │            主题三态 │ 调试坞开关      │ 48
-├──────────────┬────────────────────────────────────────────┬──────────────────┤
-│ B 左栏 264   │ C 主对话区（自适应）                        │ D 调试坞 404     │
-│              │                                            │                  │
-│ 知识库        │ 会话头（标题 / 状态 / 回放 / 导出）         │ 设备监控          │
-│  检索         │ 诊断路径条（5 步）                          │  目标/探针/CPU    │
-│  厂商树       │                                            │  控制按钮         │
-│              │ 消息流                                     │  寄存器表         │
-│ 诊断会话      │  用户气泡                                   │                  │
-│  进行中       │  agent 回复 / 澄清提问                      │ 端口设置          │
-│  历史         │  工具调用卡（读数 + 证据表）                │  端口/波特率      │
-│              │  根因判决卡（根因/证据/预测/归属）           │  收发统计         │
-│              │  安全提示                                   │                  │
-│              │ 输入栏                                      │ 调试日志          │
-├──────────────┴────────────────────────────────────────────┴──────────────────┤
-│ E 状态栏  探针 / 串口 / 告警          会话号 · 上下文 · 费用 · 平台            │ 26
-└──────────────────────────────────────────────────────────────────────────────┘
+│ TopBar  侧栏切换 │ cwd │ worktree │ 状态点 · 状态文本 │ 设置 │ 窗口控件(仅桌面) │ 48
+├────────────────────┬─────────────────────────────────────┬───────────────────┤
+│ Sidebar 264px      │ Transcript（滚动）                  │ Workbench 420px   │
+│  可拖拽调宽         │  find-bar（sticky）                 │  可拖拽 320–560   │
+│  可折叠 / 窄屏抽屉 │  消息流：用户气泡 / agent 气泡      │  tab: 板卡 | 串口│
+│                    │            工具行 / 审批条 / 提示   │                   │
+│  新建会话          ├─────────────────────────────────────┤                   │
+│  会话搜索          │ Composer                            │                   │
+│  会话列表          │  审批条（需要时）                   │                   │
+│  （按 cwd 分组）   │  输入框 + 停止 + 发送               │                   │
+│                    │  模式 / 模型 / 用量胶囊             │                   │
+└────────────────────┴─────────────────────────────────────┴───────────────────┘
 ```
 
-组件树：
+### 3.1 与 v1.4 的结构差异
 
+| v1.4 | v2.0 | 说明 |
+|---|---|---|
+| 三栏（左 264 / 主区 / 右 404 调试坞） | 两栏 + 可选工作台 | 工作台是 **tab 切换的检查器**，不是三段纵向分区 |
+| 顶部 + 底部状态栏 | 状态在顶栏右侧 | **无独立状态栏**（StatusBar 组件不存在） |
+| 左栏含知识库检索 + 厂商树 | 左栏只有会话 | 知识库面板不存在（内核无对应前端后端） |
+| 诊断路径条 PathLine（5 步） | 无 | `transcriptFromSession` 的 `steps` 随 `src/ui` 删除 |
+| VerdictCard / GuardNotice / AskBlock | 无 | 这三个组件随 `src/ui` 删除，内核事件不区分它们 |
+
+### 3.2 DOM 骨架
+
+| 区域 | 选择器 | 位置 |
+|---|---|---|
+| 根 | `.shell` | `index.html:18` |
+| 侧栏 | `aside#sidebar.sidebar` | `index.html:20` |
+| 主列 | `div.main` | `index.html:66` |
+| 顶栏 | `header.topbar` | `index.html:67` |
+| 主体 | `div.main-body` | `index.html:171` |
+| 对话列 | `div.chat-column` | `index.html:172` |
+| 转录 | `main#transcript.transcript` | `index.html:173` |
+| 查找栏 | `div#find-bar.find-bar` | `index.html:174` |
+| 滚动到底部 | `button#scroll-bottom` | `index.html:208` |
+| 输入区 | `section#composer-region` | `index.html:213` |
+| 审批条 | `div#pending-permission` | `index.html:214` |
+| 输入框 | `div.composer` | `index.html:233` |
+| 用量弹层 | `div#usage-popover` | `index.html:332` |
+| 工作台 | `section#workbench` | `index.html:357` |
+| 设置页 | `dialog#settings-dialog` | `index.html:513` |
+| 命令面板 | `div#command-palette` | `index.html:544` |
+| 快捷键 / 输入对话框 | `dialog#shortcuts-dialog` / `dialog#input-dialog` | `index.html:549,561` |
+
+### 3.3 脚本加载顺序
+
+`index.html:576-577`：
+
+```html
+<script type="module" src="bridge.js"></script>
+<script type="module" src="app.js"></script>
 ```
-App
-├─ TopBar
-│  ├─ Brand
-│  ├─ TargetChips（芯片 / 分支 / 后端）
-│  ├─ ThemeSwitch（light | system | dark）
-│  └─ DockToggle
-├─ Workspace
-│  ├─ Rail
-│  │  ├─ KnowledgePane（Search + Tree）
-│  │  └─ SessionPane（List）
-│  ├─ Conversation
-│  │  ├─ ConversationHeader
-│  │  ├─ PathLine（Step × 5）
-│  │  ├─ MessageStream
-│  │  │  ├─ UserTurn
-│  │  │  ├─ AgentTurn
-│  │  │  │  ├─ AskBlock（第 0 步分流）
-│  │  │  │  ├─ ToolCard（readout | hitlist | evidence）
-│  │  │  │  ├─ VerdictCard（rootCause / evidence / prediction / ownership）
-│  │  │  │  └─ GuardNotice（R2）
-│  │  └─ Composer
-│  └─ Dock
-│     ├─ DeviceMonitor
-│     ├─ PortSettings
-│     └─ DebugLog
-└─ StatusBar
-```
+
+`bridge.js` 必须在 `app.js` 之前：`app.js` 在模块顶层读 `window.prometheus`，而 bridge 在 Electron 下会因 preload 已提供该对象而跳过安装。模块脚本按顺序执行，`app.js` 看到的必然是 bridge 装好的对象。
 
 ---
 
 ## 4. 布局与栅格
 
-### 4.1 三栏尺寸
+### 4.1 关键尺寸
 
-| 区域 | 宽度 | 行为 |
+| 区域 | 尺寸 | 位置 |
 |---|---|---|
-| 左栏 Rail | 264px 固定 | 窗口 < 1020px 隐藏 |
-| 主区 Conversation | `minmax(0, 1fr)` | 自适应；内部内容左右各 20px 内边距 |
-| 右栏 Dock | 404px（窗口 < 1180px 时 340px） | 可整体折叠；窗口 < 820px 隐藏 |
+| 顶栏 TopBar | `height: 48px`，`padding: 0 14px` | `styles.css:1541` |
+| 侧栏 | `var(--sidebar-drag-width, var(--sidebar-width))`，默认 `264px` | `styles.css:80, 262` |
+| 侧栏拖拽条 | 6px，右侧边缘，`role="separator"` 且可 Tab 聚焦 | `styles.css:296` |
+| 转录区 | `padding: 32px 16px 16px`，独立滚动 | `styles.css:1910` |
+| 内容列宽 | `--column-width: min(var(--reading-width), calc(100vw - 120px))` | `styles.css:1998` |
+| `--reading-width` | 默认 `780px`；narrow `620px` / wide `980px` | `styles.css:83, 1982` |
+| 输入区 | `padding: 0 28px 16px` | `styles.css:2832` |
+| 工作台 | `width: 420px; min-width: 320px; max-width: 560px` | `styles.css:679` |
+| 查找栏 | sticky，`width: min(520px, calc(100% - 32px))` | `styles.css:1923` |
+| 命令面板 | fixed，`top: 14vh`，`width: min(560px, calc(100vw - 40px))` | `styles.css:3459` |
+| 设置页 | `width: min(1080px, 96vw); height: min(760px, 90vh)`；左栏 240px + 右 pane `max-width: 780px` | `styles.css:4874`, `settings.css:28,202` |
 
-### 4.2 行高体系（硬性）
+### 4.2 侧栏宽度与折叠
 
-| 行 | 高度 | 说明 |
+- 拖拽条写 `--sidebar-drag-width`（写在元素上，**不经过渡**，指针跟手）；落点记忆到 `prometheus.sidebarWidth`。
+- 折叠：`.shell.collapsed .sidebar { width: 0; flex-basis: 0 }`（`styles.css:334`）。
+- 窄屏（< 900px）：侧栏变为 fixed 抽屉（`position: fixed; inset: 0 auto 0 0; z-index: 12`），不是隐藏。
+
+### 4.3 滚动策略
+
+- 顶栏不滚动；侧栏、对话列、工作台各自独立滚动。
+- **只有 `.transcript` 一个滚动容器**（`app.js:239` 的 `scrollTarget()` 返回 `transcript`）。`find-bar` 是 `position: sticky` 贴在转录顶部，随之滚动。
+- 工作台 `.workbench-body` 内部滚动，各面板自行管理。
+- 滚动条：`.transcript::-webkit-scrollbar { width: 10px }`，thumb 用 `var(--border)` + `3px solid var(--bg)` 内缩，**未使用 `scrollbar-color` 标准属性**（`styles.css:1969`）。
+- 自动跟随：距底 < 140px 跟随，> 220px 显示「滚动到底部」按钮（`app.js:243-278`）。
+
+### 4.4 断点
+
+`styles.css` 只有三个媒体查询：
+
+| 查询 | 位置 | 行为 |
 |---|---|---|
-| 顶栏 TopBar | 48px | 与左栏品牌区共用 264px 栅格列 |
-| 栏头 PaneHead / ConversationHeader | **40px** | 左、中、右三栏必须同高同基线，顶部线对齐于 48px |
-| 诊断路径条 PathLine | 45px（24px 步高 + 上下 10px） | 与主区左右 20px 内边距对齐 |
-| 状态栏 StatusBar | 26px | 贴底 |
-| 列表行 TreeRow | 32px | 左栏统一行高 |
-| 工具卡头 ToolHead | 34px | |
-| 调试坞分区头 | 38px | |
+| `max-width: 1500px` | `styles.css:744` | 仅收紧工作台 tab 的 padding / 字号，**不改栏宽** |
+| `max-width: 900px` | `styles.css:4937` | `.main-body` 改纵向堆叠；工作台 `flex: 0 0 45%`；侧栏变 fixed 抽屉 |
+| `prefers-reduced-motion: reduce` | `styles.css:2019, 5443` | 全局 `animation/transition: none !important` |
 
-### 4.3 间距与对齐规则
-
-- 基准间距：4 / 6 / 8 / 10 / 12 / 16 / 20 / 24。
-- 水平内边距：左栏与右栏 16px；主区 20px；工具卡与气泡内部 12–14px。
-- 顶部对齐：三栏头部同为 40px，其下边框必须落在同一条水平线上（基准视口实测 y=48、h=40）。
-- 右对齐：所有表头与数值列使用 `font-variant-numeric: tabular-nums`，数字右对齐。
-- 主区内容宽度必须等于"主区宽 − 40px"，与会话头的左内边距一致；不允许出现内容比头部窄一截的孤立留白。
-- 跨栏垂直分隔只用 1px 边框（`--border`），不使用阴影分隔栏。
-
-### 4.4 滚动策略
-
-- 顶栏、状态栏不滚动；三栏各自独立滚动。
-- 左栏知识库区固定占左栏 58%（建议值），内部滚动；会话列表占据剩余空间并独立滚动。
-- 主区只有消息流滚动，会话头、路径条、输入栏固定。
-- 调试坞整坞滚动，各分区可独立折叠。
-- 滚动条宽度 10–11px，轨道透明；见 §5.4。
+> v1.4 的 1180 / 1020 / 820 三个断点**不存在**。Electron 窗口 `minWidth: 900`（`main.js:29`），900px 是实际下限。
 
 ---
 
 ## 5. 设计令牌
 
-所有颜色必须经 CSS 变量引用，禁止在组件中硬编码十六进制值。
+所有颜色必须经 CSS 变量引用，禁止在组件中硬编码十六进制值。定义集中在 `styles.css` 的 `:root`（`styles.css:13-86`）。
 
 ### 5.1 颜色
 
-**夜间（默认基线）**
+**夜间（`:root` 默认，`color-scheme: dark`）**
 
 | 变量 | 值 | 用途 |
 |---|---|---|
-| `--bg-canvas` | `#0e131a` | 主区画布 |
-| `--bg-panel` | `#141b23` | 左栏、右栏、顶栏、状态栏、卡片 |
-| `--bg-elevated` | `#1a232d` | 浮层、聚焦态输入 |
-| `--bg-inset` | `#0a0f15` | 输入框、表格内凹、按钮底 |
-| `--bg-hover` | `#1e2834` | 悬停 |
-| `--bg-active` | `#26333f` | 选中、当前步、用户气泡 |
-| `--bg-sunken` | `#111922` | 内嵌区块 |
-| `--border` | `#232e3a` | 结构分隔 |
-| `--border-soft` | `#1c2630` | 次级分隔 |
-| `--border-strong` | `#35424f` | 强调边框、路径连接线 |
-| `--text-1` | `#e4ecf2` | 主文本 |
-| `--text-2` | `#9aa8b6` | 次文本 |
-| `--text-3` | `#68757f` | 弱文本、元信息 |
-| `--text-inverse` | `#08171a` | 主色底上的文字 |
-| `--accent` | `#35d2c0` | 品牌主色、活跃状态、证据通过 |
-| `--accent-strong` | `#2bb6a6` | 主色悬停 |
-| `--accent-soft` | `rgba(53,210,192,.12)` | 主色浅底 |
-| `--accent-line` | `rgba(53,210,192,.32)` | 主色描边 |
-| `--warn` | `#e3a94e` | 告警、仿真边界、待确认 |
-| `--warn-soft` | `rgba(227,169,78,.13)` | 告警浅底 |
-| `--danger` | `#e86c5d` | 失败、写操作、违例 |
-| `--danger-soft` | `rgba(232,108,93,.13)` | 危险浅底 |
-| `--info` | `#7fb2e5` | 提问、提示、串口发送 |
-| `--info-soft` | `rgba(127,178,229,.13)` | 信息浅底 |
-| `--wave-1` | `#35d2c0` | 通道色 1 / KB 命中第一条 |
-| `--wave-2` | `#e3a94e` | 通道色 2 / 第二候选 |
-| `--wave-3` | `#d97bab` | 通道色 3 |
-| `--wave-4` | `#7fb2e5` | 通道色 4 |
+| `--bg` | `#0c0d10` | 主画布 |
+| `--sidebar` | `#101216` | 侧栏 |
+| `--surface` | `#15181d` | 卡片、输入框底 |
+| `--surface-raised` | `#1b1f25` | 浮层 |
+| `--surface-hover` | `#22272f` | 悬停 |
+| `--border` | `#232830` | 结构分隔、滚动条 thumb |
+| `--border-strong` | `#333a45` | 强调边框 |
+| `--text` | `#e6e9ef` | 主文本 |
+| `--text-secondary` | `#9aa3b2` | 次文本 |
+| `--text-faint` | `#7d8797` | 弱文本、元信息 |
+| `--accent` | `#4c9df0` | 品牌主色、活跃态 |
+| `--accent-hover` | `#6cb0f5` | 主色悬停 |
+| `--accent-soft` | `rgba(76,157,240,.14)` | 主色浅底 |
+| `--accent-text` | `#8dc0f7` | 主色文字 |
+| `--accent-warm` | `#c98b4b` | 用量分段第二色 |
+| `--accent-2` | `#4b9ac9` | 用量分段第三色 |
+| `--accent-3` | `#9a7bd1` | 用量分段第四色 |
+| `--success` | `#4fb286` | 成功 |
+| `--warn` | `#d6a244` | 告警、待确认 |
+| `--danger` | `#e06a5e` | 失败、写操作、违例 |
+| `--on-accent` | `#ffffff` | 主色底上的文字 |
+| `--scrim` | `rgba(0,0,0,.55)` | 遮罩 |
 
-**日间**
+配套浅底：`--danger-soft`、`--success-soft`、`--add-bg`、`--del-bg`、`--mark-bg`。
 
-| 变量 | 值 |
-|---|---|
-| `--bg-canvas` | `#eaeef1` |
-| `--bg-panel` | `#ffffff` |
-| `--bg-elevated` | `#ffffff` |
-| `--bg-inset` | `#f4f7f9` |
-| `--bg-hover` | `#eef3f6` |
-| `--bg-active` | `#e2eaef` |
-| `--bg-sunken` | `#f2f5f7` |
-| `--border` | `#d8e0e6` |
-| `--border-soft` | `#e6ecf0` |
-| `--border-strong` | `#bcc8d2` |
-| `--text-1` | `#15202b` |
-| `--text-2` | `#4d5b69` |
-| `--text-3` | `#7c8894` |
-| `--text-inverse` | `#ffffff` |
-| `--accent` | `#0f9d8d` |
-| `--accent-strong` | `#0b8276` |
-| `--accent-soft` | `rgba(15,157,141,.1)` |
-| `--accent-line` | `rgba(15,157,141,.34)` |
-| `--warn` | `#a9701a` |
-| `--warn-soft` | `rgba(169,112,26,.12)` |
-| `--danger` | `#c1443a` |
-| `--danger-soft` | `rgba(193,68,58,.1)` |
-| `--info` | `#2c6db0` |
-| `--info-soft` | `rgba(44,109,176,.1)` |
-| `--wave-1..4` | `#0f9d8d` / `#a9701a` / `#b04d80` / `#2c6db0` |
+> **品牌色是蓝色**（`--accent: #4c9df0`），不是 v1.4 的青色 `#35d2c0`。v1.4 的 `--bg-canvas` / `--bg-panel` / `--text-1..3` / `--wave-1..4` / `--info` 这套变量名**不存在**，不要在新代码里用。
 
-**语义映射（不得混用）**
+### 5.2 主题覆盖块
 
-| 语义 | 颜色 | 典型场景 |
+| `data-theme` | 位置 | 用途 |
 |---|---|---|
-| 正常 / 通过 / 活跃 | `--accent` | 探针已连接、证据验证通过、当前诊断步 |
-| 警告 / 待确认 / 仿真边界 | `--warn` | HSE 未起振、写操作待确认、Renode 未建模 |
-| 失败 / 危险 / 违例 | `--danger` | 读数与预期不符、错误帧、复位按钮 |
-| 信息 / 提问 / 收数据 | `--info` | 第 0 步分流提问、串口接收 |
+| `dark` | `:root` 默认 | 夜间基线 |
+| `light` | `styles.css:152` | 日间 |
+| `contrast` | `styles.css:91` | 高对比（暗底） |
+| `light-contrast` | `styles.css:121` | 高对比（亮底） |
 
-### 5.2 字体
+`light` 覆盖：`--bg:#ffffff`、`--sidebar:#f6f7f9`、`--surface:#f2f4f7`、`--surface-raised:#ffffff`、`--text:#171b21`、`--accent:#1f6feb`、`--border:#e3e7ed`，并把阴影换成浅色版。
 
+`contrast` / `light-contrast` 把所有文字与边框抬到最高对比（`--text:#ffffff` / `#000000`、`--border:#4a4a4a` / `#9a9a9a`）。
+
+**已知不一致**：`contrast` 块未声明 `color-scheme: light`（继承 `:root` 的 dark），且两个高对比块都**不覆盖阴影**，浅底上沿用深色阴影。修这两处时应同时改三块。
+
+### 5.3 字体与字号
+
+```css
+--mono:  "SF Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+--sans:  "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
 ```
---font-ui: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
-           "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
---font-mono: "Cascadia Code", "JetBrains Mono", "SFMono-Regular", Consolas,
-             "Liberation Mono", monospace;
-```
 
-- UI 与正文同一字族；数据、地址、寄存器、日志、路径、计数一律等宽。
-- 字号阶：10.5 / 11 / 11.5 / 12 / 12.5 / 13 / 15。
-- 正文行高 1.5；气泡正文 1.65；数字使用 `tabular-nums`。
-- 不使用全大写英文作为装饰性标签；栏头中文直接使用，英文 scope 保留原样（如 `vendor/`）。
+- 数据、地址、寄存器、日志、路径、计数一律等宽。
+- 字号阶：`--text-xs: 11px` / `--text-sm: 12px` / `--text-base: 13px` / `--text-md: 14px` / `--text-lg: 17px` / `--text-xl: 22px`，**全部乘 `--ui-scale`**。
+- `--font-scale`（0.9 / 1 / 1.12）单独缩放转录正文，不影响界面 chrome。
 
-### 5.3 形状与阴影
+> `--sans` 优先 Inter，**没有中文回退族**（v1.4 写的是 PingFang SC / Noto Sans SC / Microsoft YaHei）。中文靠系统回退渲染。
+
+### 5.4 形状与阴影
 
 | 令牌 | 值 |
 |---|---|
-| `--radius` | 8px |
 | `--radius-sm` | 6px |
-| `--row` | 32px（列表行高） |
-| `--gutter` | 16px（左右栏水平内边距） |
-| 胶囊 / 徽标 | 999px |
-| `--shadow`（夜间） | `0 12px 32px rgba(0,0,0,.38)` |
-| `--shadow`（日间） | `0 10px 28px rgba(23,42,58,.14)` |
+| `--radius` | 10px |
+| `--radius-lg` | 14px |
+| `--shadow-composer` | `0 10px 34px rgba(0,0,0,.42)` |
+| `--shadow-popover` | `0 14px 40px rgba(0,0,0,.5)` |
 
-阴影只用于浮层与弹层，不用于普通卡片；卡片靠 1px 边框与底色分层。
+圆角**只有三档**（源码注释：「three steps, no more」）。阴影只用于输入框与浮层，普通卡片靠 1px 边框分层。
 
-### 5.4 滚动条
+### 5.5 动效
 
-| 变量 | 夜间 | 日间 |
+| 令牌 | 值 |
+|---|---|
+| `--ease` | `cubic-bezier(0.2, 0.7, 0.3, 1)` |
+| `--fast` | 110ms |
+| `--normal` | 170ms |
+
+`prefers-reduced-motion: reduce` 时全局关闭动画与过渡。
+
+### 5.6 缩放
+
+`--ui-scale`（0.9 / 1 / 1.1 / 1.25）缩放整个界面 chrome（字号、间距），`--font-scale`（0.9 / 1 / 1.12）只缩放转录正文。两者都是根级 CSS 变量，由 `app.js:5824,5830` 写入。
+
+---
+
+## 6. 主题与偏好系统
+
+### 6.1 主题：四态选择 → 五个 CSS 变体
+
+用户可选 **4 种**（`index.html:138-141` 的 `#menu-theme`，设置页 `settings.js:403-412` 同款）：
+
+| 选择 | 解析后 `data-theme` | 说明 |
 |---|---|---|
-| `--scroll-thumb` | `#2f3d4b` | `#c6d0d9` |
-| `--scroll-thumb-hover` | `#41546a` | `#a8b5c0` |
-| `--scroll-track` | `transparent` | `transparent` |
+| `system` | `light` / `dark` | 跟随系统 |
+| `light` | `light` | 日间 |
+| `dark` | `dark` | 夜间 |
+| `high-contrast` | `light-contrast` / `contrast` | 高对比，底色跟随系统 |
 
-实现要求：
+解析函数 `resolvedTheme()`（`app.js:4425`）。所以 CSS 侧实际存在 5 个 `[data-theme]` 值。
 
-```css
-* { scrollbar-color: var(--scroll-thumb) var(--scroll-track); scrollbar-width: thin; }
-::-webkit-scrollbar { width: 11px; height: 11px; }
-::-webkit-scrollbar-track { background: var(--scroll-track); }
-::-webkit-scrollbar-thumb {
-  background: var(--scroll-thumb);
-  border: 3px solid transparent;      /* 内缩，视觉宽度约 5px */
-  background-clip: padding-box;
-  border-radius: 999px;
-}
-::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); background-clip: padding-box; }
-::-webkit-scrollbar-corner { background: transparent; }
+### 6.2 存储与默认值
+
+- 键名 **`prometheus.theme`**，存**用户原始选择**（不是解析后的 CSS 值）。
+- 系统偏好变化时（`matchMedia("(prefers-color-scheme: light)")` 的 `change` 事件，`app.js:4416`），若当前是 `system` 或 `high-contrast` 则重新解析。
+- 默认：`app.js:5809` 在**无记录或值为 `system`** 时按系统偏好解析为 `light`/`dark`，即默认跟随系统。
+
+> **已知缺陷（待修）**：boot 时若 `prometheus.theme === "system"`，`state.theme` 被改写为 `light`/`dark`，随后 `setTheme(state.theme)`（`app.js:4449`）会把解析后的值**写回** localStorage —— 用户选的「跟随系统」在一次启动后被永久固化成具体主题。修复方向：boot 阶段不要用 `setTheme` 写回，或让 `state.theme` 与存储值解耦（存储原始选择，单独维护 `resolvedTheme` 的输出）。
+
+### 6.3 正交偏好（`data-*` 属性）
+
+| 属性 | 值 | 控制什么 | 存储键 |
+|---|---|---|---|
+| `data-motion` | `full` / `reduced` | 动效开关 | `prometheus.motion` |
+| `data-density` | `balanced` / `compact` / `detailed` | 工具行密度 | `prometheus.density` |
+| `data-width` | `standard` / `narrow` / `wide` | `--reading-width` 780 / 620 / 980 | `prometheus.width` |
+| `data-view` | `normal` / `thinking` / `verbose` | 思考文本可见性 | `prometheus.view` |
+| `--ui-scale` | 0.9 / 1 / 1.1 / 1.25 | 界面 chrome 缩放 | `prometheus.uiScale` |
+| `--font-scale` | 0.9 / 1 / 1.12 | 转录正文缩放 | `prometheus.fontScale` |
+| `--mono` | 字体栈 | 代码字体 | `prometheus.codeFont` |
+| `--sidebar-width` | px | 侧栏宽 | `prometheus.sidebarWidth` |
+
+### 6.4 完整存储键
+
+```
+prometheus.locale  theme  density  width  view  motion  uiScale  fontScale
+prometheus.codeFont  sidebarWidth  sidebarCollapsed  lastSession  restartSession
+prometheus.suggestions  updateCheck  setupDismissed  workbench  pane
+prometheus.expandedProjects  collapsedProjects
 ```
 
-标准属性与伪元素同时书写：支持 `scrollbar-color` 的浏览器走标准属性，旧浏览器走伪元素，二者不冲突。
+> 键名前缀是 `prometheus.*`（**不是** v1.4 的 `eam-theme`；`eam-theme` 随 `src/ui/theme.ts` 删除）。
 
-### 5.5 图标
+### 6.5 i18n
 
-- 统一 24×24 viewBox、`stroke="currentColor"`、`stroke-width` 1.6–1.8、圆头圆角连接。
-- 渲染尺寸：14 / 15 / 16px，由使用位置决定。
-- 图标只表达动作或对象，不做装饰；同一动作在全站使用同一图标。
-- 禁止 emoji、禁止图标字体、禁止内联位图。
+- 语言：`en` / `zh` 两套（`i18n.js` en 437 键 / zh 438 键，`settings-i18n.js` 独立一套）。
+- 默认：`detectLocale()`（`i18n.js:927`）先读 `prometheus.locale`，否则看 `navigator.language`（`zh*` → `zh`，其余 → `en`）。**没有硬编码默认值**，跟随操作系统。
+- 键是扁平 camelCase，值可以是字符串或带参函数。
+- DOM 绑定：`applyLocale()`（`app.js:164`）扫描 `data-i18n`（textContent）、`data-prompt-key`（写 `dataset.prompt`）、`data-i18n-title`（title）、`data-i18n-placeholder`（placeholder）四类属性，外加一批手动补的节点。
+- `i18n.js` 顶部注释提示与内核 `src/i18n.ts` 保持同步 —— **内核侧有第二份文案**，改动时两边都要对。
 
----
+### 6.6 对比度
 
-## 6. 主题系统
-
-### 6.1 三态
-
-| 状态 | `data-theme` | 行为 |
-|---|---|---|
-| 日间 | `light` | 强制浅色令牌 |
-| 夜间 | `dark` | 强制深色令牌 |
-| 跟随系统 | `system` | 由 `prefers-color-scheme` 决定；系统切换时实时生效 |
-
-### 6.2 实现规则
-
-- 令牌定义在 `:root`（夜间基线）；日间令牌同时定义在 `[data-theme="light"]` 与 `@media (prefers-color-scheme: light) { [data-theme="system"] }`。
-- 用户选择写入 `localStorage`（键名 `eam-theme`，值 `light | system | dark`），首屏读取后应用到 `documentElement`。
-- 默认值为 `system`，不得默认写死浅色或深色。
-- 切换控件为三段式图标按钮组（日 / 系统 / 夜），当前项 `aria-pressed="true"`，并带有 `aria-label` 与 `title`。
-- 切换不得触发整页重载；切换后滚动位置与对话状态保持不变。
-- 禁止在组件内直接写死后备颜色值；新增颜色必须先加令牌，并在两套主题中都给出取值。
-
-### 6.3 对比度
-
-- 正文（`--text-1` 于 `--bg-panel` / `--bg-canvas`）≥ 7:1。
-- 次级文本（`--text-2`）≥ 4.5:1；弱文本（`--text-3`）仅用于元信息，不得承载关键结论。
-- 状态不得只靠颜色区分，必须同时有文字、图标或形状（见 §10）。
+- 高对比主题（`contrast` / `light-contrast`）把所有文字与边框抬到最高对比，源码注释称在正文尺寸下满足 WCAG AA。
+- 状态不得只靠颜色区分，必须同时有文字、图标或形状。
 
 ---
 
-## 7. 组件规格
+## 7. 组件与功能规格
 
-> 下列"数据来源"指运行时数据的语义来源，示例值仅用于说明形态，不是接口契约。
+> 「数据来源」指运行时数据的语义来源。示例值仅说明形态，不是接口契约。
 
 ### 7.1 TopBar 顶栏
 
-- 高度 48px，三段栅格：`264px | 1fr | auto`。
-- Brand：26×26 图标块 + 产品名 + 一行副标题；图标块使用 `--accent-soft` 底与 `--accent-line` 描边。
-- TargetChips：三个可点击胶囊，分别为「芯片型号」「分支」「后端（OpenOCD · 真机 / Renode）」。后端为连接态时使用 `--accent` 系；未连接时降为 `--text-2`。
-- ThemeSwitch：三段图标按钮，宽 30×24，选中项背景 `--bg-active`、图标 `--accent`。
-- DockToggle：30×30 图标按钮，`aria-pressed` 反映调试坞展开状态。
+- 高 48px。左侧：侧栏切换按钮、cwd 按钮、worktree 按钮；中间：goal 徽标（隐藏）、状态点 + 状态文本；右侧：changes / terminal / more（**均隐藏**）、设置按钮、窗口控件（**仅桌面**，`hidden`）。
+- 状态文本取值来自 `status` 事件与运行状态（如"starting"）。
+- 主题与语言切换在 more 菜单里（`index.html:135-150`），但 more 按钮本身 `hidden` —— **该菜单当前无法打开**；设置页是它们的实际入口。
 
-### 7.2 KnowledgePane 知识库
+### 7.2 Sidebar 侧栏
 
-- 位置：左栏顶部，占左栏 58%。
-- 栏头：图标 + 「知识库」+ 文件计数胶囊 + 展开/收起。
-- 检索框：高 30px，左侧放大镜图标，占位文案「kb_lookup · 寄存器名 / 错误码 / 症状」。
-- 树：行高 32px；可展开项带右向 chevron（展开时旋转 90°）；子层缩进 14px + 1px 左导线；每行右侧可显示计数胶囊。
-- 状态：默认展开「厂商分流」；当前厂商行使用 `--accent-soft` 底与 `--accent` 前景。
-- 交互：整行可点；键盘 Enter/Space 展开或收起；树容器可滚动，栏头 sticky。
+- 宽 264px，可拖拽（6px 拖拽条，可 Tab 聚焦并用方向键调整），可折叠，窄屏变抽屉。
+- 结构：品牌区 → 「新建会话」按钮 → 分组头（会话 / 过滤 / 归档 / 刷新）→ 搜索框 → 会话列表。
+- **只有会话列表，没有知识库检索与厂商树**（v1.4 §7.2 整节作废）。
+- 会话按 `cwd` 分组，可折叠（`prometheus.expandedProjects` / `collapsedProjects`）。**不是** v1.4 的「进行中 / 历史」分组。
+- 会话状态二态：`working`（当前活动会话运行时）/ `ready`（其余）。**不是** v1.4 的三态。
+- 标题：桌面宿主扫日志取首条 `user` 事件（截 80 字符，缓存 key = `id@createdAt`，最多扫 30 条）；浏览器 bridge 逐个拉会话详情取首条 user 事件（最多 30 个）。
 
-### 7.3 SessionPane 诊断会话
+### 7.3 Transcript 转录
 
-- 位置：左栏剩余空间，独立滚动。
-- 栏头：图标 + 「诊断会话」+ 新建按钮。
-- 分组：「进行中」「历史」，分组标题 10.5px、弱色、字距 `.06em`。
-- 会话行：状态点 + 标题（单行省略）+ 编号/时间；高三段式。
-- 状态点语义：运行中（`--accent` + 3px 光环）、需注意（`--warn`）、空闲（`--border-strong`）。
-- 当前会话使用 `--bg-active` 底 + 1px `--border` 描边。
+- 唯一滚动容器；`padding: 32px 16px 16px`。
+- 内容列宽 `--column-width`，居中（`.turn { max-width: var(--column-width); margin: 0 auto 22px; padding: 0 28px }`）。
+- 条目类型：
+  - **用户气泡**：提交时本地回显（`addUserTurn`），左对齐。
+  - **agent 气泡**：`addAssistantTurn()` 建 `<div class="turn assistant"><div class="markdown"></div></div>`，并在其后放一个**独立的** `<span class="caret">` 兄弟节点。
+  - **工具行**：`addToolRow(name, summary)` + `attachToolOutput()`，只渲染工具名 + 参数摘要 + 输出文本，**不区分** readout / hitlist / evidence 三种卡体形态。
+  - **审批条**：`div#pending-permission`，见 §7.7。
+  - **提示**：`addNotice(level, text)`，级别 dim / warn。
+  - **压缩接缝**：`.compact-marker`。
+- 查找栏（Ctrl/Cmd+F）用 `TreeWalker` 全文标记并显示命中计数（`app.js:987-1088`）。
 
-### 7.4 ConversationHeader 会话头
+### 7.4 流式回答的渲染路径
 
-- 高 40px，左：会话标题（单行省略）+ 诊断状态胶囊；右：「回放」「导出 transcript」两个次级按钮。
-- 状态胶囊：`诊断中`（accent）/ `已完成` / `已中断`，带 6px 状态点。
+这是 v2.0 新增的核心机制（对应已解决的 D-164）：
 
-### 7.5 PathLine 诊断路径
+1. 内核写 `assistant_delta` 事件（`{text}`，按批落盘：默认 60ms 或 400 字符）。
+2. 协议层把每个 delta 转成渲染器的 `assistant_delta{text}`。
+3. `app.js:2035` 的处理：`current.text += message.text`；若当前没有待执行的 `requestAnimationFrame`，就排一帧。**一帧内多次 delta 合并为一次重绘**。
+4. 帧回调里 `current.body.innerHTML = current.renderer.render(current.text)`（`IncrementalRenderer` 增量 diff），然后 `current.body.appendChild(current.caret)` —— **移动**同一个 caret 元素而不是重建，避免每帧重启它的闪烁动画。
+5. 完整 `assistant` 事件到达时，协议层用 `ctx.streamedText` 比对，**只补齐尚未流式过的部分**，不重复已显示的文本（`protocol.js:223-248`）。
+6. `assistant_end` → `flushAssistant()`：取消待执行 rAF、最后渲染一次、移除 caret、绑定代码复制；**若无正文则删除空气泡**。
 
-五步固定序列：`报症状 → 分流提问 → 检索 KB → 探针取证 → 根因判决`。
+> 协议层的 `ctx.streamedText` 是防重复的关键。若它为空而完整文本已到达，`missing` 退化为整段，renderer 会看到两次完整内容。
 
-| 状态 | 表现 |
+### 7.5 工具行
+
+- 卡头：工具名 + 一行参数摘要。摘要由 `summarizeToolCall(name, args)`（`protocol.js:73`）生成：按 `["path","file","command","pattern","query","name","address","tool"]` 顺序取第一个字符串值（截 120 字符）或数字值；全落空则回退到工具名。
+- 结果区：`tool_output` 携带 `content`，UTF-8 字节截断到 **8 KiB**（`MAX_TOOL_OUTPUT_BYTES`），截断时尾部补 `…[truncated]`。
+- **失败的工具行保留错误标记**，不渲染空白读数。
+- **被拒绝的调用也要留痕**：拒绝路径不写 `tool_started`，协议层会补发一行 `tool_start`（`protocol.js:270-281`）——否则转录会正好隐藏操作者最需要看到的那次调用。
+- 写文件的行会把 diff 统计改写成「文件名 +15 −1」形式（`app.js:2160-2186`）。
+
+### 7.6 Composer 输入栏
+
+- 单框结构：输入框与所有控件在同一 frame 内（v1.4 的"上下文 / 工具集 / 快捷键 / 发送"四件套已改）。
+- 控件行：模式选择器、模型选择器、用量胶囊（`#usage-meter`）。
+- **模式选择器 = 内核四个权限预设**：`diagnose` / `read-only` / `workspace-write` / `danger-full-access`（`app.js:1452`）。默认 `diagnose`。
+- 用量胶囊点击弹出 `usage-popover`：按输入 / 缓存 / 输出分段的色条 + 分类明细 + 本会话合计。
+  > 上下文**占用百分比被隐藏**（`#context-label` 带 `hidden`）：内核只给花费不给占用，编一个百分比就是撒谎（D-165）。
+- 文本域高度 `Math.min(220, scrollHeight)`（`app.js:4454`），无内部滚动条。
+- 附件（图片）、@ 文件提及、斜杠命令、语音、`+` 菜单**均已隐藏**（无后端）。`searchFiles` 仍会发（`app.js:1188`），但返回空匹配且**不刷警告** —— 每按键一次就警告会把整个转录埋掉。
+
+### 7.7 审批条
+
+- 位置：输入区上方（`div#pending-permission`），不是消息流内。
+- 内容：问题文本（`question`）+ 参数预览（`detail.paramsPreview`）+ 「Allow」/「Deny」两个按钮。
+- **只有 yes / no**。「始终允许」按钮在 HTML 里带 `hidden`，`permission_request` 分支只显示这两个 —— v1.4 写"只显示 yes/no"的规则在此仍然成立，但实现路径不同。
+- 终态由 `permission_closed{id}` 收起审批条（`app.js:2282`），协议层在 `permission_decision` 到达时发出 —— 审批超时或被内核自动拒绝时，条也会收起，不会留下一个点了没用的按钮。
+- 拒绝时额外发一条 `notice{level:"warn"}`（协议层 `protocol.js:325-333`）。
+
+### 7.8 Workbench 工作台
+
+- 宽 420px（可拖 320–560），内部用 **tab 切换**，只有两个 tab：**板卡（board）** 与 **串口（serial）**。
+- 其余 7 个面板（files / diff / history / tasks / artifact / terminal / browser）的 DOM 仍在 `index.html:381-501`，但**不在 tab 条里**，`openWorkbench()` 对非支持面板直接 return（`app.js:2654`）。空 tab 是死路，不是占位。
+- 板卡面板消费 `board_state`（由内核 `device_status` 事件转换而来），`state.device` 原样透传，**内核与 UI 都不解释、不补全、不推断**。
+- 串口面板有端口 / 波特率选择、过滤、暂停、清空、导出、跟随开关。
+- **板卡/串口的写操作入口已隐藏**（`desktop/MATRIX.md`）。
+
+### 7.9 设置页
+
+全窗口 `<dialog>` 页面（不是模态卡片）：左侧 240px 分组栏（含搜索框）+ 右侧滚动 pane。
+
+只有 **3 个页面**（`settings.js:71-73`）：
+
+| id | 内容 |
 |---|---|
-| 已完成 | 序号圈 `--accent-soft` 底、`--accent` 字；文字 `--text-2` |
-| 当前 | 胶囊底 `--bg-active`；序号圈 `--accent` 描边 + 3px 光环；文字 `--text-1` |
-| 未开始 | 序号圈 `--border-strong`；文字 `--text-3` |
+| `general` | profile 卡（只读，显示 cwd）；语言选择；outputStyle、restartSession、suggestions、updateCheck、isolateByDefault 五个开关 |
+| `appearance` | 主题（4 态，带预览色块）；字号、宽度、代码字体；视图模式、密度、减少动效；界面缩放 |
+| `about` | 版本号、检查更新、数据目录（只读） |
 
-步间连接线 14×1px `--border-strong`。窄屏时整条横向滚动，不换行。
+> Provider keys / MCP servers / skills / memory / instructions / hooks / packs / system 等页面的 builder 仍留在 `settings.js` 里但**未注册** —— 它们需要内核未暴露的写 API，列出来只会产生"保存按钮无效"的表单。恢复只需在 `settingsPages()` 加一行。
 
-### 7.6 MessageStream 消息流
+### 7.10 命令面板与快捷键
 
-- 容器内边距 20px，条目间距 20px；用户条目靠右（最大宽 540px），agent 条目占满可用宽。
-- 角色行：20×20 头像块 + 角色名（agent 为产品名，使用 `--accent` 系；用户为「你」）。
-- 用户气泡：`--bg-active` 底 + `--border-strong` 边。
-- agent 普通气泡：`--bg-panel` 底 + `--border` 边，圆角 8px，内边距 12×14。
-- AskBlock（第 0 步分流）：左侧 2px `--info` 竖条 + `--info-soft` 浅底；顶部小标签「第 0 步分流 · 一次只问一个问题」；结尾 `note` 使用 11.5px 弱色说明信息增益理由。
-- 行内代码（寄存器名、地址、值）：等宽 12px，`--bg-inset` 底 + `--border-soft` 边 + 4px 圆角。
+- **Ctrl/Cmd+K** 打开命令面板（`paletteEntries()`，`app.js:4913`）。
+- **Ctrl/Cmd+F** 打开查找栏。
+- **Esc** 依次关闭：命令面板 → 查找栏 → 设置/快捷键对话框 → 顶栏菜单 → 模型菜单 → 审批条（**视为拒绝**）→ 中止运行。
 
-### 7.7 ToolCard 工具调用卡
+### 7.11 空态与错误态
 
-结构：卡头 + 卡体。卡头高 34px、`--bg-inset` 底、底部 1px 分隔；左侧工具图标 + 工具名（等宽）+ 参数摘要（等宽、单行省略）；右侧结果标记（成功勾 + 耗时）。
-
-卡体按内容形态分三种：
-
-1. **readout（读数）**：三列 `标签 | 值 | 说明`，标签 11px 弱色，值等宽 12px；长说明跨列。
-2. **hitlist（KB 命中）**：每条命中左侧 3px 通道色条（`--wave-1` / `--wave-2` …），路径等宽，描述 11.5px，score 行 11px 弱色。
-3. **evidence（证据表）**：行三列 `名称 + 地址码 | 读回值 | 判定标签`；判定标签为胶囊，`bad`（`--danger`）/ `warn`（`--warn`）/ `ok`（`--accent`），必须带图标或文字，不只靠颜色。
-
-约束：
-
-- 工具失败时卡头右侧显示 `--danger` 错误标记，卡体展示结构化错误码与文本；不得渲染空白读数。
-- 只读工具卡不出现红色危险语义；写操作卡见 §7.10。
-- 大输出（内存 dump、反汇编、长串口捕获）默认折叠为「摘要 + 行数/字节数 + 展开」，展开后由会话 artifact 提供全文。
-
-### 7.8 VerdictCard 根因判决卡
-
-- 外框：`--accent-line` 1px 边 + 8px 圆角；卡头 `--accent-soft` 底，含图标、「根因判决」、右侧置信度标签。
-- 四个区块，以 1px `--border-soft` 分隔：根因、证据链、可证伪的修复建议、动作归属。
-- 根因：一段结论文字，寄存器与值用行内代码。
-- 证据链：复用 §7.7 的 evidence 表，逐条列出「读回值 → 判定」。
-- 可证伪预测：虚线边框 + `--bg-inset` 底，必须包含"若预测不成立则如何推翻"的条件句。
-- 动作归属：三列等宽卡片，分别是「agent 自己做」（accent）、「需要你回答」（info）、「建议你执行」（warn）；每列含图标、标题、一句说明。
-- 置信度标签：`高` / `中` / `低`；低置信度不得省略不确定性说明。
-
-### 7.9 GuardNotice 安全提示
-
-- `--warn` 1px 边 + `--warn-soft` 底 + 6px 圆角，左侧 15px 警示图标。
-- 文案必须写明：操作类型、目标地址、写入值、当前状态（待确认 / 已拒绝 / 已执行）。
-- 未确认的写操作不得在界面上表现为已生效；确认入口必须独立于普通发送按钮。
-
-### 7.10 Composer 输入栏
-
-- 外框 1px `--border-strong`、10px 圆角；聚焦时 `--accent-line` 边 + 3px `--accent-soft` 光环。
-- 文本域高度 22px 起，随内容增长至 120px 上限，不出现内部滚动条。
-- 工具行：上下文按钮、工具集按钮（如「探针 + 串口 + KB」）、右侧快捷键提示、30×30 主色发送按钮。
-- Enter 发送，Shift+Enter 换行；发送后清空并回到底部。
-- 发送按钮在空输入时禁用（视觉降饱和），不得静默丢弃输入。
-
-### 7.11 Dock 调试坞容器
-
-- 宽 404px（<1180px 时 340px），左侧 1px `--border`。
-- 栏头 40px：图标 + 「调试坞」+ 右侧「按需展开」计数胶囊。
-- 分区头 38px，可折叠；chevron 收起时旋转 −90°；`aria-expanded` 同步。
-- 顶栏 DockToggle 可整体隐藏/显示调试坞，隐藏后主区自动占满，不留空白列。
-
-### 7.12 DeviceMonitor 设备监控
-
-- 字段行：标签列 96px + 值列；字段：目标芯片、探针、CPU 状态、仿真后端。
-- 连接状态用胶囊 + 状态点：已连接（accent）、未连接（中性）、仿真（中性）。
-- 控制按钮：暂停（主色）、继续（中性）、复位（危险色）。复位按钮必须带危险语义，点击进入确认流程（R2）。
-- 寄存器表：两列「寄存器 / 值」，等宽；异常值（如 `RCC_CFGR` 为 0）用 `--warn`，不得只靠颜色——同时保留原值文本。
-- 数据来源：只消费 MCP 工具显式发布的 `device_status.payload.state`，按 `seq` 做字段 patch；缺失字段保留上一个值，未知键忽略。页面加载 / 缺口重拉时从完整历史重建；无 `device_status` 时才回退 `/api/device`。禁止从工具名、参数或文本推断，也禁止在加载阶段直接重新查询硬件。
-
-### 7.13 PortSettings 端口设置
-
-- 表单两列（标签 96px + 控件）：端口、波特率、数据帧。
-- 端口与波特率为原生 `select`，数据帧为只读输入（如 `8 N 1 · 无流控`）。
-- 按钮：打开端口（主色）、关闭（中性）。
-- 统计三卡：接收 / 发送 / 错误帧，数值等宽 15px；错误帧非 0 时使用 `--danger` 语义并保留数字。
-- 未打开端口时统计显示 `—` 而非 `0`，避免"0 错误"的误导。
-
-### 7.14 DebugLog 调试日志
-
-- 等宽 11.5px，每行三列：时间（56px）、类型标记（6×6 方块）、文本。
-- 类型标记色：发送 `--wave-4`、接收 `--wave-1`、KB `--wave-2`、错误 `--danger`。
-- 文本中的路径与工具名用 `--accent` 或高亮，数值加粗。
-- 只追加不覆盖；自动滚动到底部，但用户上滚后暂停自动滚动。
-- 日志与会话事件同源，回放时按 `seq` 顺序重建。
-- MCP 状态区消费 `mcp_status`（含旧日志 `status` + `mcp_` 前缀）；状态缓冲保留最近 20 条，调试坞展示最近 5 条。展示 `kind`、server/tool、`toolCount` 与 `message`；`attempts`、`name/originalName`、`scope` 保留在 payload，当前未渲染。不进入对话正文。
-
-### 7.15 StatusBar 状态栏
-
-- 高 26px，左：探针状态、串口状态、告警；右：会话号、上下文占用、本会话费用、平台。
-- 每项"状态点 + 文本"，状态点颜色遵循 §5.1 语义。
-- 数值全部等宽并 `tabular-nums`。
+- 无会话：侧栏显示「暂无会话」；设备字段为 `unknown` 时显示「未接入」。
+- 提交失败：在转录中显示可读错误，**不伪造成功**。
+- 202 只表示受理；工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准。
 
 ---
 
-### 7.16 ApprovalNotice 审批卡片
-
-- 位置：消息流内，由 `approval_request` 投影；与 GuardNotice 复用间距、边框与浅底，不新造布局。
-- 卡头（单行）：警示图标 + 工具名（等宽）+ 动作标记 `ask` + 预设名（可选）+ 状态标签。
-- 卡体：理由；参数摘要 `paramsPreviewText`（`key=value`，仅展示，不回写日志）；截止时间（本地时间 `HH:MM:SS`）；提交失败时的错误文本（`role="alert"`）。
-- 本地状态：`submitting`、`submitted`、`error`、`terminalError`、每秒刷新的 `now`；**不维护审批业务状态**。
-- 状态机（`ApprovalModel.status`）：
-
-  | 状态 | 来源 | 表现 |
-  |---|---|---|
-  | `pending` | `approval_request` 事件 | 「待审批」；未超时且未提交时显示「批准」「拒绝」 |
-  | `allowed` | `permission_decision`（`effective: "allow"`） | 「已允许」；隐藏按钮 |
-  | `denied` | `permission_decision` deny 且 reason 不以 `approval_timeout` / `approval_aborted` 开头 | 「已拒绝」；隐藏按钮 |
-  | `expired` | `permission_decision` deny 且 reason 以 `approval_timeout` 开头 | 「已过期」；隐藏按钮 |
-  | `aborted` | `permission_decision` deny 且 reason 以 `approval_aborted` 开头 | 「已中断」；隐藏按钮 |
-
-- 提交中按钮禁用并显示「提交中…」；成功（202）显示「已提交，等待确认」，状态仍保持 `pending` 直到 `permission_decision` 到达；失败显示错误码/消息，按钮恢复可用（未超时且非 409/410）。
-- 409 / 410 视为终态错误：展示服务端消息并保持按钮禁用，不推断最终结果。
-- 超过 `deadlineAt` 后本地禁用按钮并显示「已过期」，但 `status` 仍为 `pending`；最终状态只由事件流更新。
-- 禁止在组件内把状态改为 `allowed` / `denied` / `expired` / `aborted`，也禁止伪造 `permission_decision`。
-
 ## 8. 数据契约与状态投影
 
-### 8.1 事件模型与两条通道
+### 8.1 事件模型（内核事实源）
 
 **持久化会话事件**（会话日志，回放与实时流的唯一事实源）：
 
@@ -487,7 +483,11 @@ type EventType =
   | "tool_result" | "usage" | "checkpoint" | "status" | "mcp_status"
   | "device_status" | "interrupted" | "compaction" | "permission_decision"
   | "approval_request";
+```
 
+与 `src/session/types.ts` 逐字一致。
+
+```ts
 interface SessionEvent {
   seq: number;
   ts: string;
@@ -499,113 +499,127 @@ interface SessionEvent {
 interface SessionEventEnvelope extends SessionEvent {
   sessionId: string;
 }
-
-interface ToolStartedPayload {
-  callId: string;
-  tool: string;
-  access?: ToolAccess;
-}
-
-interface McpStatusPayload {
-  kind:
-    | "connected" | "connect_failed" | "tools_changed" | "tools_refresh_failed"
-    | "tool_invalid_schema" | "listener_failed" | "call_failed"
-    | "config_failed" | "config_warning" | "project_config_skipped"
-    | "tool_name_renamed";
-  server?: string;
-  tool?: string;
-  toolCount?: number;
-  message?: string;
-  attempts?: number;
-  name?: string;
-  originalName?: string;
-  scope?: "global";
-}
-
-interface DeviceStatusPayload {
-  callId: string;
-  server: string;
-  tool: string;
-  state: Record<string, unknown>;
-}
-
-interface ApprovalRequestPayload {
-  requestId: string;
-  callId: string;
-  tool: string;
-  action: "ask";
-  access?: ToolAccess;
-  reason: string;
-  preset: "read-only" | "workspace-write" | "diagnose" | "danger-full-access";
-  paramsDigest: string;
-  paramsKeys: string[];
-  paramsPreview?: Record<string, unknown>;
-  deadlineAt: string;
-}
-
-interface AssistantPayload {
-  content: string;
-  toolCalls: Array<{
-    id: string;
-    name: string;
-    arguments: Record<string, unknown> | { error: "invalid_json"; raw: string };
-  }>;
-}
-
-interface ToolResultPayload {
-  id: string;
-  ok: boolean;
-  text: string;
-  artifactPath?: string;
-  code?: string;
-  detail?: unknown;
-  evidence?: boolean;
-  toolName?: string;
-}
 ```
 
 `tool_call` 仅用于旧日志回放，新代码不再产生；允许路径使用 `permission_decision → tool_started → tool_result`，拒绝/校验失败路径为 `permission_decision → tool_result`（不写 `tool_started`）。旧日志中的 MCP `status` 事件继续按 `mcp_` 前缀识别，新代码只写 `mcp_status`。
 
-`assistant_delta` 是模型回答的流式片段（payload `{text}`），与 `assistant` 并存：`assistant` 是这一轮的最终结论（内容完整，用于重建模型上下文），`assistant_delta` 只用于实时显示。投影层忽略 delta，只用 `assistant` 重建上下文；同一轮的 delta 合起来应等于 `assistant.content`。增量按批落盘（默认 60ms 或 400 字符），不是逐 token——每条事件都要 fsync，逐 token 落盘会把一次回答变成上百次磁盘同步。
+`assistant_delta` 是模型回答的流式片段（payload `{text}`），与 `assistant` 并存：`assistant` 是这一轮的最终结论（内容完整，用于重建模型上下文），`assistant_delta` 只用于实时显示。投影层忽略 delta，只用 `assistant` 重建上下文。增量按批落盘（默认 60ms 或 400 字符），不是逐 token —— 每条事件都要 fsync，逐 token 落盘会把一次回答变成上百次磁盘同步。
 
-**运行时循环事件**（库 API 与 demo 使用；Web 工作台实时渲染改由 §8.6 的 SSE 事件流驱动）：
+### 8.2 协议层：内核事件 → 渲染器事件
 
-```ts
-type LoopEvent =
-  | { kind: "model_message"; content: string }
-  | { kind: "tool_use"; id: string; name: string; input: unknown }
-  | { kind: "tool_result"; id: string; ok: boolean; text: string }
-  | { kind: "turn_end"; turn: number; costUsd?: number }
-  | { kind: "compacted" }
-  | { kind: "interrupted"; reason: string }
-  | { kind: "done"; finishReason: "no_tool_calls" | "max_turns" | "max_cost_usd" | "aborted" };
-```
+`desktop/renderer/protocol.js` 是**纯函数**层，不碰 DOM、文件系统与网络。桌面宿主与浏览器 bridge 共用它，保证两种形态对同一份日志给出同一套 UI。
 
-### 8.2 投影规则
+导出：
 
-前端只维护一个视图模型 `TranscriptView`，由事件序列归约得到；UI 不持有"无法从事件还原"的状态。
+| 导出 | 签名 | 作用 |
+|---|---|---|
+| `MAX_TOOL_OUTPUT_BYTES` | `= 8 * 1024` | 工具输出进入 DOM 前的截断阈值 |
+| `summarizeToolCall` | `(name, args) => string` | 工具行的一行参数摘要 |
+| `sessionEventsToMessages` | `(events) => PublicMessage[]` | 从完整日志重建转录行 |
+| `createContext` | `(options?) => ProtocolContext` | 每个打开会话一个翻译上下文 |
+| `sessionEventToHostEvents` | `(event, ctx) => HostEvent[]` | 单个内核事件 → 0..N 个渲染器事件 |
+| `initialState` | `(options?) => HostEvent` | boot 时的 `state` 事件 |
+| `sessionsEvent` | `(summaries) => HostEvent` | `sessions` 事件 |
+| `sessionLoadedEvent` | `(events, options?) => HostEvent` | `session_loaded` 事件 |
+| `LAST_SESSION_STORAGE_KEY` | `= "prometheus.lastSession"` | 渲染器记忆上次会话的键 |
 
-| 事件 | UI 产物 |
+**`sessionEventToHostEvents` 完整映射**：
+
+| 内核 type | → 渲染器事件 |
 |---|---|
-| `user` | 用户气泡 |
-| `assistant`（content 非空） | agent 气泡 |
-| `assistant_delta` | 追加到当前 agent 气泡（流式显示）；不改气泡数量 |
-| `assistant`（toolCalls） | 工具卡骨架（待执行） |
-| `tool_started` | 对应工具卡进入「执行中」；`access` 仅用于展示授权口径，不推断设备状态 |
-| `tool_result` | 工具卡结果区（读数 / 命中 / 证据 / 错误） |
-| `approval_request` | 审批卡片（§7.16），`status: "pending"`；只展示摘要，不含参数原文 |
-| `permission_decision` | 会话内的权限条目：工具、动作、`effective`、理由；`action=ask,effective=deny` 显示「拒绝 / 未执行」；存在同 `callId` 的审批卡片时改为更新该卡片状态（§7.16），不再新增权限条目；`effective=deny` 时同 `callId` 工具卡置 `failed`（缺省错误码 `permission_denied`） |
-| `mcp_status` | 调试坞 MCP 状态区，不进入对话正文 |
-| `device_status` | 设备面板 patch（§8.6），不进入对话正文 |
-| `usage` | 状态栏与费用统计 |
-| `status` | 诊断状态胶囊、状态栏；`device_status_invalid` 保留为显式状态事件（当前未单独渲染告警） |
-| `interrupted` | 中断提示（`--danger`），保留已产生的证据 |
-| `checkpoint` | 回放锚点，不直接渲染 |
-| `compaction` | 当前仅保留在事件数组，不进入 UI 投影（后续再补提示） |
+| `system` / `tool_call` / `checkpoint` | 不产出 |
+| `user` | 不产出（渲染器提交时已回显） |
+| `assistant_delta` | `assistant_delta{text}` |
+| `assistant` | `assistant_start` → （补齐未流式部分）`assistant_delta{text}` → `assistant_end` |
+| `tool_started` | `tool_start{name, summary, id}` |
+| `tool_result` | `tool_end{name, ok, summary, id}`；成功时另加 `tool_output{name, content}`；此前无 `tool_started` 时补一行 `tool_start` |
+| `approval_request` | `permission_request{id, question, detail:{tool, preset, paramsPreview, deadlineAt}}` |
+| `permission_decision` | `permission_closed{id}`；`effective==="deny"` 时另发 `notice{level:"warn"}` |
+| `device_status` | `board_state{state:{selection, projectKind, device, tool, updatedAt}}` |
+| `mcp_status` | `notice{level:"dim"\|"warn"}`（`connected`/`tools_changed` 为 dim，其余 warn） |
+| `usage` | `usage{usage:{inputTokens, outputTokens, cachedTokens}}` |
+| `status` | `done` → `run_end`；`usage_missing` → `notice{dim}`；`device_status_invalid` / `permissions_project_config_skipped` → `notice{level:"warn"}` |
+| `interrupted` | `notice{level:"warn"}`（文案按 reason 映射）+ `run_end` |
+| `compaction` | `microcompact` → `compacted{removed, level:"micro"}`；`summary` → `compacted{level:"summary", before}`；`failed` → `notice{level:"warn"}` |
+| 未知类型 | `notice{level:"warn", text:"未识别的事件类型: <type>"}`（R3，不静默） |
 
-工具卡的结果渲染优先级：`detail`（结构化）> `text`（纯文本）> 错误占位。`ok=false` 时必须渲染 `code` 与错误文本。证据只来自 `tool_result.payload` 的 `evidence/artifactPath/detail`，不单列事件。
+**去重**：`ctx.lastSeq` 单调递增，`event.seq <= ctx.lastSeq` 直接丢弃（`protocol.js:188-191`）。
 
-### 8.3 工具语义标记
+**`sessionEventsToMessages` 产出的 message**：
+
+| role | 字段 |
+|---|---|
+| `user` | `role`、`text`（`payload.content`）、`index`（自增）、`images: 0` |
+| `assistant` | `role`、`text`（`payload.content`，trim 后非空才产出） |
+| `tool` | `role`、`name`（`call.name` 或 `payload.toolName`）、`summary`、`ok`、`done: true` |
+
+> 该函数**不产出** `assistant_delta`、审批、工具输出等行。它只用于打开会话时重建**骨架**；实时的富信息（工具输出全文、审批条）由后续事件补上。
+
+### 8.3 桌面宿主（`desktop/host/host.js`）
+
+NDJSON over stdio，Electron 主进程以 `ELECTRON_RUN_AS_NODE=1` spawn。宿主只从编译后的 `dist/` 导入内核模块；`dist/` 缺失时发 `fatal` 并 `exit(1)`。
+
+**命令**：`init`、`prompt`、`abort`、`permission`、`newSession`、`loadSession`、`listSessions`、`setMode`、`setLocale`、`setUiPreference`、`getSettings`、`getUsage`、`getSetupChecklist`、`listCommands`、`getTree`、`searchFiles`、`searchSessions`、`shutdown`。
+
+**未列入的命令**统一回 `notice{level:"warn", text:"桌面宿主暂不支持该命令：<cmd>"}`。
+
+**会话游标**：prompt 前用 `eventSource.read(sessionId, -1)` 取 `headSeq` 作 `since`，**在 `runner.start()` 之前捕获**；`startFollow` 在 `start()` 之后启动，保证本轮首批事件被包含。`follow` 只 yield `event.seq > cursor` 的事件；去重在协议层。
+
+**providers 缺失**：`init` 中 `loadProviders` 抛错 → 发 `fatal` 并停止，**不发 `ready`/`state`/`sessions`**，渲染器停在"连接中"。
+
+### 8.4 浏览器 bridge（`desktop/renderer/bridge.js`）
+
+仅当 `window.prometheus === undefined` 时安装（Electron 下 preload 已提供，bridge 不覆盖）。
+
+**`window.prometheus` 成员**：`send`、`onEvent`、`openExternal`、`pickDirectory`（恒 `null`）、`pickFile`（恒 `null`/`[]`）、`saveFile`（Blob 下载）、`appVersion`（恒 `"web"`）、`restartHost`（`location.reload()`）、`platform`（`undefined`）、可选 `notify`。
+
+**命令 → 端点**：
+
+| cmd | 端点 |
+|---|---|
+| `prompt` | `POST /api/actions`（`{text, sessionId?}`） |
+| `permission` | `POST /api/approvals`（`{sessionId, requestId, decision}`） |
+| `abort` | `POST /api/abort`（`{sessionId}`） |
+| `listSessions` | `GET /api/sessions` |
+| `loadSession` | `GET /api/sessions/:id` |
+| 实时事件 | `GET /api/events?sessionId=&since=`（SSE） |
+
+其余命令（`newSession`、`setMode`、`setLocale`、`setUiPreference`、`getSettings`、`getUsage`、`getSetupChecklist`、`listCommands`、`getTree`、`searchSessions`）**纯本地**，不发网络请求。
+
+不在白名单内的命令回 `notice{level:"warn", text:"浏览器形态暂不支持该命令：<cmd>"}`。
+
+**`searchFiles` 特判**：虽不在白名单，但单独拦截并返回 `file_matches{query, files:[]}` —— 补全弹窗每按一次键请求一次，按通用路径每字符回一条 warn 会把整个转录埋掉。
+
+### 8.5 两种形态的差异
+
+| 维度 | 桌面 | 浏览器 |
+|---|---|---|
+| 模型列表 | 真实加载 `providers.json` | 恒 `[]` |
+| `state.baseUrl` | 真实值 | 恒 `""` |
+| `getUsage` | 真实累加当前会话 usage 事件 | 恒 `summary: null` |
+| `getSetupChecklist` | 两项真实检查 | 恒 `checks: []` |
+| `searchSessions` | 真实本地过滤 | 恒 `sessions: []` |
+| `setMode` | 改内核权限预设并重建 runner | **仅本地状态，内核权限预设不变** |
+| `setLocale` | 改宿主 locale | 写 `prometheus.locale` |
+| 会话标题 | 服务端扫日志（≤30，带缓存） | 客户端逐个拉详情（≤30） |
+| `pickDirectory` / `pickFile` | Electron 原生对话框 | 恒 `null` / `[]` |
+| `saveFile` | Electron 写盘 | Blob 下载 |
+| `platform` / `windowControl` / `notify` | 有 | 无 |
+| 缺 provider | `fatal`，不发 `ready` | 无 providers 概念，恒空列表 |
+
+> 浏览器形态的 `setMode` 不改变内核权限预设，是一个**已知的语义缺口**：用户在界面上切了模式，实际跑的仍是服务端那个预设。修法是让 `POST /api/actions` 接受权限预设，或加一个 `POST /api/permissions` 端点。
+
+### 8.6 实时事件流
+
+- 端点：`GET /api/events?sessionId=<id>&since=<seq>`。`since` 缺省读 `Last-Event-ID`，都缺省按 `-1` 从头补播；`since` 大于会话当前最大 `seq` 时按该 `seq` 夹紧。
+- 帧格式：普通事件 `id: <seq>` + `data: <SessionEventEnvelope JSON>`；`retry: 3000`；每 15s 一条注释心跳 `: ping`；会话已关闭且补播完成后发 `event: stream_end`（`{"lastSeq":N}`）；异常发 `event: stream_error`（`{"code","lastSeq"}`）后关闭。
+- 慢客户端：实时队列上限 500 条；实时阶段单帧写超时（默认 30s）或队列溢出 → `stream_error {code:"slow_consumer"}` 并关闭。
+
+> **已知偏差（待修）**：`README.md:481` 承诺的"缺口检测 → 整量重拉（每次订阅最多 3 次）"与"连续 3 次未成功建流后报错"在 `bridge.js` 中**并未实现**。bridge 没有主动重连逻辑，重连依赖 `EventSource` 自身的浏览器自动重连（服务端 `retry: 3000`），且重连时 URL 里的 `since` 仍是建流时的固定值 —— 重复事件由协议层的 `ctx.lastSeq` 去重兜住，不会污染 UI，但"缺口重拉"这条保护实际不存在。桌面宿主侧同样没有缺口检测。
+>
+> 这条偏差应作为 deferred issue 登记，并同步修正 README 的措辞。
+
+### 8.7 工具语义标记
 
 工具定义携带注解：
 
@@ -620,51 +634,10 @@ interface ToolAnnotations {
 | 注解 | UI 行为 |
 |---|---|
 | `readOnly: true` | 卡头使用中性色，不出现危险语义 |
-| `evidence: true` | 结果进入"证据链"视觉（读数/判定标签） |
+| `evidence: true` | 结果进入"证据链"视觉 |
 | `destructive: true` | 卡头与操作按钮使用 `--danger`，触发确认流程 |
 
-### 8.4 回放
-
-- 页面加载时先读取会话日志，按 `seq` 归约出 `TranscriptView` 并渲染；**不得**在加载阶段调用探针重新查询设备。
-- 回放与实时渲染必须复用同一个归约函数，避免两套渲染路径产生差异。
-- 回放完成的会话，输入栏进入只读或"派生新会话"模式（会话 fork）。
-
-### 8.5 已决：实时渲染与回放共用同一份结构化结果
-
-- 决策（2026-10-18）：**扩展 `LoopEvent.tool_result`**，使其与 `ToolResultPayload` 字段对齐，而不是让 UI 维护第二套投影。`LoopEvent.tool_result` 现已是 `{ kind: "tool_result" } & ToolResultPayload`。
-- 2026-10-20 演进：Web 实时流的载荷改为 `SessionEventEnvelope`（§8.6），`tool_result` 直接携带会话日志里的完整 payload；`LoopEvent` 只服务于库 API 与 demo。实时与回放共用同一个归约函数这一点不变，V13 仍以 `transcript-consistency` 验证。
-
-### 8.6 实时事件流与合并
-
-**通道与游标**
-
-- 实时通道为 SSE：`GET /api/events?sessionId=<id>&since=<seq>`；`since` 缺省读 `Last-Event-ID`，都缺省按 `-1` 从头补播。普通帧 `id: <seq>` + `data: <SessionEventEnvelope JSON>`，心跳 `: ping`。
-- 一条连接只绑定一个会话；切换会话必须先 `close()` 旧流，再以新会话历史末 `seq` 建流。游标由事件流客户端独占，`state` 只接收已接受的事件。
-- 首屏：先 `GET /api/sessions/:id` 取历史事件与 `lastSeq`，再以 `since=lastSeq` 打开 SSE；加载期间不因实时流提前改写历史数组。
-
-**统一事件数组**
-
-- `WorkbenchState.events: SessionEvent[]` 是唯一视图输入：历史与实时都追加到同一数组，统一交给 `transcriptFromSession` 投影；不保留 `liveView` / `replayView` 两套状态。
-- 接受事件前校验 `event.sessionId === activeSessionId`；`seq <= lastSeq` 直接丢弃（去重）；接受成功后 `lastSeq = event.seq`。游标只在投影成功后推进。
-- `tool_started` 与 `tool_result` 共用工具卡：前者进入 `running`，后者落在 `done/failed`；`permission_decision` 渲染为权限条目；`mcp_status` 只进调试坞；`device_status` 只更新设备面板。
-
-**缺口与重连**
-
-- `seq > lastSeq + 1`：关闭流，触发整量重拉（重新请求历史并重建视图），每次订阅最多 3 次（`start` 时重置）；超过后显示「实时事件流缺口过多，请重试」，不允许在缺口上继续拼接。
-- 连接断开 / `stream_error`：保留 `lastSeq` 并重连；连续 3 次未成功建流后报错（成功 `open` 后计数重置），客户端自行重连，间隔默认 1s，可注入测试值。`stream_end` 表示会话已关闭且补播完成，停止重连。
-- 重拉单飞按 `sessionId` 隔离；切换会话时旧流的回调一律通过 generation 令牌失效，避免旧会话事件写入新视图。
-
-**设备面板：patch 与重载重建**
-
-- `deviceFromSession(events)` 按 `seq` 顺序折叠 `device_status.payload.state`；每次 `state` 是部分更新：已知字段为字符串时覆盖，缺失字段保留，未知键与非字符串值忽略。设备字段固定为 `probe/serial/cpu/backend`。
-- 切换会话 / 新建会话从四个 `unknown` 开始，不继承上一会话；页面重载或缺口重拉时，先用完整历史重建，再接入 SSE。
-- `/api/device` 仅作为「没有 `device_status` 事件」时的兼容回退；已有事件投影不得被恒为 `unknown` 的接口结果覆盖。设备状态不从工具名、参数或文本推断（R3）。
-
-**权限与 MCP 状态的展示位置**
-
-- `permission_decision` 进入消息流/守卫区，展示工具、动作、`effective` 与理由；`action=ask,effective=deny` 必须显示「拒绝 / 未执行」，不能伪装成成功或静默跳过。
-- `mcp_status` 进入调试坞状态区（状态缓冲最近 20 条，展示最近 5 条），展示 `kind`、server/tool、`toolCount` 与 `message`；`attempts`、`name/originalName`、`scope` 保留在 payload，当前未渲染。不重复合成旧 `status` 条目。
-- Web 审批已实现：`approval_request` 投影为待审批卡片，决策经 `POST /api/approvals` 回传；卡片终态只由 `permission_decision` 更新，不在前端伪造（§7.16）。
+> 当前渲染器**未**消费这三个注解（工具行只渲染名称 + 摘要 + 输出）。这是一条待补的契约。
 
 ---
 
@@ -672,38 +645,37 @@ interface ToolAnnotations {
 
 | 操作 | 行为 |
 |---|---|
-| 主题切换 | 即时生效，写入本地存储，不重载 |
-| 调试坞开关 | 隐藏/显示右栏，主区宽度自适应 |
-| 分区/树节点折叠 | 点击整行；`aria-expanded` 同步；chevron 旋转 160ms |
-| 发送消息 | Enter 发送；空输入禁用发送。成功返回 202 后按 `sessionId` 加载并订阅；失败在输入栏下方显示错误并保留输入 |
-| 回放 | 从会话日志重建；显示"回放中"状态，禁止并发查询硬件 |
-| 实时事件 | 只订阅当前会话；按 `seq` 去重后追加到统一事件数组；`tool_started` 立即进入执行中 |
-| 断线续传 | 以 `lastSeq` 重连，最多 3 次；`stream_end` 停止，缺口触发整量重拉 |
-| 新会话 | 会话头「新会话」按钮：清空活动会话、事件与视图，关闭 SSE；后续发送走新建。发送在途时开新会话只刷新会话列表，不切回在途结果 |
-| 审批决定 | 卡片按钮提交 `POST /api/approvals`；提交中禁用，成功显示「已提交，等待确认」，失败显示错误并恢复按钮；终态只由 `permission_decision` 更新 |
-| 权限拒绝 | `action=ask,effective=deny` 显示「拒绝 / 未执行」；审批卡片按 reason 显示已拒绝/已过期/已中断 |
-| 复位 / 写内存 | 二次确认，展示目标地址与值；确认后按钮进入执行中态 |
-| 长输出展开 | 折叠态显示摘要与规模；展开不改变消息流顺序 |
-| 滚动 | 日志与消息流在用户上滚后暂停自动跟随 |
+| 主题切换 | 即时生效，写入 `prometheus.theme`，不重载 |
+| 侧栏折叠 / 拖拽 | 折叠写 `prometheus.sidebarCollapsed`；拖拽写 `prometheus.sidebarWidth` |
+| 发送消息 | Enter 发送；空输入禁用发送按钮。**成功后不重载会话** —— 渲染器已回显用户消息，只有切换会话才重建转录 |
+| 切换会话 | `session_loaded{messages}` → 清空转录 DOM 并按骨架重建 |
+| 新建会话 | 清空活动会话与转录，关闭旧流 |
+| 审批决定 | 卡片按钮提交 `POST /api/approvals`（桌面走宿主）；终态只由 `permission_closed` 更新 |
+| 权限拒绝 | 协议层发 `notice{level:"warn"}`，工具行保留失败标记 |
+| 中止 | 「停止」按钮或 Esc → `POST /api/abort`（桌面走 `runner.abort`） |
+| 权限模式 | 切换时若正在运行则拒绝并说明原因；桌面态会重建 runner |
+| 滚动 | 距底 <140px 自动跟随，>220px 显示「滚动到底部」按钮 |
+| 命令面板 | Ctrl/Cmd+K；查找 Ctrl/Cmd+F |
 
 动效：
 
-- 仅使用 160ms 的展开/折叠与 chevron 旋转；
-- 尊重 `prefers-reduced-motion: reduce`，关闭过渡与平滑滚动；
+- 只使用 `--fast`（110ms）与 `--normal`（170ms）两档；
+- `prefers-reduced-motion: reduce` 时全局关闭动画与过渡；
 - 不使用入场动画、悬浮位移、渐变装饰。
 
 ---
 
 ## 10. 可访问性
 
-- 所有可交互元素可 Tab 到达，焦点可见（2px `--accent` 描边，偏移 1px）。
-- 图标按钮必须有 `aria-label`；仅图标不承载唯一语义。
-- 折叠控件使用 `aria-expanded`；主题按钮使用 `aria-pressed`；调试坞开关使用 `aria-pressed`。
+- 所有可交互元素可 Tab 到达；`:focus-visible` 有可见焦点环（`styles.css:217-220, 310` 等）。
+- 侧栏拖拽条是 `role="separator"` 且 `tabindex="0"`，键盘也能调宽。
+- 折叠控件使用 `aria-expanded`；开关使用 `aria-pressed`；图标按钮用 `data-i18n-title` 提供可访问名。
 - 状态不得只靠颜色：同时提供文字标签、图标或形状。
-- 正文对比度 ≥ 7:1，次级文本 ≥ 4.5:1。
 - 输入框有可见标签或 `aria-label`；表单控件使用原生元素。
 - 支持系统减少动效偏好。
-- 字号最小 10.5px 且仅用于元信息；关键结论不小于 12.5px。
+- 最小字号 11px（`--text-xs`）且仅用于元信息。
+
+> **已知缺口**：多数图标按钮用 `title`（经 `data-i18n-title`）而非 `aria-label` 承载可访问名。`title` 在部分屏幕阅读器与触屏上不朗读，键盘用户需悬停才能看到。补 `aria-label` 时应与 i18n 键一起补。
 
 ---
 
@@ -711,12 +683,11 @@ interface ToolAnnotations {
 
 | 断点 | 变化 |
 |---|---|
-| ≥ 1180px | 左 264 / 主区自适应 / 右 404 |
-| 1020–1180px | 右栏收窄至 340 |
-| 820–1020px | 隐藏左栏；顶栏品牌区改为自适应首列 |
-| < 820px | 隐藏调试坞；仅保留主区；顶栏目标胶囊可横向滚动 |
+| > 1500px | 完整布局 |
+| 900–1500px | 工作台 tab 收紧 padding / 字号；栏宽不变 |
+| < 900px | `.main-body` 纵向堆叠；工作台占 45% 高度；侧栏变 fixed 抽屉 |
 
-降级原则：优先保证"诊断对话 + 证据"可读，其次才是知识库与调试坞；隐藏的栏位不丢失状态，恢复宽度后原状还原。
+降级原则：优先保证"诊断对话 + 证据"可读；隐藏的栏位不丢失状态，恢复宽度后原状还原。
 
 ---
 
@@ -726,20 +697,23 @@ interface ToolAnnotations {
 
 | # | 检查项 | 通过标准 |
 |---|---|---|
-| V1 | 三栏头部对齐 | 左/中/右栏头 `y=48`、`height=40`，三者一致 |
-| V2 | 栏宽 | 左 264、右 404；主区 = 视口 − 668（264 + 404） |
-| V3 | 内容对齐 | 主区内容可用宽 = 主区宽 − 40 − 滚动条占位（V8），与会话头内边距同边界 |
+| V1 | 顶栏高度 | `.topbar` 计算高 = 48px |
+| V2 | 侧栏宽 | `.sidebar` 计算宽 = 264px（未拖拽时）；拖拽后 = `--sidebar-drag-width` |
+| V3 | 内容列宽 | `.turn` 的 `max-width` = `--column-width` = `min(780px, 100vw − 120px)`（standard 档） |
 | V4 | 无横向溢出 | `document.scrollWidth === window.innerWidth` |
-| V5 | 无文本截断 | 关键文本元素 `scrollWidth ≤ clientWidth + 1` |
-| V6 | 知识库树完整 | 在 717px 高工作区下，默认展开的厂商分流子树完整可见（树内容 334px，整树超出时知识库区内部滚动） |
-| V7 | 滚动条配色 | 夜间 thumb `rgb(47,61,75)`、日间 `rgb(198,208,217)`，track 透明，宽度 `thin` |
-| V8 | 滚动条占位 | 出现滚动条时实占 10px，不产生横向溢出 |
-| V9 | 三主题解析 | `light` / `dark` / `system` 的 canvas 与 accent 计算值符合 §5.1 |
-| V10 | 无 emoji | 页面文本与图标中不存在 emoji 字符 |
-| V11 | 焦点可见 | Tab 遍历所有页面内控件（含原生 input/select/textarea），均有可见焦点环 |
-| V12 | 减少动效 | 开启 reduce 后无过渡与平滑滚动 |
-| V13 | 回放一致性 | 同一会话实时渲染与回放渲染的组件序列一致 |
+| V5 | 工作台宽 | `.workbench` 计算宽 = 420px（未拖拽时） |
+| V6 | 无文本截断 | 关键文本元素 `scrollWidth ≤ clientWidth + 1` |
+| V7 | 主题令牌 | `dark` / `light` / `contrast` / `light-contrast` 四块的 `--bg` / `--accent` 计算值符合 §5.1、§5.2 |
+| V8 | 无 emoji | 页面文本与图标中不存在 emoji 字符 |
+| V9 | 焦点可见 | Tab 遍历所有页面内控件（含原生 input/select/textarea），均有可见焦点环 |
+| V10 | 减少动效 | 开启 reduce 后无过渡与平滑滚动 |
+| V11 | 流式不重复 | 一轮回答只产生**一个** assistant 气泡，正文 = 完整 `assistant` 事件内容（流式与完整不叠加） |
+| V12 | 拒绝留痕 | 被拒绝的工具调用在转录里仍有一行可见的工具行 |
+| V13 | 审批诚实 | 审批条只出现 Allow / Deny；内核自动拒绝后审批条自动收起 |
 | V14 | 写操作确认 | 复位/写内存未确认时，界面不显示"已执行" |
+| V15 | 诚实降级 | 内核未支持的能力入口不可见；宿主/bridge 收到对应命令时给出显式 notice |
+
+> v1.4 的 V1–V14 是基于三栏 Preact 布局的几何断言（栏头 y=48 h=40、主区 = 视口 − 668、知识库树 717px 可见、回放一致性 `transcript-consistency` 等），**已随旧实现整体作废**。旧 `scripts/verify-ui.mjs` 验收脚本随 `src/ui` 删除，本清单目前靠人工核对，尚无自动化脚本守护。
 
 ---
 
@@ -747,12 +721,16 @@ interface ToolAnnotations {
 
 | ID | 结论 | 日期 | 依据 |
 |---|---|---|---|
-| OPEN-UI-01 | **Preact + Vite** | 2026-10-18 | 轻量组件化，保留纯函数投影；不引入与 Node 24 / ESM 冲突的构建链 |
-| OPEN-UI-02 | **扩展 `LoopEvent.tool_result`**，透传 `code` / `detail` / `artifactPath` | 2026-10-18 | 实时与回放共用同一归约函数（V13）；改动仅类型与两处 yield |
-| OPEN-UI-03 | **SSE + HTTP POST** | 2026-10-18 | 事件单向、低频；自动重连、可 curl 调试；保留 `EventSource` 抽象 |
+| OPEN-UI-01 | ~~**Preact + Vite**~~ → **作废** | 2026-10-18 | 2026-10-20 前端移植后被取代：改为纯 ES 模块，无框架、无打包器、无构建步骤（§2.1） |
+| OPEN-UI-02 | ~~扩展 `LoopEvent.tool_result`~~ → **失去对象** | 2026-10-18 | 前端不再消费 `LoopEvent`，只消费 `SessionEvent`（§8.1、§8.2） |
+| OPEN-UI-03 | **SSE + HTTP POST**（浏览器形态）；桌面形态为 NDJSON over stdio | 2026-10-18 | 事件单向、低频；自动重连、可 curl 调试（§2.2、§8.6） |
 | OPEN-UI-04 | **不做**实时波形与仪器联锁 | 2026-10-18 | R1 禁止 LLM 直接控制仪器；信号物理层诊断属人工执行域 |
-| OPEN-UI-05 | **暂不做**虚拟滚动；触发条件：单会话 DOM 节点 > 5000 或渲染帧 > 50ms | 2026-10-18 | 消息流 append-only；避免破坏查找、折叠与可访问性 |
-| OPEN-UI-06 | M3 只做**派生入口 + 来源标记**（`#129 ← #128`），树形导航后置 | 2026-10-18 | `SessionEvent.parent` 已具备，无需提前设计树形 UI |
+| OPEN-UI-05 | 暂不做虚拟滚动；触发条件：单会话 DOM 节点 > 5000 或渲染帧 > 50ms | 2026-10-18 | 消息流 append-only；避免破坏查找、折叠与可访问性 |
+| OPEN-UI-06 | M3 只做**派生入口 + 来源标记**，树形导航后置 | 2026-10-18 | `SessionEvent.parent` 已具备，无需提前设计树形 UI |
+| OPEN-UI-07 | **前端为纯 ES 模块**，无框架无打包器 | 2026-10-20 | 前端移植；`desktop/renderer/` 直接被浏览器与 Electron 加载，零构建 |
+| OPEN-UI-08 | **内核不支持的能力隐藏入口**，宿主/bridge 回显显式 notice | 2026-10-20 | R3 工具必须诚实：渲染一个只会报错的按钮比没有按钮更糟 |
+| OPEN-UI-09 | **不渲染「始终允许」** | 2026-10-20 | 内核审批桥只有单次 allow/deny，无持久规则；按钮即失信的承诺 |
+| OPEN-UI-10 | **上下文占用百分比隐藏** | 2026-10-20 | 内核只报花费不报占用（D-165），编百分比是撒谎 |
 
 > 后续新增前端决策沿用 `OPEN-UI-xx` 编号；已关闭项保留在本表，不删除。
 
@@ -764,6 +742,33 @@ interface ToolAnnotations {
 |---|---|---|
 | v1.0 | 2026-10-18 | 首版：从 `prototypes/index.html` 提取令牌、栅格、组件与验收口径；对齐 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations` 实际类型；登记 6 项前端待决策 |
 | v1.1 | 2026-10-18 | 关闭 6 项决策：前端定为 Preact + Vite；实时通道定为 SSE + HTTP POST；决定扩展 `LoopEvent.tool_result`；波形与仪器联锁列为不做；虚拟滚动设触发条件；fork 仅做派生入口 |
-| v1.2 | 2026-10-18 | Task 10 视觉验收落地：V2 主区公式由笔误 `−664` 修正为 `−668`（264 + 404）；V3 明确滚动条占位从内容宽中扣除；V6 明确验收对象为厂商分流子树、整树超出走知识库区内部滚动；V11 明确覆盖原生表单控件；`applyTheme` 保留 `data-theme="system"` 交由 CSS 媒体查询解析 |
-| v1.3 | 2026-10-20 | 事件总线：事件模型补 `tool_started` / `mcp_status` / `device_status` / `permission_decision` 与对应 payload；明确统一事件数组、游标去重、缺口整量重拉、断线上限；设备面板按 `device_status` patch 并在重载时从历史重建；权限条目进消息流、MCP 状态进调试坞；本轮不含 Web 审批 |
-| v1.4 | 2026-10-20 | Web 审批：新增 `approval_request` 事件与 `ApprovalRequestPayload`，补 §7.16 审批卡片字段与状态机（pending/allowed/denied/expired/aborted）、提交中与失败态、超时禁用、禁止本地伪造终态；明确新会话按钮与发送失败展示；更新投影与交互规范 |
+| v1.2 | 2026-10-18 | Task 10 视觉验收落地：V2 主区公式由笔误 `−664` 修正为 `−668`；V3 明确滚动条占位从内容宽中扣除；V6 明确验收对象为厂商分流子树；V11 明确覆盖原生表单控件 |
+| v1.3 | 2026-10-20 | 事件总线：事件模型补 `tool_started` / `mcp_status` / `device_status` / `permission_decision` 与对应 payload；明确统一事件数组、游标去重、缺口整量重拉、断线上限；设备面板按 `device_status` patch 并在重载时从历史重建 |
+| v1.4 | 2026-10-20 | Web 审批：新增 `approval_request` 事件与 `ApprovalRequestPayload`，补 §7.16 审批卡片字段与状态机；明确新会话按钮与发送失败展示 |
+| **v2.0** | **2026-10-20** | **前端移植后整体重写**：前端由 Preact 工作台（`src/ui/`，31 文件）替换为 Prometheus 渲染器（`desktop/renderer/`，纯 ES 模块）。作废 v1.4 的 §2 技术约束、§3 信息架构、§4 布局、§5 令牌、§6 主题、§7 组件规格、§11 响应式、§12 验收清单，改以实现为准重写；保留 §8.1 事件模型、§8.3 工具语义标记与 §13 中未失效的决策。新增 §7.4 流式渲染路径（D-164 修复）、§8.2 协议层映射表、§8.5 双形态差异表；登记 4 条已知偏差（bridge 无缺口重拉、浏览器形态 setMode 不改内核预设、`system` 主题在 boot 后被固化、图标按钮用 title 而非 aria-label）与 1 条死依赖（`vite`）** |
+
+---
+
+## 15. 已知偏差与待补清单
+
+| # | 项 | 位置 | 建议 |
+|---|---|---|---|
+| 1 | bridge 无缺口检测与重连上限，README:481 的承诺不成立 | `desktop/renderer/bridge.js` | 补 `seq > lastSeq + 1` 缺口检测 + 整量重拉（≤3 次）+ 建流失败上限（≤3 次）；或修正 README 措辞 |
+| 2 | 浏览器形态的 `setMode` 只改本地状态，内核权限预设不变 | `bridge.js` `setMode` | 让 `POST /api/actions` 接受权限预设，或加 `POST /api/permissions` |
+| 3 | 用户选的 `system` 主题在一次启动后被固化为 light/dark | `app.js:5809,4449` | boot 阶段不写回 localStorage，或让 `state.theme` 与存储值解耦 |
+| 4 | 图标按钮用 `title` 而非 `aria-label` 承载可访问名 | `index.html` 大量 `data-i18n-title` | 补 `aria-label`，与 i18n 键一起补 |
+| 5 | 工具注解 `readOnly` / `evidence` / `destructive` 未被 UI 消费 | `app.js` `addToolRow` | 按 §8.7 落实语义标记 |
+| 6 | 视觉验收无自动化守护 | —— | 旧 `scripts/verify-ui.mjs` 已随 `src/ui` 删除；按 §12 新清单重写 |
+| 7 | `vite` 是死依赖 | `package.json` devDependencies | 移除（`vitest` 自带所需版本） |
+| 8 | 阶段 4 交互层（回放 / 导出 / 设备控制）未落地 | `docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` §7-§9 | 该 spec 的 §7-§9 依赖已删除的 `src/ui`（12 文件、约 30 个导出符号），需按本前端重写；详见 D-166 |
+
+---
+
+## 16. 相关文档
+
+- `desktop/MATRIX.md` — 命令/事件能力矩阵（已支持 / 隐藏 / 原因），是 D-166 指定的事实源
+- `docs/deferred-issues.md` — D-163（桌面未实机）、D-164（流式，已解决）、D-165（无上下文占用率）、D-166（未覆盖能力清单）
+- `docs/BRD.md` — 业务需求与硬性规则 R1–R9
+- `docs/p0-kernel-design.md` — 内核设计
+- `docs/m2-roadmap.md` — M2 路线图
+- `dev-notes/M2-前端移植.md` — 本次移植的过程留痕与翻车记录

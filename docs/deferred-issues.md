@@ -469,6 +469,7 @@
 - **影响**: 状态栏颜色语义与真实连接状态脱节,无法表达「已连接但降级」或「探测中」。
 - **触发升级条件**: 接入设备/串口状态事件;状态栏需要表达 warn/error/connecting 多态。
 - **修复建议**: 用显式状态枚举(`connected | disconnected | degraded | unknown`)替代「有字符串即 ok」,由会话事件或设备状态投影提供。
+- **注**:本条描述的 `StatusBar` 组件随 Preact 工作台(`src/ui/`)删除;新前端无独立状态栏,设备状态经 `board_state` 事件进工作台板卡面板(见 D-166 与 `desktop/MATRIX.md`)。
 
 ### D-053 · 无后端时 Composer 清空输入
 
@@ -485,6 +486,7 @@
 - **影响**: 默认展开状态下索引末项不可见;若后续把 V6 理解为「整树不可裁剪」会误判。
 - **触发升级条件**: 要求 717px 下整树默认全部可见;知识库树继续增加节点。
 - **修复建议**: 将左栏知识库比例调到 60% 或压缩检索区/树间距,并在设计 v1.2 的 V6 口径中同步基准;若维持内部滚动,明确末项可滚动是预期行为。
+- **注**:本条描述的知识库树随 Preact 工作台删除,新前端左栏只有会话列表(见 D-166)。
 
 ### D-055 · V3 内容宽口径与滚动条占位耦合
 
@@ -493,6 +495,7 @@
 - **影响**: 严格按旧口径会把合理的滚动条占位误判为内容对齐缺陷。
 - **触发升级条件**: 改用 overlay 滚动条、`scrollbar-gutter` 策略变化,或要求内容与栏头完全同右边界。
 - **修复建议**: 保持 V8 单列滚动条占位;若要内容与栏头同边界,在会话头/路径条/输入栏右侧预留同宽,或统一改为 overlay 滚动条。
+- **注**:本条描述的 V3 内容宽口径随旧布局作废,新口径见 `docs/frontend-design.md` v2.0 §4.1(`--column-width`)。
 
 ### D-056 · V11 仅覆盖页面内静态 Tab 序列
 
@@ -501,6 +504,7 @@
 - **影响**: 后续新增组件若遗漏 `:focus-visible` 覆盖,脚本不会发现;动态渲染控件缺少验收。
 - **触发升级条件**: 新增交互组件、动态消息/工具卡、原生弹层交互。
 - **修复建议**: 在组件测试中断言焦点样式,或让脚本在关键交互后重新枚举焦点序列;把采样数量作为变更检查项。
+- **注**:本条描述的验收脚本 `scripts/verify-ui.mjs` 随 Preact 工作台删除;新验收清单见 `docs/frontend-design.md` v2.0 §12,目前无自动化守护。
 
 ### D-057 · Chromium 探测未覆盖非标准安装
 
@@ -509,11 +513,12 @@
 - **影响**: 非标准安装环境需要手动设置 `CHROME_PATH`,否则验收不可运行。
 - **触发升级条件**: CI/开发机仅安装其他 Chromium 发行版;需要无人工配置执行。
 - **修复建议**: 扩展候选路径或读取注册表/常见包管理器安装位置;文档明确 `CHROME_PATH` 为兜底入口。
+- **注**:本条描述的 `scripts/verify-ui.mjs` 随 Preact 工作台删除,该验收脚本不复存在。
 
 ### D-058 · Dock/设备/日志为静态演示数据
 
 - **发现**: 2026-10-18,Task 11 第一轮整体审查修复。
-- **状态**: 数据来源已解决(2026-10-18,Task 14);设备连接状态仍待 D-052。
+- **状态**: 数据来源已解决(2026-10-18,Task 14);设备连接状态仍待 D-052。**注**:本条描述的 `Dock`/`DeviceMonitor` 随 Preact 工作台删除;新前端的对应物是工作台的板卡 tab,同样只消费 `device_status`(见 D-166)。
 - **原现象**: `App` 用 `DEMO_REGISTERS` / `DEMO_LOG_LINES` 渲染调试坞;`DeviceMonitor` 的芯片型号、探针连接、CPU 状态为字面量;复位确认后只进入「执行中,等待工具结果」,没有外部事件把它推进到「已执行」。
 - **修复**: 删除全部演示数据。`Dock` 的寄存器与日志改由 `TranscriptView` 的工具卡投影(`deriveRegisters` / `deriveLogLines`);设备字段来自 `/api/device`(当前恒为 `unknown`)。无读数时显示「暂无寄存器读数」。
 - **残余**: 无 `device_status` 事件时 `/api/device` 仍恒为 `unknown`;复位确认后等待 action 通道。`tool_result` 与 `device_status` 已可经事件流投影,action 仍为 501(D-063 事件流部分已解决)。
@@ -526,6 +531,7 @@
 - **影响**: 用户无法从界面触发回放或导出。
 - **触发升级条件**: 交付回放/导出能力;验收脚本需要点击验证。
 - **修复建议**: 增加 `onReplay` / `onExport` 回调并由宿主实现(导出 transcript 可序列化 `TranscriptView`);未接线时禁用按钮并给出可见说明。
+- **注**:本条描述的 `ConversationHeader` 的「回放」「导出 transcript」按钮随 Preact 工作台删除;新前端的导出入口是顶栏菜单的 `exportSession` 命令,当前在宿主/bridge 侧隐藏(见 D-166)。
 
 ### D-060 · SSE 无后端时输入处理
 
@@ -1267,7 +1273,7 @@
 - **影响**: 长会话(数千事件)实时刷新时 CPU 与 GC 压力上升,可能拖慢流消费;当前会话规模下未观察到卡顿。
 - **触发升级条件**: 单会话事件数达数千;UI 出现掉帧或流消费落后;启用 D-136 的大补播。
 - **修复建议**: 让投影器支持增量 append(保留 fold 状态),或按 `seq` 分块缓存;补一条大事件数组的基准测试。
-- **状态**: 未解决;性能边界。
+- **状态**: **失效(2026-10-20)**——本条描述的 `src/ui/state.ts` 的 `applySessionEvent` 随 Preact 工作台删除,O(n²) 全量重算的代码路径不复存在。新前端是增量 DOM 追加(协议层逐事件翻译),无全量重投影,故此性能边界不适用;新前端的性能边界待重新评估。
 
 ### D-144 · 文档曾称 SSE 载荷为 `LoopEvent` 且 `since` 超前语义未写明
 
@@ -1476,6 +1482,28 @@
 - **修复建议**: 逐项在 `desktop/MATRIX.md` 标记“已支持/隐藏/待接”,新增能力时先补内核后端再放开前端入口。
 - **状态**: 未解决(已知边界,清单见 `desktop/MATRIX.md`)。
 
+### D-167 · 前端文档与实现存在 4 处偏差(重写 frontend-design v2.0 时核出)
+
+- **发现**: 2026-10-20,重写 `docs/frontend-design.md` v2.0(以前端移植后的 `desktop/renderer/` 实现为准)。
+- **现象**: 逐条核对代码后,发现 4 处「文档/README 的承诺与实现不符」,均为实现缺口而非文档写错:
+  1. **客户端缺口检测与重拉不存在**:`README.md:481` 承诺「收到 `seq > lastSeq + 1` 视为缺口,关闭流并整量重拉会话(每次订阅最多 3 次)」与「连续 3 次未成功建流后显示流错误」,但 `desktop/renderer/bridge.js` 没有任何主动重连或缺口检测逻辑 —— 重连依赖 `EventSource` 自身的浏览器自动重连(服务端 `retry: 3000`),且重连时 URL 里的 `since` 仍是建流时的固定值。重复事件由协议层 `ctx.lastSeq` 去重兜住,不会污染 UI,但「缺口重拉」这条保护实际不存在。桌面宿主(`desktop/host/host.js`)侧同样没有缺口检测。
+  2. **浏览器形态的 `setMode` 不改内核权限预设**:`bridge.js` 的 `setMode` 只更新本地 `state` 并发 `state` 事件,不发任何网络请求;用户在界面上切换权限模式,实际运行的仍是服务端那个预设。
+  3. **用户选的「跟随系统」主题在一次启动后被固化**:`app.js:5809` 在无记录或值为 `system` 时把 `state.theme` 改写为解析后的 `light`/`dark`,随后 `setTheme(state.theme)`(`app.js:4449`)把该值**写回** `localStorage`,于是「跟随系统」被永久固化成具体主题。
+  4. **图标按钮用 `title` 而非 `aria-label` 承载可访问名**:`index.html` 中大量 `data-i18n-title` 只写 `title`,`title` 在部分屏幕阅读器与触屏上不朗读。
+- **影响**: (1) 事件流出现缺口时 UI 可能静默拼接错误;(2) 浏览器形态的权限模式选择是**假控件**,用户以为生效了其实没有 —— 涉及安全边界,比前一项更重;(3) 主题体验退化但不丢数据;(4) 键盘/读屏用户的可访问名缺失。
+- **触发升级条件**: (1) 长会话或频繁断线;(2) 浏览器形态需要按界面选择调整权限(而非改服务端配置);(3) 用户在设置里选「跟随系统」后抱怨主题不跟随;(4) 无障碍审查。
+- **修复建议**: (1) 在 `bridge.js` 补 `seq > lastSeq + 1` 检测 + 整量重拉(≤3 次) + 建流失败上限(≤3 次),与 `src/events/log-tail.ts` 的补播语义对齐;(2) 让 `POST /api/actions` 接受权限预设,或新增 `POST /api/permissions` 端点,bridge 据此下发;(3) boot 阶段不要用 `setTheme` 写回 localStorage,或让 `state.theme` 与存储的原始选择解耦;(4) 补 `aria-label`,与 i18n 键一起补。
+- **状态**: 未解决。`README.md:481` 与「前端工作台」已知限制段已按实际实现改写措辞,避免继续承诺不存在的机制;`docs/frontend-design.md` v2.0 §15 登记了完整清单(含另 4 项非安全边界的小偏差与 `vite` 死依赖)。
+
+### D-168 · 阶段 4 交互层 spec 的 §7-§9 依赖已删除的 `src/ui`,需按新前端重写
+
+- **发现**: 2026-10-20,重写 `docs/frontend-design.md` v2.0 时核对阶段 4 spec。
+- **现象**: `docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` 的 §7(回放)、§8(导出)、§9(设备控制)建立在 `src/ui/` 的 12 个文件、约 30 个导出符号之上(`transcriptFromSession`、`WorkbenchState`、`applySessionEvent`、`RequestGate`、`createSessionEventStream`、`postAction`、`deviceFromSession`、`main.tsx` 的定时器持有、`app.tsx` 的 `onSend` …),这些已随前端移植整体删除。该 spec 的 §10(外部验证)与 §5/§6 的内核侧约束仍然有效。
+- **影响**: 阶段 4 的回放/导出/设备控制**当前无法按 spec 直接实施**;spec 顶部已加显著失效声明,防止照旧文实施。
+- **触发升级条件**: 阶段 4 交互层落地(即 D-166 中「回放/导出/设备控制」三项被需要时)。
+- **修复建议**: 按 `docs/frontend-design.md` v2.0 与 `desktop/MATRIX.md` 重写 spec 的 §7-§9:回放改为按 `seq` 截断后重放 `sessionEventToHostEvents`;导出改用已有的 `GET /api/sessions/:id` 与 `saveFile`;设备指令改为经 `api.send({cmd:"prompt"})` 下发预置文本(浏览器形态走 `POST /api/actions`);验收脚本重写为 §12 的 V1–V15。
+- **状态**: 未解决(已知边界,spec 顶部已标注失效与重写方向)。
+
 ---
 
 ## 变更记录
@@ -1546,3 +1574,4 @@
 | 2026-10-20 | M2 阶段3 最终复核:Renode 外设寄存器改为 4 字节对齐 `ReadDoubleWord`(逐字节 `ReadByte` 对外设不可靠,GPIOA 实测全 0 而字读为 0xA8000000);`pipeline` 失败结果不再标记 `evidence`;legacy inbox id 漂移语义写入 spec;最终复核 APPROVE |
 | 2026-10-20 | 前端移植(Prometheus → 当前内核):删除 Preact 工作台(`src/ui`、`web/`、`tests/ui`、`verify-ui`、`vite.config.ts`),新增 `desktop/`(renderer 纯 ES 模块 + `bridge.js` 浏览器兼容层 + `protocol.js` 协议层 + Electron `main.js`/`preload.cjs` + NDJSON 宿主);新增 `POST /api/abort` 与 `runner.abort`;`serve:ui` 默认静态托管 `desktop/renderer`;录入 D-163(桌面未实机)、D-164(无 token 流式)、D-165(无上下文占用率)、D-166(未覆盖能力清单) |
 | 2026-10-20 | D-164 修复:模型适配层支持 OpenAI 流式响应(SSE `delta.content` / `delta.tool_calls`,网关拒绝时自动降级为一次性响应),新增 `assistant_delta` 会话事件并批量落盘,前端按增量实时显示;D-164 标记已解决 |
+| 2026-10-20 | 前端文档重写:`docs/frontend-design.md` v1.4 → v2.0,整体改为以 `desktop/renderer/` 实现为准(原 v1.4 基于已删除的 Preact 工作台,§2/§3/§4/§5/§6/§7/§11/§12 作废);`README.md` 修正断线续传的过度承诺与「前端工作台」已知限制段,设计文档索引改指 `desktop/MATRIX.md`;阶段 4 spec 顶部加失效声明(§7-§9 依赖已删除的 `src/ui`);`ui-workbench` spec/plan 加作废标注;录入 D-167(前端 4 处文档-实现偏差)与 D-168(阶段 4 spec §7-§9 需重写) |
