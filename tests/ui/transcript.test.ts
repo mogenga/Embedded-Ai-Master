@@ -62,13 +62,19 @@ function approvalEvents(): SessionEvent[] {
   ];
 }
 
-function decisionEvent(reason: string, effective: "allow" | "deny", callId = "c1"): SessionEvent {
+function decisionEvent(
+  reason: string,
+  effective: "allow" | "deny",
+  callId = "c1",
+  requestId?: string,
+): SessionEvent {
   return {
     seq: 4,
     ts: "t",
     parent: 2,
     type: "permission_decision",
     payload: {
+      ...(requestId === undefined ? {} : { requestId }),
       callId,
       tool: "mem_write",
       action: effective === "allow" ? "allow" : "deny",
@@ -429,6 +435,31 @@ describe("transcript", () => {
     expect(view.events.some((event) => event.kind === "permission")).toBe(false);
     const tool = view.events.find((event) => event.kind === "tool") as Extract<TranscriptEvent, { kind: "tool" }>;
     expect(tool.tool.state).toBe("failed");
+  });
+
+  it("同 callId 不同 requestId 的审批按 requestId 精确更新", () => {
+    const events = approvalEvents();
+    const duplicateCallId: SessionEvent = {
+      seq: 5,
+      ts: "t",
+      parent: 2,
+      type: "approval_request",
+      payload: {
+        ...events[2]!.payload,
+        requestId: "req-2",
+      },
+    };
+    const view = transcriptFromSession([
+      ...events,
+      duplicateCallId,
+      { ...decisionEvent("user_approved", "allow", "c1", "req-1"), seq: 6 },
+    ]);
+    const approvals = view.events.filter((event) => event.kind === "approval") as Array<
+      Extract<TranscriptEvent, { kind: "approval" }>
+    >;
+    expect(approvals).toHaveLength(2);
+    expect(approvals[0]!.approval).toMatchObject({ requestId: "req-1", status: "allowed" });
+    expect(approvals[1]!.approval).toMatchObject({ requestId: "req-2", status: "pending" });
   });
 
   it("callId 未命中审批卡时 permission_decision 仍生成 permission 事件", () => {

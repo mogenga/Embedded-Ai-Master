@@ -36,6 +36,7 @@ interface MissingToolResult {
 }
 
 interface PendingApproval {
+  requestId: string;
   callId: string;
   tool: string;
   access?: ToolAccess;
@@ -106,10 +107,12 @@ function isPermissionPreset(value: unknown): value is PermissionPreset {
 
 function toPendingApproval(event: SessionEvent): PendingApproval | undefined {
   if (event.type !== "approval_request") return undefined;
-  const { callId, tool, preset, paramsDigest, paramsKeys, access, paramsPreview } =
+  const { requestId, callId, tool, preset, paramsDigest, paramsKeys, access, paramsPreview } =
     event.payload;
   if (
-    typeof callId !== "string"
+    typeof requestId !== "string"
+    || requestId.trim().length === 0
+    || typeof callId !== "string"
     || typeof tool !== "string"
     || !isPermissionPreset(preset)
     || typeof paramsDigest !== "string"
@@ -119,6 +122,7 @@ function toPendingApproval(event: SessionEvent): PendingApproval | undefined {
     return undefined;
   }
   const approval: PendingApproval = {
+    requestId,
     callId,
     tool,
     preset,
@@ -134,16 +138,21 @@ function findUnresolvedApprovals(events: readonly SessionEvent[]): PendingApprov
   const decided = new Set<string>();
   for (const event of events) {
     if (event.type !== "permission_decision") continue;
-    if (typeof event.payload.callId === "string") decided.add(event.payload.callId);
+    const requestId = event.payload.requestId;
+    if (typeof requestId === "string") decided.add(requestId);
   }
   const seen = new Set<string>();
   const pending: PendingApproval[] = [];
   for (const event of events) {
     const approval = toPendingApproval(event);
-    if (approval === undefined || decided.has(approval.callId) || seen.has(approval.callId)) {
+    if (
+      approval === undefined
+      || decided.has(approval.requestId)
+      || seen.has(approval.requestId)
+    ) {
       continue;
     }
-    seen.add(approval.callId);
+    seen.add(approval.requestId);
     pending.push(approval);
   }
   return pending;
@@ -418,6 +427,7 @@ export async function resumeSession(
         await appendHandle.append({
           type: "permission_decision",
           payload: {
+            requestId: approval.requestId,
             callId: approval.callId,
             tool: approval.tool,
             action: "ask",

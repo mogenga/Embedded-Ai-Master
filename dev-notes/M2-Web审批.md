@@ -143,3 +143,37 @@
 
 - D-145 ~ D-152 与新错误码不冲突：D-150 的 404/410 判定仍在 `decide` 路径，本轮未改；D-151 仍是 `session_busy`；D-152（发送在途手动切换仍可能切回）未被本轮消除。
 - spec §10.3 按清单补了 `session_corrupt`/`session_unreadable`；审批端点本身不读 header，这两个码实际只由 `/api/actions` 的追加路径产生。
+
+## 红队修复（2026-10-20，第二轮最终审查后）
+
+**用户关键原话**
+
+- `审批 requestId 与 callId 解耦（Critical）`；`408 实际可达`；`拒绝浏览器跨源写请求`；`启动阶段失败写审计`；`Minor: runner 错误不含绝对路径 / send 清空 sendError / D-146 补面`；`不要新增依赖；不真实执行危险命令；不派发子代理`。
+
+**关键产出**
+
+- A. `permissions/gate.ts` 每次 `check` 生成 `randomUUID()` 作为 `requestId`，`callId` 保留模型原值；`PermissionRequest` 增加 `requestId`；`PermissionDecisionPayload` 增加可选 `requestId`；`query.ts` 写入；`session.ts` 的崩溃恢复按 `requestId` 配对并补写 `requestId`，缺失非空 `requestId` 的旧审批跳过；`transcript.ts` 优先按 `requestId` 匹配，旧日志无 `requestId` 时回退同 `callId` 最近 pending，工具卡仍按 `callId`。
+- B. `server/body.ts` 增加 `timeoutMs` 参数；超时只 reject 408，不再 `req.destroy()`，由 handler 的 `req.resume()` 丢弃剩余 body。
+- C. `server/api.ts` 写端点拒绝 `Sec-Fetch-Site: cross-site`（403 `forbidden_origin`）。
+- D. `index.ts` 增加 `queryStarted`，`yield* query` 前置 true；catch 中若启动前失败则追加 `interrupted(start_failed)`，append 错误被吞掉以保留原始错误。
+- E. runner 的 `model_unavailable` 消息把 home 路径脱敏为 `HARNESS_HOME` 并固定提示 `HARNESS_HOME/providers.json` 与 `HARNESS_WEB_MODEL`；`session_unreadable` 只返回「会话不可读」；`ui/main.tsx` 的 `send` 开始时清空 `sendError`。
+- F. 文档：spec §7.2/§8.1/§9.1/§9.2/§10.1/§10.3、README 审批与错误段、`deferred-issues` D-146/D-153/D-154、本文件同步。
+
+**RED/GREEN 证据**
+
+- RED：gate `requestId === callId`、transcript 同 callId 第二条审批被误更新、session-persistence 同 callId 第二轮审批未配对、body 超时挂起、api cross-site 返回 202、startup 审计无 `interrupted`、runner 消息含临时 home 绝对路径。
+- GREEN：`tests/permissions-gate.test.ts`、`tests/session-persistence.test.ts`、`tests/approvals-bridge.test.ts`、`tests/ui/transcript.test.ts` 共 173 passed；`tests/server`（body/startup-audit/api/runner）67 passed。
+
+**被拒绝或纠偏的内容**
+
+- 未新增依赖、未真实执行危险命令、未派发子代理。
+- 未把崩溃恢复的 `permission_decision` 兼容回退到 `callId`：按任务要求只用 `requestId` 配对，旧日志若缺 `requestId` 则跳过；transcript 才保留旧日志回退。
+
+**翻车与返工**
+
+- session-persistence 首版用例让第一轮 assistant 缺 `tool_result`，`buildMessages` 无法投影导致恢复分支 fail-closed；补第一轮 `tool_result` 后恢复路径才可执行。
+- spec 文档一度把 body 上限误写为 32 KiB，核对 `body.ts` 后恢复为 64 KiB。
+
+**残余**
+
+- D-153（`port: 0` 时写端点 403）、D-154（runner 关闭后 decide 返回 404）本轮只登记未修；D-150/D-151/D-152 不变。

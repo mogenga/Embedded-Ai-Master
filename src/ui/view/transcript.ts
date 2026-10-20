@@ -417,7 +417,8 @@ interface ViewMeta {
 export function transcriptFromSession(events: readonly SessionEvent[]): TranscriptView {
   const out: TranscriptEvent[] = [];
   const tools = new Map<string, Extract<TranscriptEvent, { kind: "tool" }>>();
-  const approvals = new Map<string, Extract<TranscriptEvent, { kind: "approval" }>>();
+  const approvalsByRequestId = new Map<string, Extract<TranscriptEvent, { kind: "approval" }>>();
+  const approvalsByCallId = new Map<string, Array<Extract<TranscriptEvent, { kind: "approval" }>>>();
   let usage: UsageModel | undefined;
   let cost: number | undefined;
   let interruptReason: string | undefined;
@@ -487,8 +488,9 @@ export function transcriptFromSession(events: readonly SessionEvent[]): Transcri
       case "approval_request": {
         const callId = asString(payload.callId);
         if (callId === undefined) break;
+        const requestId = asString(payload.requestId);
         const approval: ApprovalModel = {
-          requestId: asString(payload.requestId) ?? "",
+          requestId: requestId ?? "",
           callId,
           tool: asString(payload.tool) ?? "",
           reason: asString(payload.reason) ?? "",
@@ -505,13 +507,27 @@ export function transcriptFromSession(events: readonly SessionEvent[]): Transcri
           approval,
         };
         out.push(entry);
-        approvals.set(callId, entry);
+        if (requestId !== undefined) approvalsByRequestId.set(requestId, entry);
+        const sameCall = approvalsByCallId.get(callId);
+        if (sameCall === undefined) approvalsByCallId.set(callId, [entry]);
+        else sameCall.push(entry);
         break;
       }
       case "permission_decision": {
         const callId = asString(payload.callId);
         if (callId === undefined) break;
-        const approval = approvals.get(callId);
+        const requestId = asString(payload.requestId);
+        let approval =
+          requestId === undefined ? undefined : approvalsByRequestId.get(requestId);
+        if (requestId === undefined) {
+          const sameCall = approvalsByCallId.get(callId) ?? [];
+          for (let index = sameCall.length - 1; index >= 0; index -= 1) {
+            if (sameCall[index]!.approval.status === "pending") {
+              approval = sameCall[index];
+              break;
+            }
+          }
+        }
         if (approval !== undefined) {
           approval.approval.status = approvalStatus(payload);
         } else {

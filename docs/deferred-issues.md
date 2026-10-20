@@ -1290,11 +1290,11 @@
 ### D-146 · 写端点只有 loopback Origin 校验,无 token/CSRF
 
 - **发现**: 2026-10-20,M2 Web 审批 Task 10。
-- **现象**: `POST /api/actions` 与 `POST /api/approvals` 校验 `Host`/`Origin` 必须为 loopback 且端口匹配,但不校验 token、会话 cookie 或 CSRF 头,也不区分浏览器标签页。
-- **影响**: 同机其他进程或页面只要能以 loopback Origin 发请求,就能提交动作或审批;该机制只阻断跨源网页(DNS rebinding / 跨源 POST),不是本机攻击者隔离。
+- **现象**: `POST /api/actions` 与 `POST /api/approvals` 校验 `Host`/`Origin` 必须为 loopback 且端口匹配,并拒绝浏览器自动发送的 `Sec-Fetch-Site: cross-site`;但不校验 token、会话 cookie 或 CSRF 头,也不区分浏览器标签页。
+- **影响**: 同机其他进程或非浏览器客户端只要能以 loopback Origin 发请求,就能提交动作或审批;`Sec-Fetch-Site` 只覆盖浏览器跨源页面(含 localhost 上另一个 dev 代理页面),不覆盖非浏览器客户端或同源页面内的脚本。该机制只阻断跨源网页(DNS rebinding / 跨源 POST),不是本机攻击者隔离。
 - **触发升级条件**: 多用户、远程访问,或需要防本机其他应用。
 - **修复建议**: 引入一次性 token / 会话 cookie + CSRF 头,或改用 Unix socket / 命名管道并做 OS 级鉴权。
-- **状态**: 未解决;按 2026-10-20 决策不引入 token。
+- **状态**: 未解决;按 2026-10-20 决策不引入 token;浏览器跨源面已由 `Sec-Fetch-Site` 检查收紧。
 
 ### D-147 · 审批摘要可能在页面上暴露敏感片段
 
@@ -1349,6 +1349,24 @@
 - **触发升级条件**: 发送延迟明显(模型响应慢)或用户频繁切换会话。
 - **修复建议**: 在 `selectSession` 递增 epoch,或在发送完成时校验当前 `activeSessionId` 是否仍等于提交前值。
 - **状态**: 未解决;已知交互边界。
+
+### D-153 · `createUiServer({ port: 0 })` 时写端点全部 403
+
+- **发现**: 2026-10-20,M2 Web 审批红队修复。
+- **现象**: `createUiServer` 把传入的 `port` 原样用于 `requireLocalRequest` 的端口比对;传 `0` 时 HTTP server 实际监听随机端口,但校验仍要求 `Host`/`Origin` 端口等于 `0`,所有写请求返回 403 `forbidden_host` / `forbidden_origin`。
+- **影响**: 仅影响以 `port: 0` 嵌入并依赖系统分配端口的调用方;CLI/生产入口使用固定端口,测试用 `freePort()` 绕开。
+- **触发升级条件**: 需要把 UI server 嵌入其他进程并动态取端口。
+- **修复建议**: 监听 `listening` 后读取 `server.address().port`,回填给 handler;或把端口校验改为按实际监听端口。
+- **状态**: 未解决;本轮未改端口获取方式。
+
+### D-154 · runner 关闭后审批决策返回 404 而非 503
+
+- **发现**: 2026-10-20,M2 Web 审批红队修复。
+- **现象**: `SessionRunner.decide` 在 `close()` 清空 registry 后返回 `unknown_session`(HTTP 404);`start` 已对 `closed` 返回 503 `runner_unavailable`,两者不一致。
+- **影响**: 客户端把「运行器已关闭」误判为「会话不存在」;不产生错误决策。
+- **触发升级条件**: 服务关闭流程与在途审批决策并发,或需要客户端区分可重试状态。
+- **修复建议**: `decide` 先检查 `closed` 并返回 `runner_unavailable`;补 close 后 decide 的 HTTP 用例。
+- **状态**: 未解决;D-150 已覆盖运行中/会话结束后的 404/410 语义。
 
 ---
 
@@ -1412,3 +1430,4 @@
 | 2026-10-20 | M2 事件总线 Task 7 交付:D-063 标注已解决(`/api/events` 由 501 替换为真实 SSE,写操作仍 501);录入 D-133 ~ D-137(单会话流、无进程内低延迟适配器、无独立 evidence 事件、大日志补播未压测、Web 审批未实现);README 新增「实时事件流」,frontend-design 补统一事件数组/游标/缺口重拉/设备 patch/MCP 与权限展示 |
 | 2026-10-20 | 事件总线全量复验与修复(`feat/m2-event-bus`):D-138 实时单帧写超时→`slow_consumer`(已解决,残余记入条目);D-140 列表与详情共用 `isValidSessionId`(已解决);D-141 `readSessionHeader` 收敛到 persistence 并补 EACCES 用例(已解决);D-142 删除死代码 `createEventStream`/`splitCompleteLines`(已解决);D-144 文档改为 `SessionEventEnvelope` 并补 `since` 夹紧语义(已解决);录入 D-139(`/api/actions` 仍 501)与 D-143(`applySessionEvent` O(n²))为未解决 |
 | 2026-10-20 | M2 Web 审批闭环(`feat/m2-web-approval`):D-137(`approval_request` + `POST /api/approvals` + 审批 UI)与 D-139(`/api/actions` 落地)标已解决;D-112 的 Web 部分标已解决;录入 D-145 ~ D-152(重启丢失 pending、仅 Origin 校验、摘要敏感片段、单会话串行、SSE 200ms 延迟、迟到决策 404/410 不一致、未响应 abort 占用 `session_busy`、在途发送切回会话);README 新增「Web 会话与审批」,frontend-design 补审批卡片与状态机 |
+| 2026-10-20 | M2 Web 审批红队修复(`feat/m2-web-approval`):审批标识改为 gate 生成的独立 UUID(与 `callId` 解耦),`permission_decision`/崩溃恢复/transcript 按 `requestId` 配对;408 不再销毁连接;写端点拒绝 `Sec-Fetch-Site: cross-site`;启动前失败写 `interrupted(start_failed)`;D-146 补浏览器跨源面;录入 D-153(port 0 写端点 403)与 D-154(close 后 decide 返回 404) |

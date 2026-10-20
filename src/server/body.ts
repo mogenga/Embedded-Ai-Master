@@ -19,6 +19,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 export async function readJsonBody(
   req: IncomingMessage,
   limitBytes: number = DEFAULT_LIMIT_BYTES,
+  timeoutMs: number = READ_TIMEOUT_MS,
 ): Promise<Record<string, unknown>> {
   assertJsonContentType(req);
 
@@ -27,9 +28,9 @@ export async function readJsonBody(
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
       timedOut = true;
-      req.destroy();
+      // 不销毁 socket:调用方需要把 408 写回客户端,剩余 body 由 handler 的 catch 丢弃。
       reject(new HttpError(408, "request_timeout", "读取请求体超时"));
-    }, READ_TIMEOUT_MS);
+    }, timeoutMs);
     timer.unref();
   });
 

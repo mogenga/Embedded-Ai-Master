@@ -191,6 +191,10 @@ let sessionEpoch = 0;
 async function send(text: string): Promise<void> {
   const epoch = sessionEpoch;
   const wasNew = state.activeSessionId === undefined;
+  if (state.sendError !== undefined) {
+    state = { ...state, sendError: undefined };
+    renderApp();
+  }
   let created: { sessionId: string };
   try {
     created = await postAction<{ sessionId: string }>(actionUrl, {

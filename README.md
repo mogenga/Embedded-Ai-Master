@@ -232,14 +232,14 @@ for await (const event of runSession({
 
 **ask 与审批**
 
-- `ask` 且提供 `prompter` 时等待审批，默认 120000 ms，超时按拒绝；同一 gate 内审批串行，按进入队列顺序执行。
+- `ask` 且提供 `prompter` 时等待审批，默认 120000 ms，超时按拒绝；同一 gate 内审批串行，按进入队列顺序执行。每次审批由 gate 生成独立 UUID `requestId`，`callId` 保持模型原值；`requestId` 是审批与决策的唯一配对键。
 - `ask` 且没有 `prompter`（headless demo、未注入审批器的库调用）一律 `effective: "deny"`、`reason: "approval_unavailable"`，工具不执行。
 - 审批结果映射：批准 → `effective: "allow"`（理由追加 `approval_granted`）；拒绝 → `approval_denied`；超时 → `approval_timeout`；取消 → `approval_aborted`；审批器异常 → `approval_error: ...`（限长）。
 - Web 工作台由服务进程注入审批桥，经 `POST /api/approvals` 回传决策，见「Web 会话与审批」；headless 仍是 `ask` → deny。
 
 **审计事件**
 
-进入权限判定的每次调用都先写 `permission_decision` 会话事件，之后才执行或返回拒绝。payload 含 `callId`（与 `tool_result.id` 相同）、`tool`、`action`（规则原动作，`ask` 仍记 `ask`）、`effective`、`reason`、`preset`、`source`、可选 `ruleIndex`、`paramsDigest`（稳定序列化后 SHA-256 前 16 位）、`paramsKeys`（顶层键排序，最多 32 个，单键最多 100 码点）、可选 `paramsPreview`（字符串最多 120 码点，整体 4096 字节；超出预算时丢弃后续键并置 `previewTruncated: true`；可能含敏感片段，D-113）、`access`（`read` / `write` / `unknown`）。事件 `parent` 指向对应 assistant 事件，`tool_result` 在其后；`buildMessages` 与前端回放忽略该事件，不占模型上下文。
+进入权限判定的每次调用都先写 `permission_decision` 会话事件，之后才执行或返回拒绝。payload 含 `requestId`（本次审批的独立 UUID）、`callId`（与 `tool_result.id` 相同）、`tool`、`action`（规则原动作，`ask` 仍记 `ask`）、`effective`、`reason`、`preset`、`source`、可选 `ruleIndex`、`paramsDigest`（稳定序列化后 SHA-256 前 16 位）、`paramsKeys`（顶层键排序，最多 32 个，单键最多 100 码点）、可选 `paramsPreview`（字符串最多 120 码点，整体 4096 字节；超出预算时丢弃后续键并置 `previewTruncated: true`；可能含敏感片段，D-113）、`access`（`read` / `write` / `unknown`）。事件 `parent` 指向对应 assistant 事件，`tool_result` 在其后；`buildMessages` 与前端回放忽略该事件，不占模型上下文。旧日志的 `permission_decision` 可能没有 `requestId`，前端回放才回退按 `callId` 配对。
 
 **MCP 参数边界**
 
@@ -340,7 +340,7 @@ npm run serve:ui    # 真实数据服务，默认 http://127.0.0.1:5174/
 ```
 
 - **环境变量**：`HARNESS_UI_PORT` 改监听端口（默认 `5174`）；`HARNESS_HOME` 指定会话与知识库根目录（默认 `~/.harness`）；`HARNESS_UI_STATIC` 指定前端静态产物目录（默认 `dist-web`）；`HARNESS_WEB_MODEL` 指定 Web 会话默认模型引用；`VITE_EVENT_STREAM_URL` 覆盖事件流地址（默认 `/api/events`）。服务只监听 `127.0.0.1`。
-- **本机边界**：`/api/*` 校验 `Host` / `Origin` 必须为 `127.0.0.1` / `localhost` / `::1` 且端口等于监听端口；跨源返回 403 `forbidden_host` / `forbidden_origin`，用于阻断 DNS rebinding 与跨源读取（D-067 已解决）。
+- **本机边界**：`/api/*` 校验 `Host` / `Origin` 必须为 `127.0.0.1` / `localhost` / `::1` 且端口等于监听端口；跨源返回 403 `forbidden_host` / `forbidden_origin`，用于阻断 DNS rebinding 与跨源读取（D-067 已解决）。写端点额外拒绝浏览器自动发送的 `Sec-Fetch-Site: cross-site`（403 `forbidden_origin`），覆盖另一个 loopback 页面经 dev 代理发起的跨源写请求；非浏览器客户端不发送该头，仍以 `Origin` 为准（D-146）。
 - **架构**：Preact 只承担组件化与增量 diff；全部业务状态经 `src/ui/view/transcript.ts` 的纯函数投影 `TranscriptView`。前端类型直接复用内核 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations`，不维护第二套事件模型。
 - **数据加载**：首屏并行请求 `/api/sessions`、`/api/kb`、`/api/device`，再按会话列表首项请求 `/api/sessions/<id>` 的真实事件日志；切换会话重新拉取。调试坞的寄存器与日志由工具卡投影，不再使用静态演示数据。
 - **API**：
@@ -390,7 +390,7 @@ npm run build:web && npm run build && npm run serve:ui
 
 - 读取 `$HARNESS_HOME/providers.json`；模型引用按 `HARNESS_WEB_MODEL` → providers 中第一个 `<provider>/<model>` 的顺序回退（运行器显式 `model` 选项优先）。
 - 追加输入时优先使用会话 `header.model`；`header` 无模型时与新建会话相同，回退到 `HARNESS_WEB_MODEL` 与 providers 第一个引用。
-- providers 缺失、JSON/schema 错误或引用无效统一返回 503 `model_unavailable`，message 说明检查 `HARNESS_HOME/providers.json` 与 `HARNESS_WEB_MODEL`。
+- providers 缺失、JSON/schema 错误或引用无效统一返回 503 `model_unavailable`，message 说明检查 `HARNESS_HOME/providers.json` 与 `HARNESS_WEB_MODEL`，且不包含本机绝对路径（home 路径脱敏为 `HARNESS_HOME`）；`session_unreadable` 只返回「会话不可读」。
 
 **运行器语义**
 
@@ -432,8 +432,10 @@ npm run build:web && npm run build && npm run serve:ui
 请求：
 
 ```json
-{ "sessionId": "uuid", "requestId": "call-1", "decision": "allow" }
+{ "sessionId": "uuid", "requestId": "6f1c2b0e-...", "decision": "allow" }
 ```
+
+`requestId` 是权限 gate 为每次审批生成的独立 UUID，与模型工具调用 `callId` 解耦：同一 `callId` 跨轮复用时两次审批的 `requestId` 不同，迟到决策不会命中更新的审批。
 
 | 状态 | body | 条件 |
 |---|---|---|
@@ -441,18 +443,18 @@ npm run build:web && npm run build && npm run serve:ui
 | 200 | `{ requestId, decision, duplicate: true }` | 同决策重复提交 |
 | 400 | `invalid_body` / `invalid_session_id` / `invalid_decision` | 字段缺失或类型错误、id 非法、`requestId` 不是 1..200 个可打印 ASCII 字符、决策不是 `allow`/`deny` |
 | 404 | `unknown_session` / `unknown_request` | 会话不在运行器注册表 / 运行中但从未见过该 `requestId` |
-| 408 | `request_timeout` | 读取请求体超过 5s |
+| 408 | `request_timeout` | 读取请求体超过 5s（返回响应后丢弃剩余 body） |
 | 409 | `already_decided` | 已用相反决策结束 |
 | 410 | `approval_expired` | 已超时或中断，不可再决 |
 | 503 | `runner_unavailable` | 运行器已关闭或未注入 |
 
 **202 语义**：只表示决策已送达 gate，不表示工具已执行；最终结果以会话日志的 `permission_decision` 为准（批准为 `effective: "allow"` 且 reason 含 `approval_granted`，拒绝为 deny）。HTTP 不返回 `effective`，前端也不本地伪造终态，等待 SSE 更新。
 
-**写端点通用约束**：`POST /api/actions` 与 `POST /api/approvals` 必须携带 `Origin`，且为 loopback、端口等于监听端口，否则 403 `forbidden_origin`；`Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（接受 `charset` 等参数，415），body 上限 64 KiB（413），读取超时 5s（408 `request_timeout`）。`text` 仍保留 8000 字符上限；64 KiB 足以覆盖其最坏 JSON 转义（约 48 KiB）。只读端点仍只校验 `Host` / `Origin`。
+**写端点通用约束**：`POST /api/actions` 与 `POST /api/approvals` 必须携带 `Origin`，且为 loopback、端口等于监听端口，否则 403 `forbidden_origin`；浏览器带 `Sec-Fetch-Site: cross-site` 时同样 403（即使 Origin 是另一个 loopback 页面），非浏览器客户端仍以 `Origin` 为准。`Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（接受 `charset` 等参数，415），body 上限 64 KiB（413），读取超时 5s（408 `request_timeout`）。超时只返回 408，不销毁连接；handler 丢弃剩余 body。`text` 仍保留 8000 字符上限；64 KiB 足以覆盖其最坏 JSON 转义（约 48 KiB）。只读端点仍只校验 `Host` / `Origin`。
 
 **前端发送语义**：追加输入成功后只刷新会话列表，保持当前视图与 SSE 连接，不重载会话；只有新建会话（提交前没有 `activeSessionId`）才按返回的 `sessionId` 切换并订阅。
 
-**失败语义**：审批超时（`approvalTimeoutMs`，默认 120000ms）、用户拒绝、会话中断均不执行工具，日志以 `permission_decision` deny 收尾；迟到决策在运行中返回 410，会话结束后返回 404。服务重启后未决审批丢失，`resumeSession` 会补 `approval_aborted: crash_recovery` 审计。headless demo 与未注入审批桥的库调用仍是 `ask` → deny（`approval_unavailable`）。
+**失败语义**：审批超时（`approvalTimeoutMs`，默认 120000ms）、用户拒绝、会话中断均不执行工具，日志以 `permission_decision` deny 收尾；迟到决策在运行中返回 410，会话结束后返回 404。服务重启后未决审批丢失，`resumeSession` 会补 `approval_aborted: crash_recovery` 审计（按 `requestId` 配对，同 `callId` 的已决审批不会重复补写）。`query` 启动前的失败会写 `interrupted`（`reason: "start_failed"`）。headless demo 与未注入审批桥的库调用仍是 `ask` → deny（`approval_unavailable`）。
 
 **演示**：启动后在输入栏发送需要 `ask` 的指令（默认 `diagnose` 下让 `shell` 执行无害命令，或让 `fs` 写临时文件），页面出现审批卡片；批准后工具执行，拒绝后不执行。过程记录见 `dev-notes/M2-Web审批.md`。
 

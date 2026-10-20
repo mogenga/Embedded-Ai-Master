@@ -234,7 +234,8 @@ describe("createSessionRunner", () => {
 
     const error = await startError(runner, { text: "hi" });
     expect(error.code).toBe("model_unavailable");
-    expect(error.message).toContain(path.join(home, "providers.json"));
+    expect(error.message).toContain("HARNESS_HOME/providers.json");
+    expect(error.message).not.toContain(home);
     expect(error.message).toContain("HARNESS_WEB_MODEL");
   });
 
@@ -245,7 +246,8 @@ describe("createSessionRunner", () => {
 
     const error = await startError(runner, { text: "hi" });
     expect(error.code).toBe("model_unavailable");
-    expect(error.message).toContain(path.join(home, "providers.json"));
+    expect(error.message).toContain("HARNESS_HOME/providers.json");
+    expect(error.message).not.toContain(home);
     expect(error.message).toContain("HARNESS_WEB_MODEL");
   });
 
@@ -257,7 +259,8 @@ describe("createSessionRunner", () => {
 
     const error = await startError(runner, { text: "hi" });
     expect(error.code).toBe("model_unavailable");
-    expect(error.message).toContain(path.join(home, "providers.json"));
+    expect(error.message).toContain("HARNESS_HOME/providers.json");
+    expect(error.message).not.toContain(home);
     expect(error.message).toContain("HARNESS_WEB_MODEL");
   });
 
@@ -269,7 +272,8 @@ describe("createSessionRunner", () => {
 
     const error = await startError(runner, { text: "hi" });
     expect(error.code).toBe("model_unavailable");
-    expect(error.message).toContain(path.join(home, "providers.json"));
+    expect(error.message).toContain("HARNESS_HOME/providers.json");
+    expect(error.message).not.toContain(home);
     expect(error.message).toContain("HARNESS_WEB_MODEL");
   });
 
@@ -352,7 +356,7 @@ describe("createSessionRunner", () => {
 
     const error = await startError(runner, { text: "hi", sessionId: "existing-session" });
     expect(error.code).toBe("session_unreadable");
-    expect(error.message).toContain("会话不可读");
+    expect(error.message).toBe("会话不可读");
     expect(fake.calls).toHaveLength(0);
   });
 

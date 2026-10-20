@@ -507,6 +507,98 @@ describe("approval_request 事件", () => {
     await again.close();
   });
 
+  it("resume 只补同 callId 下真正未决的审批", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    const call = { id: "call-1", name: "shell", arguments: { command: "ls" } };
+    const firstAssistant = await session.append({
+      type: "assistant",
+      payload: { content: "first", toolCalls: [call] },
+    });
+    await session.append({
+      type: "approval_request",
+      payload: {
+        requestId: "req-1",
+        callId: "call-1",
+        tool: "shell",
+        action: "ask",
+        reason: "test:ask",
+        preset: "read-only",
+        paramsDigest: "digest",
+        paramsKeys: ["command"],
+        deadlineAt: "2026-10-20T00:01:00.000Z",
+      },
+    });
+    await session.append({
+      type: "permission_decision",
+      payload: {
+        requestId: "req-1",
+        callId: "call-1",
+        tool: "shell",
+        action: "ask",
+        effective: "allow",
+        reason: "approval_granted",
+        preset: "read-only",
+        source: "builtin",
+        paramsDigest: "digest",
+        paramsKeys: ["command"],
+      },
+    });
+    await session.append({
+      type: "tool_result",
+      payload: { id: "call-1", ok: false, text: "denied", code: "permission_denied" },
+      parent: firstAssistant.seq,
+    });
+    await session.append({
+      type: "assistant",
+      payload: { content: "second", toolCalls: [call] },
+    });
+    await session.append({
+      type: "approval_request",
+      payload: {
+        requestId: "req-2",
+        callId: "call-1",
+        tool: "shell",
+        action: "ask",
+        reason: "test:ask",
+        preset: "read-only",
+        paramsDigest: "digest",
+        paramsKeys: ["command"],
+        deadlineAt: "2026-10-20T00:01:00.000Z",
+      },
+    });
+    await session.close();
+
+    const resumed = await resumeSession(dir);
+    const recoveryDecisions = resumed
+      .events()
+      .filter(
+        (event) =>
+          event.type === "permission_decision" &&
+          event.payload.reason === "approval_aborted: crash_recovery",
+      );
+    expect(recoveryDecisions).toHaveLength(1);
+    expect(recoveryDecisions[0]!.payload).toMatchObject({
+      requestId: "req-2",
+      callId: "call-1",
+      effective: "deny",
+    });
+    expect(recoveryDecisions[0]!.payload.requestId).not.toBe("req-1");
+    await resumed.close();
+
+    const again = await resumeSession(dir);
+    expect(
+      again
+        .events()
+        .filter(
+          (event) =>
+            event.type === "permission_decision" &&
+            event.payload.reason === "approval_aborted: crash_recovery",
+        ),
+    ).toHaveLength(1);
+    await again.close();
+  });
+
   it("resume 跳过 preset 非法的 approval_request,不补 permission_decision", async () => {
     const dir = makeTempDir();
     const session = await createSession(dir);

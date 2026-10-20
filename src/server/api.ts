@@ -158,6 +158,11 @@ function requireMethod(method: string, expected: string): void {
 
 function requireWriteRequest(req: IncomingMessage, port: number | undefined): void {
   requireLocalRequest(req, port);
+  // 浏览器跨源页面（含 localhost 上的 dev 代理页面）会自动带上该头；非浏览器客户端
+  // 不发送它，仍由 Origin 校验兜底。
+  if (req.headers["sec-fetch-site"] === "cross-site") {
+    throw new HttpError(403, "forbidden_origin", "写请求不允许浏览器跨源发起");
+  }
   if (req.headers.origin === undefined) {
     throw new HttpError(403, "forbidden_origin", "写请求必须携带 Origin");
   }

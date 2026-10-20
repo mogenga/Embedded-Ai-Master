@@ -94,6 +94,7 @@ function decisionFor(
   overrides: Partial<PermissionRequest> = {},
 ): PermissionRequest {
   return {
+    requestId: `req-${input.callId}`,
     callId: input.callId,
     tool: input.tool.name,
     args: input.args,
@@ -168,6 +169,7 @@ describe("query 权限审计", () => {
       expect(audits[index]!.seq).toBeLessThan(results[index]!.seq);
     }
     expect(audits[0]!.payload).toStrictEqual({
+      requestId: "req-c1",
       callId: "c1",
       tool: "echo",
       action: "allow",

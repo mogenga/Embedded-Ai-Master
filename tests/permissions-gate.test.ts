@@ -133,7 +133,10 @@ describe("createPermissionGate", () => {
   it("passes approval context including deadline and params summary to the prompter", async () => {
     const fixture = deferredPrompter();
     const captured = await firstPromptRequest(fixture);
-    expect(captured.requestId).toBe("call-1");
+    expect(captured.requestId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(captured.requestId).not.toBe(captured.callId);
     expect(captured.callId).toBe("call-1");
     expect(captured.access).toBe("write");
     expect(captured.deadlineAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
@@ -141,6 +144,27 @@ describe("createPermissionGate", () => {
     expect(captured.paramsDigest).toMatch(/^[a-f0-9]{16}$/);
     expect(captured.paramsKeys).toEqual(["op"]);
     expect(captured.paramsPreview).toEqual({ op: "write" });
+  });
+
+  it("同一 callId 的多次审批使用不同的 requestId", async () => {
+    const fixture = deferredPrompter();
+    const gate = createPermissionGate({ preset: "diagnose", rules: [], prompter: fixture.prompter });
+
+    const first = check(gate, "call-1", shell, { op: "write" });
+    await flush();
+    const firstReq = fixture.requests[0]!.req;
+    fixture.requests[0]!.resolve("allow");
+    await first;
+
+    const second = check(gate, "call-1", shell, { op: "write" });
+    await flush();
+    const secondReq = fixture.requests[1]!.req;
+    fixture.requests[1]!.resolve("allow");
+    await second;
+
+    expect(firstReq.requestId).not.toBe(secondReq.requestId);
+    expect(firstReq.callId).toBe("call-1");
+    expect(secondReq.callId).toBe("call-1");
   });
 
   it("denies when the prompter denies", async () => {

@@ -117,7 +117,7 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner;
 - `start` 校验：`text` 为字符串、去空白后非空、长度 ≤ `maxTextLength`（默认 8000）；否则抛 `RunnerInputError(code: "invalid_text")`。HTTP body 上限为 64 KiB，足以容纳 8000 个 UTF-16 单元的最坏 JSON 转义（约 48 KiB），因此上限不会在校验前误伤合法输入。
 - **受理边界**：`start` 必须等到会话 `header.json` 已落盘（即 `runSession` 调用 `onSession` 之后）才返回 202。实现用 readiness promise + 运行 promise 竞速；`readyTimeoutMs`（默认 10s）内未就绪则 abort 并抛 `session_start_timeout`。generator 在就绪前失败时把错误映射为对应的受理前错误（模型/配置），不留半成品会话目录由 `runSession` 自身清理。无法归类的启动失败（会话锁冲突、日志损坏、IO）保留现有 `model_unavailable` HTTP code 以维持契约，但 message 必须明确「会话启动失败」而不是声称模型不可用。
 - `sessionId` 缺省：生成 `randomUUID()`，作为新会话 id 传给 `runSession({ sessionId })`，返回 `created: true`。
-- 带 `sessionId`：先校验 `isValidSessionId`，再检查 `<harnessHome>/sessions/<id>/header.json` 是否存在；**header 检查先于 providers 解析**，未知会话优先返回 404，而不是 providers 缺失的 503。错误分型：`ENOENT` / `ENOTDIR` → `unknown_session`；header 损坏（`SessionCorruptionError`）→ `session_corrupt`（message 以「会话 header 损坏」开头）；`EACCES` / `EPERM` → `session_unreadable`（message 以「会话不可读」开头）；其他错误原样抛出，不伪装成未知会话。存在则读取 header，**使用 `header.model` 作为模型引用、省略 `cwd`**（让 `runSession` 回落到 `header.workdir`），调用 `runSession({ resume: true, sessionDir, sessionId })`，返回 `created: false`。header 无 `model` 时回落到默认模型。
+- 带 `sessionId`：先校验 `isValidSessionId`，再检查 `<harnessHome>/sessions/<id>/header.json` 是否存在；**header 检查先于 providers 解析**，未知会话优先返回 404，而不是 providers 缺失的 503。错误分型：`ENOENT` / `ENOTDIR` → `unknown_session`；header 损坏（`SessionCorruptionError`）→ `session_corrupt`（message 以「会话 header 损坏」开头）；`EACCES` / `EPERM` → `session_unreadable`（message 固定为「会话不可读」，不回传底层错误文本）；其他错误原样抛出，不伪装成未知会话。存在则读取 header，**使用 `header.model` 作为模型引用、省略 `cwd`**（让 `runSession` 回落到 `header.workdir`），调用 `runSession({ resume: true, sessionDir, sessionId })`，返回 `created: false`。header 无 `model` 时回落到默认模型。
 - 同一 `sessionId` 已有运行中的 promise → `session_busy`；运行 promise settle 后从注册表移除，并允许下一次追加。
 - `close()` 之后的 `start` 抛 `runner_unavailable`（HTTP 503），与未注入 runner 的场景共用同一 code。
 - 运行器维护 `Map<sessionId, RunningSession>`，`RunningSession` 含 `controller: AbortController`、`completion: Promise<void>`、`ready: Promise<void>`、`bridge: ApprovalBridge`。
@@ -161,8 +161,8 @@ export interface ApprovalBridge extends PermissionPrompter {
 
 ```ts
 export interface PermissionPromptRequest {
-  requestId: string;        // = callId
-  callId: string;           // 保留显式字段，便于阅读
+  requestId: string;        // 每次 check 生成的独立 UUID，与 callId 解耦
+  callId: string;           // 模型工具调用 id，可跨轮复用
   tool: string;
   args: unknown;
   reason: string;
@@ -176,6 +176,8 @@ export interface PermissionPromptRequest {
 }
 ```
 
+- `gate.ts` 在 `check` 中为每次审批生成 `requestId = randomUUID()`；`callId` 保持模型原始值。同一 `callId` 跨轮复用不会让两次审批共享标识（迟到决策、崩溃恢复配对都按 `requestId`）。
+- `PermissionRequest` 同步增加 `requestId: string`，`permission_decision` 写入该值。
 - `gate.ts` 在调用 prompter 时传入上述完整对象；`deadlineAt` 由入队时计算出的 deadline 转 ISO。
 - 这是 additive 扩展：现有 prompter 实现忽略额外字段仍可用。既有精确断言需同步更新。
 - `approvalTimeoutMs`、串行队列、abort、错误限长逻辑不变。
@@ -191,7 +193,7 @@ export interface RunOptions {
 ```
 
 - `home` 用于让宿主显式指定 `HARNESS_HOME`，`runSession` 内部所有 `resolveHarnessHome()` 调用改用它；缺省行为不变。
-- `onSession` 在 `createSession` / `resumeSession` 成功后、首个 `append` 之前、`try` 块内调用；回调抛错按启动失败处理，`finally` 负责关闭会话与释放锁。
+- `onSession` 在 `createSession` / `resumeSession` 成功后、首个 `append` 之前、`try` 块内调用；回调抛错按启动失败处理，`finally` 负责关闭会话与释放锁。失败发生在 `query` 启动前时，`runSession` 在会话日志追加 `{ type: "interrupted", payload: { reason: "start_failed" } }`（append 自身失败被吞掉，不覆盖原始错误）。
 - 仅用于宿主绑定会话（本轮是 Web 审批桥），不加领域逻辑；`docs/deferred-issues.md` 记录“暴露 handle 给宿主”的边界。
 
 ## 9. 事件模型
@@ -222,20 +224,21 @@ export interface ApprovalRequestPayload {
 - `context/build.ts` 忽略该类型（与 `permission_decision` 同组），不进入模型消息。
 - `ui/view/transcript.ts` 投影规则：
   - `approval_request` → `{ kind: "approval", approval: { requestId, callId, tool, reason, preset, paramsPreviewText?, deadlineAt, status: "pending" } }`。
-  - `permission_decision` 到达时若存在同 `callId` 的 pending approval：更新其 `status`（`allow` → `allowed`；`deny` 且 `reason` 以 `approval_timeout` 开头 → `expired`；`deny` 且 `reason` 以 `approval_aborted` 开头 → `aborted`；其他 deny → `denied`），不再额外生成 `permission` 事件。
+  - `permission_decision` 到达时优先按 `payload.requestId` 匹配 pending approval：更新其 `status`（`allow` → `allowed`；`deny` 且 `reason` 以 `approval_timeout` 开头 → `expired`；`deny` 且 `reason` 以 `approval_aborted` 开头 → `aborted`；其他 deny → `denied`），不再额外生成 `permission` 事件。只有旧日志缺 `requestId` 时才回退到同 `callId` 最近一个 pending approval；工具卡片始终按 `callId` 更新。
   - 找不到对应 approval 时保持现有 `permission` 事件行为。
 - `paramsPreviewText` 由投影层把 `paramsPreview` 扁平化为 `key=value` 文本（字符串截断 200 字符，最多 8 个键），仅用于展示，不写回日志。
 
 ### 9.2 崩溃恢复
 
-- `planCrashRecovery` 增加：扫描日志中无对应 `permission_decision`（同 `callId`）的 `approval_request`，在既有恢复批次中补一条：
+- `planCrashRecovery` 增加：扫描日志中无对应 `permission_decision` 的 `approval_request`，在既有恢复批次中补一条：
   ```ts
   { type: "permission_decision", payload: {
-      callId, tool, action: "ask", effective: "deny",
+      requestId, callId, tool, action: "ask", effective: "deny",
       reason: "approval_aborted: crash_recovery", preset, source: "builtin",
       paramsDigest, paramsKeys
   } }
   ```
+  配对按 `requestId`（收集 `permission_decision.payload.requestId`），不再使用全局 `callId` 集合；`approval_request` 缺非空 `requestId` 时跳过，不补决策。写入时同时带 `requestId`，保证再次 resume 不会重复补写。
   不设置 `parent`：`approval_request` 由 prompter 写入，`BatchCall` 不含 assistant seq；`parent` 是可选字段，`buildMessages` 忽略该事件类型，不影响投影。不新增 `interrupted` 语义；已有 `interrupted` 补写逻辑保持不变。
 - 该恢复只在 `resumeSession` 时发生；Web 页面在服务未运行时按 `deadlineAt` 显示过期提示，不伪造决策。
 
@@ -244,9 +247,10 @@ export interface ApprovalRequestPayload {
 ### 10.1 写请求通用约束
 
 - `POST /api/actions` 与 `POST /api/approvals` 必须带 `Origin`，且 `Origin` 为 loopback、端口等于监听端口（`requireWriteRequest`）。缺少 `Origin` → 403 `forbidden_origin`；非 POST → 405 `method_not_allowed`。
+- 浏览器跨源：请求携带 `Sec-Fetch-Site: cross-site` 时直接 403 `forbidden_origin`，即使 `Origin` 是另一个 loopback 页面（例如 dev 代理页面）。该头由浏览器自动发送；非浏览器客户端不发送，仍由 `Origin` 校验兜底。
 - `Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（允许 `; charset=utf-8` 等参数；`application/jsonp` 不放行），否则 415 `unsupported_media_type`。
 - Body 上限 64 KiB；超出 413 `payload_too_large`；JSON 解析失败或非普通对象 → 400 `invalid_body`。`text` 的 8000 字符上限不变；64 KiB 覆盖其最坏 JSON 转义（每 UTF-16 单元最多 6 字节，约 48 KiB）。
-- 读取超时 5s → 408 `request_timeout`；客户端断开按 400/无响应处理，不留下 pending。
+- 读取超时 5s → 408 `request_timeout`：超时只让 `readJsonBody` 以 408 拒绝，不销毁 socket；handler 的 catch 执行 `req.resume()` 丢弃剩余 body 后写出 408 响应。客户端断开按 400/无响应处理，不留下 pending。
 - 成功统一 202 + JSON；错误复用 `{ error: { code, message } }`。
 - 现有只读路由的 `requireLocalRequest` 行为不变。
 
@@ -281,14 +285,14 @@ export interface ApprovalRequestPayload {
 | 503 | `session_start_timeout` | `readyTimeoutMs` 内会话未就绪（runner 已 abort） |
 | 503 | `runner_unavailable` | 运行器已关闭或未注入 |
 
-`model_unavailable` 的 message 必须说明检查 `~/.harness/providers.json` 与 `HARNESS_WEB_MODEL`；`session_start_timeout` 的 message 说明会话未创建成功。
+`model_unavailable` 的 message 必须说明检查 `HARNESS_HOME/providers.json` 与 `HARNESS_WEB_MODEL`，且不得包含本机绝对路径（home 路径在消息中脱敏为 `HARNESS_HOME`）；`session_start_timeout` 的 message 说明会话未创建成功。`session_unreadable` 只返回「会话不可读」，不回传底层 `EACCES` 详情。
 
 ### 10.3 `POST /api/approvals`
 
 请求：
 
 ```json
-{ "sessionId": "uuid", "requestId": "call-1", "decision": "allow" }
+{ "sessionId": "uuid", "requestId": "6f1c2b0e-...", "decision": "allow" }
 ```
 
 响应：
@@ -307,7 +311,7 @@ export interface ApprovalRequestPayload {
 | 500 | `session_unreadable` | 追加会话的 header 不可读（EACCES/EPERM） |
 | 503 | `runner_unavailable` | 运行器已关闭或未注入 |
 
-- `requestId` 只允许 1..200 个可打印 ASCII 字符（`\x20-\x7E`）；`sessionId` 用 `isValidSessionId`。两者校验失败均为 400 `invalid_body` / `invalid_session_id`。
+- `requestId` 是权限 gate 为每次审批生成的独立 UUID（与模型 `callId` 解耦，`callId` 可在跨轮复用）；只允许 1..200 个可打印 ASCII 字符（`\x20-\x7E`）。`sessionId` 用 `isValidSessionId`。两者校验失败均为 400 `invalid_body` / `invalid_session_id`。
 - 202 只表示决策已送达 gate；最终结果以 `permission_decision` 事件为准，HTTP 不返回 `effective`。
 - 不记录请求 body 到日志。
 

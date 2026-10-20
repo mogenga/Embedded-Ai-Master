@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { digestParams, summarizeParams } from "./audit.js";
 import { PermissionConfigError } from "./errors.js";
 import { evaluatePolicy } from "./policy.js";
@@ -220,7 +221,9 @@ export function createPermissionGate(opts: PermissionGateOptions): PermissionGat
         : "deny";
 
       const summary = summarizeParams(input.args);
+      const requestId = randomUUID();
       const request: PermissionRequest = {
+        requestId,
         callId: input.callId,
         tool: input.tool.name,
         args: input.args,
@@ -249,7 +252,7 @@ export function createPermissionGate(opts: PermissionGateOptions): PermissionGat
 
       const outcome = await requestApproval(
         {
-          requestId: request.callId,
+          requestId,
           callId: request.callId,
           tool: request.tool,
           args: request.args,

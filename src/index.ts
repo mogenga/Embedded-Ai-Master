@@ -527,6 +527,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   }
 
   let hasPrimaryError = false;
+  let queryStarted = false;
   let mcpManager: McpManager | undefined;
   let statusQueue: Promise<void> = Promise.resolve();
   const seenMcpStatuses = new Set<string>();
@@ -700,12 +701,19 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       ...(compactor !== undefined ? { compactor } : {}),
     };
 
+    queryStarted = true;
     yield* query(ctx, opts.input, {
       maxTurns: opts.maxTurns ?? 10,
       maxCostUsd: opts.maxCostUsd,
     });
   } catch (error) {
     hasPrimaryError = true;
+    if (!queryStarted) {
+      // 启动阶段失败（如 onSession 抛错）也要留痕；append 失败不得覆盖原始错误。
+      try {
+        await session.append({ type: "interrupted", payload: { reason: "start_failed" } });
+      } catch {}
+    }
     throw error;
   } finally {
     let closeError: unknown;

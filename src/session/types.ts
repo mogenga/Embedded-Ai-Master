@@ -124,6 +124,7 @@ export type CompactionPayload =
   | { kind: "failed"; reason: string; stage: "microcompact" | "summary" };
 
 export interface PermissionDecisionPayload {
+  requestId?: string;
   callId: string;
   tool: string;
   action: PermissionAction;

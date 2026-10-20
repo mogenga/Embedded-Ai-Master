@@ -168,6 +168,23 @@ describe("ApprovalBridge", () => {
     await expect(first).resolves.toBe("allow");
   });
 
+  it("旧 requestId 的迟到决策不会命中同 callId 的新审批", async () => {
+    const bridge = createApprovalBridge();
+    bridge.bindSession(fakeHandle());
+    const oldRequest = bridge.request(promptReq("req-old", { callId: "call-1" }));
+    await flush();
+    expect(bridge.decide("req-old", "allow")).toEqual({ kind: "accepted" });
+    await oldRequest;
+
+    const newRequest = bridge.request(promptReq("req-new", { callId: "call-1" }));
+    await flush();
+    expect(bridge.pendingCount()).toBe(1);
+    expect(bridge.decide("req-old", "deny").kind).not.toBe("accepted");
+    expect(bridge.pendingCount()).toBe(1);
+    expect(bridge.decide("req-new", "deny")).toEqual({ kind: "accepted" });
+    await expect(newRequest).resolves.toBe("deny");
+  });
+
   it("相同决策重复返回 duplicate", async () => {
     const bridge = createApprovalBridge();
     bridge.bindSession(fakeHandle());

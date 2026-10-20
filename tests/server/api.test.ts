@@ -538,6 +538,20 @@ describe("ui api", () => {
     expect(JSON.parse(res.body)).toMatchObject({ error: { code: "forbidden_origin" } });
   });
 
+  it("拒绝浏览器跨源写请求（Sec-Fetch-Site: cross-site）", async () => {
+    const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
+    close = s.close;
+    const res = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      { ...writeHeaders(s.port), "sec-fetch-site": "cross-site" },
+      JSON.stringify({ text: "hi" }),
+    );
+    expect(res.status).toBe(403);
+    expect(errorCode(res.body)).toBe("forbidden_origin");
+  });
+
   it("允许 loopback Host 与同源 Origin", async () => {
     const s = createUiServer({ harnessHome: makeHome() });
     close = s.close;

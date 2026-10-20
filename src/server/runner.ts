@@ -91,7 +91,7 @@ function mapHeaderError(error: unknown, sessionId: string): never {
     throw new RunnerError("unknown_session", `会话不存在: ${sessionId}`);
   }
   if (code === "EACCES" || code === "EPERM") {
-    throw new RunnerError("session_unreadable", `会话不可读: ${messageOf(causeOf(error) ?? error)}`);
+    throw new RunnerError("session_unreadable", "会话不可读");
   }
   if (error instanceof SessionCorruptionError) {
     throw new RunnerError("session_corrupt", `会话 header 损坏: ${messageOf(error)}`);
@@ -125,7 +125,19 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
   }
 
   function modelUnavailableMessage(detail: string): string {
-    return `${detail}；请检查配置文件 ${path.join(opts.harnessHome, "providers.json")}，或设置环境变量 HARNESS_WEB_MODEL 指定模型引用`;
+    return `${redactHomePath(detail)}；请检查 HARNESS_HOME/providers.json 与 HARNESS_WEB_MODEL`;
+  }
+
+  function redactHomePath(text: string): string {
+    let result = text;
+    const variants = new Set([opts.harnessHome, path.resolve(opts.harnessHome)]);
+    for (const variant of variants) {
+      if (variant === "") continue;
+      result = result.split(variant).join("HARNESS_HOME");
+      const posix = variant.split(path.sep).join("/");
+      if (posix !== variant) result = result.split(posix).join("HARNESS_HOME");
+    }
+    return result;
   }
 
   function resolveProviders(): ProvidersConfig {

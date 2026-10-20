@@ -41,6 +41,7 @@ export interface PermissionCheckInput {
 }
 
 export interface PermissionRequest {
+  requestId: string;
   callId: string;
   tool: string;
   args: unknown;

@@ -65,6 +65,7 @@ function decisionFor(
   overrides: Partial<PermissionRequest> = {},
 ): PermissionRequest {
   return {
+    requestId: `req-${input.callId}`,
     callId: input.callId,
     tool: input.tool.name,
     args: input.args,

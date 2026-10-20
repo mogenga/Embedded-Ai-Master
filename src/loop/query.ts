@@ -430,6 +430,7 @@ export async function* query(
           gate,
           onDecision: async (call, decision) => {
             const payload: PermissionDecisionPayload = {
+              requestId: decision.requestId,
               callId: decision.callId,
               tool: decision.tool,
               action: decision.action,
