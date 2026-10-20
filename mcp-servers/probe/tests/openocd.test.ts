@@ -383,6 +383,75 @@ describe("OpenOcdBackend 错误传播", () => {
     expect(transport.commands).toEqual(["mww 0x20000000 0x04030201"]);
   });
 
+  it("abort 后重建 transport，旧命令迟到输出不会命中下一条命令", async () => {
+    const controller = new AbortController();
+    const transports: FakeTransport[] = [];
+    let resolveStale: ((value: string) => void) | undefined;
+    let first = true;
+    const backend = new OpenOcdBackend({
+      existsImpl: () => true,
+      resolveImpl: () => true,
+      transportFactory: async () => {
+        if (first) {
+          first = false;
+          const stale = new Promise<string>((resolve) => {
+            resolveStale = resolve;
+          });
+          const transport = new FakeTransport(() => stale);
+          transports.push(transport);
+          return transport;
+        }
+        const transport = new FakeTransport(() => "0x20000000: aabbccdd");
+        transports.push(transport);
+        return transport;
+      },
+    });
+    await backend.attach({ monitorPort: 4444 });
+
+    const pending = backend.readMemory(0x20000000, 4, controller.signal);
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    expect(await codeOf(() => pending)).toBe("aborted");
+    resolveStale?.("0x20000000: 11111111");
+
+    const result = await backend.readMemory(0x20000000, 4);
+    expect(result.hex).toBe("ddccbbaa");
+    expect(transports).toHaveLength(2);
+    expect(transports[0].closeCount).toBe(1);
+    expect(transports[0].commands).toEqual(["mdw 0x20000000 1"]);
+    expect(transports[1].commands).toEqual(["mdw 0x20000000 1"]);
+  });
+
+  it("abort 后 transport 重建失败抛 transport_reset_required", async () => {
+    const controller = new AbortController();
+    const transports: FakeTransport[] = [];
+    let factoryCalls = 0;
+    const backend = new OpenOcdBackend({
+      existsImpl: () => true,
+      resolveImpl: () => true,
+      transportFactory: async () => {
+        factoryCalls += 1;
+        if (factoryCalls === 1) {
+          const transport = new FakeTransport(() => new Promise<string>(() => {}));
+          transports.push(transport);
+          return transport;
+        }
+        throw new Error("connect ECONNREFUSED");
+      },
+    });
+    await backend.attach();
+
+    const pending = backend.readMemory(0x20000000, 4, controller.signal);
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    expect(await codeOf(() => pending)).toBe("aborted");
+
+    expect(await codeOf(() => backend.halt())).toBe("transport_reset_required");
+    expect(factoryCalls).toBe(2);
+    expect(transports[0].closeCount).toBe(1);
+    expect(backend.status().probe).toBe("detached");
+  });
+
   it("attach 时 transportFactory 失败会传播且保持未连接", async () => {
     const backend = new OpenOcdBackend({
       existsImpl: () => true,

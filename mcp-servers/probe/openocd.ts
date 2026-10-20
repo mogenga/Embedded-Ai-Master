@@ -45,6 +45,13 @@ interface PendingCommand {
   timer: NodeJS.Timeout;
 }
 
+class TelnetTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`telnet 命令超时(${timeoutMs}ms)`);
+    this.name = "TelnetTimeoutError";
+  }
+}
+
 function toHex(address: number): string {
   return `0x${address.toString(16)}`;
 }
@@ -249,7 +256,7 @@ function createTelnetTransport(
             const timer = setTimeout(() => {
               if (pending?.command !== command) return;
               pending = undefined;
-              rejectSend(new Error(`telnet 命令超时(${timeoutMs}ms)`));
+              rejectSend(new TelnetTimeoutError(timeoutMs));
             }, timeoutMs);
             pending = { command, resolve: resolveSend, reject: rejectSend, timer };
             socket.write(`${command}\n`);
@@ -275,6 +282,8 @@ export class OpenOcdBackend implements ProbeBackend {
 
   private transport?: TelnetTransport;
   private attached = false;
+  private desynced = false;
+  private activePort: number;
   private cpu: DeviceStatus["cpu"] = "unknown";
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -282,6 +291,7 @@ export class OpenOcdBackend implements ProbeBackend {
     this.openocdPath = options.openocdPath ?? DEFAULT_OPENOCD_PATH;
     this.host = options.host ?? DEFAULT_OPENOCD_HOST;
     this.monitorPort = options.monitorPort ?? DEFAULT_OPENOCD_TELNET_PORT;
+    this.activePort = this.monitorPort;
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_TELNET_TIMEOUT_MS;
     this.existsImpl = options.existsImpl ?? ((path) => existsSync(path));
     this.resolveImpl = options.resolveImpl ?? resolveOnPath;
@@ -303,6 +313,7 @@ export class OpenOcdBackend implements ProbeBackend {
     const stale = this.transport;
     this.transport = undefined;
     this.attached = false;
+    this.desynced = false;
     if (stale) {
       try {
         await stale.close();
@@ -330,6 +341,7 @@ export class OpenOcdBackend implements ProbeBackend {
     }
 
     this.transport = transport;
+    this.activePort = port;
     this.attached = true;
     this.cpu = "unknown";
     return this.status();
@@ -339,6 +351,7 @@ export class OpenOcdBackend implements ProbeBackend {
     const transport = this.transport;
     this.transport = undefined;
     this.attached = false;
+    this.desynced = false;
     this.cpu = "unknown";
     if (!transport) return;
     await transport.close();
@@ -504,10 +517,9 @@ export class OpenOcdBackend implements ProbeBackend {
   }
 
   private sendCommand(command: string, signal?: AbortSignal): Promise<string> {
-    const transport = this.requireAttached();
     const run = this.queue.then(
-      () => this.execute(transport, command, signal),
-      () => this.execute(transport, command, signal),
+      () => this.execute(command, signal),
+      () => this.execute(command, signal),
     );
     this.queue = run.then(
       () => undefined,
@@ -516,16 +528,59 @@ export class OpenOcdBackend implements ProbeBackend {
     return run;
   }
 
-  private async execute(
-    transport: TelnetTransport,
-    command: string,
-    signal?: AbortSignal,
-  ): Promise<string> {
+  private async acquireTransport(): Promise<TelnetTransport> {
+    if (this.desynced) await this.resetTransport();
+    return this.requireAttached();
+  }
+
+  private async resetTransport(): Promise<void> {
+    const stale = this.transport;
+    this.transport = undefined;
+    if (stale) {
+      try {
+        await stale.close();
+      } catch {
+        // 旧 transport 关闭失败不阻塞重建。
+      }
+    }
+
+    let transport: TelnetTransport;
+    try {
+      transport = await this.transportFactory(this.host, this.activePort);
+    } catch (error) {
+      this.attached = false;
+      this.cpu = "unknown";
+      throw new ProbeBackendError(
+        "transport_reset_required",
+        `OpenOCD transport 重建失败(${this.host}:${this.activePort})，请重新 attach: ${errorMessage(error)}`,
+      );
+    }
+
+    this.transport = transport;
+    this.attached = true;
+    this.desynced = false;
+  }
+
+  private async execute(command: string, signal?: AbortSignal): Promise<string> {
     throwIfAborted(signal);
+    const transport = await this.acquireTransport();
+    throwIfAborted(signal);
+
     let output: string;
     try {
       output = await awaitWithAbort(transport.send(command), signal);
     } catch (error) {
+      if (signal?.aborted === true) {
+        this.desynced = true;
+        throw new ProbeBackendError("aborted", "请求已取消");
+      }
+      if (error instanceof TelnetTimeoutError) {
+        this.desynced = true;
+        throw new ProbeBackendError(
+          "backend_error",
+          `OpenOCD 命令执行失败(${command}): ${errorMessage(error)}`,
+        );
+      }
       if (error instanceof ProbeBackendError) throw error;
       throw new ProbeBackendError(
         "backend_error",

@@ -77,15 +77,25 @@ async function flush(): Promise<void> {
 
 function createMonitor(options: Partial<RenodeMonitorOptions> = {}) {
   const spawn = createFakeSpawn();
-  const socket = new FakeSocket();
+  const first = new FakeSocket();
+  const sockets: FakeSocket[] = [first];
+  let firstUsed = false;
   const monitor = new RenodeMonitor({
     monitorPort: DEFAULT_MONITOR_PORT,
     platform: "test-platform",
     spawnImpl: spawn.spawnImpl,
-    connectImpl: async () => socket,
+    connectImpl: async () => {
+      if (!firstUsed) {
+        firstUsed = true;
+        return first;
+      }
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
     ...options,
   });
-  return { monitor, spawn, socket };
+  return { monitor, spawn, sockets, socket: first };
 }
 
 describe("RenodeMonitor", () => {
@@ -182,8 +192,8 @@ describe("RenodeMonitor", () => {
     await monitor.stop();
   });
 
-  it("命令超时 reject 且后续命令仍可执行", async () => {
-    const { monitor, socket } = createMonitor({ commandTimeoutMs: 20 });
+  it("命令超时 reject，重连后丢弃迟到响应", async () => {
+    const { monitor, sockets } = createMonitor({ commandTimeoutMs: 20 });
     await monitor.start();
 
     const slow = monitor.send("slow");
@@ -191,30 +201,65 @@ describe("RenodeMonitor", () => {
 
     const next = monitor.send("version");
     await flush();
-    socket.emit("(machine-0) version\r\nok\r\n(machine-0) ");
+    expect(sockets).toHaveLength(2);
+    expect(sockets[0].closed).toBe(true);
+
+    sockets[0].emit("(machine-0) slow\r\nSTALE-TIMEOUT\r\n(machine-0) ");
+    sockets[1].emit("(machine-0) version\r\nok\r\n(machine-0) ");
     await expect(next).resolves.toBe("ok");
 
     await monitor.stop();
   });
 
-  it("send 在途 abort 后立即 reject 并释放队列", async () => {
+  it("send 在途 abort 后立即 reject 并在下一条命令前重连", async () => {
     const controller = new AbortController();
-    const { monitor, socket } = createMonitor();
+    const { monitor, sockets } = createMonitor();
     await monitor.start();
 
     const pending = monitor.send("version", controller.signal);
     await flush();
-    expect(socket.writes).toEqual(["version\n"]);
+    expect(sockets[0].writes).toEqual(["version\n"]);
 
     controller.abort();
     await expect(pending).rejects.toThrow(/取消/);
 
     const next = monitor.send("machine");
     await flush();
-    expect(socket.writes).toEqual(["version\n", "machine\n"]);
+    expect(sockets).toHaveLength(2);
+    expect(sockets[0].closed).toBe(true);
+    expect(sockets[0].writes).toEqual(["version\n"]);
+    expect(sockets[1].writes).toEqual(["machine\n"]);
 
-    socket.emit("(machine-0) machine\r\nname: m\r\n(machine-0) ");
+    sockets[0].emit("(machine-0) version\r\nSTALE-ABORT\r\n(machine-0) ");
+    sockets[1].emit("(machine-0) machine\r\nname: m\r\n(machine-0) ");
     await expect(next).resolves.toBe("name: m");
+
+    await monitor.stop();
+  });
+
+  it("abort 后重连失败时明确报错，不静默继续", async () => {
+    const controller = new AbortController();
+    const socket = new FakeSocket();
+    let connectCalls = 0;
+    const { monitor } = createMonitor({
+      connectImpl: async () => {
+        connectCalls += 1;
+        if (connectCalls === 1) return socket;
+        throw new Error("ECONNREFUSED");
+      },
+      connectRetries: 1,
+      connectRetryDelayMs: 0,
+    });
+    await monitor.start();
+
+    const pending = monitor.send("version", controller.signal);
+    await flush();
+    controller.abort();
+    await expect(pending).rejects.toThrow(/取消/);
+
+    await expect(monitor.send("machine")).rejects.toThrow(/重连失败/);
+    expect(connectCalls).toBe(2);
+    expect(socket.writes).toEqual(["version\n"]);
 
     await monitor.stop();
   });

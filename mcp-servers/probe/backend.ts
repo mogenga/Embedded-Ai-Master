@@ -45,6 +45,7 @@ export type ProbeErrorCode =
   | "aborted"
   | "serial_already_open"
   | "verification_failed"
+  | "transport_reset_required"
   | "backend_unavailable"
   | "backend_error";
 

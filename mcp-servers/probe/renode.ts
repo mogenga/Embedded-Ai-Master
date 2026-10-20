@@ -37,6 +37,8 @@ export interface RenodeMonitorOptions {
   spawnImpl?: (command: string, args: string[]) => RenodeProcess;
   connectImpl?: (port: number) => Promise<MonitorSocket>;
   commandTimeoutMs?: number;
+  connectRetries?: number;
+  connectRetryDelayMs?: number;
 }
 
 export class RenodeCommandError extends Error {
@@ -176,12 +178,15 @@ export class RenodeMonitor {
   private readonly spawnImpl: (command: string, args: string[]) => RenodeProcess;
   private readonly connectImpl: (port: number) => Promise<MonitorSocket>;
   private readonly commandTimeoutMs: number;
+  private readonly connectRetries: number;
+  private readonly connectRetryDelayMs: number;
 
   private child?: RenodeProcess;
   private childExit?: Promise<void>;
   private socket?: MonitorSocket;
   private pending?: PendingCommand;
   private connectedFlag = false;
+  private desynced = false;
   private queue: Promise<unknown> = Promise.resolve();
   private startPromise?: Promise<void>;
   private stopPromise?: Promise<void>;
@@ -193,6 +198,8 @@ export class RenodeMonitor {
     this.spawnImpl = options.spawnImpl ?? spawnRenode;
     this.connectImpl = options.connectImpl ?? createSocket;
     this.commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    this.connectRetries = options.connectRetries ?? CONNECT_RETRIES;
+    this.connectRetryDelayMs = options.connectRetryDelayMs ?? CONNECT_RETRY_DELAY_MS;
   }
 
   get connected(): boolean {
@@ -239,20 +246,20 @@ export class RenodeMonitor {
     this.childExit = new Promise<void>((resolve) => {
       child.onExit(() => {
         if (this.child === child) this.child = undefined;
-        this.handleClose();
+        this.handleProcessExit();
         resolve();
       });
     });
 
     let socket: MonitorSocket | undefined;
     let lastError: unknown;
-    for (let attempt = 0; attempt < CONNECT_RETRIES; attempt++) {
+    for (let attempt = 0; attempt < this.connectRetries; attempt++) {
       try {
         socket = await this.connectImpl(this.monitorPort);
         break;
       } catch (error) {
         lastError = error;
-        await delay(CONNECT_RETRY_DELAY_MS);
+        if (attempt + 1 < this.connectRetries) await delay(this.connectRetryDelayMs);
       }
     }
 
@@ -269,19 +276,23 @@ export class RenodeMonitor {
       throw new Error("Renode monitor 在启动过程中被停止");
     }
 
-    this.socket = socket;
+    const connectedSocket: MonitorSocket = socket;
+    this.socket = connectedSocket;
     this.connectedFlag = true;
-    socket.onData((chunk) => this.handleData(chunk));
-    socket.onClose(() => this.handleClose());
+    this.desynced = false;
+    connectedSocket.onData((chunk) => this.handleData(connectedSocket, chunk));
+    connectedSocket.onClose(() => this.handleSocketClose(connectedSocket));
   }
 
-  private execute(command: string, signal?: AbortSignal): Promise<string> {
+  private async execute(command: string, signal?: AbortSignal): Promise<string> {
+    if (signal?.aborted === true) {
+      throw new RenodeCommandError(command, "", "Renode 命令已取消");
+    }
+    if (this.desynced) await this.reconnect(command);
+
     const socket = this.socket;
     if (!socket || !this.connectedFlag) {
-      return Promise.reject(new RenodeCommandError(command, "", "Renode monitor 未连接"));
-    }
-    if (signal?.aborted === true) {
-      return Promise.reject(new RenodeCommandError(command, "", "Renode 命令已取消"));
+      throw new RenodeCommandError(command, "", "Renode monitor 未连接");
     }
 
     return new Promise<string>((resolve, reject) => {
@@ -291,6 +302,7 @@ export class RenodeMonitor {
       const onAbort = (): void => {
         if (this.pending?.timer !== timer) return;
         this.pending = undefined;
+        this.desynced = true;
         clearTimeout(timer);
         reject(new RenodeCommandError(command, "", "Renode 命令已取消"));
       };
@@ -298,6 +310,7 @@ export class RenodeMonitor {
         if (this.pending?.timer !== timer) return;
         const current = this.pending;
         this.pending = undefined;
+        this.desynced = true;
         cleanup();
         reject(
           new RenodeCommandError(
@@ -314,7 +327,58 @@ export class RenodeMonitor {
     });
   }
 
-  private handleData(chunk: string): void {
+  private async reconnect(command: string): Promise<void> {
+    const stale = this.socket;
+    this.socket = undefined;
+    this.connectedFlag = false;
+    this.pending = undefined;
+    if (stale) {
+      try {
+        stale.close();
+      } catch {
+        // 旧连接关闭失败不阻塞重连。
+      }
+    }
+
+    if (!this.child) {
+      throw new RenodeCommandError(
+        command,
+        "",
+        "Renode 进程已退出，monitor 连接无法重建；请重新 attach",
+      );
+    }
+
+    let socket: MonitorSocket | undefined;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < this.connectRetries; attempt++) {
+      try {
+        socket = await this.connectImpl(this.monitorPort);
+        break;
+      } catch (error) {
+        lastError = error;
+        if (attempt + 1 < this.connectRetries) await delay(this.connectRetryDelayMs);
+      }
+    }
+
+    if (!socket) {
+      const reason = lastError instanceof Error ? lastError.message : String(lastError);
+      throw new RenodeCommandError(
+        command,
+        "",
+        `Renode monitor 重连失败(端口 ${this.monitorPort})；请重新 attach: ${reason}`,
+      );
+    }
+
+    const connectedSocket: MonitorSocket = socket;
+    this.socket = connectedSocket;
+    this.connectedFlag = true;
+    this.desynced = false;
+    connectedSocket.onData((chunk) => this.handleData(connectedSocket, chunk));
+    connectedSocket.onClose(() => this.handleSocketClose(connectedSocket));
+  }
+
+  private handleData(socket: MonitorSocket, chunk: string): void {
+    if (this.socket !== socket) return;
     const pending = this.pending;
     if (!pending) return;
 
@@ -342,16 +406,34 @@ export class RenodeMonitor {
     pending.resolve(output);
   }
 
-  private handleClose(): void {
+  private handleSocketClose(socket: MonitorSocket): void {
+    if (this.socket !== socket) return;
+    this.socket = undefined;
     this.connectedFlag = false;
+    this.failPending("Renode monitor 连接已关闭");
+  }
+
+  private handleProcessExit(): void {
+    const socket = this.socket;
+    this.socket = undefined;
+    this.connectedFlag = false;
+    if (socket) {
+      try {
+        socket.close();
+      } catch {
+        // 进程已退出，socket 关闭失败可忽略。
+      }
+    }
+    this.failPending("Renode monitor 进程已退出");
+  }
+
+  private failPending(reason: string): void {
     const pending = this.pending;
     if (!pending) return;
     this.pending = undefined;
     clearTimeout(pending.timer);
     pending.cleanup();
-    pending.reject(
-      new RenodeCommandError(pending.command, pending.buffer, "Renode monitor 连接已关闭"),
-    );
+    pending.reject(new RenodeCommandError(pending.command, pending.buffer, reason));
   }
 
   private async doStop(): Promise<void> {
@@ -366,6 +448,7 @@ export class RenodeMonitor {
     }
 
     this.connectedFlag = false;
+    this.desynced = false;
     const socket = this.socket;
     this.socket = undefined;
     if (socket) {
