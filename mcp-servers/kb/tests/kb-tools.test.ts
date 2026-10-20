@@ -94,16 +94,19 @@ describe('kbTools', () => {
     rmSync(root, { recursive: true, force: true })
   })
 
-  it('注册 4 个只读工具，kb_read 标记为证据工具', () => {
+  it('注册 5 个工具，其中 4 个只读，kb_read 标记为证据工具', () => {
     expect(tools.map((tool) => tool.name).sort()).toEqual([
       'kb_lookup',
+      'kb_propose',
       'kb_read',
       'kb_search',
       'kb_status',
     ])
-    for (const tool of tools) {
-      expect(tool.annotations?.readOnlyHint).toBe(true)
+    for (const name of ['kb_lookup', 'kb_read', 'kb_search', 'kb_status']) {
+      expect(findTool(tools, name).annotations?.readOnlyHint, name).toBe(true)
     }
+    expect(findTool(tools, 'kb_propose').annotations?.readOnlyHint).toBe(false)
+    expect(findTool(tools, 'kb_propose').annotations?.destructiveHint).toBe(true)
     expect(findTool(tools, 'kb_read').meta?.evidence).toBe(true)
   })
 

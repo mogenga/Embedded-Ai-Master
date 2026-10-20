@@ -376,6 +376,7 @@ describe('KbService', () => {
         fileCount: 7,
         indexEntries: 4,
         indexPresent: true,
+        inboxPending: 0,
       })
     })
 
@@ -388,6 +389,7 @@ describe('KbService', () => {
         fileCount: 0,
         indexEntries: 0,
         indexPresent: false,
+        inboxPending: 0,
       })
       expect(ghost.lookup('串口')).toEqual({
         found: false,

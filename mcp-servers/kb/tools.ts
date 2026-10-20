@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { appendProposal, newProposalId } from './inbox.js'
 import { KbServiceError } from './service.js'
 import type { KbService } from './service.js'
 
@@ -13,7 +14,7 @@ export interface KbToolSpec {
   name: string
   description: string
   inputSchema?: z.ZodTypeAny
-  annotations?: { readOnlyHint?: boolean }
+  annotations?: { readOnlyHint?: boolean; destructiveHint?: boolean }
   meta?: Record<string, unknown>
   handler: (args: unknown) => Promise<KbToolResult>
 }
@@ -30,6 +31,34 @@ const readSchema = z.object({
 const searchSchema = z.object({
   tokens: z.array(z.string()).max(8),
   limit: z.number().int().min(1).max(100).optional(),
+})
+
+const singleLine = (value: string) => !/[\r\n]/.test(value)
+const notSeparatorLine = (value: string) => !/^\s*---\s*$/m.test(value)
+
+const proposeSchema = z.object({
+  kind: z.enum(['trap', 'correction', 'reference', 'case']),
+  domain: z
+    .string()
+    .min(1)
+    .max(64)
+    .refine(singleLine, 'domain 不能包含换行'),
+  source: z
+    .string()
+    .min(1)
+    .max(200)
+    .refine(singleLine, 'source 不能包含换行'),
+  content: z
+    .string()
+    .min(1)
+    .max(8000)
+    .refine(notSeparatorLine, 'content 不能包含单独成行的 ---'),
+  title: z
+    .string()
+    .min(1)
+    .max(200)
+    .refine(singleLine, 'title 不能包含换行')
+    .optional(),
 })
 
 function ok(structuredContent: unknown): KbToolResult {
@@ -120,7 +149,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const status: KbToolSpec = {
     name: 'kb_status',
     description:
-      '查看知识库根路径、markdown 文件数、索引条目数与索引是否存在。索引缺失时返回 indexPresent=false；索引损坏时返回 index_invalid。',
+      '查看知识库根路径、markdown 文件数、索引条目数、待审提案数与索引是否存在。索引缺失时返回 indexPresent=false；索引损坏时返回 index_invalid。',
     annotations: { readOnlyHint: true },
     handler: async () => {
       try {
@@ -133,5 +162,36 @@ export function kbTools(service: KbService): KbToolSpec[] {
     },
   }
 
-  return [lookup, read, search, status]
+  const propose: KbToolSpec = {
+    name: 'kb_propose',
+    description:
+      '把诊断中发现的新知识或修正写入待审 inbox（_inbox.md）。只写入待审区，不参与 kb_lookup/kb_search，也不会自动合并；必须由人工审核后合并到正式条目。返回 proposalId 与 pending_review 状态。',
+    inputSchema: proposeSchema,
+    annotations: { readOnlyHint: false, destructiveHint: true },
+    handler: withSchema(proposeSchema, async (args) => {
+      const now = new Date()
+      const proposal = {
+        id: newProposalId(now),
+        date: now.toISOString().slice(0, 10),
+        kind: args.kind,
+        domain: args.domain,
+        source: args.source,
+        content: args.content,
+        ...(args.title === undefined ? {} : { title: args.title }),
+      }
+      try {
+        const result = appendProposal(service.rootPath, proposal)
+        return ok({
+          proposalId: result.duplicateOf ?? proposal.id,
+          inboxPath: result.path,
+          status: 'pending_review',
+          ...(result.duplicateOf === undefined ? {} : { duplicate: true }),
+        })
+      } catch (error) {
+        return fail('proposal_failed', errorMessage(error))
+      }
+    }),
+  }
+
+  return [lookup, read, search, propose, status]
 }

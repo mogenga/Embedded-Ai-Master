@@ -3,6 +3,7 @@ import path from 'node:path'
 
 import { parseFrontmatter, parseIndexYaml } from './yaml.js'
 import type { IndexEntry } from './yaml.js'
+import { parseInbox } from './inbox.js'
 
 export interface KbLookupCandidate {
   path: string
@@ -42,6 +43,7 @@ export interface KbStatus {
   fileCount: number
   indexEntries: number
   indexPresent: boolean
+  inboxPending: number
 }
 
 export type KbServiceErrorCode = 'path_denied' | 'file_too_large' | 'not_found'
@@ -300,6 +302,10 @@ export class KbService {
     this.rootExists = this.isDirectory(real)
   }
 
+  get rootPath(): string {
+    return this.root
+  }
+
   lookup(query: string, limit = DEFAULT_LOOKUP_LIMIT): KbLookupResult {
     const trimmed = query.trim()
     if (trimmed === '') return { found: false, candidates: [], reason: 'empty_query' }
@@ -424,7 +430,7 @@ export class KbService {
 
   status(): KbStatus {
     if (!this.rootExists) {
-      return { root: this.root, fileCount: 0, indexEntries: 0, indexPresent: false }
+      return { root: this.root, fileCount: 0, indexEntries: 0, indexPresent: false, inboxPending: 0 }
     }
 
     const indexPath = path.join(this.root, INDEX_FILE)
@@ -438,11 +444,22 @@ export class KbService {
       }
     }
 
+    let inboxPending = 0
+    const inboxFile = path.join(this.root, '_inbox.md')
+    if (this.isRegularFile(inboxFile)) {
+      try {
+        inboxPending = parseInbox(readFileSync(inboxFile, 'utf8')).length
+      } catch {
+        inboxPending = 0
+      }
+    }
+
     return {
       root: this.root,
       fileCount: this.walkMarkdown().length,
       indexEntries,
       indexPresent,
+      inboxPending,
     }
   }
 

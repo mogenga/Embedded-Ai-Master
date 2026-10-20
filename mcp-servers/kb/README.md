@@ -88,6 +88,14 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 
 该门槛用于让 KB 外查询显式拒答，代价是少量相邻主题召回下降。2026-10-20 实测：index Recall@2 0.44 / Hit@1 0.38 / MRR 0.41，search 严格 Hit@1 0.1333 / goldInTop20 0.4333，负样本拒答率 0.84（上一版 0.46 / 0.40 / 0.43 / 0.56，search 指标当时未单列）。基线见 `tests/regression-baseline.json`，回归脚本为 `npm run kb:regression`。残余 4 条误报中 3 条是主题相邻但细节未覆盖（neg-005、neg-008、neg-023，`near_domain: true`），1 条 neg-011 是纯硬件供电问题（`near_domain: false`）；详见 D-159。
 
+## 工具面与沉淀流程
+
+- `kb_lookup` / `kb_read` / `kb_search` / `kb_status` 为只读工具。
+- `kb_propose` 把新知识写入 `<KB 根>/_inbox.md`，返回 `proposalId` 与 `status: "pending_review"`。它**只写待审区**：`kb_search` 排除 `_inbox.md`，`kb_lookup` 只读 `index.yaml`，因此未审内容不会进入检索。
+- 同一 `kind + domain + content` 重复提交不会重复写入，返回已有 `proposalId` 与 `duplicate: true`。
+- 审核是人工步骤：先把内容合并进正式条目，再运行 `npm run kb:review -- --accept <id> --target <正式条目路径>`；回归指标低于基线时脚本拒绝接受、inbox 不变。拒绝用 `npm run kb:review -- --reject <id> --reason "..."`。
+- `kb_status.inboxPending` 报告待审条数。
+
 ## 测试
 
 ```bash
