@@ -184,13 +184,13 @@ npm run build:mcp
 npm run probe:e2e
 ```
 
-成功时输出 `{"backend":"renode","attach":true,...,"writeVerified":true,...}`；`dist-mcp/` 缺失时退出码 2 并提示 `npm run build:mcp`，其余失败退出码 1。写内存、复位与串口写入是破坏性操作，在 `diagnose` 预设下为 `ask`；headless（无审批器）时降级为拒绝且不执行工具。写操作返回 `declaration` 声明；`mem_read` 全 0 只返回警告，不推断“无故障”。`serial_read` 响应 MCP 取消信号：abort 后返回 `aborted`，不再继续等待或消费缓冲。
+成功时输出 `{"backend":"renode","attach":true,...,"writeVerified":true,...}`；`dist-mcp/` 缺失时退出码 2 并提示 `npm run build:mcp`，其余失败退出码 1。写内存、复位与串口写入是破坏性操作，在 `diagnose` 预设下为 `ask`；headless（无审批器）时降级为拒绝且不执行工具。`serial_open` 不是只读工具，未显式授权时在 `diagnose` 下被拒绝；可复制 `mcp-servers/probe/permissions.example.json` 到 `.harness/permissions.json` 配置 SRAM 写窗口与串口白名单。写操作返回 `declaration` 声明；`mem_read` 全 0 只返回警告，不推断“无故障”。`serial_read` 响应 MCP 取消信号：abort 后返回 `aborted`，不再继续等待或消费缓冲。
 
 OpenOCD 后端本轮只做“连接已运行的 OpenOCD telnet”，`attach` 不 spawn 进程；使用前请自行启动 `openocd -f <config>`（telnet 默认 `127.0.0.1:4444`）。`OPENOCD_PATH` 仅用于可用性检测；`openocdConfig` 参数已移除。真机验证登记 D-157。
 
 ## 领域 MCP：知识库（BR-3）
 
-`mcp-servers/kb` 以 stdio MCP server 暴露 `kb_lookup` / `kb_read` / `kb_search` / `kb_status`，全部只读；`kb_read` 标记为 evidence。先构建再配置：
+`mcp-servers/kb` 以 stdio MCP server 暴露 `kb_lookup` / `kb_read` / `kb_search` / `kb_status` 与写入待审区的 `kb_propose`；前四个只读，`kb_read` 标记为 evidence。`kb_propose` 只追加 `_inbox.md`，未审内容不参与检索，必须人工审核后合并。先构建再配置：
 
 ```bash
 npm run build:mcp
@@ -221,11 +221,33 @@ npm run kb:regression          # 表格 + JSON；--json 仅 JSON，--baseline �
 
 脚本在缺少 `dist-mcp/kb/service.js`、`KB_ROOT`、`index.yaml` 或查询集时打印原因并以退出码 2 结束；脚本不设通过阈值。`mcp-servers/kb/tests/regression.test.ts` 直接 import `service.ts`、不启动 MCP server；语料或查询集缺失时 `describe.skip`，存在时断言各指标不低于 `regression-baseline.json`。
 
+### 沉淀与人工审核
+
+```bash
+npm run kb:review -- --list
+npm run kb:review -- --accept <id> --target protocols/uart/no-output.md
+npm run kb:review -- --reject <id> --reason "重复条目"
+```
+
+`--accept` 要求人工**先把提案内容合并进正式条目**；脚本只做门禁与状态流转：校验 target 在 KB 根内、运行 `kb-regression --json`、按 `regression-baseline.json` 比较。任一指标下降或总数变化时退出码 1，`_inbox.md` 不变；全绿才移除提案并写入 `_reviewed.md`。脚本不自动编辑正式条目或 `index.yaml`，target 不在索引中只输出 warning。
+
 2026-10-20 实测基线（只作下限，不是目标）：index 轨 Recall@2 0.44、Hit@1 0.38、MRR 0.41；search 轨严格 Hit@1 0.1333（第一条 hit 命中 gold）、`goldInTop20` 0.4333（gold 出现在 `search(tokens, 20)` 的任意命中中；引擎按路径排序，不承诺相关性 rank）；负样本拒答率 0.84（21/25 正确拒答）。`kb_lookup` 对英文 keyword/tag 使用 ASCII 词边界、忽略单字符英文 token，并按查询中未出现在索引词表的 token 比例折减分数；折减后最高分低于 1.75 时返回 `found: false`、`reason: "low_confidence"`。此外有两层覆盖度规则：**技术 token 覆盖度**从 query 提取 ASCII/十六进制/型号并过滤英文停用词与 `CPU`/`MCU`/`SoC` 等泛指词，单个技术 token 必须被条目覆盖，多个技术 token 必须覆盖超过一半；**中文覆盖度**只在查询没有 ASCII 技术 token 时生效，要求命中中文关键词字符数 ≥ 4，或命中 ≥ 2 个不同中文关键词，或关键词之外还有 ≥ 2 个中文字符上下文。因此 `优化`、`对齐`、`没反应` 这类孤立短词会按 `low_confidence` 拒答，而 `串口没输出`、`串口乱码` 与带上下文的长句仍可命中。相对上一版（Recall@2 0.46、Hit@1 0.40、MRR 0.43、拒答率 0.56、宽松 search Hit@1 0.4333），Recall@2 / Hit@1 / MRR 各下降 2pp，拒答率提升 28pp；search 轨严格 Hit@1 与 `goldInTop20` 分别披露排序与召回，避免再用宽松指标掩盖排序回归。残余 4 条误报中，3 条（neg-005、neg-008、neg-023）为主题相邻但细节未覆盖（`near_domain: true`），1 条 neg-011 为纯硬件供电问题（`near_domain: false`）；neg-011 是长句，中文覆盖度规则不会拒绝，差距与语义检索计划见 D-159。
+
+### 端到端诊断验收（阶段 3）
+
+```bash
+npm run build && npm run build:mcp
+npm run diagnosis:e2e
+```
+
+脚本用真实 Renode、真实 KB MCP 与真实内核事件日志跑一次只读取证：`kb_lookup("串口没输出")` → `kb_read` → `attach`/`halt` → 读 `VTOR`、`RCC_APB1ENR`、`GPIOA_MODER`、`USART2 CR1/BRR` → 证据对表 → 根因与可证伪预测 → `LogTailEventSource` 回放。输出 JSON 含 `rootCause`、`evidence`、`falsifiablePrediction`、`limitations`、`replayEvents`；缺 `dist`/`dist-mcp` 或 KB 资产退出码 2，缺 Renode 或断言失败退出码 1。
+
+该验收是**仿真复位基线取证**，不是真实板卡故障复现：`VTOR=0` 只表示未加载固件，结论不能外推到线序、共地、电平等真板问题。真机验证仍由 D-157 跟踪。
 
 ### 验证边界
 
 - Renode 探针路径已由 `npm run probe:e2e` 真实执行（只操作仿真内存）；`RENODE_PATH` 可覆盖默认可执行文件路径。
+- `npm run diagnosis:e2e` 已真实执行只读取证与事件回放，覆盖 KB → probe → 权限 → 会话日志链路。
 - OpenOCD 后端只完成可用性检测、参数与错误路径验证，未连接真机；真串口设备同样未实测。
 - 真串口与真机 OpenOCD 验证登记为 D-157；KB 语料/查询集不入库导致 CI 无法运行回归，登记为 D-158。
 
@@ -346,7 +368,7 @@ node dist/demo/run.js "在当前目录写入 demo.txt"
    投影层只采用非空、`0 <= coversUpToSeq < summary 事件自身 seq`（因此 `coversUpToSeq === 最后 seq` 非法）、不切断工具批次且不覆盖 evidence 的 summary；非法 summary 回退上一条有效 summary。摘要调用缺 `usage` 时写 `status{status:"usage_missing",stage:"summary"}`，不写零 usage。
    `keepTailRatio` 与 `softRatio` 必须满足 `0 < keepTailRatio < softRatio < 1`，`keepRecentTurns` 必须是非负整数；启用压缩时在 `runSession` / `compactSession` 入口抛 `TypeError`。
 
-evidence 保护：`ToolResultPayload.evidence === true` 的结果不会被二级/三级修剪；投影层会拒绝覆盖 evidence 的 summary（回退上一条有效 summary 或原视图）。MCP 工具可在注册时通过 `_meta: { evidence: true }` 声明证据工具；适配层将其映射为 `annotations.evidence`，与内置工具走同一保护路径。旧日志中没有 `evidence` 字段的 `tool_result` 按非 evidence 处理（P0 未发布，不做迁移）。摘要请求的 usage 作为独立 `usage` 事件落日志（cached 字段经 `normalizeUsage` 归一化），`query` 在压缩后按会话累计 usage 重算 `costUsd`，因此计入 `maxCostUsd` 熔断。
+evidence 保护：`ToolResultPayload.evidence === true` 的结果不会被二级/三级修剪；投影层会拒绝覆盖 evidence 的 summary（回退上一条有效 summary 或原视图）。MCP 工具可在注册时通过 `_meta: { evidence: true }` 声明证据工具；适配层将其映射为 `annotations.evidence` 与结果上的 `evidence: true`，与内置工具走同一保护路径并写入 `tool_result.payload.evidence`。旧日志中没有 `evidence` 字段的 `tool_result` 按非 evidence 处理（P0 未发布，不做迁移）。摘要请求的 usage 作为独立 `usage` 事件落日志（cached 字段经 `normalizeUsage` 归一化），`query` 在压缩后按会话累计 usage 重算 `costUsd`，因此计入 `maxCostUsd` 熔断。
 
 `RunOptions.compaction`（缺省全开）：
 

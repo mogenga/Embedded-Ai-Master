@@ -16,6 +16,7 @@
     "build:mcp": "tsc -p tsconfig.mcp.json",
     "test:mcp": "vitest run mcp-servers",
     "probe:e2e": "node scripts/probe-e2e.mjs",
+    "diagnosis:e2e": "node scripts/diagnosis-e2e.mjs",
     "kb:regression": "node scripts/kb-regression.mjs",
     "kb:review": "node scripts/kb-review.mjs",
     "build:web": "vite build",

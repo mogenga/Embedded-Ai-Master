@@ -242,7 +242,7 @@ export function analyzeUartBaseline(input: UartBaselineRegisters): DiagnosisVerd
    - 5 个 `mem_read` 都有 `evidence: true`；
    - 根因包含“未初始化”，`matchedKbSteps` 含 7/8；
    - 结论含可证伪预测；
-   - `LogTailEventSource.read(sessionId, 0)` 的事件 seq 连续，工具调用序列与在线一致，`permission_decision` 先于对应 `tool_started`。
+   - `LogTailEventSource.read(sessionId, -1)` 的事件 seq 连续（`since=0` 会排除 seq 0），工具调用序列与在线一致，`permission_decision` 先于对应 `tool_started`。
 6. 输出一行 JSON（`symptom/kbEntry/rootCause/evidence/replayEvents`）；任何断言失败退出码 1。
 7. 范围声明：这是**仿真复位基线取证**，不是真实板卡故障复现；报告中必须带 `limitations`。
 
