@@ -48,6 +48,8 @@ describe("ApprovalNotice", () => {
     expect(root.textContent).toContain("写入寄存器前需声明目标地址与写入值");
     expect(root.textContent).toContain("address=0x40004408, value=0x0009");
     expect(root.textContent).toContain("截止");
+    expect(root.querySelector(".approval-head .approval-action")?.textContent).toBe("ask");
+    expect(root.querySelector(".approval-head .approval-state")?.textContent).toBe("待审批");
     const buttons = [...root.querySelectorAll<HTMLButtonElement>("button")];
     expect(buttons.length).toBe(2);
     expect(buttons[0].textContent).toContain("批准");
@@ -123,6 +125,29 @@ describe("ApprovalNotice", () => {
     expect(buttonByText(root, "批准").disabled).toBe(false);
     expect(buttonByText(root, "拒绝").disabled).toBe(false);
     expect(root.textContent).not.toContain("已提交，等待确认");
+  });
+
+  it.each([
+    [409, "审批请求已完成相反的决策"],
+    [410, "审批请求已过期"],
+  ] as const)("onDecision 返回 HTTP %s 时记录终态错误并禁用按钮", async (status, message) => {
+    const root = mount();
+    render(
+      <ApprovalNotice
+        approval={makeApproval()}
+        sessionId="s1"
+        onDecision={() => Promise.reject(Object.assign(new Error(message), { status }))}
+      />,
+      root,
+    );
+    buttonByText(root, "批准").click();
+    await tick();
+    expect(root.textContent).toContain(message);
+    expect(buttonByText(root, "批准").disabled).toBe(true);
+    expect(buttonByText(root, "拒绝").disabled).toBe(true);
+    expect(root.querySelector(".approval")?.getAttribute("data-status")).toBe("pending");
+    expect(root.textContent).not.toContain("已允许");
+    expect(root.textContent).not.toContain("已拒绝");
   });
 
   it("deadlineAt 已过期时禁用按钮并显示已过期", () => {

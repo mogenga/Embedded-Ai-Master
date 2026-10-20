@@ -37,6 +37,14 @@ function errorText(error: unknown): string {
   return "审批提交失败，请重试";
 }
 
+function errorStatus(error: unknown): number | undefined {
+  if (typeof error === "object" && error !== null) {
+    const status = (error as { status?: unknown }).status;
+    if (typeof status === "number") return status;
+  }
+  return undefined;
+}
+
 export function ApprovalNotice({
   approval,
   sessionId,
@@ -49,6 +57,7 @@ export function ApprovalNotice({
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [error, setError] = useState<string>();
+  const [terminalError, setTerminalError] = useState<string>();
   const [now, setNow] = useState(() => Date.now());
 
   const deadlineAt = deadlineMs(approval.deadlineAt);
@@ -66,7 +75,14 @@ export function ApprovalNotice({
 
   const timedOut = pending && deadlineAt !== undefined && now >= deadlineAt;
   const settled = !pending;
-  const disabled = settled || timedOut || submitting || submitted || onDecision === undefined || sessionId === undefined;
+  const disabled =
+    settled ||
+    timedOut ||
+    submitting ||
+    submitted ||
+    terminalError !== undefined ||
+    onDecision === undefined ||
+    sessionId === undefined;
 
   let stateLabel: string;
   if (settled) stateLabel = TERMINAL_LABEL[approval.status as Exclude<ApprovalModel["status"], "pending">];
@@ -85,7 +101,10 @@ export function ApprovalNotice({
       await onDecision(sessionId, approval.requestId, decision);
       setSubmitted(true);
     } catch (err) {
-      setError(errorText(err));
+      const text = errorText(err);
+      setError(text);
+      const status = errorStatus(err);
+      if (status === 409 || status === 410) setTerminalError(text);
     } finally {
       setSubmitting(false);
     }
@@ -96,6 +115,7 @@ export function ApprovalNotice({
       <div class="approval-head">
         <Icon name="i-alert" size={15} />
         <span class="approval-tool">{approval.tool}</span>
+        <code class="approval-action">ask</code>
         {approval.preset.length === 0 ? null : <code class="approval-preset">{approval.preset}</code>}
         <span class="approval-state">{stateLabel}</span>
       </div>

@@ -136,6 +136,7 @@ export function applyLoadSuccess(state: WorkbenchState, loaded: LoadedWorkbench)
     failedSessionId: undefined,
     switching: false,
     streamError: undefined,
+    sendError: undefined,
   };
 }
 
@@ -177,6 +178,7 @@ export function applySessionLoaded(
     detailError: undefined,
     failedSessionId: undefined,
     streamError: undefined,
+    sendError: undefined,
   };
 }
 

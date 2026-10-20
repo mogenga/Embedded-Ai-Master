@@ -88,6 +88,17 @@ describe("workbench state", () => {
     expect(state.device.probe).toBe("attached");
   });
 
+  it("加载成功清除上一次的发送错误，避免串到其他会话", () => {
+    const state = applyLoadSuccess({ ...baseState(), sendError: "发送失败（HTTP 409）：会话忙" }, LOADED);
+    expect(state.sendError).toBeUndefined();
+    const switched = applySessionLoaded(
+      { ...baseState(), sendError: "发送失败（HTTP 409）：会话忙" },
+      "s2",
+      loadedSession("s2", EVENTS),
+    );
+    expect(switched.sendError).toBeUndefined();
+  });
+
   it("加载成功且无会话时清除旧 activeSessionId", () => {
     const previous = { ...baseState(), activeSessionId: "s1" };
     const state = applyLoadSuccess(previous, {

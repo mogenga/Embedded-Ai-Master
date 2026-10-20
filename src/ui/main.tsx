@@ -186,7 +186,10 @@ async function load(): Promise<void> {
   }
 }
 
+let sessionEpoch = 0;
+
 async function send(text: string): Promise<void> {
+  const epoch = sessionEpoch;
   let created: { sessionId: string };
   try {
     created = await postAction<{ sessionId: string }>(actionUrl, {
@@ -206,6 +209,8 @@ async function send(text: string): Promise<void> {
   } catch {
     // 提交已成功；列表刷新失败不阻断新会话的加载
   }
+  // 提交在途期间用户已开新会话：只刷新列表，不再把视图切回本次创建的会话。
+  if (epoch !== sessionEpoch) return;
   await selectSession(created.sessionId);
 }
 
@@ -217,11 +222,14 @@ async function decideApproval(
   try {
     await postAction(approvalUrl, { sessionId, requestId, decision });
   } catch (error) {
-    throw new Error(actionErrorText(error));
+    const wrapped = new Error(actionErrorText(error)) as Error & { status?: number };
+    if (isHttpError(error)) wrapped.status = error.status;
+    throw wrapped;
   }
 }
 
 function newSession(): void {
+  sessionEpoch += 1;
   controller.close();
   state = applyNewSession(state);
   renderApp();
