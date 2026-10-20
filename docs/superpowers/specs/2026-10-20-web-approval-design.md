@@ -115,7 +115,7 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner;
 ### 7.2 行为
 
 - `start` 校验：`text` 为字符串、去空白后非空、长度 ≤ `maxTextLength`（默认 8000）；否则抛 `RunnerInputError(code: "invalid_text")`。
-- **受理边界**：`start` 必须等到会话 `header.json` 已落盘（即 `runSession` 调用 `onSession` 之后）才返回 202。实现用 readiness promise + 运行 promise 竞速；`readyTimeoutMs`（默认 10s）内未就绪则 abort 并抛 `session_start_timeout`。generator 在就绪前失败时把错误映射为对应的受理前错误（模型/配置），不留半成品会话目录由 `runSession` 自身清理。
+- **受理边界**：`start` 必须等到会话 `header.json` 已落盘（即 `runSession` 调用 `onSession` 之后）才返回 202。实现用 readiness promise + 运行 promise 竞速；`readyTimeoutMs`（默认 10s）内未就绪则 abort 并抛 `session_start_timeout`。generator 在就绪前失败时把错误映射为对应的受理前错误（模型/配置），不留半成品会话目录由 `runSession` 自身清理。无法归类的启动失败（会话锁冲突、日志损坏、IO）保留现有 `model_unavailable` HTTP code 以维持契约，但 message 必须明确「会话启动失败」而不是声称模型不可用。
 - `sessionId` 缺省：生成 `randomUUID()`，作为新会话 id 传给 `runSession({ sessionId })`，返回 `created: true`。
 - 带 `sessionId`：先校验 `isValidSessionId`，再检查 `<harnessHome>/sessions/<id>/header.json` 是否存在；不存在抛 `unknown_session`。存在则读取 header，**使用 `header.model` 作为模型引用、省略 `cwd`**（让 `runSession` 回落到 `header.workdir`），调用 `runSession({ resume: true, sessionDir, sessionId })`，返回 `created: false`。header 无 `model` 时回落到默认模型。
 - 同一 `sessionId` 已有运行中的 promise → `session_busy`；运行 promise settle 后从注册表移除，并允许下一次追加。
@@ -293,11 +293,11 @@ export interface ApprovalRequestPayload {
 |---|---|---|
 | 202 | `{ requestId, decision }` | 首次受理，已 resolve |
 | 200 | `{ requestId, decision, duplicate: true }` | 同决策重复提交 |
-| 400 | `invalid_body` / `invalid_decision` | 字段缺失、`decision` 不是 allow/deny |
-| 404 | `unknown_session` | 会话不在运行器注册表 |
+| 400 | `invalid_body` / `invalid_decision` | 字段缺失/类型错误/`requestId` 超长、`decision` 不是 allow/deny |
+| 404 | `unknown_session` | 会话不在运行器注册表（含会话已结束） |
 | 404 | `unknown_request` | 运行中会话但从未见过该 requestId |
 | 409 | `already_decided` | 已用相反决策结束 |
-| 410 | `approval_expired` | 已超时/中断，当前不可再决 |
+| 410 | `approval_expired` | 会话仍在运行，但请求已超时/中断，当前不可再决 |
 
 - `requestId` 只允许 1..200 字符可打印字符串；`sessionId` 用 `isValidSessionId`。
 - 202 只表示决策已送达 gate；最终结果以 `permission_decision` 事件为准，HTTP 不返回 `effective`。

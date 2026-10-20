@@ -532,7 +532,7 @@
 - **状态**: 已解决(2026-10-18,Task 14/15)。
 - **原现象**: `main.tsx` 中 `VITE_ACTION_URL` 未配置时 `console.warn` 后返回;配置了 `VITE_EVENT_STREAM_URL` 但无 action 端点时,Composer 仍清空输入且界面无失败提示。D-053 记录的是输入被清空,这里记录的是 SSE 与 action 两条通道不同步时的处理缺口。
 - **修复**: 未配置 `VITE_ACTION_URL` 时 `onSend` 不传入,`Composer` 发送按钮禁用并显示「未配置提交端点,输入不会发送」;当时未配置 `VITE_EVENT_STREAM_URL` 时不建立实时流。2026-10-20 事件总线后默认连接 `/api/events`,两条通道仍不互相暗示已提交。
-- **残余**: action 仍未实现;事件流已实现,见 D-063(事件流部分已解决)与 D-137(审批未实现)。
+- **残余**: action 已实现(2026-10-20,见 D-139);事件流见 D-063;审批见 D-137(均已解决)。
 
 ### D-061 · StatusBar context/limit 来源未定
 
@@ -987,7 +987,7 @@
 - **影响**: 默认 `diagnose` 下写工具在 headless/Web 无法经人工批准执行,只能改预设或配置放行;审批记录只能从会话日志离线查看。
 - **触发升级条件**: 阶段 2 接入 Web 审批/SSE;需要人工在 UI 中批准工具调用;需要实时展示待审批请求。
 - **修复建议**: 定义审批请求/响应事件与 HTTP API,与 `permission_decision` 同源;前端展示工具名、参数摘要与原因并回传 allow/deny;保持“审计先于执行”和超时/取消语义。
-- **状态**: 未解决;阶段 2 范围。
+- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`,Web 部分):Web 进程注入审批桥,`ask` 经 `approval_request` + `POST /api/approvals` 完成人工批准或拒绝,`/api/actions` 不再返回 501;headless demo 与未注入 prompter 的库调用仍按 `approval_unavailable` deny(设计如此)。实现见 D-137。
 
 ### D-113 · `paramsPreview` 可能保留最多 120 字符的敏感参数片段
 
@@ -1212,7 +1212,7 @@
 - **影响**: 在 Web 工作台无法响应 `ask` 审批;交互式审批仍依赖库层 `PermissionPrompter`(CLI/宿主)。Web 只能事后看到允许/拒绝结果,无法在诊断过程中操作。
 - **触发升级条件**: Web 工作台发起需要 `ask` 审批的会话,或需要浏览器内完成批准/拒绝。
 - **修复建议**: 定义 `approval_request` 事件与 `POST /api/approvals`(requestId/decision/超时/abort 语义),UI 在守卫区提供批准/拒绝并回显最终 `permission_decision`;复用现有审批队列与审计,不新造权限模型。
-- **状态**: 未解决;按 m2-roadmap 阶段 2 延后。
+- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`):新增 `approval_request` 事件(`src/session/types.ts`、`src/session/persistence.ts`);审批桥 `src/server/approvals.ts` 负责写入事件、等待决策并区分首次/重复/相反/超时;`src/server/runner.ts` 注入 `PermissionPrompter`、`home` 与 `onSession`;`POST /api/approvals`(`src/server/api.ts`)回传 `{ sessionId, requestId, decision }`;前端 `ApprovalNotice`(`src/ui/components/conversation/approval-notice.tsx`)经 `permission_decision` 投影终态;崩溃恢复在 `src/session/session.ts` 补 `approval_aborted: crash_recovery`。测试:`tests/approvals-bridge.test.ts`、`tests/server/approvals-api.test.ts`、`tests/web-approval-e2e.test.ts`、`tests/ui/components/approval-notice.test.tsx`、`tests/ui/transcript.test.ts`、`tests/session-persistence.test.ts`。headless 无 prompter 时仍是 `ask` → deny(`approval_unavailable`);本轮残余边界见 D-145 ~ D-152。
 
 ### D-138 · 实时事件流的慢客户端检测依赖单帧写超时,写超时前不感知停读
 
@@ -1230,7 +1230,7 @@
 - **影响**: Web 工作台只读:可以订阅实时事件与回放,但不能发起新会话、追加输入或响应审批。
 - **触发升级条件**: 需要从 Web 发起 runSession 或提交审批决定。
 - **修复建议**: 见 D-051 的 action schema(`requestId`/`sessionId`/`text`、202/4xx/5xx)与 D-137 的审批端点;两者共用同一套请求去重与错误映射。
-- **状态**: 未解决;按 m2-roadmap 阶段 2 / M3 延后。
+- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`):`POST /api/actions` 已落地(`src/server/api.ts` + `src/server/runner.ts`),接受 `{ text, sessionId? }`,缺省新建会话、带 id 追加输入,返回 202 `{ sessionId, created }`;错误码为 400 `invalid_body`/`invalid_text`/`invalid_session_id`、404 `unknown_session`、409 `session_busy`、503 `model_unavailable`/`session_start_timeout`;写端点强制 loopback `Origin`。测试:`tests/server/runner.test.ts`、`tests/server/api.test.ts`、`tests/server/approvals-api.test.ts`、`tests/web-approval-e2e.test.ts`。旧 D-051 中的 `requestId` 字段未采用,去重只保留在审批端点。
 
 ### D-140 · 会话列表与 `isValidSessionId` 的 id 规则已统一,但大小写别名(Windows)未处理
 
@@ -1276,6 +1276,78 @@
 - **触发升级条件**: 第三方按文档实现 SSE 消费方。
 - **修复建议**: 文档改为 `SessionEventEnvelope`,并写明 `since` 夹紧语义。
 - **状态**: **已解决**(2026-10-20,`feat/m2-event-bus` 复验修复):`frontend-design` §2/§8.5 改为 `SessionEventEnvelope` 并标注 §8.6;README 与 spec §11.1 补 `since` 夹紧说明。
+
+### D-145 · 服务重启后 pending 审批丢失
+
+- **发现**: 2026-10-20,M2 Web 审批 Task 10。
+- **现象**: 审批桥的 pending 表只在进程内存;服务重启后正在等待的审批随 gate 一起丢失。已落盘的 `approval_request` 没有对应 `permission_decision`,要等 `resumeSession` 的崩溃恢复补 `approval_aborted: crash_recovery` 才配对;重启前未完成的 HTTP 请求不会重放。
+- **影响**: 重启期间页面卡片停留在 pending,只能等 `deadlineAt` 到点后本地显示已过期;日志在 resume 前不完整。不会误执行工具。
+- **触发升级条件**: 需要跨重启保留待审批状态,或重启后继续同一次审批。
+- **修复建议**: 以 `approval_request` 为源恢复待审批队列并重新等待,或明确重启即失效、在服务启动时批量补 deny 审计。
+- **状态**: 未解决;本轮按「重启即失效、resume 补审计」处理。
+
+### D-146 · 写端点只有 loopback Origin 校验,无 token/CSRF
+
+- **发现**: 2026-10-20,M2 Web 审批 Task 10。
+- **现象**: `POST /api/actions` 与 `POST /api/approvals` 校验 `Host`/`Origin` 必须为 loopback 且端口匹配,但不校验 token、会话 cookie 或 CSRF 头,也不区分浏览器标签页。
+- **影响**: 同机其他进程或页面只要能以 loopback Origin 发请求,就能提交动作或审批;该机制只阻断跨源网页(DNS rebinding / 跨源 POST),不是本机攻击者隔离。
+- **触发升级条件**: 多用户、远程访问,或需要防本机其他应用。
+- **修复建议**: 引入一次性 token / 会话 cookie + CSRF 头,或改用 Unix socket / 命名管道并做 OS 级鉴权。
+- **状态**: 未解决;按 2026-10-20 决策不引入 token。
+
+### D-147 · 审批摘要可能在页面上暴露敏感片段
+
+- **发现**: 2026-10-20,M2 Web 审批 Task 10。
+- **现象**: `approval_request` 复用 `permission_decision` 的 `paramsPreview`(字符串最多 120 码点、整体 4096 字节),审批卡片直接渲染 `paramsPreviewText`,不做脱敏。
+- **影响**: 设备序列号、绝对路径、令牌片段会出现在页面与日志中;截图、投屏或共享时泄露。
+- **触发升级条件**: 接入含凭据的工具;审批界面需要共享或合规审查。
+- **修复建议**: 按 D-113 增加键级脱敏或默认关闭 preview;卡片仅展示 `paramsKeys` 与 `paramsDigest`。
+- **状态**: 未解决;与 D-113 同根因,此处只登记 Web 审批的展示面。
+
+### D-148 · 单会话串行运行,运行中不能追加或取消
+
+- **发现**: 2026-10-20,M2 Web 审批 Task 10。
+- **现象**: 每个会话同时只允许一个 `runSession`;运行期间再次 `POST /api/actions` 返回 409 `session_busy`,没有排队、插话或取消端点。不同会话可并行。
+- **影响**: 长工具调用期间无法追加输入或纠正指令,只能等待结束或重启服务;前端没有取消按钮。
+- **触发升级条件**: 需要中途取消/插话/排队,或工具执行时长成为交互瓶颈。
+- **修复建议**: 增加取消端点(暴露 `AbortController`)与有界队列,并在 UI 显示运行中状态与取消入口。
+- **状态**: 未解决;本轮按 spec 显式拒绝并发。
+
+### D-149 · 审批卡片受 SSE 200ms 轮询延迟影响
+
+- **发现**: 2026-10-20,M2 Web 审批 Task 10。
+- **现象**: `approval_request` 先落日志,再由 200ms 轮询的 SSE 跟随投影;卡片出现与终态更新最多滞后约 200ms 加文件读取/事件循环调度,无硬上限。
+- **影响**: 审批交互不是即时反馈;极端调度下延迟更长。正确性不受影响(日志仍是事实源)。
+- **触发升级条件**: 需要亚 100ms 交互,或审批频次显著提高。
+- **修复建议**: 按 D-134 增加进程内低延迟适配器,保持 SSE 协议不变。
+- **状态**: 未解决;与 D-134 同根因,此处登记审批链路的可见延迟。
+
+### D-150 · 会话结束后迟到决策返回 404,运行中已超时返回 410
+
+- **发现**: 2026-10-20,M2 Web 审批 Task 10。
+- **现象**: `SessionRunner.decide` 先查运行器注册表;会话已结束(注册表无该项)时返回 404 `unknown_session`。只有会话仍运行、但请求已超时/中断时,桥的 settled 表才返回 410 `approval_expired`。
+- **影响**: 同一语义(不可再决)对应两种状态码;会话结束后点击审批显示 404 文案,重复提交也可能从 200 变为 404。调用方需同时处理。
+- **触发升级条件**: 前端需要统一「已过期」提示,或外部调用方按状态码做重试/告警。
+- **修复建议**: 短期保留「已结束会话 + requestId → expired」映射,或前端把 404/410 统一映射为已过期。
+- **状态**: 未解决;当前优先保持 HTTP 状态语义准确。
+
+### D-151 · 就绪超时后未响应 abort 的 generator 可能长期占用 `session_busy`
+
+- **发现**: 2026-10-20,M2 Web 审批 Task 10。
+- **现象**: `start` 在就绪超时时 abort 并关闭审批桥,但注册表项只在 `consume` 的 `finally`(completion settle)删除;若 `runSession` 或工具不响应 `signal`,注册表项保留。带同一 `sessionId` 的后续追加会一直返回 409 `session_busy`;`close()` 等待 5s 后放弃。
+- **影响**: 长生命周期服务内可能出现「会话永远忙」与注册表项残留;新建会话的随机 id 用户不可见,影响较小。
+- **触发升级条件**: 出现实际挂起的 generator;Web 服务长时间运行。
+- **修复建议**: 就绪失败时立即从注册表移除并异步等待 completion,或为运行增加硬超时与强制清理;补一条不响应 abort 的 generator 用例。
+- **状态**: 未解决;当前依赖 `runSession` 与工具响应 `signal`。
+
+### D-152 · 发送在途时手动切换会话仍可能被切回新会话
+
+- **发现**: 2026-10-20,M2 Web 审批 Task 10。
+- **现象**: `main.tsx` 的 `sessionEpoch` 只在「新会话」按钮递增;发送在途时手动点击其他会话(`selectSession` 不递增 epoch),`POST /api/actions` 返回后仍会 `selectSession(created.sessionId)`,把视图切回本次发送产生的会话。
+- **影响**: 用户的手动选择被覆盖,需要再次切换;不产生错误数据。
+- **触发升级条件**: 发送延迟明显(模型响应慢)或用户频繁切换会话。
+- **修复建议**: 在 `selectSession` 递增 epoch,或在发送完成时校验当前 `activeSessionId` 是否仍等于提交前值。
+- **状态**: 未解决;已知交互边界。
 
 ---
 
@@ -1338,3 +1410,4 @@
 | 2026-10-19 | 权限系统高价值项修复(`feat/m2-permission`):D-118 `__proto__` 审计键丢失、D-119 截断标记改名 `previewTruncated`、D-120 inline 复用 schema 校验、D-121 空白字段拒绝、D-122 不可 stat 项目配置 fail-closed、D-125 测试 home 隔离、D-126 symbol 键拒绝、D-128 恒真断言替换;D-124/D-127/D-129 部分解决;README/spec 同步标记名 |
 | 2026-10-20 | M2 事件总线 Task 7 交付:D-063 标注已解决(`/api/events` 由 501 替换为真实 SSE,写操作仍 501);录入 D-133 ~ D-137(单会话流、无进程内低延迟适配器、无独立 evidence 事件、大日志补播未压测、Web 审批未实现);README 新增「实时事件流」,frontend-design 补统一事件数组/游标/缺口重拉/设备 patch/MCP 与权限展示 |
 | 2026-10-20 | 事件总线全量复验与修复(`feat/m2-event-bus`):D-138 实时单帧写超时→`slow_consumer`(已解决,残余记入条目);D-140 列表与详情共用 `isValidSessionId`(已解决);D-141 `readSessionHeader` 收敛到 persistence 并补 EACCES 用例(已解决);D-142 删除死代码 `createEventStream`/`splitCompleteLines`(已解决);D-144 文档改为 `SessionEventEnvelope` 并补 `since` 夹紧语义(已解决);录入 D-139(`/api/actions` 仍 501)与 D-143(`applySessionEvent` O(n²))为未解决 |
+| 2026-10-20 | M2 Web 审批闭环(`feat/m2-web-approval`):D-137(`approval_request` + `POST /api/approvals` + 审批 UI)与 D-139(`/api/actions` 落地)标已解决;D-112 的 Web 部分标已解决;录入 D-145 ~ D-152(重启丢失 pending、仅 Origin 校验、摘要敏感片段、单会话串行、SSE 200ms 延迟、迟到决策 404/410 不一致、未响应 abort 占用 `session_busy`、在途发送切回会话);README 新增「Web 会话与审批」,frontend-design 补审批卡片与状态机 |

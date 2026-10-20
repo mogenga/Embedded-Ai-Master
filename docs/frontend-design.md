@@ -1,6 +1,6 @@
 # 前端设计文档 · 诊断工作台
 
-> 版本 v1.1 · 2026-10-18 · 状态：**设计基线，前端选型已定**
+> 版本 v1.4 · 2026-10-20 · 状态：**设计基线，前端选型已定**
 > 视觉基线：`prototypes/index.html`（单文件、零外部依赖，所有令牌与尺寸已内联于本文，不依赖打开原型）
 > 业务依据：症状驱动诊断闭环、诊断过程可视化与会话回放、动作三类归属与安全边界（写内存/复位前先声明、工具必须诚实）
 > 本文边界：只定义前端的设计契约、组件规格与验收口径；不定义内核实现，不定义 MCP server 的工具清单。
@@ -454,6 +454,27 @@ App
 
 ---
 
+### 7.16 ApprovalNotice 审批卡片
+
+- 位置：消息流内，由 `approval_request` 投影；与 GuardNotice 复用间距、边框与浅底，不新造布局。
+- 卡头（单行）：警示图标 + 工具名（等宽）+ 动作标记 `ask` + 预设名（可选）+ 状态标签。
+- 卡体：理由；参数摘要 `paramsPreviewText`（`key=value`，仅展示，不回写日志）；截止时间（本地时间 `HH:MM:SS`）；提交失败时的错误文本（`role="alert"`）。
+- 本地状态：`submitting`、`submitted`、`error`、`terminalError`、每秒刷新的 `now`；**不维护审批业务状态**。
+- 状态机（`ApprovalModel.status`）：
+
+  | 状态 | 来源 | 表现 |
+  |---|---|---|
+  | `pending` | `approval_request` 事件 | 「待审批」；未超时且未提交时显示「批准」「拒绝」 |
+  | `allowed` | `permission_decision`（`effective: "allow"`） | 「已允许」；隐藏按钮 |
+  | `denied` | `permission_decision` deny 且 reason 不以 `approval_timeout` / `approval_aborted` 开头 | 「已拒绝」；隐藏按钮 |
+  | `expired` | `permission_decision` deny 且 reason 以 `approval_timeout` 开头 | 「已过期」；隐藏按钮 |
+  | `aborted` | `permission_decision` deny 且 reason 以 `approval_aborted` 开头 | 「已中断」；隐藏按钮 |
+
+- 提交中按钮禁用并显示「提交中…」；成功（202）显示「已提交，等待确认」，状态仍保持 `pending` 直到 `permission_decision` 到达；失败显示错误码/消息，按钮恢复可用（未超时且非 409/410）。
+- 409 / 410 视为终态错误：展示服务端消息并保持按钮禁用，不推断最终结果。
+- 超过 `deadlineAt` 后本地禁用按钮并显示「已过期」，但 `status` 仍为 `pending`；最终状态只由事件流更新。
+- 禁止在组件内把状态改为 `allowed` / `denied` / `expired` / `aborted`，也禁止伪造 `permission_decision`。
+
 ## 8. 数据契约与状态投影
 
 ### 8.1 事件模型与两条通道
@@ -464,7 +485,8 @@ App
 type EventType =
   | "system" | "user" | "assistant" | "tool_call" | "tool_started"
   | "tool_result" | "usage" | "checkpoint" | "status" | "mcp_status"
-  | "device_status" | "interrupted" | "compaction" | "permission_decision";
+  | "device_status" | "interrupted" | "compaction" | "permission_decision"
+  | "approval_request";
 
 interface SessionEvent {
   seq: number;
@@ -505,6 +527,20 @@ interface DeviceStatusPayload {
   server: string;
   tool: string;
   state: Record<string, unknown>;
+}
+
+interface ApprovalRequestPayload {
+  requestId: string;
+  callId: string;
+  tool: string;
+  action: "ask";
+  access?: ToolAccess;
+  reason: string;
+  preset: "read-only" | "workspace-write" | "diagnose" | "danger-full-access";
+  paramsDigest: string;
+  paramsKeys: string[];
+  paramsPreview?: Record<string, unknown>;
+  deadlineAt: string;
 }
 
 interface AssistantPayload {
@@ -554,7 +590,8 @@ type LoopEvent =
 | `assistant`（toolCalls） | 工具卡骨架（待执行） |
 | `tool_started` | 对应工具卡进入「执行中」；`access` 仅用于展示授权口径，不推断设备状态 |
 | `tool_result` | 工具卡结果区（读数 / 命中 / 证据 / 错误） |
-| `permission_decision` | 会话内的权限条目：工具、动作、`effective`、理由；`action=ask,effective=deny` 显示「拒绝 / 未执行」 |
+| `approval_request` | 审批卡片（§7.16），`status: "pending"`；只展示摘要，不含参数原文 |
+| `permission_decision` | 会话内的权限条目：工具、动作、`effective`、理由；`action=ask,effective=deny` 显示「拒绝 / 未执行」；存在同 `callId` 的审批卡片时改为更新该卡片状态（§7.16），不再新增权限条目；`effective=deny` 时同 `callId` 工具卡置 `failed`（缺省错误码 `permission_denied`） |
 | `mcp_status` | 调试坞 MCP 状态区，不进入对话正文 |
 | `device_status` | 设备面板 patch（§8.6），不进入对话正文 |
 | `usage` | 状态栏与费用统计 |
@@ -624,7 +661,7 @@ interface ToolAnnotations {
 
 - `permission_decision` 进入消息流/守卫区，展示工具、动作、`effective` 与理由；`action=ask,effective=deny` 必须显示「拒绝 / 未执行」，不能伪装成成功或静默跳过。
 - `mcp_status` 进入调试坞状态区（状态缓冲最近 20 条，展示最近 5 条），展示 `kind`、server/tool、`toolCount` 与 `message`；`attempts`、`name/originalName`、`scope` 保留在 payload，当前未渲染。不重复合成旧 `status` 条目。
-- 本轮不提供 Web 审批按钮或审批 API；`approval_request` 仅为阶段 2 保留类型，实时流只透传已落日志的 `permission_decision`。
+- Web 审批已实现：`approval_request` 投影为待审批卡片，决策经 `POST /api/approvals` 回传；卡片终态只由 `permission_decision` 更新，不在前端伪造（§7.16）。
 
 ---
 
@@ -635,11 +672,13 @@ interface ToolAnnotations {
 | 主题切换 | 即时生效，写入本地存储，不重载 |
 | 调试坞开关 | 隐藏/显示右栏，主区宽度自适应 |
 | 分区/树节点折叠 | 点击整行；`aria-expanded` 同步；chevron 旋转 160ms |
-| 发送消息 | Enter 发送，Shift+Enter 换行；空输入禁用发送 |
+| 发送消息 | Enter 发送；空输入禁用发送。成功返回 202 后按 `sessionId` 加载并订阅；失败在输入栏下方显示错误并保留输入 |
 | 回放 | 从会话日志重建；显示"回放中"状态，禁止并发查询硬件 |
 | 实时事件 | 只订阅当前会话；按 `seq` 去重后追加到统一事件数组；`tool_started` 立即进入执行中 |
 | 断线续传 | 以 `lastSeq` 重连，最多 3 次；`stream_end` 停止，缺口触发整量重拉 |
-| 权限拒绝 | `action=ask,effective=deny` 显示「拒绝 / 未执行」；本轮无 Web 审批按钮 |
+| 新会话 | 会话头「新会话」按钮：清空活动会话、事件与视图，关闭 SSE；后续发送走新建。发送在途时开新会话只刷新会话列表，不切回在途结果 |
+| 审批决定 | 卡片按钮提交 `POST /api/approvals`；提交中禁用，成功显示「已提交，等待确认」，失败显示错误并恢复按钮；终态只由 `permission_decision` 更新 |
+| 权限拒绝 | `action=ask,effective=deny` 显示「拒绝 / 未执行」；审批卡片按 reason 显示已拒绝/已过期/已中断 |
 | 复位 / 写内存 | 二次确认，展示目标地址与值；确认后按钮进入执行中态 |
 | 长输出展开 | 折叠态显示摘要与规模；展开不改变消息流顺序 |
 | 滚动 | 日志与消息流在用户上滚后暂停自动跟随 |
@@ -723,4 +762,4 @@ interface ToolAnnotations {
 | v1.0 | 2026-10-18 | 首版：从 `prototypes/index.html` 提取令牌、栅格、组件与验收口径；对齐 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations` 实际类型；登记 6 项前端待决策 |
 | v1.1 | 2026-10-18 | 关闭 6 项决策：前端定为 Preact + Vite；实时通道定为 SSE + HTTP POST；决定扩展 `LoopEvent.tool_result`；波形与仪器联锁列为不做；虚拟滚动设触发条件；fork 仅做派生入口 |
 | v1.2 | 2026-10-18 | Task 10 视觉验收落地：V2 主区公式由笔误 `−664` 修正为 `−668`（264 + 404）；V3 明确滚动条占位从内容宽中扣除；V6 明确验收对象为厂商分流子树、整树超出走知识库区内部滚动；V11 明确覆盖原生表单控件；`applyTheme` 保留 `data-theme="system"` 交由 CSS 媒体查询解析 |
-| v1.3 | 2026-10-20 | 事件总线：事件模型补 `tool_started` / `mcp_status` / `device_status` / `permission_decision` 与对应 payload；明确统一事件数组、游标去重、缺口整量重拉、断线上限；设备面板按 `device_status` patch 并在重载时从历史重建；权限条目进消息流、MCP 状态进调试坞；本轮不含 Web 审批 |
+| v1.3 | 2026-10-20 | 事件总线：事件模型补 `tool_started` / `mcp_status` / `device_status` / `permission_decision` 与对应 payload；明确统一事件数组、游标去重、缺口整量重拉、断线上限；设备面板按 `device_status` patch 并在重载时从历史重建；权限条目进消息流、MCP 状态进调试坞；本轮不含 Web 审批 || v1.4 | 2026-10-20 | Web 审批：新增 `approval_request` 事件与 `ApprovalRequestPayload`，补 §7.16 审批卡片字段与状态机（pending/allowed/denied/expired/aborted）、提交中与失败态、超时禁用、禁止本地伪造终态；明确新会话按钮与发送失败展示；更新投影与交互规范 |

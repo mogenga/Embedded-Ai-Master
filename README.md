@@ -233,9 +233,9 @@ for await (const event of runSession({
 **ask 与审批**
 
 - `ask` 且提供 `prompter` 时等待审批，默认 120000 ms，超时按拒绝；同一 gate 内审批串行，按进入队列顺序执行。
-- `ask` 且没有 `prompter`（headless demo、Web 后端、未注入审批器的库调用）一律 `effective: "deny"`、`reason: "approval_unavailable"`，工具不执行。
+- `ask` 且没有 `prompter`（headless demo、未注入审批器的库调用）一律 `effective: "deny"`、`reason: "approval_unavailable"`，工具不执行。
 - 审批结果映射：批准 → `effective: "allow"`（理由追加 `approval_granted`）；拒绝 → `approval_denied`；超时 → `approval_timeout`；取消 → `approval_aborted`；审批器异常 → `approval_error: ...`（限长）。
-- 本轮只交付库层审批接口；Web 审批 API 与 UI 不在范围内（`/api/actions` 仍为 501；`/api/events` 已提供只读事件流，但无审批通道，D-112/D-137）。
+- Web 工作台由服务进程注入审批桥，经 `POST /api/approvals` 回传决策，见「Web 会话与审批」；headless 仍是 `ask` → deny。
 
 **审计事件**
 
@@ -339,7 +339,7 @@ npm run build:web   # 前端产物 dist-web/
 npm run serve:ui    # 真实数据服务，默认 http://127.0.0.1:5174/
 ```
 
-- **环境变量**：`HARNESS_UI_PORT` 改监听端口（默认 `5174`）；`HARNESS_HOME` 指定会话与知识库根目录（默认 `~/.harness`）；`HARNESS_UI_STATIC` 指定前端静态产物目录（默认 `dist-web`）；`VITE_EVENT_STREAM_URL` 覆盖事件流地址（默认 `/api/events`）。服务只监听 `127.0.0.1`。
+- **环境变量**：`HARNESS_UI_PORT` 改监听端口（默认 `5174`）；`HARNESS_HOME` 指定会话与知识库根目录（默认 `~/.harness`）；`HARNESS_UI_STATIC` 指定前端静态产物目录（默认 `dist-web`）；`HARNESS_WEB_MODEL` 指定 Web 会话默认模型引用；`VITE_EVENT_STREAM_URL` 覆盖事件流地址（默认 `/api/events`）。服务只监听 `127.0.0.1`。
 - **本机边界**：`/api/*` 校验 `Host` / `Origin` 必须为 `127.0.0.1` / `localhost` / `::1` 且端口等于监听端口；跨源返回 403 `forbidden_host` / `forbidden_origin`，用于阻断 DNS rebinding 与跨源读取（D-067 已解决）。
 - **架构**：Preact 只承担组件化与增量 diff；全部业务状态经 `src/ui/view/transcript.ts` 的纯函数投影 `TranscriptView`。前端类型直接复用内核 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations`，不维护第二套事件模型。
 - **数据加载**：首屏并行请求 `/api/sessions`、`/api/kb`、`/api/device`，再按会话列表首项请求 `/api/sessions/<id>` 的真实事件日志；切换会话重新拉取。调试坞的寄存器与日志由工具卡投影，不再使用静态演示数据。
@@ -351,10 +351,11 @@ npm run serve:ui    # 真实数据服务，默认 http://127.0.0.1:5174/
   | GET | `/api/sessions/:id` | `{ header, events }`；非法 id 400，不存在 404，损坏会话 500 `session_corrupt` |
   | GET | `/api/kb` | `{ root, tree }`；未配置 `kb/` 时返回 `{ root: null, tree: [] }` |
   | GET | `/api/device` | 当前恒为 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` |
-  | POST | `/api/actions` | 501 `action_not_implemented`（写操作尚未实现） |
+  | POST | `/api/actions` | 发起会话或追加输入，202 `{ sessionId, created }`；错误码见「Web 会话与审批」 |
+  | POST | `/api/approvals` | 回传审批决策，202/200；错误码见「Web 会话与审批」 |
   | GET | `/api/events` | SSE 单会话事件流，见「实时事件流」；非法 id/cursor 400，不存在 404，损坏 500 |
 
-- **诚实边界**：写操作仍未实现，前端不伪造提交成功。未配置 `VITE_ACTION_URL` 时发送按钮禁用并提示「未配置提交端点，输入不会发送」；实时事件流默认连接 `/api/events`。
+- **诚实边界**：写端点必须带 loopback `Origin`；提交失败在输入栏下方显示错误并保留输入。202 只表示受理/送达，工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准，前端不伪造成功。`VITE_ACTION_URL` / `VITE_APPROVAL_URL` 可覆盖默认端点；实时事件流默认连接 `/api/events`。
 - **空态**：无会话显示「暂无会话」，未配置 `$HARNESS_HOME/kb/` 显示「未配置知识库」；设备字段为 `unknown` 时 StatusBar 显示「—」，TopBar / DeviceMonitor / PortSettings 显示「未接入」。
 - **主题**：`light` / `system` / `dark` 三态，`localStorage` 键 `eam-theme`，默认 `system`；切换不重载页面。所有颜色经 CSS 变量，图标为内联 SVG sprite。
 - **验收**：`npm run verify:ui` 先要求 `dist-web/` 与 `dist/server/serve.js` 已构建，然后创建临时 `HARNESS_HOME`（写入一条真实会话日志与示例知识库目录），启动 `dist/server/serve.js`，用无头 Chromium 经 CDP 实测 V1-V14（三栏几何、无溢出/截断、滚动条配色与占位、三主题解析、无 emoji、焦点可见、减少动效、回放一致性、真实写操作确认文案）；另以空 `HARNESS_HOME` 起第二个服务检查空态文案（V0，附加项不计入 14 项）。结束后关闭服务并清理临时目录，清理失败仅 warning。浏览器探测优先 `CHROME_PATH`，其次 Chrome/Edge 常见安装路径；找不到时以 exit 2 明确失败。
@@ -367,12 +368,86 @@ Web 工作台通过 SSE 订阅单个会话的日志投影。实时流与回放�
 - **端点**：`GET /api/events?sessionId=<id>&since=<seq>`。`sessionId` 必填（规则同 `isValidSessionId`）；`since` 为不小于 `-1` 的整数，缺省时读取 `Last-Event-ID`，两者都缺省按 `-1` 从头补播；query 优先于 header。`since` 大于会话当前最大 `seq` 时按该 `seq` 夹紧（等价于从尾部继续跟随），不报错。非法 id / cursor 返回 400（`invalid_session_id` / `invalid_cursor`），会话不存在 404 `session_not_found`，日志损坏 500 `session_corrupt`。
 - **单会话绑定**：每条连接只跟随一个会话；切换会话必须关闭旧流，并以新会话的 `lastSeq` 重新建流。多会话复用与全局流未实现（D-133）。
 - **帧格式**：普通事件为 `id: <seq>` + `data: <SessionEventEnvelope JSON>`；`retry: 3000`；每 15s 一条注释心跳 `: ping`；会话已关闭且补播完成后发 `event: stream_end`（`data: {"lastSeq":N}`）；异常发 `event: stream_error`（`data: {"code","lastSeq"}`）后关闭。
-- **事件类型**：`tool_started`（`{callId,tool,access?}`）、`tool_result`、`permission_decision`、`mcp_status`、`device_status`，以及既有 `system/user/assistant/usage/checkpoint/status/interrupted/compaction`。`tool_call` 仅用于旧日志回放，新代码不再产生。`permission_decision` 中 `action=ask,effective=deny` 表示最终未获批准且工具未执行（原因可能是 `approval_unavailable` / `approval_denied` / `approval_timeout` / `approval_aborted`，需看 `reason`）；`mcp_status` 的 `kind` 覆盖 `connected/connect_failed/tools_changed/tools_refresh_failed/tool_invalid_schema/listener_failed/call_failed/config_failed/config_warning/project_config_skipped/tool_name_renamed`。
+- **事件类型**：`approval_request`（参数摘要与截止时间，不含参数原文）、`tool_started`（`{callId,tool,access?}`）、`tool_result`、`permission_decision`、`mcp_status`、`device_status`，以及既有 `system/user/assistant/usage/checkpoint/status/interrupted/compaction`。`tool_call` 仅用于旧日志回放，新代码不再产生。`permission_decision` 中 `action=ask,effective=deny` 表示最终未获批准且工具未执行（原因可能是 `approval_unavailable` / `approval_denied` / `approval_timeout` / `approval_aborted`，需看 `reason`）；`mcp_status` 的 `kind` 覆盖 `connected/connect_failed/tools_changed/tools_refresh_failed/tool_invalid_schema/listener_failed/call_failed/config_failed/config_warning/project_config_skipped/tool_name_renamed`。
 - **设备状态契约**：MCP 工具在**成功**结果（`isError !== true`）的 `structuredContent.deviceStatus` 返回普通 JSON 对象；序列化后 ≤ 8 KiB、深度 ≤ 4。内核校验后写 `device_status`，payload 为 `{callId, server, tool, state}`。`state` 的键与值完全由 MCP server 决定，内核与 UI 不解释、不补全、不推断；UI 只 patch 已知字符串字段 `probe/serial/cpu/backend`，未知键与非字符串值忽略。失败、权限拒绝、超时/取消不产生 `device_status`；`deviceStatus` 存在但解析失败（非普通对象、超限、访问器/循环等）时写 `status {status:"device_status_invalid", tool, message}` 显式审计；`structuredContent` 非对象或缺少 `deviceStatus` 键时静默跳过，不猜测状态。
 - **断线续传**：客户端独占游标 `lastSeq`，重连以 `since=lastSeq` 建流并按 `seq` 去重；连续 3 次未成功建流后显示流错误（成功 `open` 后计数重置）。收到 `seq > lastSeq + 1` 视为缺口，关闭流并整量重拉会话（每次订阅最多 3 次），避免静默拼接错误；`stream_end` 停止重连，`stream_error` 按同一上限重连。
 - **慢客户端**：服务端实时队列上限 500 条；实时阶段单帧写超时（默认同补播超时，30s）到期即视为慢客户端，或队列溢出时同样处理：发 `stream_error {code:"slow_consumer", lastSeq}` 并关闭连接，客户端凭游标重连续传。补播阶段每帧也有写超时，完全不读响应体的连接会被关闭；大日志 / 长断线补播的性能上限未压测（D-136）。
 - **延迟与证据**：当前由 200ms 日志轮询跟随，实际延迟还受文件读取与事件循环调度影响，无硬上限，也未压测；进程内低延迟适配器未实现（D-134）。证据由 `tool_result.payload` 的 `evidence/artifactPath/detail` 承载，没有独立 `evidence` 事件（D-135）。
-- **本轮不含 Web 审批**：只暴露已落日志的 `permission_decision`；`approval_request` 是阶段 2 的保留类型，审批 API / UI 未实现（D-137）。
+- **审批事件**：`approval_request` 由审批桥在等待前写入日志，再由 SSE 投影为待审批卡片；决策与执行结果见「Web 会话与审批」。
+
+## Web 会话与审批
+
+Web 进程内运行最小会话运行器：`POST /api/actions` 发起会话或追加输入，`ask` 工具产生 `approval_request`，浏览器经 `POST /api/approvals` 回传决策。
+
+```bash
+npm run build:web && npm run build && npm run serve:ui
+# 打开 http://127.0.0.1:5174/
+```
+
+开发期用 `npm run dev:web`：Vite 把 `/api` 代理到 `HARNESS_UI_PORT`（默认 5174），并在 `proxyReq` 把 `Origin` 改写为 `http://127.0.0.1:<端口>`，以满足写端点的 Origin 要求；生产同源不需要改写。
+
+**模型**
+
+- 读取 `$HARNESS_HOME/providers.json`；模型引用按 `HARNESS_WEB_MODEL` → providers 中第一个 `<provider>/<model>` 的顺序回退（运行器显式 `model` 选项优先）。
+- 追加输入时优先使用会话 `header.model`；`header` 无模型时与新建会话相同，回退到 `HARNESS_WEB_MODEL` 与 providers 第一个引用。
+- providers 缺失、JSON/schema 错误或引用无效统一返回 503 `model_unavailable`，message 说明检查 `HARNESS_HOME/providers.json` 与 `HARNESS_WEB_MODEL`。
+
+**运行器语义**
+
+- 同一会话同一时间只允许一次运行；运行期间再次提交返回 409 `session_busy`。
+- 202 返回前会话 `header.json` 必须已落盘；默认 10s 内未就绪则 abort 并返回 503 `session_start_timeout`。
+- 运行错误写入 stderr 并留在会话日志，不回传 HTTP 响应。
+
+### POST /api/actions
+
+请求：
+
+```json
+{ "text": "读取 0x20000000 的 4 字节", "sessionId": "可选" }
+```
+
+缺省 `sessionId` 新建会话；带 `sessionId` 时向该会话追加输入（使用 `header.model` 与 `header.workdir`）。
+
+202 响应：
+
+```json
+{ "sessionId": "uuid", "created": true }
+```
+
+| 状态 | code | 条件 |
+|---|---|---|
+| 400 | `invalid_body` | 非 JSON 对象、缺 `text`、`text` 非字符串 |
+| 400 | `invalid_text` | `text` 为空/纯空白、超过 8000 字符 |
+| 400 | `invalid_session_id` | `sessionId` 非法 |
+| 404 | `unknown_session` | 指定会话不存在 |
+| 409 | `session_busy` | 同会话正在运行 |
+| 503 | `model_unavailable` | providers 缺失/无效/引用无效 |
+| 503 | `session_start_timeout` | 就绪超时（运行器已 abort） |
+
+### POST /api/approvals
+
+请求：
+
+```json
+{ "sessionId": "uuid", "requestId": "call-1", "decision": "allow" }
+```
+
+| 状态 | body | 条件 |
+|---|---|---|
+| 202 | `{ requestId, decision }` | 首次受理，决策已送达等待中的 gate |
+| 200 | `{ requestId, decision }` | 同决策重复提交 |
+| 400 | `invalid_body` / `invalid_session_id` / `invalid_request_id` / `invalid_decision` | 字段缺失或类型错误、id 非法、`requestId` 不在 1..200 字符、决策不是 `allow`/`deny` |
+| 404 | `unknown_session` / `unknown_request` | 会话不在运行器注册表 / 运行中但从未见过该 `requestId` |
+| 409 | `already_decided` | 已用相反决策结束 |
+| 410 | `approval_expired` | 已超时或中断，不可再决 |
+
+**202 语义**：只表示决策已送达 gate，不表示工具已执行；最终结果以会话日志的 `permission_decision` 为准（批准为 `effective: "allow"` 且 reason 含 `approval_granted`，拒绝为 deny）。HTTP 不返回 `effective`，前端也不本地伪造终态，等待 SSE 更新。
+
+**写端点通用约束**：`POST /api/actions` 与 `POST /api/approvals` 必须携带 `Origin`，且为 loopback、端口等于监听端口，否则 403 `forbidden_origin`；`Content-Type` 必须为 `application/json`（415），body 上限 8 KiB（413），读取超时 5s。只读端点仍只校验 `Host` / `Origin`。
+
+**失败语义**：审批超时（`approvalTimeoutMs`，默认 120000ms）、用户拒绝、会话中断均不执行工具，日志以 `permission_decision` deny 收尾；迟到决策在运行中返回 410，会话结束后返回 404。服务重启后未决审批丢失，`resumeSession` 会补 `approval_aborted: crash_recovery` 审计。headless demo 与未注入审批桥的库调用仍是 `ask` → deny（`approval_unavailable`）。
+
+**演示**：启动后在输入栏发送需要 `ask` 的指令（默认 `diagnose` 下让 `shell` 执行无害命令，或让 `fs` 写临时文件），页面出现审批卡片；批准后工具执行，拒绝后不执行。过程记录见 `dev-notes/M2-Web审批.md`。
 
 ## 会话管理
 
@@ -490,7 +565,7 @@ MCP：
 
 前端工作台：
 
-- SSE 实时事件流已实现（单会话、`since`/`Last-Event-ID` 续传）；写操作仍为 501，action 契约待定（D-051；D-063 事件流部分已解决）。
+- SSE 实时事件流已实现（单会话、`since`/`Last-Event-ID` 续传）；写操作与审批已落地，见「Web 会话与审批」（D-137/D-139 已解决；D-051 的 action 契约已收敛为 `text` + 可选 `sessionId`）。
 - 实时总线只做日志投影：延迟约 200-250ms，无进程内低延迟适配器（D-134）；只支持单会话流（D-133）。
 - 设备面板只消费 MCP 显式发布的 `device_status`，无该事件时 `/api/device` 仍恒为 `unknown`，缺少显式连接状态枚举（D-052、D-058）。
 - 回放/导出按钮已渲染但未接行为（D-059）。

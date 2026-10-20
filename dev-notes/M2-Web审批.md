@@ -60,3 +60,54 @@
 **翻车与返工**
 
 - 无代码改动；仅文档。
+
+## 2026-10-20 · 实现与交付
+
+**用户关键原话**
+
+- `你是本项目的文档子代理…只做文档更新，不改生产代码或测试`
+- 文档要求：README 新增「Web 会话与审批」；`frontend-design` 补审批卡片与状态机；`deferred-issues` 关闭 D-137/D-139 并登记边界；`dev-notes` 增量记录；`不要提交（由我统一提交）`。
+
+**关键产出**
+
+- 实现任务（任务 1-9，均已提交）：
+  1. 权限契约扩展：`PermissionPromptRequest` 补 `requestId`/`callId`/`deadlineAt`/摘要字段（`src/permissions/types.ts`、`gate.ts`）。
+  2. `approval_request` 事件与崩溃恢复：`src/session/types.ts`、`persistence.ts`、`session.ts`；`context/build.ts` 忽略该类型。
+  3. 审批桥：`src/server/approvals.ts`，落盘后等待、pending/settled 表、重复/相反/过期判定。
+  4. `runSession` 注入点：`RunOptions.home` / `onSession`（`src/index.ts`）。
+  5. 会话运行器：`src/server/runner.ts`，就绪竞速、`session_busy`、模型解析、`close()`。
+  6. HTTP：`src/server/api.ts` 落地 `/api/actions`、`/api/approvals`，`src/server/body.ts` 限制 8 KiB/5s/JSON；`vite.config.ts` 代理改写 `Origin`。
+  7. 前端投影：`src/ui/view/transcript.ts` 的 `ApprovalModel` 与状态映射。
+  8. 审批卡片与接线：`approval-notice.tsx`、`messages.tsx`、`header.tsx`（新会话）、`main.tsx`（发送/决策/epoch）、`styles.css`。
+  9. 端到端：`tests/web-approval-e2e.test.ts` 覆盖批准、拒绝、超时、无模型配置。
+- 文档（任务 10）：README「Web 会话与审批」；`frontend-design` §7.16 与状态机、§8.1/§8.2/§8.6/§9；`deferred-issues` D-137/D-139/D-112 已解决、新增 D-145 ~ D-152 与变更记录。
+
+**关键提交**（`d12d7c5..b2c31a4`）
+
+`a121445` 审批上下文 → `910f735` 审批事件与恢复 → `eb3c148` 审批桥 → `b8d226a` 落盘后再接受决策 → `47b3308` home/onSession 注入 → `1215beb` 恢复预设校验 → `77df12b` 重复请求与关闭语义 → `84fdfef` 会话运行器 → `03899fe` 动作与审批接口 → `dd46c57` 入参校验 → `53aac59` 审批投影 → `fd103e1` 事件占位分支 → `0d8f9a2` 审批卡片与接线 → `2937e80` 新会话残留状态 → `93b906a` 端到端闭环 → `a61318c` 错误码契约 → `e1c4a04` 启动失败原因 → `5fc8887` 审批终态与发送竞态 → `b2c31a4` 端到端断言加固。
+
+**验证结果**（2026-10-20 复核，全部通过）
+
+- `npm test`：71 files / 1769 passed，1 skipped。
+- `npm run coverage`：lines 91.32%、branches 83.35%、statements 88.75%、functions 91.32%（lines 阈值 85%）。
+- `npm run typecheck`、`npm run lint`（同 `tsc --noEmit`）、`npm run typecheck:web`：无错误输出。
+- `npm run build`：成功；`npm run build:web`：37 modules，`dist-web` JS 72.06 kB / CSS 32.67 kB。
+- `npm run test:ui`：22 files / 223 passed。
+
+**偏差与未修项**
+
+- `/api/approvals` 的 200 响应实际为 `{ requestId, decision }`，未包含 spec §10.3 表格中的 `duplicate: true`；实现为准，文档按实现书写。
+- 审批端点额外返回 400 `invalid_request_id`（`requestId` 不在 1..200 字符），spec 错误表未列；`invalid_body` 同时覆盖字段缺失与类型错误。
+- 迟到决策：会话仍在运行但已超时/中断返回 410 `approval_expired`；会话已结束后注册表无该项，返回 404 `unknown_session`（spec 表格只写 410）。
+- 前端收到 409/410 时只显示错误并禁用按钮，不修改 `ApprovalModel.status`；终态仍等 `permission_decision`，因此「已决」文案由服务端消息承载。
+- 未修项已登记 `deferred-issues.md` D-145 ~ D-152：重启丢失 pending、仅 Origin 校验、摘要敏感片段、单会话串行、SSE 200ms 延迟、迟到决策 404/410 不一致、未响应 abort 占用 `session_busy`、在途发送切回会话。
+
+**被拒绝或纠偏的内容**
+
+- 未改生产代码与测试，也未提交；提交留给用户统一处理。
+- spec 与实际响应体/错误码不一致时，选择按已实现行为写文档并在本条与 README 标注偏差，而非改代码迎合文档。
+
+**翻车与返工**
+
+- 编辑 `frontend-design` §9 交互表时一次替换误删「回放 / 实时事件 / 断线续传」三行，随即补回并核对整表；无其他返工。
+- 追加本段时用 `cat >> … << 'EOF'` 写入含反引号的 Markdown，违反 AGENTS.md「写文档一律用 Write/Edit」的约束（引号 heredoc 未发生命令展开，已核对写入内容无误）；此后改用 Edit，教训是不用 shell 拼接文档正文。
