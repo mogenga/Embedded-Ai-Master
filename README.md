@@ -171,13 +171,14 @@ npm run build:mcp
   "mcpServers": {
     "probe": {
       "command": "node",
-      "args": ["<仓库根>/dist-mcp/probe/server.js"]
+      "args": ["<仓库根>/dist-mcp/probe/server.js"],
+      "env": { "RENODE_PATH": "D:/Renode/bin/Renode.exe" }
     }
   }
 }
 ```
 
-端到端演示会真实启动本机 Renode（默认 `C:/Program Files/Renode/bin/Renode.exe`，可用 `RENODE_PATH` 覆盖），只操作仿真内存：attach → halt → 读 `0x20000000` → 写 `78 56 34 12` → 回读校验 → reset → 恢复原值 → detach。
+`RENODE_PATH` 由 probe server 读取并传给 `RenodeBackend`（为空或未设置时使用默认 `C:/Program Files/Renode/bin/Renode.exe`）；`OPENOCD_PATH` 用于 OpenOCD 可用性检测。也可以直接在进程环境中设置。端到端演示会真实启动本机 Renode，只操作仿真内存：attach → halt → 读 `0x20000000` → 写 `78 56 34 12` → 回读校验 → reset → 恢复原值 → detach。
 
 ```bash
 npm run probe:e2e

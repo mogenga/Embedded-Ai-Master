@@ -97,7 +97,7 @@ function buildReadResult(address: number, bytes: number[]): MemoryReadResult {
 export class RenodeBackend implements ProbeBackend {
   readonly kind = "renode" as const;
 
-  private readonly renodePath?: string;
+  readonly renodePath?: string;
   private readonly monitorFactory: (options: RenodeMonitorOptions) => RenodeMonitorLike;
   private readonly serialFactory: () => SerialClientLike;
 

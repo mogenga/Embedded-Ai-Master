@@ -8,8 +8,16 @@ import { RenodeBackend } from "./renode-backend.js";
 import { probeTools } from "./tools.js";
 import type { ProbeBackends, ProbeToolSpec } from "./tools.js";
 
-export function createProbeBackends(): ProbeBackends {
-  return { renode: new RenodeBackend(), openocd: new OpenOcdBackend() };
+export interface ProbeBackendEnv {
+  RENODE_PATH?: string | undefined;
+}
+
+export function createProbeBackends(env: ProbeBackendEnv = process.env): ProbeBackends {
+  const renodePath = env.RENODE_PATH?.trim();
+  return {
+    renode: new RenodeBackend(renodePath ? { renodePath } : {}),
+    openocd: new OpenOcdBackend(),
+  };
 }
 
 export function createProbeTools(backends: ProbeBackends = createProbeBackends()): ProbeToolSpec[] {
