@@ -195,6 +195,14 @@ async function main() {
     fail(`未找到 ${path.relative(ROOT, SERVICE_MODULE)}；请先运行 npm run build:mcp`);
     return;
   }
+  if (!existsSync(REPORT_MODULE)) {
+    fail(`未找到 ${path.relative(ROOT, REPORT_MODULE)}；请先运行 npm run build:mcp`);
+    return;
+  }
+  if (!existsSync(YAML_MODULE)) {
+    fail(`未找到 ${path.relative(ROOT, YAML_MODULE)}；请先运行 npm run build:mcp`);
+    return;
+  }
 
   const configuredRoot = process.env.KB_ROOT?.trim();
   const kbRoot = configuredRoot ? path.resolve(process.cwd(), configuredRoot) : DEFAULT_KB_ROOT;
@@ -248,11 +256,20 @@ async function main() {
     return;
   }
 
-  const { KbService } = await import(pathToFileURL(SERVICE_MODULE).href);
-  const { createSearchAccumulator, recordSearchResult } = await import(
-    pathToFileURL(REPORT_MODULE).href
-  );
-  const { parseIndexYaml } = await import(pathToFileURL(YAML_MODULE).href);
+  let KbService;
+  let createSearchAccumulator;
+  let recordSearchResult;
+  let parseIndexYaml;
+  try {
+    ({ KbService } = await import(pathToFileURL(SERVICE_MODULE).href));
+    ({ createSearchAccumulator, recordSearchResult } = await import(
+      pathToFileURL(REPORT_MODULE).href
+    ));
+    ({ parseIndexYaml } = await import(pathToFileURL(YAML_MODULE).href));
+  } catch (error) {
+    fail(`加载构建产物失败: ${errorMessage(error)}；请先运行 npm run build:mcp`);
+    return;
+  }
   const service = new KbService(kbRoot);
   const status = service.status();
 
