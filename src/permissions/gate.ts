@@ -7,6 +7,7 @@ import type {
   PermissionGate,
   PermissionPreset,
   PermissionPrompter,
+  PermissionPromptRequest,
   PermissionRequest,
   SourcedRule,
 } from "./types.js";
@@ -30,7 +31,7 @@ type ApprovalOutcome =
   | { kind: "aborted" }
   | { kind: "error"; message: string };
 
-type ApprovalPrompt = Omit<Parameters<PermissionPrompter["request"]>[0], "signal">;
+type ApprovalPrompt = Omit<PermissionPromptRequest, "signal" | "deadlineAt">;
 
 function isPermissionAction(value: unknown): value is PermissionAction {
   return value === "allow" || value === "ask" || value === "deny";
@@ -130,7 +131,23 @@ export function createPermissionGate(opts: PermissionGateOptions): PermissionGat
         active = true;
 
         try {
-          const pending = prompter.request({ ...prompt, signal: controller.signal });
+          const promptReq: PermissionPromptRequest = {
+            requestId: prompt.requestId,
+            callId: prompt.callId,
+            tool: prompt.tool,
+            args: prompt.args,
+            reason: prompt.reason,
+            preset: prompt.preset,
+            access: prompt.access,
+            deadlineAt: new Date(deadline).toISOString(),
+            paramsDigest: prompt.paramsDigest,
+            paramsKeys: prompt.paramsKeys,
+            ...(prompt.paramsPreview === undefined
+              ? {}
+              : { paramsPreview: prompt.paramsPreview }),
+            signal: controller.signal,
+          };
+          const pending = prompter.request(promptReq);
           if (!isThenable(pending)) {
             settle({ kind: "error", message: `非法审批返回值: ${describeValue(pending)}` });
             return;
@@ -232,10 +249,18 @@ export function createPermissionGate(opts: PermissionGateOptions): PermissionGat
 
       const outcome = await requestApproval(
         {
-          tool: input.tool.name,
-          args: input.args,
+          requestId: request.callId,
+          callId: request.callId,
+          tool: request.tool,
+          args: request.args,
           reason: evaluation.reason,
           preset: evaluation.preset,
+          access: request.access,
+          paramsDigest: request.paramsDigest,
+          paramsKeys: summary.keys,
+          ...(request.paramsPreview === undefined
+            ? {}
+            : { paramsPreview: request.paramsPreview }),
         },
         input.signal,
       );

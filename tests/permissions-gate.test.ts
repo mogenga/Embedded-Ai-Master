@@ -53,6 +53,21 @@ async function flush(): Promise<void> {
   await Promise.resolve();
 }
 
+async function firstPromptRequest(
+  fixture: ReturnType<typeof deferredPrompter>,
+  callId = "call-1",
+  args: unknown = { op: "write" },
+): Promise<Parameters<PermissionPrompter["request"]>[0]> {
+  const gate = createPermissionGate({ preset: "diagnose", rules: [], prompter: fixture.prompter });
+  const pending = check(gate, callId, shell, args);
+  await flush();
+  expect(fixture.requests).toHaveLength(1);
+  const captured = fixture.requests[0]!.req;
+  fixture.requests[0]!.resolve("allow");
+  await pending;
+  return captured;
+}
+
 function check(
   gate: ReturnType<typeof createPermissionGate>,
   callId: string,
@@ -113,6 +128,19 @@ describe("createPermissionGate", () => {
     expect(prompter.request).toHaveBeenCalledWith(
       expect.objectContaining({ tool: "shell", preset: "diagnose" }),
     );
+  });
+
+  it("passes approval context including deadline and params summary to the prompter", async () => {
+    const fixture = deferredPrompter();
+    const captured = await firstPromptRequest(fixture);
+    expect(captured.requestId).toBe("call-1");
+    expect(captured.callId).toBe("call-1");
+    expect(captured.access).toBe("write");
+    expect(captured.deadlineAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(Date.parse(captured.deadlineAt)).toBeGreaterThan(Date.now());
+    expect(captured.paramsDigest).toMatch(/^[a-f0-9]{16}$/);
+    expect(captured.paramsKeys).toEqual(["op"]);
+    expect(captured.paramsPreview).toEqual({ op: "write" });
   });
 
   it("denies when the prompter denies", async () => {

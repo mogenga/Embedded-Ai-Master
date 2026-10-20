@@ -56,16 +56,25 @@ export interface PermissionRequest {
   paramsPreview?: Record<string, unknown>;
 }
 
+export interface PermissionPromptRequest {
+  requestId: string;
+  callId: string;
+  tool: string;
+  args: unknown;
+  reason: string;
+  preset: PermissionPreset;
+  access: ToolAccess;
+  deadlineAt: string;
+  paramsDigest: string;
+  paramsKeys: string[];
+  paramsPreview?: Record<string, unknown>;
+  signal: AbortSignal;
+}
+
 export interface PermissionGate {
   check(input: PermissionCheckInput): Promise<PermissionRequest>;
 }
 
 export interface PermissionPrompter {
-  request(req: {
-    tool: string;
-    args: unknown;
-    reason: string;
-    preset: PermissionPreset;
-    signal: AbortSignal;
-  }): Promise<"allow" | "deny">;
+  request(req: PermissionPromptRequest): Promise<"allow" | "deny">;
 }
