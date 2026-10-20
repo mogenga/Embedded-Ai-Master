@@ -17,6 +17,7 @@
     "test:mcp": "vitest run mcp-servers",
     "probe:e2e": "node scripts/probe-e2e.mjs",
     "kb:regression": "node scripts/kb-regression.mjs",
+    "kb:review": "node scripts/kb-review.mjs",
     "build:web": "vite build",
     "serve:ui": "node dist/server/serve.js",
     "dev:web": "vite",

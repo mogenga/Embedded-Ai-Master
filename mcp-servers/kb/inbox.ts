@@ -22,10 +22,6 @@ export interface ReviewedEntry {
   reason?: string
 }
 
-interface InboxBlock {
-  proposal: KbProposal
-  raw: string
-}
 
 const INBOX_FILE = '_inbox.md'
 const REVIEWED_FILE = '_reviewed.md'
@@ -81,12 +77,18 @@ function splitBlocks(text: string): { header: string; blocks: string[] } {
   const blocks: string[] = []
   let current: string[] | null = null
 
+  const pushCurrent = () => {
+    if (current === null) return
+    const block = current.join('\n')
+    if (block.trim() !== '') blocks.push(block)
+  }
+
   for (const line of lines) {
     if (isSeparator(line)) {
       if (current === null) {
         current = []
       } else {
-        blocks.push(current.join('\n'))
+        pushCurrent()
         current = []
       }
       continue
@@ -94,31 +96,50 @@ function splitBlocks(text: string): { header: string; blocks: string[] } {
     if (current === null) headerLines.push(line)
     else current.push(line)
   }
-  if (current !== null && current.some((line) => line.trim() !== '')) {
-    blocks.push(current.join('\n'))
-  }
+  pushCurrent()
   return { header: headerLines.join('\n').replace(/\s+$/, ''), blocks }
 }
 
-function parseBlock(raw: string, index: number): InboxBlock | undefined {
+interface ParsedBlock {
+  id?: string
+  date: string
+  kind: KbProposalKind
+  domain: string
+  source: string
+  content: string
+  title?: string
+  raw: string
+}
+
+function parseBlock(raw: string): ParsedBlock | undefined {
   const fields = parseFields(raw)
   const content = fields.content ?? ''
   if (content.trim() === '') return undefined
-  const id = fields.id?.trim() || `legacy-${index}`
+  const id = fields.id?.trim()
   const kind = fields.kind?.trim()
   return {
-    proposal: {
-      id,
-      date: fields.date?.trim() ?? '',
-      kind: kind !== undefined && KINDS.has(kind as KbProposalKind) ? (kind as KbProposalKind) : 'reference',
-      domain: fields.domain?.trim() ?? '',
-      source: fields.source?.trim() ?? '',
-      content,
-      ...(fields.title !== undefined && fields.title.trim() !== ''
-        ? { title: fields.title.trim() }
-        : {}),
-    },
+    ...(id === undefined || id === '' ? {} : { id }),
+    date: fields.date?.trim() ?? '',
+    kind: kind !== undefined && KINDS.has(kind as KbProposalKind) ? (kind as KbProposalKind) : 'reference',
+    domain: fields.domain?.trim() ?? '',
+    source: fields.source?.trim() ?? '',
+    content,
+    ...(fields.title !== undefined && fields.title.trim() !== ''
+      ? { title: fields.title.trim() }
+      : {}),
     raw,
+  }
+}
+
+function toProposal(parsed: ParsedBlock, id: string): KbProposal {
+  return {
+    id,
+    date: parsed.date,
+    kind: parsed.kind,
+    domain: parsed.domain,
+    source: parsed.source,
+    content: parsed.content,
+    ...(parsed.title === undefined ? {} : { title: parsed.title }),
   }
 }
 
@@ -133,11 +154,12 @@ function reviewedPath(root: string): string {
 export function parseInbox(text: string): KbProposal[] {
   const { blocks } = splitBlocks(text)
   const proposals: KbProposal[] = []
-  let index = 0
+  let legacyIndex = 0
   for (const raw of blocks) {
-    index += 1
-    const parsed = parseBlock(raw, index)
-    if (parsed !== undefined) proposals.push(parsed.proposal)
+    const parsed = parseBlock(raw)
+    if (parsed === undefined) continue
+    legacyIndex += 1
+    proposals.push(toProposal(parsed, parsed.id ?? `legacy-${legacyIndex}`))
   }
   return proposals
 }
@@ -197,12 +219,17 @@ export function removeProposal(root: string, id: string): KbProposal | undefined
 
   const kept: string[] = []
   let removed: KbProposal | undefined
-  let index = 0
+  let legacyIndex = 0
   for (const raw of blocks) {
-    index += 1
-    const parsed = parseBlock(raw, index)
-    if (parsed !== undefined && parsed.proposal.id === id) {
-      removed = parsed.proposal
+    const parsed = parseBlock(raw)
+    if (parsed === undefined) {
+      if (raw.trim() !== '') kept.push(raw)
+      continue
+    }
+    legacyIndex += 1
+    const proposalId = parsed.id ?? `legacy-${legacyIndex}`
+    if (proposalId === id) {
+      removed = toProposal(parsed, proposalId)
       continue
     }
     kept.push(raw)
