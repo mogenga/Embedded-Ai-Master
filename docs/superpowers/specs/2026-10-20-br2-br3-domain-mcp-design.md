@@ -1,6 +1,6 @@
 # BR-2/BR-3 领域 MCP 设计（取证工具 + 诊断知识库）
 
-> 版本：v1.0 · 日期：2026-10-20 · 状态：待实现
+> 版本：v1.0 · 日期：2026-10-20 · 状态：已实现（2026-10-20）
 > 上游：`docs/BRD.md` §6 BR-2/BR-3、§11.2、§12；`docs/m2-roadmap.md` §3 阶段 2 任务 5/6。
 > 本轮范围：BR-2 MVP（Renode 端到端 + OpenOCD 适配层）与 BR-3 骨架（KB 工具 + 回归）。BR-4 参数级策略、BR-5 沉淀闭环不在本轮。
 
@@ -167,7 +167,8 @@ scripts/
 - 全部 `readOnlyHint: true`；`kb_read` 的 `_meta.evidence: true`（读到的内容可作为证据引用）。
 - 路径安全：拒绝绝对路径、`..`、空路径、解析后不在 KB 根内、非 `.md`/`.yaml`、超过 1 MiB；错误 `code: "path_denied"` / `file_too_large` / `not_found`。
 - `kb_lookup` 评分：对每个索引条目，`score = Σ(命中 keyword 的字符长度) + 2 × 命中 tag 数`；只做小写子串匹配（中文无需分词）；同分按 path 字典序稳定排序；`score = 0` 不返回。
-- 技术 token 覆盖度：从 query 提取 ASCII token / 十六进制 / 型号，过滤英文停用词与 `CPU`/`MCU`/`SoC` 等泛指词。候选条目必须在 title/summary/path/keywords/tags 中覆盖技术 token；单个技术 token 必须命中，多个技术 token 必须覆盖超过一半。仅命中中文通用词（如“优化”“内存”“对齐”“没反应”）不足以支撑 `found: true`，此时按 `low_confidence` 拒答。
+- 技术 token 覆盖度：从 query 提取 ASCII token / 十六进制 / 型号，过滤英文停用词与 `CPU`/`MCU`/`SoC` 等泛指词。候选条目必须在 title/summary/path/keywords/tags 中覆盖技术 token；单个技术 token 必须命中，多个技术 token 必须覆盖超过一半。
+- 中文覆盖度（仅在查询没有 ASCII 技术 token 时生效）：候选必须满足下列任一条件，否则按 `low_confidence` 拒答——(a) 命中的中文 keyword 字符总数 ≥ 4；(b) 命中 ≥ 2 个不同中文 keyword；(c) 查询在命中 keyword 之外还有 ≥ 2 个中文字符上下文。因此 `优化`、`对齐`、`没反应` 这类短通用查询会拒答，而 `串口没输出`、`串口乱码` 及“调试版本正常、优化版本出错”这类带上下文的长句仍可命中。该规则不针对具体 neg-id/path 特判，也不改语料或查询集；neg-011 这类长句仍可能误报，见 D-159。
 - `kb_search`：大小写不敏感逐行匹配；返回行号（1-based）与前后各 1 行上下文；排除 `index.yaml`、`_inbox.md`、`_about.md`；token 只做字面匹配，不做正则。
 - 拒答：`kb_lookup` 空查询返回 `reason: "empty_query"`；无命中 `reason: "no_match"`；`kb_search` 无命中 `found: false`。不得返回编造内容。
 
@@ -175,7 +176,7 @@ scripts/
 
 - `scripts/kb-regression.mjs`：读取 `KB_ROOT` 与 `mcp-servers/kb/data/queries.jsonl`、`negatives.jsonl`，输出 JSON 报告：
   - index 轨：Recall@2、严格 Hit@1（第一条候选命中 gold）、MRR、未命中列表；
-  - search 轨：严格 Hit@1（第一条 hit 命中 gold）与 `goldInTop20`（gold 出现在 `search(tokens, 20)` 的任意命中中，不承诺排序）、未命中列表；
+  - search 轨：严格 Hit@1（第一条 hit 命中 gold）与 `goldInTop20`（gold 出现在 `search(tokens, 20)` 的任意命中中，不承诺排序）、未命中列表；未命中按 `gold_not_in_top_20_hits` / `no_hits` / `gold_in_top_20_but_not_first` / `no_ascii_or_hex_token` 分类，排序退化不再只体现在汇总数字里；
   - 负样本：拒答率、误报列表；
   - 分层：gold 是否在 `index.yaml` 中。
 - 语料或查询集缺失时脚本退出码 2 并打印明确原因；测试文件在缺失时 `describe.skip`。
@@ -194,7 +195,7 @@ scripts/
 ### BR-3
 
 1. `npm run test:mcp` 中 KB 单测全绿（临时夹具 KB；含路径逃逸、空查询、无命中、frontmatter 容错）。
-2. 本地语料存在时 `npm run kb:regression` 输出 index/search/负样本指标，且 index 与 search 轨不低于实测基线。**负样本拒答率 100% 是 BR-3 目标；2026-10-20 本轮实测为 84%（21/25），残余 4 条主题相邻但细节未覆盖的误报，差距与后续语义检索计划见 D-159。不得把 84% 声称为 100%。**
+2. 本地语料存在时 `npm run kb:regression` 输出 index/search/负样本指标，且 index 与 search 轨不低于实测基线。**负样本拒答率 100% 是 BR-3 目标；2026-10-20 本轮实测为 84%（21/25）：neg-005、neg-008、neg-023 是主题相邻但细节未覆盖（`near_domain: true`），neg-011 是纯硬件供电问题（`near_domain: false`）。短中文通用查询已拒答，但 neg-011 为长句仍误报；差距与后续语义检索计划见 D-159。不得把 84% 声称为 100%。**
 3. `kb_read` 拒绝越界路径；`kb_lookup` 无命中显式 `no_match`。
 4. README 记录语料偏差与本地资产说明。
 
@@ -216,4 +217,4 @@ scripts/
 | KB 语料不入库 | 本地资产 + gitignore；README 说明；CI 中 KB 回归 skip |
 | 仅 80 条自建回归集（BRD 基准 172+102） | 报告实测指标与分层偏差，不声称达到 BRD 全量基准 |
 | `index.yaml` 90 条 vs BRD 85 条 | 按实测记录，不修改语料 |
-| 46 个 frontmatter 非标准 YAML | `kb_read` 尽力解析，失败时保留原文并标注 `frontmatterParsed: false` |
+| 46 个 frontmatter 非标准 YAML | `kb_read` 尽力解析，失败时保留原文并标注 `frontmatterParsed: false` || OpenOCD 已发出的单条 telnet 命令无法撤回 | abort 后立即返回 `aborted` 且不再发送后续命令；底层单条命令仍可能完成，登记 D-162 |

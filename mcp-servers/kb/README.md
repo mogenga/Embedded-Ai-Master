@@ -79,12 +79,14 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 
 ### 检索评分与拒答
 
-`KbService.lookup` 的分数为命中 keyword 长度和 + 2 × 命中 tag 数，并施加两项收紧：
+`KbService.lookup` 的分数为命中 keyword 长度和 + 2 × 命中 tag 数，并施加以下收紧：
 
 - 非 CJK keyword/tag 使用 ASCII 词边界匹配；长度 < 2 的纯英文 token 忽略（例如 tag `c` 不参与匹配）。
 - 查询中长度 ≥ 2 的 ASCII/十六进制 token 若不在索引 keyword/tag 词表中，按 `max(0, 1 - 0.75 × 未登录比例)` 折减分数。折减后最高分低于 `1.75` 时返回 `found: false`、`reason: "low_confidence"`；完全无词面命中返回 `no_match`。
+- 技术 token 覆盖度：从查询提取 ASCII/十六进制/型号，过滤英文停用词与 `CPU`/`MCU`/`SoC` 等泛指词；候选条目必须覆盖单个技术 token，多个技术 token 必须覆盖超过一半。
+- 中文覆盖度（仅在查询没有 ASCII 技术 token 时生效）：候选须满足命中中文 keyword 字符总数 ≥ 4、或命中 ≥ 2 个不同中文 keyword、或命中 keyword 之外还有 ≥ 2 个中文字符上下文；否则按 `low_confidence` 拒答。因此 `优化`、`对齐`、`没反应` 等孤立短词拒答，`串口没输出`、`串口乱码` 仍可命中。
 
-该门槛用于让 KB 外查询显式拒答，代价是少量相邻主题召回下降。2026-10-20 实测：index Recall@2 0.46 / Hit@1 0.40 / MRR 0.43，负样本拒答率 0.56（修改前 0.48 / 0.40 / 0.44 / 0.16）。基线见 `tests/regression-baseline.json`，回归脚本为 `npm run kb:regression`。
+该门槛用于让 KB 外查询显式拒答，代价是少量相邻主题召回下降。2026-10-20 实测：index Recall@2 0.44 / Hit@1 0.38 / MRR 0.41，search 严格 Hit@1 0.1333 / goldInTop20 0.4333，负样本拒答率 0.84（上一版 0.46 / 0.40 / 0.43 / 0.56，search 指标当时未单列）。基线见 `tests/regression-baseline.json`，回归脚本为 `npm run kb:regression`。残余 4 条误报中 3 条是主题相邻但细节未覆盖（neg-005、neg-008、neg-023，`near_domain: true`），1 条 neg-011 是纯硬件供电问题（`near_domain: false`）；详见 D-159。
 
 ## 测试
 
