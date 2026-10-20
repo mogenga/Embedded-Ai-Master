@@ -252,11 +252,13 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
         if (!readySettled) {
           readySettled = true;
           readyReject(
-            error instanceof RunnerError
-              ? error
-              : new RunnerError("model_unavailable", `会话启动失败: ${messageOf(error)}`),
+            controller.signal.aborted
+              ? new RunnerError("session_start_timeout", "会话在就绪前被中止")
+              : error instanceof RunnerError
+                ? error
+                : new RunnerError("model_unavailable", `会话启动失败: ${messageOf(error)}`),
           );
-        } else {
+        } else if (!controller.signal.aborted) {
           process.stderr.write(`[session-runner] ${sessionId}: ${messageOf(error)}\n`);
         }
       } finally {

@@ -390,4 +390,33 @@ describe("createSessionRunner", () => {
     await expect(runner.close()).resolves.toBeUndefined();
     expect(fake.calls[0]?.signal?.aborted).toBe(true);
   });
+
+  it("close 中止运行中的会话时不写 stderr", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession({ hang: true });
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+    await runner.start({ text: "hi" });
+
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      await runner.close();
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("就绪前被 close 中止时 start 抛 session_start_timeout", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession({ neverReady: true, hang: true });
+    const runner = newRunner(home, { runSessionImpl: fake.impl, readyTimeoutMs: 5000 });
+
+    const pending = startError(runner, { text: "hi" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const closing = runner.close();
+    const error = await pending;
+    expect(error.code).toBe("session_start_timeout");
+    expect(error.message).toContain("会话在就绪前被中止");
+    await closing;
+  });
 });
