@@ -1,0 +1,80 @@
+{"id": "idx-001", "track": "index", "text": "板子上电后日志口完全没动静,换了个 USB 转串口模块还是一样", "gold": ["protocols/uart/no-output.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-002", "track": "index", "text": "串口打出来的字符像乱码,英文数字勉强认得出但中文完全不对", "gold": ["protocols/uart/garbled-data.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-003", "track": "index", "text": "跑几个小时才偶尔丢几个字节,把波特率降到 9600 就不再丢", "gold": ["protocols/uart/dropped-bytes.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-004", "track": "index", "text": "半双工 485 总线上从机收到的帧最后两个字节经常是错的", "gold": ["protocols/uart/framing-errors.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-005", "track": "index", "text": "读传感器的 WHO_AM_I 寄存器,返回值和手册上写的正好差一倍", "gold": ["protocols/spi/mode-mismatch.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-006", "track": "index", "text": "读 Flash ID 一直是 FF,示波器上时钟和数据都有波形", "gold": ["protocols/spi/all-zero-or-ff.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-007", "track": "index", "text": "小数据包没问题,传大块数据时结尾几个字节偶尔出错", "gold": ["protocols/spi/intermittent-corruption.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-008", "track": "index", "text": "I2C 通信卡住,程序一直等标志位,断电重新上电才好", "gold": ["protocols/i2c/bus-stuck.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-009", "track": "index", "text": "用扫描程序找不到总线上任何一个从机地址", "gold": ["protocols/i2c/nack.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-010", "track": "index", "text": "上拉电阻接了但示波器看上升沿是很慢的斜坡", "gold": ["protocols/i2c/rise-time.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-011", "track": "index", "text": "CAN 总线上能测到差分信号,但收发器一帧都收不到", "gold": ["protocols/can/no-communication.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-012", "track": "index", "text": "网口灯是亮的,但电脑 ping 不通板子", "gold": ["protocols/ethernet/bring-up.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-013", "track": "index", "text": "USB 插到电脑上一点反应都没有,设备管理器里不出现任何东西", "gold": ["protocols/usb/enumeration-fail.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-014", "track": "index", "text": "Modbus 从机回的帧校验总是不通过,错的总在最后", "gold": ["protocols/modbus/rtu-timing.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-015", "track": "index", "text": "LIN 从机跟主机同步场总是对不齐", "gold": ["protocols/lin-1wire/timing.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-016", "track": "index", "text": "传感器 ID 读出来是对的,但数据寄存器一直返回 0", "gold": ["protocols/sensor/bring-up.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "idx-017", "track": "index", "text": "外部晶振接了但就是不起振,读状态位一直没置起来", "gold": ["system/clock-tree/hse-not-starting.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-018", "track": "index", "text": "设备跑久了时间和真实时间越差越多", "gold": ["system/clock-tree/timebase-drift.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-019", "track": "index", "text": "DMA 搬完数据后 CPU 读到的还是旧值,只有关掉缓存才对", "gold": ["system/dma/dma-data-not-appearing.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-020", "track": "index", "text": "设备自己反复重启,复位状态寄存器显示是看门狗引起的", "gold": ["system/watchdog/reset-loop.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-021", "track": "index", "text": "设备偶尔莫名复位,复位原因显示欠压", "gold": ["system/power-reset/brownout-unexpected-reset.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-022", "track": "index", "text": "升级程序跳转到应用之后程序跑飞了", "gold": ["system/boot-flash/bootloader-jump-fails.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-023", "track": "index", "text": "中断响应有时候特别慢,但不是每次都能复现", "gold": ["system/interrupts/nvic-priority-latency.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-024", "track": "index", "text": "从低功耗唤醒后串口收到的第一个字节总是丢", "gold": ["system/low-power/uart-loss-on-wake.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-025", "track": "index", "text": "ADC 采同一个电压,每次读出来的值抖得很厉害", "gold": ["system/adc-dac/adc-noisy-or-wrong.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-026", "track": "index", "text": "电机驱动板上电瞬间就触发过流保护", "gold": ["system/motor/pwm-deadtime-encoder.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-027", "track": "index", "text": "一个变量中断和主循环都会改,偶尔读到前后不一致的值", "gold": ["system/races/races-shared-data.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-028", "track": "index", "text": "存储卡发完复位命令之后一直进不了就绪状态", "gold": ["system/storage/sd-card-fatfs-init.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-029", "track": "index", "text": "调试版本一切正常,换成优化版本之后数据就错了", "gold": ["system/toolchain/c-level-optimization-bugs.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-030", "track": "index", "text": "内存搬移之后数据变成重复的片段", "gold": ["system/toolchain/overlap-copy-direction.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-031", "track": "index", "text": "电机一启动,采样的模拟量就跟着跳", "gold": ["system/emi-si/emi-signal-integrity.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-032", "track": "index", "text": "固件还没烧到板子上,想先做一轮编译期检查", "gold": ["system/toolchain/firmware-static-check.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "idx-033", "track": "index", "text": "程序进了异常处理,想知道是哪个地址引起的,该读哪些寄存器", "gold": ["debug/hardfault/cortex-m-decode.md"], "topic": "debug", "lang": "zh", "source": "manual"}
+{"id": "idx-034", "track": "index", "text": "同一个函数直接调用没事,通过函数指针调用就崩", "gold": ["debug/hardfault/invstate-thumbbit.md"], "topic": "debug", "lang": "zh", "source": "manual"}
+{"id": "idx-035", "track": "index", "text": "调试器连不上目标板", "gold": ["debug/swd/no-connect.md"], "topic": "debug", "lang": "zh", "source": "manual"}
+{"id": "idx-036", "track": "index", "text": "手上只有一个崩溃地址,想还原成函数名和源码行号", "gold": ["debug/swd/symbol-lookup.md"], "topic": "debug", "lang": "zh", "source": "manual"}
+{"id": "idx-037", "track": "index", "text": "想在正在运行的调试会话里直接执行调试器命令", "gold": ["debug/swd/openocd-tcl-cheatsheet.md"], "topic": "debug", "lang": "zh", "source": "manual"}
+{"id": "idx-038", "track": "index", "text": "板子同时出现好几个症状,不知道该先查哪个", "gold": ["method/compound-fault-decoupling.md"], "topic": "method", "lang": "zh", "source": "manual"}
+{"id": "idx-039", "track": "index", "text": "故障只是偶尔出现,试了很多次也复现不了", "gold": ["method/intermittent-fault-method.md"], "topic": "method", "lang": "zh", "source": "manual"}
+{"id": "idx-040", "track": "index", "text": "烧写工具报错,说连不上芯片", "gold": ["vendor/espressif/esp32-devflow.md"], "topic": "vendor", "lang": "zh", "source": "manual"}
+{"id": "idx-041", "track": "index", "text": "固件烧写成功但一启动就不断重启", "gold": ["vendor/espressif/esp8266-boot-flash.md"], "topic": "vendor", "lang": "zh", "source": "manual"}
+{"id": "idx-042", "track": "index", "text": "崩了之后串口打印了一串地址,看不懂", "gold": ["vendor/espressif/panic-backtrace.md"], "topic": "vendor", "lang": "zh", "source": "manual"}
+{"id": "idx-043", "track": "index", "text": "开了蓝牙协议栈之后调用总是返回错误码", "gold": ["vendor/nordic/nrf-debug.md"], "topic": "vendor", "lang": "zh", "source": "manual"}
+{"id": "idx-044", "track": "index", "text": "芯片烧写一次之后就再也连不上了", "gold": ["vendor/nxp/kinetis-imxrt.md"], "topic": "vendor", "lang": "zh", "source": "manual"}
+{"id": "idx-045", "track": "index", "text": "板子上电后进不去引导模式", "gold": ["vendor/raspberrypi/rp2040-boot-debug.md"], "topic": "vendor", "lang": "zh", "source": "manual"}
+{"id": "idx-046", "track": "index", "text": "进入低功耗之后再也叫不醒", "gold": ["vendor/ti/msp430-debug.md"], "topic": "vendor", "lang": "zh", "source": "manual"}
+{"id": "idx-047", "track": "index", "text": "无线芯片射频发送一直失败", "gold": ["vendor/ti/simplelink-wireless.md"], "topic": "vendor", "lang": "zh", "source": "manual"}
+{"id": "idx-048", "track": "index", "text": "把 STM32 的例程直接烧到国产兼容芯片上,跑飞了", "gold": ["vendor/cn/gd32-ch32-debug-diffs.md"], "topic": "vendor", "lang": "zh", "source": "manual"}
+{"id": "idx-049", "track": "index", "text": "任务偶尔直接死掉,怀疑内存被踩了", "gold": ["rtos/stack-overflow.md"], "topic": "rtos", "lang": "zh", "source": "manual"}
+{"id": "idx-050", "track": "index", "text": "设备树里加了节点,编译报 undefined reference", "gold": ["rtos/zephyr-devicetree-west.md"], "topic": "rtos", "lang": "zh", "source": "manual"}
+{"id": "srch-001", "track": "search", "text": "USART BRR 寄存器值 0x271 怎么反推 PCLK2", "gold": ["reference/stm32-rcc-usart-registers.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-002", "track": "search", "text": "CFSR 里 INVSTATE 是第几位", "gold": ["reference/scb-fault-registers.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-003", "track": "search", "text": "Modbus CRC16 多项式 0xA001,帧 01 03 00 00 00 01 的校验值", "gold": ["reference/modbus-crc-vectors.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-004", "track": "search", "text": "I2C 快速模式 tr 和 tf 的最大值是多少", "gold": ["reference/i2c-timing-spec.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-005", "track": "search", "text": "SPI mode 3 对应 CPOL 和 CPHA 各是什么", "gold": ["reference/spi-mode-timing.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-006", "track": "search", "text": "SD 卡 CMD8 参数 0x1AA 返回什么", "gold": ["reference/sd-spi-commands.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-007", "track": "search", "text": "STM32 怎么通过 BOOT0 进入系统引导程序", "gold": ["reference/stm32-bootloader-entry.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-008", "track": "search", "text": "STM32 CAN1 的 bxCAN 基址是多少", "gold": ["reference/stm32-bxcan-registers.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-009", "track": "search", "text": "nRF52 的 UICR 和 RESETREAS 地址", "gold": ["reference/nrf-memory-map.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-010", "track": "search", "text": "ESP32 的 strapping 引脚是哪几个", "gold": ["reference/esp32-strapping-registers.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-011", "track": "search", "text": "esp_reset_reason 的返回值分别代表什么", "gold": ["reference/esp32-reset-reasons.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-012", "track": "search", "text": "ESP32 分区表的 offset 和 size 怎么排", "gold": ["reference/esp32-flash-partitions.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-013", "track": "search", "text": "ESP8266 NonOS SDK 的 ROM boot 相关地址", "gold": ["reference/esp8266-nonos-flash.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-014", "track": "search", "text": "Kinetis 的 FSEC 和 FOPT 安全字怎么配", "gold": ["reference/kinetis-fsec-fopt-wdog.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-015", "track": "search", "text": "i.MX RT 的 FlexSPI 配置块和 IVT", "gold": ["reference/imxrt-flexspi-boot.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-016", "track": "search", "text": "MSP430 的 FRAM 写保护密码", "gold": ["reference/msp430-pmm-fram-registers.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-017", "track": "search", "text": "PIC32 的配置字 DEVCFG 怎么设", "gold": ["reference/pic32-config-clock-uart.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-018", "track": "search", "text": "Renesas RA 的选项字节 OFS0", "gold": ["reference/renesas-ra-clock-options.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-019", "track": "search", "text": "RP2040 的 PIO 指令和 USB 寄存器", "gold": ["reference/rp2040-pio-usb.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-020", "track": "search", "text": "SAMD21 的 GCLK 配置流程", "gold": ["reference/samd-gclk-timers.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-021", "track": "search", "text": "STM8 的选项字节 ROP 是什么", "gold": ["reference/stm8-options-swim.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-022", "track": "search", "text": "TM4C1294 的 WDTLOAD 寄存器", "gold": ["reference/tm4c-uart-gpio-wdt.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-023", "track": "search", "text": "CC2652 的 CCFG 配置页里有哪些字段", "gold": ["reference/cc13xx26xx-ccfg.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-024", "track": "search", "text": "ATmega328P 的 fuse 低位怎么设", "gold": ["reference/avr-fuse-usart-timer.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-025", "track": "search", "text": "GD32 和 STM32 在 RCC 上有什么差异", "gold": ["reference/gd32-ch32-diffs.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-026", "track": "search", "text": "CreateServerSocketTerminal 怎么把 UART 接到 socket", "gold": ["reference/renode-simulation.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-027", "track": "search", "text": "i.MX RT 的 CCM 和 SEMC 寄存器", "gold": ["reference/imxrt-ccm-semc.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-028", "track": "search", "text": "Kinetis 的 SIM 时钟门控怎么开", "gold": ["reference/kinetis-clock-sim.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-029", "track": "search", "text": "CC13xx 的射频命令 RF_ 开头那些", "gold": ["reference/cc13xx26xx-rf-cmds.md"], "topic": "reference", "lang": "zh", "source": "manual"}
+{"id": "srch-030", "track": "search", "text": "nRF52 的 BLE 错误码含义", "gold": ["reference/nrf-ble-svc-errors.md"], "topic": "reference", "lang": "zh", "source": "manual"}

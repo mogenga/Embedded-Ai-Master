@@ -1,0 +1,25 @@
+{"id": "neg-001", "text": "i.MX RT1170 双核之间用 MU 发中断,对端偶尔收不到", "reason": "KB 未覆盖 i.MX RT1170 双核 MU 外设", "near_domain": true}
+{"id": "neg-002", "text": "STM32H750 的 OCTOSPI 在内存映射模式下读外部 HyperRAM 偶发数据错", "reason": "KB 有 FlexSPI/HyperRAM 相关但无 OCTOSPI 内存映射窗口配置", "near_domain": true}
+{"id": "neg-003", "text": "用 J-Link 的 RTT 通道传波形数据,缓冲满了之后丢采样点", "reason": "KB 未覆盖 RTT 传输与缓冲管理", "near_domain": true}
+{"id": "neg-004", "text": "CAN FD 的 BRS 位切换后采样点设置不对导致错误帧", "reason": "KB 只覆盖经典 CAN,无 CAN FD 数据段时序", "near_domain": true}
+{"id": "neg-005", "text": "ESP32-S3 的 USB OTG 主机模式下枚举 U 盘失败", "reason": "KB 覆盖 ESP32 开发流与 USB 设备模式,无主机模式", "near_domain": true}
+{"id": "neg-006", "text": "nRF52840 的 NFC 天线调谐后读卡距离变短", "reason": "KB 无 NFC 射频天线设计内容", "near_domain": true}
+{"id": "neg-007", "text": "用 FreeRTOS 的 stream buffer 在中断和安全函数之间传数据,偶发覆盖", "reason": "KB 只覆盖任务栈与优先级,无 stream buffer API 细节", "near_domain": true}
+{"id": "neg-008", "text": "Zephyr 的 devicetree overlays 在 west build 时没被应用", "reason": "KB 覆盖 devicetree 基本排障,无 overlay 机制", "near_domain": true}
+{"id": "neg-009", "text": "用 STM32 的 FDCAN 过滤器组配置掩码模式时漏帧", "reason": "KB 只有 bxCAN 经典 CAN 寄存器", "near_domain": true}
+{"id": "neg-010", "text": "RISC-V 芯片的 PMP 配置错误导致访问外设触发异常", "reason": "KB 面向 Cortex-M,无 RISC-V PMP 内容", "near_domain": true}
+{"id": "neg-011", "text": "板子上电后完全没反应,电源指示灯也不亮", "reason": "纯硬件供电测量问题,非 KB 可答", "near_domain": false}
+{"id": "neg-012", "text": "这个 BGA 封装的焊点用 X 光看出来有空洞,要不要返修", "reason": "焊接工艺判定,KB 不覆盖", "near_domain": false}
+{"id": "neg-013", "text": "外壳的注塑模具公差改到多少比较合适", "reason": "结构设计问题,与嵌入式调试无关", "near_domain": false}
+{"id": "neg-014", "text": "这个项目的 BOM 成本还能降多少", "reason": "采购与成本问题,KB 不覆盖", "near_domain": false}
+{"id": "neg-015", "text": "EMC 认证实验室说要整改辐射发射超标,从哪下手", "reason": "合规认证流程,KB 只覆盖板级信号完整性", "near_domain": true}
+{"id": "neg-016", "text": "产品过 CE 认证需要准备哪些文档", "reason": "认证流程问题,KB 不覆盖", "near_domain": false}
+{"id": "neg-017", "text": "SPI NOR Flash 的 JEDEC ID 读取时序在 133MHz 下眼图很差", "reason": "高速信号完整性评估,KB 无眼图分析", "near_domain": true}
+{"id": "neg-018", "text": "锂电池充电管理芯片的 NTC 测温电阻选型", "reason": "器件选型,KB 不覆盖", "near_domain": false}
+{"id": "neg-019", "text": "RT-Thread 的 device 框架注册后 open 返回空指针", "reason": "KB 只覆盖 FreeRTOS 与 Zephyr,无 RT-Thread", "near_domain": true}
+{"id": "neg-020", "text": "用 PlatformIO 编译时找不到 stm32f4xx_hal.h", "reason": "构建工具链配置,KB 覆盖 Zephyr west 与静态检查,无 PlatformIO", "near_domain": true}
+{"id": "neg-021", "text": "这个 MCU 的供货周期要多久", "reason": "供应链问题,KB 不覆盖", "near_domain": false}
+{"id": "neg-022", "text": "pcb 叠层从四层改成六层,阻抗怎么算", "reason": "PCB 叠层阻抗设计,KB 不覆盖", "near_domain": true}
+{"id": "neg-023", "text": "STM32H7 的 DMA 双缓冲模式下 cache 维护的时机", "reason": "KB 覆盖 DMA 基本 cache 一致性,无双缓冲模式细节", "near_domain": true}
+{"id": "neg-024", "text": "GCC 链接脚本里 KEEP 段被优化掉了怎么办", "reason": "链接脚本细节,KB 无专属条目", "near_domain": true}
+{"id": "neg-025", "text": "串口屏的 Modbus 从机地址能不能改成 0xF8 之外的", "reason": "外设产品配置问题,KB 只覆盖 Modbus 时序", "near_domain": false}
