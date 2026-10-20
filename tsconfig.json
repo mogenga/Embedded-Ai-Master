@@ -9,6 +9,6 @@
     "outDir": "dist",
     "skipLibCheck": true
   },
-  "include": ["src", "tests"],
+  "include": ["src", "tests", "mcp-servers"],
   "exclude": ["src/ui", "tests/ui"]
 }
