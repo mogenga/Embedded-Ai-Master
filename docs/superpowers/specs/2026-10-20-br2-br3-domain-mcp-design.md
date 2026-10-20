@@ -217,4 +217,5 @@ scripts/
 | KB 语料不入库 | 本地资产 + gitignore；README 说明；CI 中 KB 回归 skip |
 | 仅 80 条自建回归集（BRD 基准 172+102） | 报告实测指标与分层偏差，不声称达到 BRD 全量基准 |
 | `index.yaml` 90 条 vs BRD 85 条 | 按实测记录，不修改语料 |
-| 46 个 frontmatter 非标准 YAML | `kb_read` 尽力解析，失败时保留原文并标注 `frontmatterParsed: false` || OpenOCD 已发出的单条 telnet 命令无法撤回 | abort 后立即返回 `aborted` 且不再发送后续命令；底层单条命令仍可能完成，登记 D-162 |
+| 46 个 frontmatter 非标准 YAML | `kb_read` 尽力解析，失败时保留原文并标注 `frontmatterParsed: false` |
+| OpenOCD 已发出的单条 telnet 命令无法撤回 | abort 后立即返回 `aborted` 且不再发送后续命令；随后关闭旧 transport 并在下一条命令前重建，底层单条命令仍可能完成，登记 D-162 |
