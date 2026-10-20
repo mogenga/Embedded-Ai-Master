@@ -349,6 +349,40 @@ describe("OpenOcdBackend 错误传播", () => {
     await expect(backend.readMemory(0x20000000, 4)).rejects.toThrow(/mdw 0x20000000 1/);
   });
 
+  it("readMemory 在途命令 abort 后立即取消且不发送后续命令", async () => {
+    const controller = new AbortController();
+    const { backend, transport } = setup((command) => {
+      if (!command.startsWith("mdw")) return "";
+      return new Promise<string>(() => {
+        // 模拟 telnet 命令一直等不到 prompt。
+      });
+    });
+    await backend.attach();
+
+    const pending = backend.readMemory(0x20000000, 8, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+
+    expect(await codeOf(() => pending)).toBe("aborted");
+    expect(transport.commands).toEqual(["mdw 0x20000000 2"]);
+  });
+
+  it("writeMemory 中途 abort 后不再写剩余字节或回读", async () => {
+    const controller = new AbortController();
+    const { backend, transport } = setup((command) => {
+      if (command.startsWith("mww")) controller.abort();
+      return "";
+    });
+    await backend.attach();
+
+    expect(
+      await codeOf(() =>
+        backend.writeMemory(0x20000000, [1, 2, 3, 4], controller.signal),
+      ),
+    ).toBe("aborted");
+    expect(transport.commands).toEqual(["mww 0x20000000 0x04030201"]);
+  });
+
   it("attach 时 transportFactory 失败会传播且保持未连接", async () => {
     const backend = new OpenOcdBackend({
       existsImpl: () => true,

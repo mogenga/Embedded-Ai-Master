@@ -23,7 +23,7 @@ const MAX_ADDRESS = 0xffff_ffff;
 export interface RenodeMonitorLike {
   readonly connected: boolean;
   start(): Promise<void>;
-  send(command: string): Promise<string>;
+  send(command: string, signal?: AbortSignal): Promise<string>;
   stop(): Promise<void>;
 }
 
@@ -72,6 +72,25 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted === true) {
     throw new ProbeBackendError("aborted", "请求已取消");
   }
+}
+
+async function sendMemoryCommand(
+  monitor: RenodeMonitorLike,
+  command: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  throwIfAborted(signal);
+  let output: string;
+  try {
+    output = await monitor.send(command, signal);
+  } catch (error) {
+    if (signal?.aborted === true) {
+      throw new ProbeBackendError("aborted", "请求已取消");
+    }
+    throw error;
+  }
+  throwIfAborted(signal);
+  return output;
 }
 
 function parseByteOutput(address: number, output: string): number {
@@ -224,7 +243,11 @@ export class RenodeBackend implements ProbeBackend {
     for (let offset = 0; offset < length; offset += 1) {
       throwIfAborted(signal);
       const current = address + offset;
-      const output = await monitor.send(`sysbus ReadByte 0x${current.toString(16)}`);
+      const output = await sendMemoryCommand(
+        monitor,
+        `sysbus ReadByte 0x${current.toString(16)}`,
+        signal,
+      );
       bytes.push(parseByteOutput(current, output));
     }
     return buildReadResult(address, bytes);
@@ -255,8 +278,10 @@ export class RenodeBackend implements ProbeBackend {
     for (let offset = 0; offset < length; offset += 1) {
       throwIfAborted(signal);
       const current = address + offset;
-      await monitor.send(
+      await sendMemoryCommand(
+        monitor,
         `sysbus WriteByte 0x${current.toString(16)} 0x${bytes[offset].toString(16)}`,
+        signal,
       );
     }
 

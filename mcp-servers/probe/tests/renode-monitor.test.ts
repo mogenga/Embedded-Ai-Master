@@ -197,6 +197,28 @@ describe("RenodeMonitor", () => {
     await monitor.stop();
   });
 
+  it("send 在途 abort 后立即 reject 并释放队列", async () => {
+    const controller = new AbortController();
+    const { monitor, socket } = createMonitor();
+    await monitor.start();
+
+    const pending = monitor.send("version", controller.signal);
+    await flush();
+    expect(socket.writes).toEqual(["version\n"]);
+
+    controller.abort();
+    await expect(pending).rejects.toThrow(/取消/);
+
+    const next = monitor.send("machine");
+    await flush();
+    expect(socket.writes).toEqual(["version\n", "machine\n"]);
+
+    socket.emit("(machine-0) machine\r\nname: m\r\n(machine-0) ");
+    await expect(next).resolves.toBe("name: m");
+
+    await monitor.stop();
+  });
+
   it("未启动时 send 直接 reject", async () => {
     const { monitor } = createMonitor();
     await expect(monitor.send("version")).rejects.toBeInstanceOf(RenodeCommandError);

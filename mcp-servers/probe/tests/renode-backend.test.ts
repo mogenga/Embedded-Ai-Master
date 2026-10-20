@@ -9,7 +9,7 @@ import type { RenodeMonitorOptions } from "../renode.js";
 const DEFAULT_PLATFORM_COMMAND =
   "machine LoadPlatformDescription @platforms/boards/stm32f4_discovery-kit.repl";
 
-type CommandHandler = (command: string) => string | Promise<string>;
+type CommandHandler = (command: string, signal?: AbortSignal) => string | Promise<string>;
 
 class FakeMonitor implements RenodeMonitorLike {
   readonly commands: string[] = [];
@@ -30,9 +30,9 @@ class FakeMonitor implements RenodeMonitorLike {
     this.connected = true;
   }
 
-  async send(command: string): Promise<string> {
+  async send(command: string, signal?: AbortSignal): Promise<string> {
     this.commands.push(command);
-    return this.handler(command);
+    return this.handler(command, signal);
   }
 
   async stop(): Promise<void> {
@@ -164,6 +164,49 @@ describe("RenodeBackend", () => {
     expect(harness.monitors).toHaveLength(1);
     expect(harness.monitors[0].commands).toEqual(["mach create", DEFAULT_PLATFORM_COMMAND]);
     expect(harness.monitors[0].startCount).toBe(1);
+  });
+
+  it("readMemory 在途命令 abort 后立即取消且不发送下一条", async () => {
+    const controller = new AbortController();
+    const harness = createHarness((command, signal) => {
+      if (!command.startsWith("sysbus ReadByte")) return "";
+      return new Promise<string>((_resolve, reject) => {
+        const onAbort = (): void => {
+          reject(new ProbeBackendError("aborted", "请求已取消"));
+        };
+        if (signal?.aborted === true) onAbort();
+        else signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    });
+    await harness.backend.attach();
+    const before = harness.monitors[0].commands.length;
+
+    const pending = harness.backend.readMemory(0x20000000, 2, controller.signal);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ code: "aborted" });
+    expect(harness.monitors[0].commands.slice(before)).toEqual([
+      "sysbus ReadByte 0x20000000",
+    ]);
+  });
+
+  it("writeMemory 中途 abort 后不再写剩余字节", async () => {
+    const controller = new AbortController();
+    const harness = createHarness((command) => {
+      if (command.startsWith("sysbus WriteByte")) controller.abort();
+      return "";
+    });
+    await harness.backend.attach();
+
+    await expect(
+      harness.backend.writeMemory(0x20000000, [1, 2, 3], controller.signal),
+    ).rejects.toMatchObject({ code: "aborted" });
+    expect(
+      harness.monitors[0].commands.filter((command) =>
+        command.startsWith("sysbus WriteByte"),
+      ),
+    ).toEqual(["sysbus WriteByte 0x20000000 0x1"]);
   });
 
   it("halt/resume/reset 发送 pause/start/machine Reset 并更新 CPU 状态", async () => {

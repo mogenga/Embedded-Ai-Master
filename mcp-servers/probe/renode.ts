@@ -58,6 +58,7 @@ interface PendingCommand {
   timer: NodeJS.Timeout;
   resolve(value: string): void;
   reject(error: Error): void;
+  cleanup(): void;
 }
 
 interface PromptMatch {
@@ -207,10 +208,10 @@ export class RenodeMonitor {
     return this.startPromise;
   }
 
-  send(command: string): Promise<string> {
+  send(command: string, signal?: AbortSignal): Promise<string> {
     const run = this.queue.then(
-      () => this.execute(command),
-      () => this.execute(command),
+      () => this.execute(command, signal),
+      () => this.execute(command, signal),
     );
     this.queue = run.then(
       () => undefined,
@@ -274,17 +275,30 @@ export class RenodeMonitor {
     socket.onClose(() => this.handleClose());
   }
 
-  private execute(command: string): Promise<string> {
+  private execute(command: string, signal?: AbortSignal): Promise<string> {
     const socket = this.socket;
     if (!socket || !this.connectedFlag) {
       return Promise.reject(new RenodeCommandError(command, "", "Renode monitor 未连接"));
     }
+    if (signal?.aborted === true) {
+      return Promise.reject(new RenodeCommandError(command, "", "Renode 命令已取消"));
+    }
 
     return new Promise<string>((resolve, reject) => {
+      const cleanup = (): void => {
+        signal?.removeEventListener("abort", onAbort);
+      };
+      const onAbort = (): void => {
+        if (this.pending?.timer !== timer) return;
+        this.pending = undefined;
+        clearTimeout(timer);
+        reject(new RenodeCommandError(command, "", "Renode 命令已取消"));
+      };
       const timer = setTimeout(() => {
         if (this.pending?.timer !== timer) return;
         const current = this.pending;
         this.pending = undefined;
+        cleanup();
         reject(
           new RenodeCommandError(
             command,
@@ -294,7 +308,8 @@ export class RenodeMonitor {
         );
       }, this.commandTimeoutMs);
 
-      this.pending = { command, buffer: "", timer, resolve, reject };
+      this.pending = { command, buffer: "", timer, resolve, reject, cleanup };
+      signal?.addEventListener("abort", onAbort, { once: true });
       socket.write(`${command}\n`);
     });
   }
@@ -310,6 +325,7 @@ export class RenodeMonitor {
 
     this.pending = undefined;
     clearTimeout(pending.timer);
+    pending.cleanup();
 
     const output = cleanOutput(pending.buffer.slice(0, prompt.start), pending.command);
     const failure = ERROR_PATTERNS.find((pattern) => output.includes(pattern));
@@ -332,6 +348,7 @@ export class RenodeMonitor {
     if (!pending) return;
     this.pending = undefined;
     clearTimeout(pending.timer);
+    pending.cleanup();
     pending.reject(
       new RenodeCommandError(pending.command, pending.buffer, "Renode monitor 连接已关闭"),
     );
@@ -342,6 +359,7 @@ export class RenodeMonitor {
     this.pending = undefined;
     if (pending) {
       clearTimeout(pending.timer);
+      pending.cleanup();
       pending.reject(
         new RenodeCommandError(pending.command, pending.buffer, "Renode monitor 已停止"),
       );

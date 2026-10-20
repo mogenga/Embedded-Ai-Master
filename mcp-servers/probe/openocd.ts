@@ -112,6 +112,30 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
+function awaitWithAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  throwIfAborted(signal);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => {
+      reject(new ProbeBackendError("aborted", "请求已取消"));
+    };
+    const cleanup = (): void => {
+      signal.removeEventListener("abort", onAbort);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
 function collectHexTokens(output: string): string[] {
   const tokens: string[] = [];
   for (const rawLine of output.split(/\r?\n/)) {
@@ -354,7 +378,10 @@ export class OpenOcdBackend implements ProbeBackend {
     while (length - offset >= 4 && (address + offset) % 4 === 0) {
       throwIfAborted(signal);
       const words = Math.floor((length - offset) / 4);
-      const output = await this.sendCommand(`mdw ${toHex(address + offset)} ${words}`);
+      const output = await this.sendCommand(
+        `mdw ${toHex(address + offset)} ${words}`,
+        signal,
+      );
       for (const word of parseWords(output, words)) {
         bytes.push(word & 0xff, (word >>> 8) & 0xff, (word >>> 16) & 0xff, (word >>> 24) & 0xff);
       }
@@ -364,7 +391,10 @@ export class OpenOcdBackend implements ProbeBackend {
     if (offset < length) {
       throwIfAborted(signal);
       const remaining = length - offset;
-      const output = await this.sendCommand(`mdb ${toHex(address + offset)} ${remaining}`);
+      const output = await this.sendCommand(
+        `mdb ${toHex(address + offset)} ${remaining}`,
+        signal,
+      );
       bytes.push(...parseBytes(output, remaining));
     }
 
@@ -403,6 +433,7 @@ export class OpenOcdBackend implements ProbeBackend {
         0;
       await this.sendCommand(
         `mww ${toHex(address + offset)} 0x${word.toString(16).padStart(8, "0")}`,
+        signal,
       );
       offset += 4;
     }
@@ -411,6 +442,7 @@ export class OpenOcdBackend implements ProbeBackend {
       throwIfAborted(signal);
       await this.sendCommand(
         `mwb ${toHex(address + offset)} 0x${toHexByte(bytes[offset])}`,
+        signal,
       );
       offset += 1;
     }
@@ -471,11 +503,11 @@ export class OpenOcdBackend implements ProbeBackend {
     return this.transport;
   }
 
-  private sendCommand(command: string): Promise<string> {
+  private sendCommand(command: string, signal?: AbortSignal): Promise<string> {
     const transport = this.requireAttached();
     const run = this.queue.then(
-      () => this.execute(transport, command),
-      () => this.execute(transport, command),
+      () => this.execute(transport, command, signal),
+      () => this.execute(transport, command, signal),
     );
     this.queue = run.then(
       () => undefined,
@@ -484,10 +516,15 @@ export class OpenOcdBackend implements ProbeBackend {
     return run;
   }
 
-  private async execute(transport: TelnetTransport, command: string): Promise<string> {
+  private async execute(
+    transport: TelnetTransport,
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    throwIfAborted(signal);
     let output: string;
     try {
-      output = await transport.send(command);
+      output = await awaitWithAbort(transport.send(command), signal);
     } catch (error) {
       if (error instanceof ProbeBackendError) throw error;
       throw new ProbeBackendError(
@@ -495,6 +532,7 @@ export class OpenOcdBackend implements ProbeBackend {
         `OpenOCD 命令执行失败(${command}): ${errorMessage(error)}`,
       );
     }
+    throwIfAborted(signal);
 
     const failure = findCommandError(output);
     if (failure) {
