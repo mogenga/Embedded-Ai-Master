@@ -1393,7 +1393,7 @@
 - **影响**: Renode 与真机在复位语义、内存访问时序、串口缓冲/流控、USB 枚举失败模式上存在差异;真机上的权限声明、超时与错误映射可能暴露当前测试覆盖不到的问题。
 - **触发升级条件**: 获得可复现的真机/串口环境;或用户报告 OpenOCD/串口路径的实际失败。
 - **修复建议**: 在真机上执行 attach → halt → read → write → 回读 → reset → detach,并单独验证串口打开、写、读超时与断开;把实测结果写入 `dev-notes`,不把硬件依赖加入默认 `npm test`。
-- **状态**: 未解决。
+- **状态**: 未解决。2026-10-20 第一轮独立审查修复进一步明确:本轮 `OpenOcdBackend.attach` 只建立 telnet transport,不 spawn `openocd`;`openocdConfig` 死参数已移除。真机启动与板卡验证仍由本条覆盖。
 
 ### D-158 · KB 语料与查询集不入库导致 CI 回归覆盖缺口
 
@@ -1402,6 +1402,33 @@
 - **影响**: 本地基线能防住检索质量回退,但 CI 只能验证解析器与工具层的夹具测试;语料或查询集在本地被替换、损坏时,CI 不会报警。
 - **触发升级条件**: 建立 CI;或需要对外分发 KB 回归能力。
 - **修复建议**: 提供可公开的合成夹具语料与等价查询集供 CI 使用,真实语料仍留在本地;或在 CI 中显式下载受控语料并校验 `manifest.sha256`。不得把受限语料提交进仓库。
+- **状态**: 未解决。
+
+### D-159 · BR-3 负样本拒答率 84%,未达到 100% 目标
+
+- **发现**: 2026-10-20,BR-2/BR-3 第一轮独立审查修复。
+- **现象**: 引入技术 token 覆盖度规则后,25 条负样本中 21 条正确拒答(refusalRate 0.84),残余 4 条误报: neg-005、neg-008、neg-011、neg-023。它们分别命中 ESP32-S3/USB、Zephyr/devicetree/west、串口“没反应”、DMA/cache 等真实相邻条目,但 KB 并未覆盖提问中的具体细节(OTG 主机、overlay 应用、纯硬件供电、双缓冲 cache 时机)。
+- **影响**: spec §6 的 100% 拒答是目标而非本轮实测;当前词法覆盖度无法区分“主题相邻”和“答案存在”,agent 可能拿到不足以回答问题的候选。不得对外声称 BR-3 拒答已达 100%。
+- **触发升级条件**: BR-5 语义检索/答案覆盖评估落地;或负样本误报导致实际诊断错误。
+- **修复建议**: 引入语义检索或答案覆盖度判断(例如基于条目正文与 query 意图的可答性评分),在此之前保持“余量预算 ≤4 条、不针对 neg-id/path 特判”。扩展评估集时按 calibration/evaluation 拆分,报告留出集拒答率,避免在同一组负样本上调参。
+- **状态**: 未解决(已用原则性覆盖度规则从 0.56 提升到 0.84)。
+
+### D-160 · Renode monitor 超时后迟到输出可能污染下一条命令
+
+- **发现**: 2026-10-20,BR-2/BR-3 第一轮独立审查(Minor M-3)。
+- **现象**: `mcp-servers/probe/renode.ts` 的命令超时后只清空 `pending`,没有 drain/隔离迟到字节;迟到输出可能拼到下一条命令的 buffer。OpenOCD telnet transport 有同类竞态。
+- **影响**: 多数路径会变成显式解析错误而非静默错误数据,但存在真实竞态;超时后的下一次读取可能读到上一条命令的残留。
+- **触发升级条件**: 真机/仿真出现超时后错误数据;或新增依赖命令输出长度的工具。
+- **修复建议**: 超时后将连接标记为 degraded 并拒绝后续命令直到重连,或在发送下一条命令前 drain 并加注入测试;本轮不修,登记跟踪。
+- **状态**: 未解决。
+
+### D-161 · 10/20ms 真实定时器测试在 CI 负载下可能抖动
+
+- **发现**: 2026-10-20,BR-2/BR-3 第一轮独立审查(Minor M-6)。
+- **现象**: `mcp-servers/probe/tests/renode-monitor.test.ts` 使用 20ms 超时、`mcp-servers/probe/tests/serial.test.ts` 使用 10ms 超时;断言方向是“等待超时后返回”,高负载 CI 上仍可能因定时器抖动失败。
+- **影响**: 偶发红灯,可能被误判为超时语义回归;不影响产品行为。
+- **触发升级条件**: 再次出现;或 CI 要求稳定全绿。
+- **修复建议**: 改用 fake timers,或把超时窗口放大到 100ms 以上并注明测的是超时语义而非绝对耗时。
 - **状态**: 未解决。
 
 ---
@@ -1469,3 +1496,4 @@
 | 2026-10-20 | M2 Web 审批红队修复(`feat/m2-web-approval`):审批标识改为 gate 生成的独立 UUID(与 `callId` 解耦),`permission_decision`/崩溃恢复/transcript 按 `requestId` 配对;408 不再销毁连接;写端点拒绝 `Sec-Fetch-Site: cross-site`;启动前失败写 `interrupted(start_failed)`;D-146 补浏览器跨源面;录入 D-153(port 0 写端点 403)与 D-154(close 后 decide 返回 404) |
 | 2026-10-20 | 权限引擎与 Web 审批全量复验(`feat/m2-web-approval`):构建产物探针实测通过 135 项断言;D-154 复现并补记与 README/spec 的措辞冲突;录入 D-155(spec 三处残留 `requestId === callId` 旧描述)与 D-156(`tests/mcp-manager.test.ts` 时间阈值用例在并行负载下偶发失败);本轮未改生产代码 |
 | 2026-10-20 | BR-2/BR-3 Task 11:新增 `scripts/kb-regression.mjs`(index/search/负样本三轨,缺少本地资产时退出码 2)与 `regression.test.ts`/`regression-baseline.json`;README 新增 KB MCP 配置、语料偏差与实测基线;录入 D-157(真串口与真机 OpenOCD 未实测)与 D-158(KB 本地资产不入库导致 CI 回归覆盖缺口) |
+| 2026-10-20 | BR-2/BR-3 第一轮独立审查修复:C1/KB 拒答引入技术 token 覆盖度(refusalRate 0.56→0.84,Recall@2 0.46→0.44);I1 OpenOCD 全 0 warning;I2 Renode `available()`;I3 OpenOCD attach 仅 telnet、移除 `openocdConfig`;I4 search 严格 Hit@1 + `goldInTop20`;I5 工具接 AbortSignal 并收紧 `serial_read` 上限;I6 spec 工具数改 14;录入 D-159(拒答未达 100%)、D-160(超时迟到输出竞态)与 D-161(10/20ms 定时器抖动) |

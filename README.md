@@ -184,7 +184,9 @@ npm run build:mcp
 npm run probe:e2e
 ```
 
-成功时输出 `{"backend":"renode","attach":true,...,"writeVerified":true,...}`；`dist-mcp/` 缺失时退出码 2 并提示 `npm run build:mcp`，其余失败退出码 1。写内存、复位与串口写入是破坏性操作，在 `diagnose` 预设下为 `ask`；headless（无审批器）时降级为拒绝且不执行工具。写操作返回 `declaration` 声明；`mem_read` 全 0 只返回警告，不推断“无故障”。
+成功时输出 `{"backend":"renode","attach":true,...,"writeVerified":true,...}`；`dist-mcp/` 缺失时退出码 2 并提示 `npm run build:mcp`，其余失败退出码 1。写内存、复位与串口写入是破坏性操作，在 `diagnose` 预设下为 `ask`；headless（无审批器）时降级为拒绝且不执行工具。写操作返回 `declaration` 声明；`mem_read` 全 0 只返回警告，不推断“无故障”。`serial_read` 响应 MCP 取消信号：abort 后返回 `aborted`，不再继续等待或消费缓冲。
+
+OpenOCD 后端本轮只做“连接已运行的 OpenOCD telnet”，`attach` 不 spawn 进程；使用前请自行启动 `openocd -f <config>`（telnet 默认 `127.0.0.1:4444`）。`OPENOCD_PATH` 仅用于可用性检测；`openocdConfig` 参数已移除。真机验证登记 D-157。
 
 ## 领域 MCP：知识库（BR-3）
 
@@ -219,7 +221,7 @@ npm run kb:regression          # 表格 + JSON；--json 仅 JSON，--baseline �
 
 脚本在缺少 `dist-mcp/kb/service.js`、`KB_ROOT`、`index.yaml` 或查询集时打印原因并以退出码 2 结束；脚本不设通过阈值。`mcp-servers/kb/tests/regression.test.ts` 直接 import `service.ts`、不启动 MCP server；语料或查询集缺失时 `describe.skip`，存在时断言各指标不低于 `regression-baseline.json`。
 
-2026-10-20 实测基线（只作下限，不是目标）：index 轨 Recall@2 0.46、Hit@1 0.40、MRR 0.43；search 轨 Hit@1 0.4333（`search(tokens, 20)` 返回结果中出现 gold 文件即算命中；引擎按路径排序，没有相关性 rank 语义）；负样本拒答率 0.56（14/25 正确拒答）。`kb_lookup` 对英文 keyword/tag 使用 ASCII 词边界、忽略单字符英文 token，并按查询中未出现在索引词表的 token 比例折减分数；折减后最高分低于 1.75 时返回 `found: false`、`reason: "low_confidence"`，不再把弱匹配伪装成命中。相对收紧前（Recall@2 0.48、MRR 0.44、拒答率 0.16），Recall@2 下降 2pp、Hit@1 不变、拒答率提升 40pp。search 轨偏低的主要原因是 `reference/*.md` 大量未进索引，且命中结果被前 20 条路径排序截断，属于当前实现的可观测上限。
+2026-10-20 实测基线（只作下限，不是目标）：index 轨 Recall@2 0.44、Hit@1 0.38、MRR 0.41；search 轨严格 Hit@1 0.1333（第一条 hit 命中 gold）、`goldInTop20` 0.4333（gold 出现在 `search(tokens, 20)` 的任意命中中；引擎按路径排序，不承诺相关性 rank）；负样本拒答率 0.84（21/25 正确拒答）。`kb_lookup` 对英文 keyword/tag 使用 ASCII 词边界、忽略单字符英文 token，并按查询中未出现在索引词表的 token 比例折减分数；折减后最高分低于 1.75 时返回 `found: false`、`reason: "low_confidence"`。此外新增**技术 token 覆盖度**：从 query 提取 ASCII/十六进制/型号并过滤英文停用词与 `CPU`/`MCU`/`SoC` 等泛指词；单个技术 token 必须被条目覆盖，多个技术 token 必须覆盖超过一半，否则视为低置信拒答，不再让中文通用词单独支撑命中。相对上一版（Recall@2 0.46、Hit@1 0.40、MRR 0.43、拒答率 0.56、宽松 search Hit@1 0.4333），Recall@2 / Hit@1 / MRR 各下降 2pp，拒答率提升 28pp；search 轨严格 Hit@1 与 `goldInTop20` 分别披露排序与召回，避免再用宽松指标掩盖排序回归。残余 4 条误报为主题相邻但细节未覆盖，差距与语义检索计划见 D-159。
 
 ### 验证边界
 
