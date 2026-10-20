@@ -486,17 +486,20 @@ async function runOne(
   call: BatchCall,
   opts: BatchOptions,
 ): Promise<RunOutcome> {
-  const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
+  const isEvidenceTool = tools.lookup(call.name)?.annotations?.evidence === true;
   const authorization = await authorizeOne(tools, call, opts);
   if (authorization.kind === "rejected") {
     const result = await finalizeResult(authorization.result, call.id, opts.artifactDir);
-    return { id: call.id, result: { ...result, evidence } };
+    return {
+      id: call.id,
+      result: { ...result, evidence: isEvidenceTool && result.isError !== true },
+    };
   }
   const outcome = await executeAuthorized(session, call, authorization.authorized, opts);
   const result = await finalizeResult(outcome.result, call.id, opts.artifactDir);
   return {
     id: call.id,
-    result: { ...result, evidence },
+    result: { ...result, evidence: isEvidenceTool && result.isError !== true },
     ...(outcome.pending !== undefined ? { pending: outcome.pending } : {}),
   };
 }
@@ -529,9 +532,8 @@ function waitForSettled(promise: Promise<unknown>, timeoutMs: number): Promise<b
 async function skippedResult(
   call: BatchCall,
   opts: BatchOptions,
-  tools: ToolRegistry,
+  _tools: ToolRegistry,
 ): Promise<BatchResult> {
-  const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
   const result = await finalizeResult(
     failure(
       "tool_skipped_after_timeout",
@@ -540,37 +542,35 @@ async function skippedResult(
     call.id,
     opts.artifactDir,
   );
-  return { id: call.id, result: { ...result, evidence } };
+  return { id: call.id, result: { ...result, evidence: false } };
 }
 
 // 非字符串 id 会同时绕过重复检测与 artifact 命名假设,在管线入口直接拒绝(D-023)。
 async function invalidIdResult(
   call: BatchCall,
   opts: BatchOptions,
-  tools: ToolRegistry,
+  _tools: ToolRegistry,
 ): Promise<RunOutcome> {
-  const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
   const result = await finalizeResult(
     failure("tool_protocol_error", `invalid tool call id: ${describeType(call.id)}`),
     "invalid-id",
     opts.artifactDir,
   );
-  return { id: String(call.id), result: { ...result, evidence } };
+  return { id: String(call.id), result: { ...result, evidence: false } };
 }
 
 async function duplicateResult(
   call: BatchCall,
   opts: BatchOptions,
-  tools: ToolRegistry,
+  _tools: ToolRegistry,
 ): Promise<BatchResult> {
   const message = `duplicate call id: ${truncateText(call.id, MAX_NAME_ECHO_CHARS)}`;
-  const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
   const result = await finalizeResult(
     failure("duplicate_call_id", message),
     call.id,
     opts.artifactDir,
   );
-  return { id: call.id, result: { ...result, evidence } };
+  return { id: call.id, result: { ...result, evidence: false } };
 }
 
 export async function executeBatch(
@@ -618,20 +618,23 @@ export async function executeBatch(
         prepared.push({ kind: "final", result: await duplicateResult(call, opts, tools) });
         continue;
       }
-      const evidence = tools.lookup(call.name)?.annotations?.evidence === true;
+      const isEvidenceTool = tools.lookup(call.name)?.annotations?.evidence === true;
       const authorization = await authorizeOne(tools, call, opts);
       if (authorization.kind === "rejected") {
         const result = await finalizeResult(authorization.result, call.id, opts.artifactDir);
         prepared.push({
           kind: "final",
-          result: { id: call.id, result: { ...result, evidence } },
+          result: {
+            id: call.id,
+            result: { ...result, evidence: isEvidenceTool && result.isError !== true },
+          },
         });
         continue;
       }
       prepared.push({
         kind: "authorized",
         call,
-        evidence,
+        evidence: isEvidenceTool,
         authorized: authorization.authorized,
       });
     }
@@ -642,7 +645,10 @@ export async function executeBatch(
         if (entry.kind === "final") return entry.result;
         const outcome = await executeAuthorized(session, entry.call, entry.authorized, opts);
         const result = await finalizeResult(outcome.result, entry.call.id, opts.artifactDir);
-        return { id: entry.call.id, result: { ...result, evidence: entry.evidence } };
+        return {
+          id: entry.call.id,
+          result: { ...result, evidence: entry.evidence && result.isError !== true },
+        };
       }),
     );
   }

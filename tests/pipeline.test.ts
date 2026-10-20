@@ -305,7 +305,34 @@ describe("executeBatch 并发策略", () => {
     expect(results[0].result.text).toBe("proof");
   });
 
-  it("重复 id 的 evidence 工具结果也写入 evidence 标记", async () => {
+  it("evidence 工具执行失败时不写入 evidence 标记", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const evidenceTool: ToolDef<{}> = {
+      name: "evidence",
+      description: "取证工具",
+      schema: z.object({}) as z.ZodType<{}>,
+      annotations: { readOnly: true, evidence: true },
+      execute: async () => ({
+        isError: true,
+        code: "probe_failed",
+        message: "读取失败",
+        text: "读取失败",
+      }),
+    };
+    const reg = new ToolRegistry([evidenceTool]);
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("1", "evidence")],
+      { signal: new AbortController().signal, artifactDir: artifactDir() },
+    );
+
+    expect(results[0].result.isError).toBe(true);
+    expect(results[0].result.evidence).toBe(false);
+  });
+
+  it("重复 id 的 evidence 工具失败结果不写入 evidence 标记", async () => {
     const { session } = makeSession(path.join(tmp, "session"));
     const evidenceTool: ToolDef<{}> = {
       name: "evidence",
@@ -324,7 +351,7 @@ describe("executeBatch 并发策略", () => {
     );
 
     expect(results[1].result.code).toBe("duplicate_call_id");
-    expect(results[1].result.evidence).toBe(true);
+    expect(results[1].result.evidence).toBe(false);
   });
 
   it("重复 id 的普通工具结果写入 evidence=false", async () => {

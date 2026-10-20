@@ -95,6 +95,7 @@ describe('analyzeUartBaseline', () => {
     expect(() => decodeMemoryHex('zzzzzzzz', 4)).toThrow(/十六进制/)
     expect(() => decodeMemoryHex('', 4)).toThrow(/长度/)
     expect(() => decodeMemoryHex('00000020', 0)).toThrow(/长度/)
+    expect(() => decodeMemoryHex('00000020', 5)).toThrow(/长度/)
   })
 
   it('复位基线 0xa8000000 经小端解码后仍判定未初始化', () => {

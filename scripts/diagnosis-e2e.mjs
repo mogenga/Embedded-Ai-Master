@@ -110,15 +110,6 @@ function parseText(text) {
   }
 }
 
-function hexToInt(hex) {
-  // Renode 对外设寄存器的 ReadByte 返回寄存器显示顺序（实测 USART2.CR1 为
-  // "c0000000" 对应 0xC0000000），因此按大端解析 hex 得到寄存器值。内存读写
-  // 的字节序不在本脚本范围；这里只读 STM32 外设寄存器。
-  const value = Number.parseInt(hex, 16);
-  if (!Number.isFinite(value)) throw new Error(`无法解析 hex: ${hex}`);
-  return value;
-}
-
 function requireToolResult(events, toolName, count) {
   const results = events.filter(
     (event) => event.type === "tool_result" && event.payload?.toolName === toolName,
@@ -129,7 +120,7 @@ function requireToolResult(events, toolName, count) {
   return results;
 }
 
-function registerSnapshot(events) {
+function registerSnapshot(events, decodeHex) {
   const byAddress = new Map();
   const warnings = [];
   for (const event of requireToolResult(events, "mcp__probe__mem_read", 5)) {
@@ -138,13 +129,20 @@ function registerSnapshot(events) {
     if (memory === undefined || typeof memory.address !== "number" || typeof memory.hex !== "string") {
       throw new Error(`mem_read 结果缺少 memory.address/hex: ${event.payload.text}`);
     }
+    if (!Array.isArray(memory.bytes) || memory.bytes.length * 2 !== memory.hex.length) {
+      throw new Error(
+        `mem_read 的 bytes 与 hex 长度不一致: bytes=${JSON.stringify(memory.bytes)} hex=${memory.hex}`,
+      );
+    }
     if (memory.allZero === true) {
       warnings.push({
         address: `0x${memory.address.toString(16)}`,
         warning: typeof memory.warning === "string" ? memory.warning : "all_zero",
       });
     }
-    byAddress.set(memory.address, hexToInt(memory.hex));
+    // hex 是地址递增的内存字节顺序（小端）；直接 Number.parseInt 会把它当大端，
+    // 高位非零的寄存器会整体错位（0x000000c0 的字节串 "c0000000" 会被读成 0xC0000000）。
+    byAddress.set(memory.address, decodeHex(memory.hex, memory.bytes.length));
   }
   const snapshot = {};
   for (const [name, address] of Object.entries(REGISTERS)) {
@@ -193,7 +191,9 @@ async function main() {
   }
 
   const { runSession } = await import(pathToFileURL(INDEX_MODULE).href);
-  const { analyzeUartBaseline } = await import(pathToFileURL(DIAGNOSIS_MODULE).href);
+  const { analyzeUartBaseline, decodeMemoryHex } = await import(
+    pathToFileURL(DIAGNOSIS_MODULE).href
+  );
   const { createLogTailEventSource } = await import(pathToFileURL(LOG_TAIL_MODULE).href);
 
   const home = mkdtempSync(path.join(tmpdir(), "eam-diagnosis-e2e-"));
@@ -281,7 +281,10 @@ async function main() {
       assert(result.payload.evidence === true, `mem_read ${result.payload.id} 未标记 evidence`);
     }
 
-    const { snapshot, warnings: registerWarnings } = registerSnapshot(onlineEvents);
+    const { snapshot, warnings: registerWarnings } = registerSnapshot(
+      onlineEvents,
+      decodeMemoryHex,
+    );
     const warningFields = {};
     for (const warning of registerWarnings) {
       for (const [name, address] of Object.entries(REGISTERS)) {
