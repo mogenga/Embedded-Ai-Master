@@ -111,7 +111,7 @@ export function appendReviewed(root: string, entry: ReviewedEntry): string;
 
 - 文件固定为 `<root>/_inbox.md`，追加在文件末尾。
 - 新提案块格式与现有块一致（`---` 分隔的 YAML 子集），并新增 `id` 与可选 `title`。
-- 旧块没有 `id` 时，`parseInbox` 生成稳定 `legacy-<n>`（按出现顺序，从 1 开始）。
+- 旧块没有 `id` 时，`parseInbox` 按当前出现顺序生成 `legacy-<n>`（从 1 开始）；该编号只在该次解析内稳定，删除前置块后会漂移，新提案始终写入稳定 `id`。
 - 重复判定：`kind + domain + content` 的 sha256 与现有提案相同；重复时不写文件，返回已有 id。
 - `removeProposal` 重写 `_inbox.md`，保留头部注释与其他块，不改动内容。
 - `appendReviewed` 追加到 `<root>/_reviewed.md`，记录 `id/status/reviewedAt/target/reason`；文件不存在时创建，头部固定一行说明。
