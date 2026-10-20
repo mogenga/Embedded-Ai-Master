@@ -913,6 +913,29 @@ describe("buildMessages 投影重组", () => {
     ]);
   });
 
+  it("approval_request 事件本身不产生消息", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "hi" }),
+      mk(1, "approval_request", {
+        requestId: "req-1",
+        callId: "c1",
+        tool: "shell",
+        action: "ask",
+        reason: "needs approval",
+        preset: "read-only",
+        paramsDigest: "digest",
+        paramsKeys: ["command"],
+        deadlineAt: "2026-10-20T00:01:00.000Z",
+      }),
+      mk(2, "user", { content: "again" }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "user", content: "hi" },
+      { role: "user", content: "again" },
+    ]);
+  });
+
   it("不修改输入事件", () => {
     const events: SessionEvent[] = [
       mk(0, "system", { content: "SYS" }),

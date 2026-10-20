@@ -3,6 +3,8 @@ import { readFileSync } from "node:fs";
 import { appendFile, lstat, mkdir, open, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { buildMessages } from "../context/build.js";
+import type { PermissionPreset } from "../permissions/types.js";
+import type { ToolAccess } from "../tools/types.js";
 import { SessionResumeError } from "./errors.js";
 import {
   createHandle,
@@ -33,9 +35,20 @@ interface MissingToolResult {
   parent: number;
 }
 
+interface PendingApproval {
+  callId: string;
+  tool: string;
+  access?: ToolAccess;
+  preset: PermissionPreset;
+  paramsDigest: string;
+  paramsKeys: string[];
+  paramsPreview?: Record<string, unknown>;
+}
+
 interface CrashRecoveryPlan {
   missing: MissingToolResult[];
   needsInterrupted: boolean;
+  approvals: PendingApproval[];
 }
 
 function crashRecoveryResultPayload(id: string): Record<string, unknown> {
@@ -80,16 +93,63 @@ function needsCrashRecoveryInterrupted(events: readonly SessionEvent[]): boolean
   return true;
 }
 
+function toPendingApproval(event: SessionEvent): PendingApproval | undefined {
+  if (event.type !== "approval_request") return undefined;
+  const { callId, tool, preset, paramsDigest, paramsKeys, access, paramsPreview } =
+    event.payload;
+  if (
+    typeof callId !== "string"
+    || typeof tool !== "string"
+    || typeof preset !== "string"
+    || typeof paramsDigest !== "string"
+    || !Array.isArray(paramsKeys)
+    || !paramsKeys.every((key) => typeof key === "string")
+  ) {
+    return undefined;
+  }
+  const approval: PendingApproval = {
+    callId,
+    tool,
+    preset: preset as PermissionPreset,
+    paramsDigest,
+    paramsKeys: paramsKeys as string[],
+  };
+  if (access === "read" || access === "write" || access === "unknown") approval.access = access;
+  if (isRecord(paramsPreview)) approval.paramsPreview = paramsPreview;
+  return approval;
+}
+
+function findUnresolvedApprovals(events: readonly SessionEvent[]): PendingApproval[] {
+  const decided = new Set<string>();
+  for (const event of events) {
+    if (event.type !== "permission_decision") continue;
+    if (typeof event.payload.callId === "string") decided.add(event.payload.callId);
+  }
+  const seen = new Set<string>();
+  const pending: PendingApproval[] = [];
+  for (const event of events) {
+    const approval = toPendingApproval(event);
+    if (approval === undefined || decided.has(approval.callId) || seen.has(approval.callId)) {
+      continue;
+    }
+    seen.add(approval.callId);
+    pending.push(approval);
+  }
+  return pending;
+}
+
 // 只恢复「最后一个 assistant 批次缺 tool_result」这一种崩溃尾部；
 // 其余投影错误保持 fail-closed，避免把日志损坏伪装成可恢复状态。
 function planCrashRecovery(
   events: readonly SessionEvent[],
 ): CrashRecoveryPlan | undefined {
+  const approvals = findUnresolvedApprovals(events);
   let projectionError: unknown;
   try {
     buildMessages(events);
-    return needsCrashRecoveryInterrupted(events)
-      ? { missing: [], needsInterrupted: true }
+    const needsInterrupted = needsCrashRecoveryInterrupted(events);
+    return needsInterrupted || approvals.length > 0
+      ? { missing: [], needsInterrupted, approvals }
       : undefined;
   } catch (error) {
     projectionError = error;
@@ -165,6 +225,7 @@ function planCrashRecovery(
   return {
     missing: missing.map((id) => ({ id, parent: assistant.seq })),
     needsInterrupted: true,
+    approvals,
   };
 }
 
@@ -341,6 +402,27 @@ export async function resumeSession(
     // 崩溃恢复前先补齐日志末行换行,避免续写与上一行粘连(D-035)。
     await ensureTrailingNewline(lastLogPath);
     if (recovery !== undefined) {
+      // 未决审批先补 deny 审计,再补丢失的 tool_result 与 interrupted,保持事件因果顺序。
+      for (const approval of recovery.approvals) {
+        await appendHandle.append({
+          type: "permission_decision",
+          payload: {
+            callId: approval.callId,
+            tool: approval.tool,
+            action: "ask",
+            effective: "deny",
+            reason: "approval_aborted: crash_recovery",
+            preset: approval.preset,
+            source: "builtin",
+            paramsDigest: approval.paramsDigest,
+            paramsKeys: approval.paramsKeys,
+            ...(approval.paramsPreview === undefined
+              ? {}
+              : { paramsPreview: approval.paramsPreview }),
+            ...(approval.access === undefined ? {} : { access: approval.access }),
+          },
+        });
+      }
       for (const missing of recovery.missing) {
         await appendHandle.append({
           type: "tool_result",

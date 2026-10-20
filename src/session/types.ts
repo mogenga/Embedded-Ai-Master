@@ -19,7 +19,8 @@ export type EventType =
   | "status"
   | "interrupted"
   | "compaction"
-  | "permission_decision";
+  | "permission_decision"
+  | "approval_request";
 
 export interface SessionHeader {
   id: string;
@@ -135,4 +136,18 @@ export interface PermissionDecisionPayload {
   paramsKeys: string[];
   paramsPreview?: Record<string, unknown>;
   access?: ToolAccess;
+}
+
+export interface ApprovalRequestPayload {
+  requestId: string;
+  callId: string;
+  tool: string;
+  action: "ask";
+  access?: ToolAccess;
+  reason: string;
+  preset: PermissionPreset;
+  paramsDigest: string;
+  paramsKeys: string[];
+  paramsPreview?: Record<string, unknown>;
+  deadlineAt: string;
 }

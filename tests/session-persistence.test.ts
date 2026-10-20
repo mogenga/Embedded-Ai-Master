@@ -13,8 +13,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { buildMessages } from "../src/context/build.js";
 import { SessionCorruptionError } from "../src/session/errors.js";
-import { forkSession, readSessionDir } from "../src/session/persistence.js";
-import { createSession } from "../src/session/session.js";
+import {
+  forkSession,
+  readSessionDir,
+  readSessionSnapshot,
+} from "../src/session/persistence.js";
+import { createSession, resumeSession } from "../src/session/session.js";
 import type { EventType, SessionEvent, SessionHeader } from "../src/session/types.js";
 
 const fsFaults = vi.hoisted(() => ({
@@ -407,6 +411,90 @@ describe("permission_decision 事件", () => {
 
     expect(result.events.map((event) => event.type)).toEqual(["user", "usage"]);
     expect(result.events.some((event) => event.type === "permission_decision")).toBe(false);
+  });
+});
+
+describe("approval_request 事件", () => {
+  it("写入 approval_request 后可读,readSessionSnapshot 不抛 unknown_event_type", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    const appended = await session.append({
+      type: "approval_request",
+      payload: {
+        requestId: "req-1",
+        callId: "c1",
+        tool: "shell",
+        action: "ask",
+        access: "write",
+        reason: "test:ask",
+        preset: "read-only",
+        paramsDigest: "digest",
+        paramsKeys: ["command"],
+        paramsPreview: { command: "ls" },
+        deadlineAt: "2026-10-20T00:01:00.000Z",
+      },
+    });
+    await session.close();
+
+    const result = readSessionDir(dir);
+    expect(result.events).toEqual([appended]);
+
+    const snapshot = await readSessionSnapshot(dir);
+    expect(snapshot.events.map((event) => event.type)).toEqual(["approval_request"]);
+  });
+
+  it("resume 为崩溃遗留的未决审批补 deny 审计", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({
+      type: "assistant",
+      payload: {
+        content: "calling",
+        toolCalls: [{ id: "call-1", name: "shell", arguments: { command: "ls" } }],
+      },
+    });
+    await session.append({
+      type: "approval_request",
+      payload: {
+        requestId: "req-1",
+        callId: "call-1",
+        tool: "shell",
+        action: "ask",
+        access: "write",
+        reason: "test:ask",
+        preset: "read-only",
+        paramsDigest: "digest",
+        paramsKeys: ["command"],
+        deadlineAt: "2026-10-20T00:01:00.000Z",
+      },
+    });
+    await session.close();
+
+    const resumed = await resumeSession(dir);
+    const events = resumed.events();
+    const decision = events.find(
+      (event) =>
+        event.type === "permission_decision" &&
+        event.payload.callId === "call-1" &&
+        event.payload.effective === "deny" &&
+        event.payload.reason === "approval_aborted: crash_recovery",
+    );
+
+    expect(decision).toBeDefined();
+    expect(decision?.payload).toMatchObject({
+      callId: "call-1",
+      tool: "shell",
+      action: "ask",
+      effective: "deny",
+      reason: "approval_aborted: crash_recovery",
+      preset: "read-only",
+      source: "builtin",
+      paramsDigest: "digest",
+      paramsKeys: ["command"],
+    });
+    expect(decision?.parent).toBeUndefined();
+    expect(() => buildMessages(events)).not.toThrow();
+    await resumed.close();
   });
 });
 
