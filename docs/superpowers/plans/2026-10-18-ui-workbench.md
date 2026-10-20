@@ -1,5 +1,8 @@
 # P0 前端 Web 工作台实现计划
 
+> **状态：已作废（2026-10-20）。** 本计划描述的 Preact + Vite 工作台（`src/ui/`、`web/`、`vite.config.ts`、`tests/ui/`、`scripts/verify-ui.mjs`）已在前端移植中**整体删除**，由 `desktop/renderer/`（Prometheus 渲染器，纯 ES 模块）取代。文中所有 `src/ui/**` 路径、API 名与验收脚本均不存在，本计划仅作历史留档，**不得据此实施**。
+> 当前前端的事实源是 `docs/frontend-design.md` v2.0 与 `desktop/MATRIX.md`。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 `feat/p0` 分支上落地可运行的前端 Web 工作台（三栏布局、三态主题、消息流组件、调试坞、状态栏、回放），复用内核事件类型，前端唯一视图模型为纯函数归约 `TranscriptView`。

@@ -1,5 +1,7 @@
 # M2 权限系统设计（PLAT-5 阶段 1）
 
+> **注（2026-10-20 前端移植后）**：本 spec 的内核侧设计（策略规则、四个预设、管线接入、`permission_decision` 审计、审批通道）**已实现且仍然有效**；文中引用的 `src/ui/**` 前端文件与 `npm run test:ui` / `typecheck:web` / `build:web` 命令**已随 Preact 工作台整体删除**。当前前端的事实源是 `docs/frontend-design.md` v2.0 与 `desktop/MATRIX.md`，前端测试命令是 `npm run test:desktop`。
+
 > 日期：2026-10-19 · 状态：待评审 · 上游：[m2-roadmap.md](../../m2-roadmap.md) 阶段 1 第 1 项、[BRD.md](../../BRD.md) PLAT-5 / R2 / R3、[p0-kernel-design.md](../../p0-kernel-design.md) §4。
 > 本轮交付终点：策略规则模型、四个预设、管线接入（schema 校验后、execute 前）、`permission_decision` 审计事件、库层审批通道接口、headless `ask → deny`、配置加载与测试。不实现 Web 审批 API、SSE 与审批 UI。
 

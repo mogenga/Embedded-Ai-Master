@@ -1,5 +1,7 @@
 # M2 Web 审批闭环设计（PLAT-5 阶段 2）
 
+> **注（2026-10-20 前端移植后）**：本 spec 的内核侧设计（`approval_request` 事件、`POST /api/approvals`、审批队列与审计）**已实现且仍然有效**；但审批 UI 已从 `src/ui/components/conversation/approval-notice.tsx`（Preact 组件）迁到 `desktop/renderer/` 的审批条，文中引用的 `src/ui/**` 文件、`vite.config.ts` 代理配置与 `npm run test:ui` / `typecheck:web` / `build:web` 命令**已随 Preact 工作台整体删除**。当前前端的事实源是 `docs/frontend-design.md` v2.0 与 `desktop/MATRIX.md`，前端测试命令是 `npm run test:desktop`。
+
 > 日期：2026-10-20 · 状态：待评审 · 上游：[m2-roadmap.md](../../m2-roadmap.md) 阶段 2 第 4 项、[BRD.md](../../BRD.md) PLAT-5 / R2 / R3、[permission-system-design.md](./2026-10-19-permission-system-design.md) 阶段 1、[event-bus-design.md](./2026-10-19-event-bus-design.md) 实时流、[deferred-issues.md](../../deferred-issues.md) D-112 / D-137 / D-139。
 > 本轮交付终点：Web 进程内最小会话运行器（发起会话 / 追加输入）、`approval_request` 事件、`POST /api/approvals` 回传、最简审批 UI，以及 `POST /api/actions` 从 501 落地。审批沿用既有 gate 队列、超时与 `permission_decision` 审计，不新造权限模型。
 

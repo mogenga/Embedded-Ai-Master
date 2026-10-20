@@ -1,6 +1,25 @@
 # M2 阶段 4 交互与外部验证设计（M3 衔接）
 
-> 日期：2026-10-20 · 状态：待评审 · 上游：[m2-roadmap.md](../../m2-roadmap.md) 阶段 4、[BRD.md](../../BRD.md) BR-6 / PLAT-5 / R1-R3、[frontend-design.md](../../frontend-design.md) §8.6/§9、[deferred-issues.md](../../deferred-issues.md) D-052 / D-058 / D-059 / D-111。
+> **状态：待评审 · §7-§9 的前端接口需按新前端重写（2026-10-20 前端移植后）**
+>
+> 2026-10-20 的前端移植把 Preact 工作台（`src/ui/`）整体替换为 `desktop/renderer/`（Prometheus 渲染器，纯 ES 模块，无框架无打包器）。本 spec **§10 外部验证与 §5/§6 的内核侧约束仍然有效**，但 **§7 回放、§8 导出、§9 设备控制** 所依赖的前端 API 已不存在，必须按新前端重写后才能实施。
+>
+> 已删除的依赖（`src/ui/` 共 12 个文件、约 30 个导出符号）与其在新前端中的对应物：
+>
+> | 本 spec 引用（已删除） | 新前端的对应物 | 状态 |
+> |---|---|---|
+> | `src/ui/view/transcript.ts` 的 `transcriptFromSession` / `TranscriptView` / `ApprovalModel` / `PermissionModel` | `desktop/renderer/protocol.js` 的 `sessionEventsToMessages`（重建骨架）；`sessionEventToHostEvents`（实时增量） | **需新写**：新前端无归约层，回放需按 `seq` 截断后重放 `sessionEventToHostEvents` |
+> | `src/ui/state.ts` 的 `WorkbenchState` / `applySessionEvent` / `applyStreamError` / `retryTarget` / `RequestGate` | `desktop/renderer/app.js` 的 `state` 对象 + 增量 DOM 操作 | **需新写**：无归约器，回放状态需自行建模 |
+> | `src/ui/main.tsx`（定时器持有者）、`src/ui/app.tsx`（`onSend`） | `desktop/renderer/app.js` 的 `submit()` / `api.send({cmd:"prompt"})` | **需改写**：预置指令经 `api.send` 下发，非组件 props |
+> | `src/ui/api/load.ts` 的 `loadSessionView` / `lastSeqOf` / `deviceForSession` / `loadWorkbench` | 桌面走 `loadSession` cmd；浏览器走 `GET /api/sessions/:id`（`bridge.js`） | **已有等价物**，需对齐形状 |
+> | `src/ui/api/event-stream.ts` / `session-stream.ts`（缺口重拉、重连上限） | `bridge.js` 的 `openStream` / `_internal.getLastSeq()` | **缺口检测与重连上限未实现**（见 D-167） |
+> | `src/ui/view/sse.ts` 的 `postAction` | `bridge.js` 的 `startPrompt`（`POST /api/actions`） | **已有等价物** |
+> | `src/ui/view/device.ts` 的 `deviceFromSession` / `UNKNOWN_DEVICE` | `desktop/renderer/protocol.js` 的 `device_status` → `board_state` | **需改写**：`state.device` 原样透传，不做字段 patch |
+> | `scripts/verify-ui.mjs` 与 `npm run test:ui` | `npm run test:desktop`（协议层与宿主） | **需新写**：视觉验收清单已随 §12 更换为 v2.0 的 V1–V15 |
+>
+> 重写时的前端事实源：`docs/frontend-design.md` v2.0（布局、令牌、组件、协议映射）与 `desktop/MATRIX.md`（命令/事件能力矩阵）。**不得**按本 spec 现存文字直接实施 §7-§9。
+
+> 日期：2026-10-20 · 状态：待评审 · 上游：[m2-roadmap.md](../../m2-roadmap.md) 阶段 4、[BRD.md](../../BRD.md) BR-6 / PLAT-5 / R1-R3、[frontend-design.md](../../frontend-design.md) §8.6/§9、[deferred-issues.md](../../deferred-issues.md) D-052 / D-058 / D-059 / D-111 / D-166。
 > 本轮交付终点：会话回放与 transcript 导出可用；设备面板的暂停/继续/复位经既有会话指令链路执行；D-111 的 live 网关、第三方 MCP、终止失败路径完成可执行部分，真机部分显式登记阻塞。
 
 ## 1. 意图与为什么

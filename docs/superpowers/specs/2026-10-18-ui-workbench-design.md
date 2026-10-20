@@ -1,7 +1,10 @@
 # P0 前端工程（Web 工作台）实现设计
 
-> 版本 v1.0 · 2026-10-18 · 状态：设计基线，等待实现
-> 上位事实源：`docs/frontend-design.md` v1.1（设计契约与视觉令牌，本 spec 不重复其全部内容，只落地工程实现决策）；视觉基线：`prototypes/index.html`
+> **状态：已作废（2026-10-20）。** 本 spec 描述的 Preact + Vite 工作台（`src/ui/`、`web/`、`vite.config.ts`、`tests/ui/`）已在前端移植中**整体删除**，由 `desktop/renderer/`（Prometheus 渲染器，纯 ES 模块）取代。文中提到的 `src/ui/**` 文件与 API 均不存在，本 spec 仅作历史留档，**不得据此实施**。
+> 当前前端的事实源是 `docs/frontend-design.md` v2.0 与 `desktop/MATRIX.md`。
+
+> 版本 v1.0 · 2026-10-18 · 状态：~~设计基线，等待实现~~（已作废）
+> 上位事实源：~~`docs/frontend-design.md` v1.1~~（现为 v2.0，结构与令牌已整体更换）；视觉基线：`prototypes/index.html`
 > 本 spec 边界：只定义前端工程的目录结构、模块职责、构建/测试配置、类型接线、状态投影、验收映射；不定义内核行为，不修改内核语义。
 
 ---

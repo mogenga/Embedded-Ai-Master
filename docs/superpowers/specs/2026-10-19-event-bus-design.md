@@ -1,5 +1,7 @@
 # M2 事件总线设计（工作流 C）
 
+> **注（2026-10-20 前端移植后）**：本 spec 的内核侧设计（事件模型、事件总线、SSE 服务端协议、MCP 设备状态发布）**已实现且仍然有效**；但文中引用的 `src/ui/**` 前端文件与 `npm run test:ui` / `typecheck:web` / `build:web` / `verify:ui` 命令**已随 Preact 工作台整体删除**。当前前端的事实源是 `docs/frontend-design.md` v2.0 与 `desktop/MATRIX.md`，前端测试命令是 `npm run test:desktop`。
+
 > 日期：2026-10-19 · 状态：待评审 · 上游：[m2-roadmap.md](../../m2-roadmap.md) 阶段 1 第 3 项、[BRD.md](../../BRD.md) PLAT-8、[p0-kernel-design.md](../../p0-kernel-design.md) 事件流、[frontend-design.md](../../frontend-design.md) 实时/回放切换。
 > 本轮交付终点：事件模型与新增事件类型、日志投影式事件总线、SSE 服务端协议、客户端游标/续传/合并、MCP 显式设备状态发布、实时工具/权限/MCP/设备状态投影与测试。不实现 Web 审批 API/UI。
 
