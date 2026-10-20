@@ -79,6 +79,48 @@ describe("assistant 三段合成", () => {
   });
 });
 
+describe("assistant_delta 流式片段", () => {
+  it("增量片段逐条转成 assistant_delta", () => {
+    const { out } = translate([
+      ev(0, "assistant_delta", { text: "你" }),
+      ev(1, "assistant_delta", { text: "好" }),
+    ]);
+    expect(out).toStrictEqual([
+      { type: "assistant_delta", text: "你" },
+      { type: "assistant_delta", text: "好" },
+    ]);
+  });
+
+  it("完整 assistant 事件不重复已流式过的文本", () => {
+    const { out } = translate([
+      ev(0, "assistant_delta", { text: "你好" }),
+      ev(1, "assistant", { content: "你好世界", toolCalls: [] }),
+    ]);
+    // start + 补齐的 "世界" + end：整段再发一次会让气泡显示两遍。
+    expect(out).toStrictEqual([
+      { type: "assistant_delta", text: "你好" },
+      { type: "assistant_start" },
+      { type: "assistant_delta", text: "世界" },
+      { type: "assistant_end" },
+    ]);
+  });
+
+  it("流式文本与完整文本不一致时以完整文本为准", () => {
+    const { out } = translate([
+      ev(0, "assistant_delta", { text: "部分" }),
+      ev(1, "assistant", { content: "完整答案", toolCalls: [] }),
+    ]);
+    expect(out).toContainEqual({ type: "assistant_delta", text: "完整答案" });
+    // 不重复已流式的部分。
+    expect(out.filter((item) => item.type === "assistant_delta")).toHaveLength(2);
+  });
+
+  it("空片段不产出事件", () => {
+    const { out } = translate([ev(0, "assistant_delta", { text: "" })]);
+    expect(out).toStrictEqual([]);
+  });
+});
+
 describe("tool_result", () => {
   it("成功时输出 tool_end + tool_output", () => {
     const { out } = translate([

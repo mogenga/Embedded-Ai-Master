@@ -21,6 +21,7 @@ const KNOWN_TYPES = new Set([
   "system",
   "user",
   "assistant",
+  "assistant_delta",
   "tool_call",
   "tool_result",
   "tool_started",
@@ -157,6 +158,14 @@ export function createContext(options = {}) {
     startedTools: new Set(),
     /** requestIds the renderer is currently showing an approval bar for. */
     pendingApprovals: new Set(),
+    /**
+     * Text already streamed for the open assistant turn.
+     *
+     * The kernel sends `assistant_delta` fragments and then the complete
+     * `assistant` event. Without this counter the complete text would be
+     * appended a second time and the bubble would show the answer twice.
+     */
+    streamedText: "",
   };
 }
 
@@ -199,11 +208,30 @@ export function sessionEventToHostEvents(event, ctx) {
       // The renderer already echoed the text when it sent the prompt.
       break;
 
+    case "assistant_delta": {
+      // The kernel's streaming fragment. The renderer appends it to the open
+      // bubble; the complete answer arrives later as an `assistant` event,
+      // which replaces the bubble's content.
+      const text = textOf(payload.text);
+      if (text !== "") {
+        ctx.streamedText += text;
+        out.push({ type: "assistant_delta", text });
+      }
+      break;
+    }
+
     case "assistant": {
       const content = textOf(payload.content);
       out.push({ type: "assistant_start" });
       if (content !== "") {
-        out.push({ type: "assistant_delta", text: content });
+        // The complete answer already arrived as delta fragments. Only the
+        // part that never streamed is missing, so send that; sending the
+        // whole text again would double it in the bubble.
+        const missing = content.startsWith(ctx.streamedText)
+          ? content.slice(ctx.streamedText.length)
+          : content;
+        if (missing !== "") out.push({ type: "assistant_delta", text: missing });
+        ctx.streamedText = "";
         ctx.lastAssistantText = content;
       }
       out.push({ type: "assistant_end" });

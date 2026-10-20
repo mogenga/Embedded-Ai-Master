@@ -24,6 +24,7 @@ const EVENT_TYPES: Record<EventType, true> = {
   system: true,
   user: true,
   assistant: true,
+  assistant_delta: true,
   tool_call: true,
   tool_result: true,
   tool_started: true,

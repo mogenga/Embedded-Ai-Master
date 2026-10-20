@@ -9,6 +9,7 @@ export type EventType =
   | "system"
   | "user"
   | "assistant"
+  | "assistant_delta"
   | "tool_call"
   | "tool_result"
   | "tool_started"
@@ -48,6 +49,17 @@ export interface ToolStartedPayload {
   callId: string;
   tool: string;
   access?: ToolAccess;
+}
+
+/**
+ * 模型输出的一段增量文本。
+ *
+ * 与 `assistant` 事件并存：`assistant` 是这一轮的最终结论（内容完整、可用于
+ * 重建模型上下文），`assistant_delta` 是到达过程中的片段，只用于实时显示。
+ * 投影层忽略 delta，用 `assistant` 重建上下文；UI 用 delta 做逐字显示。
+ */
+export interface AssistantDeltaPayload {
+  text: string;
 }
 
 export type McpStatusPayloadKind =

@@ -43,7 +43,7 @@ function complete(fetchImpl: typeof fetch, options: { apiKey?: string } = {}) {
 }
 
 describe("OpenAI 兼容模型适配器", () => {
-  it("请求体包含 model/messages/tools/max_tokens 且 stream=false", async () => {
+  it("请求体包含 model/messages/tools/max_tokens 且 stream=true", async () => {
     let captured: Record<string, unknown> | undefined;
     const fetchImpl = mockFetch((_url, init) => {
       captured = JSON.parse(String(init.body));
@@ -58,7 +58,8 @@ describe("OpenAI 兼容模型适配器", () => {
       messages: MESSAGES,
       tools: [TOOL],
       max_tokens: 8192,
-      stream: false,
+      stream: true,
+      stream_options: { include_usage: true },
     });
   });
 
@@ -763,5 +764,211 @@ describe("OpenAI 兼容模型适配器", () => {
       provider.complete(MESSAGES, [], { signal: new AbortController().signal, maxOutputTokens: 1 }),
     ).rejects.toMatchObject({ code: "invalid_response" });
     expect(cancelled).toBe(true);
+  });
+});
+
+describe("OpenAI 流式响应", () => {
+  function sseResponse(lines: string[]): Response {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (const line of lines) controller.enqueue(encoder.encode(`${line}\n`));
+        controller.close();
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  }
+
+  function sseFetch(lines: string[]): { impl: typeof fetch; calls: number } {
+    const state = { impl: undefined as unknown as typeof fetch, calls: 0 };
+    state.impl = vi.fn(async () => {
+      state.calls += 1;
+      return sseResponse(lines);
+    }) as unknown as typeof fetch;
+    return state;
+  }
+
+  it("逐帧回调 onDelta 并拼出完整 content", async () => {
+    const onDelta = vi.fn();
+    const fetchImpl = sseFetch([
+      'data: {"choices":[{"delta":{"role":"assistant","content":""},"finish_reason":null}]}',
+      'data: {"choices":[{"delta":{"content":"你"},"finish_reason":null}]}',
+      'data: {"choices":[{"delta":{"content":"好"},"finish_reason":null}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+      "data: [DONE]",
+    ]).impl;
+    const provider = createOpenAIProvider({ baseUrl: "http://gw/v1", model: "m", fetchImpl });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onDelta,
+    });
+
+    expect(onDelta.mock.calls).toEqual([["你"], ["好"]]);
+    expect(result.content).toBe("你好");
+    expect(result.stopReason).toBe("stop");
+  });
+
+  it("流式帧里的 usage 汇总成完整用量", async () => {
+    const fetchImpl = sseFetch([
+      'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+      'data: {"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":2}}}',
+      "data: [DONE]",
+    ]).impl;
+    const provider = createOpenAIProvider({ baseUrl: "http://gw/v1", model: "m", fetchImpl });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+    });
+
+    expect(result.usage).toStrictEqual({
+      promptTokens: 11,
+      completionTokens: 3,
+      cachedTokens: 2,
+    });
+  });
+
+  it("流式帧里的 tool_calls 累积成完整调用", async () => {
+    const fetchImpl = sseFetch([
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"echo","arguments":"{\\"op\\":"}}]},"finish_reason":null}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"write\\"}"}}]},"finish_reason":null}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+      "data: [DONE]",
+    ]).impl;
+    const provider = createOpenAIProvider({ baseUrl: "http://gw/v1", model: "m", fetchImpl });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+    });
+
+    expect(result.toolCalls).toStrictEqual([
+      { id: "call-1", name: "echo", arguments: { op: "write" } },
+    ]);
+  });
+
+  it("漏发 Content-Type 但内容是 data: 帧时仍按流式解析", async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"hi"}}]}\n'));
+        controller.enqueue(new TextEncoder().encode("data: [DONE]\n"));
+        controller.close();
+      },
+    });
+    const fetchImpl = vi.fn(async () => new Response(body, { status: 200 })) as unknown as typeof fetch;
+    const onDelta = vi.fn();
+    const provider = createOpenAIProvider({ baseUrl: "http://gw/v1", model: "m", fetchImpl });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onDelta,
+    });
+
+    expect(result.content).toBe("hi");
+    expect(onDelta.mock.calls).toEqual([["hi"]]);
+  });
+
+  it("网关拒绝流式时降级为一次性响应", async () => {
+    let calls = 0;
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      if (body.stream === true) {
+        return new Response("no stream here", { status: 400 });
+      }
+      return new Response(JSON.stringify(OK_BODY), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const onDelta = vi.fn();
+    const provider = createOpenAIProvider({ baseUrl: "http://gw/v1", model: "m", fetchImpl });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onDelta,
+    });
+
+    expect(result.content).toBe("hi");
+    expect(calls).toBe(2);
+    expect(onDelta.mock.calls).toEqual([["hi"]]);
+  });
+
+  it("降级后同一端点不再试探流式", async () => {
+    const bodies: string[] = [];
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      bodies.push(String(init?.body ?? "{}"));
+      if (String(init?.body ?? "").includes('"stream":true')) {
+        return new Response("no", { status: 400 });
+      }
+      return new Response(JSON.stringify(OK_BODY), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const provider = createOpenAIProvider({ baseUrl: "http://gw/v1", model: "m", fetchImpl });
+    const options = { signal: new AbortController().signal, maxOutputTokens: 16 };
+
+    await provider.complete(MESSAGES, [], options);
+    await provider.complete(MESSAGES, [], options);
+
+    // 第一次 complete 试探一次流式（被拒）后立刻降级；第二次 complete
+    // 不再试探，直接一次性。两次调用各产生一次一次性请求。
+    expect(bodies.filter((body) => body.includes('"stream":true'))).toHaveLength(1);
+    expect(bodies.filter((body) => body.includes('"stream":false'))).toHaveLength(2);
+  });
+
+  it("流式帧 JSON 非法时抛 invalid_response", async () => {
+    const fetchImpl = sseFetch(["data: {not json}"]).impl;
+    const provider = createOpenAIProvider({ baseUrl: "http://gw/v1", model: "m", fetchImpl });
+
+    await expect(
+      provider.complete(MESSAGES, [], {
+        signal: new AbortController().signal,
+        maxOutputTokens: 16,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("流式响应缺少 choices 时抛 invalid_response", async () => {
+    const fetchImpl = sseFetch(['data: {"foo":1}']).impl;
+    const provider = createOpenAIProvider({ baseUrl: "http://gw/v1", model: "m", fetchImpl });
+
+    await expect(
+      provider.complete(MESSAGES, [], {
+        signal: new AbortController().signal,
+        maxOutputTokens: 16,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("stream=false 配置时不请求流式", async () => {
+    let captured: Record<string, unknown> | undefined;
+    const fetchImpl = mockFetch((_url, init) => {
+      captured = JSON.parse(String(init.body));
+      return { status: 200, body: OK_BODY };
+    });
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      stream: false,
+    });
+
+    await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+    });
+
+    expect(captured).toMatchObject({ stream: false });
+    expect(captured?.stream_options).toBeUndefined();
   });
 });

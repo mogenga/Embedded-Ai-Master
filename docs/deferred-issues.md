@@ -1456,7 +1456,7 @@
 - **影响**: 回答不逐字出现,长回答的等待观感与流式不同;内容本身完整,不影响证据与结论。
 - **触发升级条件**: 需要逐字输出;或大回答的等待体验成为主要抱怨。
 - **修复建议**: 在内核的模型适配层加可选的增量事件并落盘,协议层直接映射;需同时确定 `tool_call` 增量与最终消息的关系。
-- **状态**: 未解决(已知边界)。
+- **状态**: 已解决(2026-10-20)。模型适配层改为请求 OpenAI 流式响应(`stream:true` + `stream_options.include_usage`),按 SSE 帧解析 `delta.content` 与 `delta.tool_calls`;网关拒绝流式时自动降级为一次性响应并记住结论。内核新增 `assistant_delta` 事件(`src/loop/assistant-delta.ts` 批量落盘,默认 60ms/400 字符),`assistant` 事件仍承载完整内容,投影层忽略 delta。协议层把 delta 转成渲染器的 `assistant_delta`,完整 `assistant` 事件只补齐尚未流式过的部分,不重复。
 
 ### D-165 · 内核不提供上下文占用率,前端只显示用量
 
@@ -1545,3 +1545,4 @@
 | 2026-10-20 | M2 阶段3 BR-4/BR-5/端到端:新增权限 `extentKey` 区间跨度、probe 权限模板、`kb_propose`/`kb-review`/`regression-gate` 与 `diagnosis:e2e`;`serial_open` 改为非只读,`diagnose` 下未显式授权默认 deny(安全收紧,配置见 `mcp-servers/probe/permissions.example.json`);KB 未审内容保持不参与检索 |
 | 2026-10-20 | M2 阶段3 最终复核:Renode 外设寄存器改为 4 字节对齐 `ReadDoubleWord`(逐字节 `ReadByte` 对外设不可靠,GPIOA 实测全 0 而字读为 0xA8000000);`pipeline` 失败结果不再标记 `evidence`;legacy inbox id 漂移语义写入 spec;最终复核 APPROVE |
 | 2026-10-20 | 前端移植(Prometheus → 当前内核):删除 Preact 工作台(`src/ui`、`web/`、`tests/ui`、`verify-ui`、`vite.config.ts`),新增 `desktop/`(renderer 纯 ES 模块 + `bridge.js` 浏览器兼容层 + `protocol.js` 协议层 + Electron `main.js`/`preload.cjs` + NDJSON 宿主);新增 `POST /api/abort` 与 `runner.abort`;`serve:ui` 默认静态托管 `desktop/renderer`;录入 D-163(桌面未实机)、D-164(无 token 流式)、D-165(无上下文占用率)、D-166(未覆盖能力清单) |
+| 2026-10-20 | D-164 修复:模型适配层支持 OpenAI 流式响应(SSE `delta.content` / `delta.tool_calls`,网关拒绝时自动降级为一次性响应),新增 `assistant_delta` 会话事件并批量落盘,前端按增量实时显示;D-164 标记已解决 |

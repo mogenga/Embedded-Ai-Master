@@ -39,7 +39,8 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 
 | 内核事件 | 渲染器事件 |
 |---|---|
-| `assistant` | `assistant_start` → `assistant_delta{text}` → `assistant_end`（内核无 token 增量，delta 一次带出整段，见 D-164） |
+| `assistant_delta` | `assistant_delta{text}`（流式片段，追加到当前气泡） |
+| `assistant` | `assistant_start` → 补齐尚未流式过的部分 → `assistant_end`（不重复已流式的文本） |
 | `tool_started` | `tool_start{name, summary, id}`（summary 取 assistant 事件的 `toolCalls` 参数） |
 | `tool_result` | `tool_end{name, ok, summary, id}` +（成功时）`tool_output{name, content}`；未被 `tool_started` 覆盖时先补一行 `tool_start`（被拒的调用也要留痕） |
 | `approval_request` | `permission_request{id, question, detail}` |
@@ -51,8 +52,7 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 | `status{usage_missing\|device_status_invalid\|permissions_project_config_skipped}` | `notice` |
 | `interrupted` | `notice{warn}` + `run_end` |
 | `compaction` | `compacted`（summary）/ `notice`（failed） |
-| `system` / `user` / `checkpoint` / `tool_call` | 不产出（用户消息在提交时已回显） |
-| 未知类型 | `notice{warn}`（R3，不静默） |
+| `system` / `user` / `checkpoint` / `tool_call` | 不产出（用户消息在提交时已回显） || 未知类型 | `notice{warn}`（R3，不静默） |
 
 宿主另发：`hello`、`ready`、`state`、`sessions`、`session_loaded`、`session_matches`、`commands`、`setup_checklist`、`settings`、`usage_summary`、`locale`、`ui_preference`、`tree`、`file_matches`、`notice`、`error`、`fatal`、`run_start`、`run_end`、`permission_closed`。
 

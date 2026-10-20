@@ -283,6 +283,7 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
       }
       case "tool_call":
       case "tool_started":
+      case "assistant_delta":
       case "mcp_status":
       case "device_status":
       case "usage":

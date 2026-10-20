@@ -695,3 +695,87 @@ describe("MCP 状态日志兼容", () => {
     controller.abort();
   });
 });
+describe("query assistant_delta 生产者", () => {
+  function streamingProvider(
+    chunks: string[],
+    final: CompletionResult,
+  ): ModelProtocol {
+    return {
+      async complete(_messages, _tools, opts) {
+        for (const chunk of chunks) opts.onDelta?.(chunk);
+        return final;
+      },
+      countTokens() {
+        return 0;
+      },
+    };
+  }
+
+  async function runWith(model: ModelProtocol): Promise<SessionHandle> {
+    const dir = await makeTempDir("events-producers-delta-");
+    const session = await createSession(dir);
+    sessions.push(session);
+    const ctx: LoopCtx = {
+      session,
+      model,
+      modelCfg: { contextWindow: 8192, maxOutput: 512 },
+      tools: new ToolRegistry([echoTool]),
+      budget: () => ({ over: false, tokens: 0, softLimit: 1 }),
+      signal: new AbortController().signal,
+      artifactDir: path.join(dir, "artifacts"),
+    };
+    for await (const _event of query(ctx, "x", { maxTurns: 10 })) {
+      // 跑到结束即可。
+    }
+    return session;
+  }
+
+  const final: CompletionResult = {
+    content: "你好世界",
+    toolCalls: [],
+    truncatedByMaxTokens: false,
+    stopReason: "stop",
+  };
+
+  it("模型的增量文本落成 assistant_delta 事件（同一批合并为一条）", async () => {
+    const session = await runWith(streamingProvider(["你", "好", "世界"], final));
+
+    const deltas = session.events().filter((event) => event.type === "assistant_delta");
+    // 同一轮里连续到达的增量会被合并：每条事件都要 fsync，逐 token 落盘
+    // 会把一次回答变成上百次磁盘同步。
+    expect(deltas.map((event) => event.payload.text).join("")).toBe("你好世界");
+  });
+
+  it("增量文本按批落盘，每批内容完整", async () => {
+    const session = await runWith(streamingProvider(["第一段", "第二段"], final));
+
+    const deltas = session.events().filter((event) => event.type === "assistant_delta");
+    expect(deltas.length).toBeGreaterThanOrEqual(1);
+    expect(deltas.map((event) => event.payload.text).join("")).toBe("第一段第二段");
+  });
+
+  it("assistant_delta 之后仍有完整的 assistant 事件", async () => {
+    const session = await runWith(streamingProvider(["你好世界"], final));
+
+    const assistant = session.events().find((event) => event.type === "assistant");
+    expect(assistant?.payload.content).toBe("你好世界");
+  });
+
+  it("buildMessages 忽略 assistant_delta，只用 assistant 重建上下文", async () => {
+    const session = await runWith(streamingProvider(["你", "好世界"], final));
+    const { buildMessages } = await import("../src/context/build.js");
+
+    const messages = buildMessages(session.events());
+    expect(messages).toStrictEqual([
+      { role: "user", content: "x" },
+      { role: "assistant", content: "你好世界", tool_calls: [] },
+    ]);
+  });
+
+  it("没有增量时只有 assistant 事件", async () => {
+    const session = await runWith(streamingProvider([], final));
+
+    expect(session.events().some((event) => event.type === "assistant_delta")).toBe(false);
+    expect(session.events().some((event) => event.type === "assistant")).toBe(true);
+  });
+});

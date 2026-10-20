@@ -6,6 +6,8 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 const HOST = path.join(import.meta.dirname, "..", "..", "desktop", "host", "host.js");
+// 每个用例都要起一个 Node 宿主进程；满负载下会超过 vitest 的 5s 默认超时。
+const HOST_TIMEOUT_MS = 30_000;
 const tempDirs = [];
 const servers = [];
 
@@ -124,7 +126,7 @@ describe("desktop host", () => {
       type: "commands",
       commands: [],
     });
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("providers 缺失时发 fatal 而不是崩溃", async () => {
     const home = await mkdtemp(path.join(tmpdir(), "eam-host-empty-"));
@@ -137,7 +139,7 @@ describe("desktop host", () => {
     expect(fatal.message).toContain("providers");
     // fatal 之后进程仍在：renderer 要能显示设置入口。
     expect(events.some((event) => event.type === "ready")).toBe(false);
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("不支持的命令显式 warn（R3，不静默）", async () => {
     const home = await tempHome();
@@ -156,7 +158,7 @@ describe("desktop host", () => {
       "桌面宿主暂不支持该命令：terminalRun",
     ]);
     expect(notices.every((notice) => notice.level === "warn")).toBe(true);
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("setMode 在空闲时重建 runner 并更新 state", async () => {
     const home = await tempHome();
@@ -174,7 +176,7 @@ describe("desktop host", () => {
     const modes = events.filter((event) => event.type === "state").map((event) => event.mode);
     expect(modes).toContain("diagnose");
     expect(modes).toContain("read-only");
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("setMode 收到内核以外的预设时忽略", async () => {
     const home = await tempHome();
@@ -188,7 +190,7 @@ describe("desktop host", () => {
       { until: (all) => all.some((event) => event.type === "sessions") },
     );
     expect(events.filter((event) => event.type === "state")).toHaveLength(1);
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("prompt 创建会话、回放事件并以 run_end 收尾（模型不可达）", async () => {
     const home = await tempHome();
@@ -217,7 +219,7 @@ describe("desktop host", () => {
     const sessionsDir = path.join(home, "sessions");
     const dirs = await readdir(sessionsDir);
     expect(dirs).toHaveLength(1);
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("loadSession 回放历史消息并设置游标", async () => {
     const home = await tempHome();
@@ -243,7 +245,7 @@ describe("desktop host", () => {
     const loaded = events.find((event) => event.type === "session_loaded");
     expect(loaded.messages[0]).toMatchObject({ role: "user", text: "症状" });
     expect(loaded.mode).toBe("diagnose");
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("loadSession 拒绝非法 id", async () => {
     const home = await tempHome();
@@ -257,7 +259,7 @@ describe("desktop host", () => {
     );
     const error = events.find((event) => event.type === "error");
     expect(error.message).toContain("非法的会话 id");
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("getUsage 汇总当前会话的 usage 事件", async () => {
     const home = await tempHome();
@@ -274,7 +276,7 @@ describe("desktop host", () => {
       days: 0,
       summary: { inputTokens: 0, outputTokens: 0, cachedTokens: 0 },
     });
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("getSetupChecklist 如实报告 providers 状态", async () => {
     const home = await tempHome();
@@ -288,7 +290,7 @@ describe("desktop host", () => {
     );
     const checklist = events.find((event) => event.type === "setup_checklist");
     expect(checklist.checks.every((check) => check.ok)).toBe(true);
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("getTree 返回空树而不是挂起", async () => {
     const home = await tempHome();
@@ -305,7 +307,7 @@ describe("desktop host", () => {
       type: "tree",
       nodes: [],
     });
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("无法解析的指令被拒绝而不是让宿主崩溃", async () => {
     const home = await tempHome();
@@ -334,5 +336,5 @@ describe("desktop host", () => {
     expect(events[0].type).toBe("hello");
     expect(events.some((event) => event.type === "notice" && event.text.includes("无法解析"))).toBe(true);
     expect(events.some((event) => event.type === "ready")).toBe(true);
-  });
+  }, HOST_TIMEOUT_MS);
 });

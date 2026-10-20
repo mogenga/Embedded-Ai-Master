@@ -483,7 +483,7 @@ App
 
 ```ts
 type EventType =
-  | "system" | "user" | "assistant" | "tool_call" | "tool_started"
+  | "system" | "user" | "assistant" | "assistant_delta" | "tool_call" | "tool_started"
   | "tool_result" | "usage" | "checkpoint" | "status" | "mcp_status"
   | "device_status" | "interrupted" | "compaction" | "permission_decision"
   | "approval_request";
@@ -566,6 +566,8 @@ interface ToolResultPayload {
 
 `tool_call` 仅用于旧日志回放，新代码不再产生；允许路径使用 `permission_decision → tool_started → tool_result`，拒绝/校验失败路径为 `permission_decision → tool_result`（不写 `tool_started`）。旧日志中的 MCP `status` 事件继续按 `mcp_` 前缀识别，新代码只写 `mcp_status`。
 
+`assistant_delta` 是模型回答的流式片段（payload `{text}`），与 `assistant` 并存：`assistant` 是这一轮的最终结论（内容完整，用于重建模型上下文），`assistant_delta` 只用于实时显示。投影层忽略 delta，只用 `assistant` 重建上下文；同一轮的 delta 合起来应等于 `assistant.content`。增量按批落盘（默认 60ms 或 400 字符），不是逐 token——每条事件都要 fsync，逐 token 落盘会把一次回答变成上百次磁盘同步。
+
 **运行时循环事件**（库 API 与 demo 使用；Web 工作台实时渲染改由 §8.6 的 SSE 事件流驱动）：
 
 ```ts
@@ -587,6 +589,7 @@ type LoopEvent =
 |---|---|
 | `user` | 用户气泡 |
 | `assistant`（content 非空） | agent 气泡 |
+| `assistant_delta` | 追加到当前 agent 气泡（流式显示）；不改气泡数量 |
 | `assistant`（toolCalls） | 工具卡骨架（待执行） |
 | `tool_started` | 对应工具卡进入「执行中」；`access` 仅用于展示授权口径，不推断设备状态 |
 | `tool_result` | 工具卡结果区（读数 / 命中 / 证据 / 错误） |

@@ -20,6 +20,7 @@ import type { ToolRegistry } from "../tools/registry.js";
 import type { ToolResult } from "../tools/types.js";
 import type { BreakerLimits, PricePerMillion } from "./breakers.js";
 import { assertBreakers, computeCostUsd, LoopBroke, normalizeUsage } from "./breakers.js";
+import { createAssistantDeltaWriter } from "./assistant-delta.js";
 import type { LoopEvent, LoopFinishReason } from "./events.js";
 
 export interface LoopCtx {
@@ -333,12 +334,22 @@ export async function* query(
 
       let response: CompletionResult;
       const toolSchemas = toModelToolSchemas(ctx.tools.all());
+      // 增量文本先落盘再被投影：会话日志是唯一事实源，实时事件不允许绕过它。
+      // 完整内容仍由随后的 `assistant` 事件承载，所以写失败不终止这一轮。
+      const deltaWriter = createAssistantDeltaWriter({
+        session,
+        onError: () => {
+          // 增量丢失只影响流式显示，完整内容仍在 assistant 事件里。
+        },
+      });
       try {
         response = await ctx.model.complete(messages, toolSchemas, {
           signal: ctx.signal,
           maxOutputTokens: ctx.modelCfg.maxOutput,
+          onDelta: (text) => deltaWriter.push(text),
         });
       } catch (error) {
+        await deltaWriter.flush();
         if (isAbortError(error) || ctx.signal.aborted) {
           exitReason = "normal";
           yield* emitInterrupted(session, "aborted");
@@ -346,6 +357,7 @@ export async function* query(
         }
         throw error;
       }
+      await deltaWriter.flush();
 
       assertUniqueToolCallIds(response.toolCalls);
       const assistantEvent = await session.append({
