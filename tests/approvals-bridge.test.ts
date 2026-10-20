@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createApprovalBridge } from "../src/server/approvals.js";
 import type { PermissionPromptRequest } from "../src/permissions/types.js";
 import type { SessionEvent } from "../src/session/types.js";
@@ -35,9 +35,9 @@ function promptReq(
   };
 }
 
-afterEach(() => {
-  vi.useRealTimers();
-});
+function flush(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 describe("ApprovalBridge", () => {
   it("先写 approval_request 再等待决策", async () => {
@@ -57,16 +57,38 @@ describe("ApprovalBridge", () => {
         }),
       }),
     );
+    await flush();
     expect(bridge.pendingCount()).toBe(1);
     expect(bridge.decide("call-1", "allow")).toEqual({ kind: "accepted" });
     await expect(promise).resolves.toBe("allow");
     expect(bridge.pendingCount()).toBe(0);
   });
 
+  it("append 延迟完成时 decide 返回 unknown_request", async () => {
+    let release!: () => void;
+    const append = vi.fn(
+      (ev: Omit<SessionEvent, "seq" | "ts">) =>
+        new Promise<SessionEvent>((resolve) => {
+          release = () => resolve({ ...ev, seq: 0, ts: "" });
+        }),
+    );
+    const bridge = createApprovalBridge();
+    bridge.bindSession({ append });
+    const promise = bridge.request(promptReq("call-deferred"));
+    expect(bridge.pendingCount()).toBe(0);
+    expect(bridge.decide("call-deferred", "allow")).toEqual({ kind: "unknown_request" });
+    release();
+    await flush();
+    expect(bridge.pendingCount()).toBe(1);
+    expect(bridge.decide("call-deferred", "allow")).toEqual({ kind: "accepted" });
+    await expect(promise).resolves.toBe("allow");
+  });
+
   it("deny 决策返回 deny", async () => {
     const bridge = createApprovalBridge();
     bridge.bindSession(fakeHandle());
     const promise = bridge.request(promptReq("call-2"));
+    await flush();
     expect(bridge.decide("call-2", "deny")).toEqual({ kind: "accepted" });
     await expect(promise).resolves.toBe("deny");
   });
@@ -91,11 +113,12 @@ describe("ApprovalBridge", () => {
       paramsPreview: { command: "echo hi" },
       deadlineAt: req.deadlineAt,
     });
+    await flush();
     bridge.decide("call-3", "allow");
     await promise;
   });
 
-  it("signal abort 清理 pending 并返回 deny", async () => {
+  it("append 期间 abort 记录无决策并返回 deny", async () => {
     const bridge = createApprovalBridge();
     bridge.bindSession(fakeHandle());
     const controller = new AbortController();
@@ -106,10 +129,24 @@ describe("ApprovalBridge", () => {
     expect(bridge.decide("call-4", "allow")).toEqual({ kind: "expired" });
   });
 
-  it("append 失败使 request reject", async () => {
+  it("登记后 abort 清理 pending 并返回 deny", async () => {
+    const bridge = createApprovalBridge();
+    bridge.bindSession(fakeHandle());
+    const controller = new AbortController();
+    const promise = bridge.request(promptReq("call-4b", { signal: controller.signal }));
+    await flush();
+    expect(bridge.pendingCount()).toBe(1);
+    controller.abort();
+    await expect(promise).resolves.toBe("deny");
+    expect(bridge.pendingCount()).toBe(0);
+    expect(bridge.decide("call-4b", "allow")).toEqual({ kind: "expired" });
+  });
+
+  it("append 失败使 request reject 且不登记 pending", async () => {
     const bridge = createApprovalBridge();
     const failure = new Error("log unavailable");
-    bridge.bindSession({ append: vi.fn(async () => Promise.reject(failure)) });
+    const append = vi.fn(async () => Promise.reject(failure));
+    bridge.bindSession({ append });
     await expect(bridge.request(promptReq("call-5"))).rejects.toBe(failure);
     expect(bridge.pendingCount()).toBe(0);
     expect(bridge.decide("call-5", "allow")).toEqual({ kind: "unknown_request" });
@@ -119,6 +156,7 @@ describe("ApprovalBridge", () => {
     const bridge = createApprovalBridge();
     bridge.bindSession(fakeHandle());
     const promise = bridge.request(promptReq("call-6"));
+    await flush();
     expect(bridge.decide("call-6", "allow")).toEqual({ kind: "accepted" });
     await promise;
     expect(bridge.decide("call-6", "allow")).toEqual({ kind: "duplicate" });
@@ -128,6 +166,7 @@ describe("ApprovalBridge", () => {
     const bridge = createApprovalBridge();
     bridge.bindSession(fakeHandle());
     const promise = bridge.request(promptReq("call-7"));
+    await flush();
     expect(bridge.decide("call-7", "allow")).toEqual({ kind: "accepted" });
     await promise;
     expect(bridge.decide("call-7", "deny")).toEqual({ kind: "already_decided" });
@@ -139,14 +178,13 @@ describe("ApprovalBridge", () => {
   });
 
   it("settled 超过 TTL 后返回 unknown_request", async () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-10-20T00:00:00.000Z"));
-    const bridge = createApprovalBridge({ settledTtlMs: 60_000 });
+    const bridge = createApprovalBridge({ settledTtlMs: 10 });
     bridge.bindSession(fakeHandle());
     const promise = bridge.request(promptReq("call-8"));
+    await flush();
     expect(bridge.decide("call-8", "allow")).toEqual({ kind: "accepted" });
     await promise;
-    vi.setSystemTime(new Date("2026-10-20T00:02:00.000Z"));
+    await new Promise((resolve) => setTimeout(resolve, 30));
     expect(bridge.decide("call-8", "allow")).toEqual({ kind: "unknown_request" });
   });
 
@@ -155,6 +193,7 @@ describe("ApprovalBridge", () => {
     bridge.bindSession(fakeHandle());
     for (const id of ["a", "b", "c"]) {
       const promise = bridge.request(promptReq(id));
+      await flush();
       expect(bridge.decide(id, "allow")).toEqual({ kind: "accepted" });
       await promise;
     }
@@ -168,7 +207,8 @@ describe("ApprovalBridge", () => {
     bridge.bindSession(fakeHandle());
     const first = bridge.request(promptReq("call-9"));
     const second = bridge.request(promptReq("call-10"));
-    bridge.decide("call-10", "allow");
+    await flush();
+    expect(bridge.decide("call-10", "allow")).toEqual({ kind: "accepted" });
     await second;
     bridge.close();
     await expect(first).resolves.toBe("deny");

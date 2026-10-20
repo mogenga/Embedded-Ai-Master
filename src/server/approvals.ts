@@ -28,7 +28,7 @@ interface PendingEntry {
   signal: AbortSignal;
   onAbort: () => void;
   resolve: (decision: "allow" | "deny") => void;
-  reject: (error: unknown) => void;
+
 }
 
 interface SettledEntry {
@@ -72,8 +72,8 @@ export function createApprovalBridge(opts: ApprovalBridgeOptions = {}): Approval
       session = next;
     },
 
-    request(req: PermissionPromptRequest): Promise<"allow" | "deny"> {
-      if (session === undefined) return Promise.resolve("deny");
+    async request(req: PermissionPromptRequest): Promise<"allow" | "deny"> {
+      if (session === undefined) return "deny";
 
       const payload: ApprovalRequestPayload = {
         requestId: req.requestId,
@@ -89,11 +89,23 @@ export function createApprovalBridge(opts: ApprovalBridgeOptions = {}): Approval
         deadlineAt: req.deadlineAt,
       };
 
+      await session.append({ type: "approval_request", payload: { ...payload } });
+
+      if (req.signal.aborted) {
+        recordSettled(req.requestId, undefined, Date.now());
+        return "deny";
+      }
+
+      const previous = pending.get(req.requestId);
+      if (previous !== undefined) {
+        pending.delete(req.requestId);
+        detach(previous);
+        previous.resolve("deny");
+      }
+
       let resolveDecision!: (decision: "allow" | "deny") => void;
-      let rejectDecision!: (error: unknown) => void;
-      const outcome = new Promise<"allow" | "deny">((resolve, reject) => {
+      const outcome = new Promise<"allow" | "deny">((resolve) => {
         resolveDecision = resolve;
-        rejectDecision = reject;
       });
 
       let entry!: PendingEntry;
@@ -105,43 +117,9 @@ export function createApprovalBridge(opts: ApprovalBridgeOptions = {}): Approval
         resolveDecision("deny");
       };
 
-      if (req.signal.aborted) {
-        recordSettled(req.requestId, undefined, Date.now());
-        return Promise.resolve("deny");
-      }
-
-      const previous = pending.get(req.requestId);
-      if (previous !== undefined) {
-        pending.delete(req.requestId);
-        detach(previous);
-        previous.resolve("deny");
-      }
-
-      entry = {
-        signal: req.signal,
-        onAbort,
-        resolve: resolveDecision,
-        reject: rejectDecision,
-      };
+      entry = { signal: req.signal, onAbort, resolve: resolveDecision };
       pending.set(req.requestId, entry);
       req.signal.addEventListener("abort", onAbort, { once: true });
-
-      let appended: Promise<unknown>;
-      try {
-        appended = session.append({ type: "approval_request", payload: { ...payload } });
-      } catch (error) {
-        pending.delete(req.requestId);
-        detach(entry);
-        rejectDecision(error);
-        return outcome;
-      }
-
-      Promise.resolve(appended).catch((error: unknown) => {
-        if (pending.get(req.requestId) !== entry) return;
-        pending.delete(req.requestId);
-        detach(entry);
-        rejectDecision(error);
-      });
 
       return outcome;
     },
