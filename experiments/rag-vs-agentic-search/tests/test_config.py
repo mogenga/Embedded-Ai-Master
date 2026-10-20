@@ -16,8 +16,19 @@ def test_loads_repository_config() -> None:
     assert config.seed == 20261019
     assert config.corpus_dir == "corpus/kb"
     assert "index.yaml" in config.navigation_files
-    assert config.model.llm_configured is False
     assert set(config.schemes) == {"A", "B", "C", "C_prime", "D"}
+
+
+def test_model_section_is_rejected(tmp_path: Path) -> None:
+    """端点配置只在 models.yaml：experiment.yaml 出现 model 段必须报错，避免两套配置并存。"""
+
+    path = tmp_path / "e.yaml"
+    path.write_text(
+        "model:\n  llm_base_url: http://localhost:8080/v1\n  llm_model: flash\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="models.yaml"):
+        ExperimentConfig.from_yaml(path)
 
 
 def test_missing_file_raises(tmp_path: Path) -> None:
@@ -44,55 +55,6 @@ def test_non_int_seed_raises(tmp_path: Path) -> None:
     path.write_text("seed: abc\n", encoding="utf-8")
     with pytest.raises(ConfigurationError):
         ExperimentConfig.from_yaml(path)
-
-
-def test_api_key_env_defaults() -> None:
-    root = Path(__file__).resolve().parents[1]
-    config = ExperimentConfig.from_yaml(root / "config" / "experiment.yaml")
-    assert config.model.llm_api_key_env == "RAGLAB_LLM_API_KEY"
-    assert config.model.embedding_api_key_env == "RAGLAB_EMBED_API_KEY"
-
-
-def test_api_key_read_from_env_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    root = Path(__file__).resolve().parents[1]
-    config = ExperimentConfig.from_yaml(root / "config" / "experiment.yaml")
-
-    monkeypatch.delenv("RAGLAB_LLM_API_KEY", raising=False)
-    assert config.model.llm_api_key() is None
-
-    monkeypatch.setenv("RAGLAB_LLM_API_KEY", "sk-test-123")
-    assert config.model.llm_api_key() == "sk-test-123"
-    # 显式传入的 env 映射优先于进程环境。
-    assert config.model.llm_api_key({"RAGLAB_LLM_API_KEY": "other"}) == "other"
-
-
-def test_api_key_env_name_can_be_overridden(tmp_path: Path) -> None:
-    path = tmp_path / "e.yaml"
-    path.write_text(
-        "model:\n  llm_api_key_env: MY_CUSTOM_KEY\n",
-        encoding="utf-8",
-    )
-    config = ExperimentConfig.from_yaml(path)
-    assert config.model.llm_api_key_env == "MY_CUSTOM_KEY"
-    assert config.model.llm_api_key({"MY_CUSTOM_KEY": "v"}) == "v"
-
-
-def test_empty_api_key_env_name_rejected(tmp_path: Path) -> None:
-    path = tmp_path / "e.yaml"
-    path.write_text("model:\n  llm_api_key_env: ''\n", encoding="utf-8")
-    with pytest.raises(ConfigurationError):
-        ExperimentConfig.from_yaml(path)
-
-
-def test_model_flags_reflect_presence(tmp_path: Path) -> None:
-    path = tmp_path / "e.yaml"
-    path.write_text(
-        "model:\n  llm_base_url: http://localhost:8080/v1\n  llm_model: flash\n",
-        encoding="utf-8",
-    )
-    config = ExperimentConfig.from_yaml(path)
-    assert config.model.llm_configured is True
-    assert config.model.embedding_configured is False
 
 
 def test_load_scheme_reads_all_scheme_files() -> None:

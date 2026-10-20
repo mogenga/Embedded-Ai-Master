@@ -1,12 +1,14 @@
 # RAG vs Agentic Search 对照实验
 
-> 状态：**BLOCKED（评测资产未到位，未实现、未跑批、无结果）** · 建立：2026-10-19
+> 状态：**BLOCKED（方案未实现、M3 未到位，未跑批）** · 建立：2026-10-19
 >
 > 本目录是独立实验项目，位于主仓库根目录下的 `experiments/rag-vs-agentic-search/`，拥有自己的 `README.md`、`docs/` 与 `.gitignore`，不进入主仓库的 TypeScript 构建与测试收集范围。
 
 ## 骨架状态（2026-10-20）
 
-素材（M1-M5）仍未到位。**不依赖素材的后段链路已闭环**：导入校验 → 分层切分 → 评分 → 表格，全部可离线运行并有 143 项 pytest 覆盖。五个方案与图表仍为**显式占位**，调用即抛 `FeatureNotImplemented`，不会返回空候选冒充结果。
+**不依赖素材的后段链路已闭环**：导入校验 → 分层切分 → 评分 → 表格 → 环境记录，全部可离线运行并有 169 项 pytest 覆盖。五个方案与图表仍为**显式占位**，调用即抛 `FeatureNotImplemented`，不会返回空候选冒充结果。
+
+素材状态：M1 语料、M2 自建评测集、M5 负样本已到位；M4 端点已实测可用；**M3（kb-mcp 算法）仍缺**，方案 C 无法忠实复现。
 
 ```
 src/raglab/
@@ -21,13 +23,15 @@ src/raglab/
 ├── prereg.py      # 预注册哈希 + confirmatory 门禁（T2）
 ├── env.py         # env.json 环境记录（T9）
 ├── llm.py         # OpenAI 兼容客户端 + live 门禁
-├── config.py      # experiment.yaml / schemes/*.yaml
+├── config.py      # experiment.yaml / models.yaml / schemes/*.yaml
 ├── runner.py      # 统一契约跑批骨架（ITT、连续网关错误中止）
 ├── schemes/       # 五个方案（占位）
 └── report/        # 表格写入（已实现）/ 图表（占位）
 ```
 
-已实现的 CLI 子命令：`import`、`split`、`score`、`report`、`env`。仍阻塞：`index`（需 M1+M4）、`run`（需方案实现）。
+已实现的 CLI 子命令：`import`、`split`、`score`、`report`、`env`、`models`。仍阻塞：`index`（索引侧未实现）、`run`（需方案实现）。
+
+**配置分两处，职责不重叠**：`config/experiment.yaml` 放实验设计；M4 端点与密钥只在本地 `config/models.yaml`（已 gitignore，模板 `models.example.yaml`）。`experiment.yaml` 出现 `model` 段会直接报错，避免"实际用了哪个端点"不可判定。
 
 ## 这个实验回答什么
 
@@ -45,17 +49,17 @@ src/raglab/
 
 ## 当前状态：BLOCKED
 
-以下材料尚未取得，实验不得启动，也不得用占位语料或占位 gold 生成“结果”：
+实验不得用占位语料或占位 gold 生成“结果”。素材与实现的状态：
 
-| # | 缺失材料 |
-|---|---|
-| M1 | Phase 0 KB 103 文件 + `index.yaml` + 来源许可登记 |
-| M2 | `regression.py` 导出的 274 条查询与预期文件 |
-| M3 | kb-mcp 源码或精确算法说明（C 的忠实复现） |
-| M4 | LLM 网关地址/密钥/模型名；embedding 模型 |
-| M5 | 多 gold 标注（增强项）、扰动集 150 条、负样本 20-30 条 |
+| # | 材料 | 状态 |
+|---|---|---|
+| M1 | Phase 0 KB + `index.yaml` | **已取得**（108 md / 90 条目，见 `STATUS.md`） |
+| M2 | 回归查询与预期文件 | **已替换为自建查询集**（80 条；原 274 条确认拿不到） |
+| M3 | kb-mcp 源码或精确算法说明 | **未取得** — C 无法忠实复现 |
+| M4 | LLM / embedding 端点 | **已实测可用**（`raglab models` 显示 1+1 可用） |
+| M5 | 多 gold、扰动集、负样本 | 负样本 25 条已完成；扰动集与多 gold 未建 |
 
-素材到位后先完成导入与校验（G0），再按设计文档的 G1-G4 推进。
+素材与实现都到位后，按设计文档的 G0-G4 推进。
 
 ## 目录
 
@@ -72,6 +76,7 @@ experiments/rag-vs-agentic-search/
 ├── corpus/              # 导入的语料，不进版本库
 ├── data/                # 评测集 JSONL，进版本库（当前只有 README，无占位数据）
 ├── src/raglab/          # 实验代码（纯逻辑已实现，方案为占位）
+├── scripts/             # 人工工具（端点探针；不属于跑批路径）
 ├── tests/               # pytest 离线单测
 └── results/             # runs/、scored/、figures/、tables/（待跑批后生成）
 ```

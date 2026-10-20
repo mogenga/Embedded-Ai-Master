@@ -43,14 +43,16 @@ H1-H7 定义见 [`docs/rag-vs-agentic-search-todo.md`](../../../docs/rag-vs-agen
 
 网格内每个配置都必须写入 `results/tables/grid_search.csv`，不只报最优。
 
-## 5. 模型候选（M4 到位后填写）
+## 5. 模型候选（M4 已到位，待冻结）
 
 | 用途 | 候选 | 选择规则 |
 |---|---|---|
-| LLM | 待填 | dev Recall@2 最高；差距 < 2pp 时优先本地/低成本 |
-| Embedding | 本地 bge-m3 类 / API 候选 | 同上 |
+| LLM | `remote-llm-1`（`step-5-preview`） | dev Recall@2 最高；差距 < 2pp 时优先本地/低成本 |
+| Embedding | `api-embed-1`（`BAAI/bge-m3`）/ `local-bge-m3`（当前不可用） | 同上 |
 
-端点、模型名与版本写入本地 `config/models.yaml`（已被 `.gitignore` 忽略，模板见 `config/models.example.yaml`）。密钥只能存在于本地文件或环境变量中，**任何情况下不进版本库**；冻结时记录候选 `id` 与 `model`，不记录密钥。
+端点、模型名与密钥只在本地 `config/models.yaml`（已被 `.gitignore` 忽略，模板见 `config/models.example.yaml`）。**任何情况下不进版本库**；冻结时记录候选 `id` 与 `model`，不记录密钥。
+
+**实测约束（2026-10-20，`STATUS.md` 有完整数据）**：`step-5-preview` 网关为共享队列，串行单线程、间隔 ≥ 15s 时约 4 次/分钟可用，并发与突发均为 0 成功率。方案 B 的重复次数与轮数网格必须在冻结前按此预算重定，否则跑不完。
 
 ## 6. 提示词与导航文件
 

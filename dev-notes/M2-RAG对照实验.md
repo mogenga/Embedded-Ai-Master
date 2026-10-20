@@ -239,3 +239,161 @@
 **状态说明**：用户确认的是对话中的设计要点；书面 spec 尚未逐节复核，状态保持“待用户复核本文档”，不写成“已评审”。
 
 **待办**：① 用户复核 spec；② 素材 M1-M5 到位后另写实现 plan（writing-plans），再进入实现与跑批。
+
+## 2026-10-20 · 端点连通性实测（M4 解锁）
+
+**用户关键原话**：`测试一下Api连通性`。
+
+**方法**：先在 `%TEMP%\raglab_probe\` 写临时探针（当轮用完即弃），确认口径后固化到 `scripts/probe_endpoints.py`（见下一节）；全部经 `raglab.llm.OpenAIClient` 发真实请求；密钥只进请求头，输出里只出现 `api_key_set`，不打印密钥值。
+
+**关键产出（实测，非推断）**
+
+| 项 | LLM（`step-5-preview`） | Embedding（`BAAI/bge-m3`） |
+|---|---|---|
+| 连通 | 通过：回复 `pong`，首包 6.9s，稳态 3–7s | 通过：1024 维，L2 归一化（norm=1.0000） |
+| 密钥校验 | 通过：不带 `Authorization` → 401 | 通过：不带 key → 401 `Token is invalid` |
+| 批量 | — | 通过：110 条一次过，1.04s |
+| 工具调用 | 通过：`finish_reason=tool_calls`，`kb_lookup` 参数 JSON 正确 | — |
+| 多轮 tool 循环 | 通过：user → tool_calls → tool → 最终答案 | — |
+| 确定性 | 不成立：同 prompt 3 次三份不同答案（temperature=0） | 非逐位一致：max_abs_diff≈0.0013–0.0022，余弦 0.999937 |
+
+**LLM 的额外结构事实**
+
+- 响应消息含 `reasoning_content`（推理模型），`content` 可能为空字符串。
+- 第 2 轮回传 / 不回传 `reasoning_content` 都能跑通，客户端无须特殊处理；如需保留推理上下文可原样回传。
+- `seed` 被接受但不回显，也无 `system_fingerprint`：`supports_seed: false` 的配置是准确的，不能靠 seed 复现。
+- 长输出正常：请求 `max_tokens=1024`，返回 468 completion tokens，14.9s，`finish_reason=stop`。
+
+**限流实测（本次最重要的发现）**
+
+网关是共享队列，三种 429：`queue.full` / `queue.waiting` / `usage exceeds frequency limit`，均带 `retry in Ns`。
+
+| 发起方式 | 成功 |
+|---|---|
+| 4 并发 | 0 / 4（全部 429） |
+| 6 次连发（约 50ms 间隔） | 0 / 6 |
+| 闲置 60s 后连发 2 次 | 2 / 2 |
+| 10s 间隔 ×4 | 3 / 4（第 4 次 429，retry 27s） |
+| 15s 间隔 ×5 | 5 / 5 |
+| 30s 间隔 ×3 | 3 / 3 |
+
+**可行口径：串行、单线程、间隔 ≥ 15s，约 4 次/分钟。并发与突发都不可用。**
+
+按此估算跑批预算：
+
+- 方案 B（80 查询 × repeat 3 = 240 次运行；agentic 每运行约 5–8 次调用）≈ 1,200–2,000 次调用 ≈ **5–8 小时**。
+- B 的 dev 轮数网格 {6, 12, 20}（dev 55 条 × 3 重复 × 3 档）≈ **10 小时以上**。
+- D1/D2 在此之上叠加。
+
+结论：B 的重复次数与轮数网格必须按此预算重新预注册，否则跑不完。embedding 侧不是瓶颈（110 条/秒）。
+
+**同一份配置下发现的文档与代码不一致（当轮记录，已于下一次提交前修复，见下节）**
+
+- `docs/runbook.md` 与 `config/experiment.yaml` 写着可用 `RAGLAB_LLM_BASE_URL` / `RAGLAB_LLM_MODEL` / `RAGLAB_EMBED_BASE_URL` / `RAGLAB_EMBED_MODEL` 覆盖端点，但**源码里没有任何地方读这四个变量**；实际生效的只有 `models.yaml`（端点）与 `RAGLAB_LLM_API_KEY` / `RAGLAB_EMBED_API_KEY`（密钥）。
+- `config/experiment.yaml` 的 `model.*` 段（`llm_base_url: null` 等）目前没有被任何调用方使用，与 `models.yaml` 是两套互不相通的配置。
+- `config/models.yaml` 里"也可改用环境变量：RAGLAB_LLM_BASE_URL / …"这句注释同样不成立。
+- **`env.json` 记录的不是实际使用的端点**：`cmd_env` 把 `experiment.yaml` 的 `model.*` 传给 `capture_env`，而该段全为 `null`；真实跑批读的是 `models.yaml`。跑批前必须修，否则 T9 的环境记录与事实不符。
+
+按用户口径"不区分远程本地，有且能跑就行"，实测可用的是 LLM 候选 `remote-llm-1` 与 Embedding 候选 `api-embed-1`；`local-flash` 缺 model、`local-bge-m3` 缺可选依赖组，二者按设计判为不可用——判定与实际一致。
+
+**被拒绝或纠偏的内容**
+
+- 未把 429 当"端点不可用"：那是限流不是故障，重试即恢复。`raglab models` 的 `usable` 仍是离线判定、不触网，这个设计是对的。
+- 未在 `raglab` 里加 `--live-probe` 子命令：连通性属于一次性人工确认，进 CLI 会把端点探测与退避重试逻辑带进产品代码。探针留在 `%TEMP%`。
+- 未因"连通性通过"就把 STATUS 改成 READY：M3 仍缺，方案 C 无法忠实复现；A/B/D 的实现也尚未落地，仍不可跑完整对照。
+
+**翻车与返工**
+
+- 第一轮能力探针直接撞 429（`queue.full`），一度会把"网关限流"误读成"不支持 tool calling"；加退避重试后第二轮正常，确认支持。**教训：429 必须与能力失败分开判定。**
+- `probe_budget.py` 把 4 并发当默认探测方式，结果全 429。这本身是正确的结论（并发不可用），但最初写法差点被读成"端点坏了"，已在脚本里改成一次一请求。
+
+## 2026-10-20 · 收敛配置面：删掉没用的，修掉错的
+
+**用户关键原话**：`没用的删掉。其他的修。先不开始实验`。
+
+**判断口径**：上一节列出的四条不一致里，`experiment.yaml` 的 `model` 段与端点环境变量承诺属于**同一件事**——它们是 `models.yaml` 出现之前的旧方案残留，从未有任何调用方消费。留着只会让人误以为两条路径都能配端点。按"没用的删掉"，直接移除，不做兼容层。
+
+**关键产出**
+
+- **删除** `ModelConfig` 类及 `ExperimentConfig.model` 字段；`experiment.yaml` 出现 `model` 段现在直接抛 `ConfigurationError`（指向 `models.yaml`），而不是静默忽略。
+- **删除** `DEFAULT_LLM_KEY_ENV` / `DEFAULT_EMBED_KEY_ENV` 与 `llm_api_key()` / `embedding_api_key()` / `llm_configured` / `embedding_configured`——密钥读取本来就该由拿到候选的那一层负责，配置类不该二次发明。
+- **修 `env.json`（T9 缺口）**：`capture_env(models=ModelsConfig)` 改为接收 `load_models()` 的结果，写 `model_candidates`（全部候选，含 `usable` 与 `block_reason`，只含 `api_key_set`）。旧实现写的 `model.{llm_base_url,...}` 全为 `null`，与实际使用的端点不符。
+- **同步文档**：`docs/runbook.md` 删掉"方式二：环境变量"整节（那是空头承诺），改为只讲 `models.yaml` + `raglab models`；`README.md`、`PREREGISTRATION.md`、`docs/fairness-protocol.md`（T4/T9 行）、`config/experiment.yaml`、`config/models.yaml` 注释一并订正。
+- **测试 168 → 164**：删除 7 项针对已移除 API 的测试（`api_key_env` 默认值/读取/覆盖/空名拒绝、`llm_configured`、两处旧的 `model` 传参），新增 1 项 `test_model_section_is_rejected` 与 2 项 `env.json` 记录真实候选的断言。净减 4。
+
+**关键验证（实测输出，不是推断）**
+
+`raglab env` 现在写入的是真实候选：
+
+```
+"model_candidates": [
+  {"id": "remote-llm-1", "base_url": "http://127.0.0.1:8788", "model": "step-5-preview", "api_key_set": true, "usable": true},
+  {"id": "local-flash",  "block_reason": "缺少 model", "usable": false},
+  {"id": "local-bge-m3", "block_reason": "缺少可选依赖组 local-embed", "usable": false},
+  {"id": "api-embed-1", "base_url": "https://api.siliconflow.cn/v1", "model": "BAAI/bge-m3", "api_key_set": true, "usable": true}
+]
+```
+
+`git grep` 确认密钥值与 `sk-` 前缀均未出现在任何被跟踪文件里；`models.yaml` 仍被 `.gitignore:21` 忽略、仍未被跟踪（两项回归测试持续把关）。
+
+**被拒绝或纠偏的内容**
+
+- 未给 `experiment.yaml` 的 `model` 段做"存在即读、缺失即忽略"的兼容：那会让两条配置路径长期并存，正是本轮要消除的问题。宁可报错。
+- 未把 `raglab models` 改成发真实请求探测：连通性是人工一次性确认（探针在 `%TEMP%`），CLI 保持离线、不触网。
+- 未把 `env.json` 只记录 `usable` 的候选：不可用的候选带着 `block_reason` 一起落盘，才能解释"为什么这次只跑了 A/C′ 没跑 B"。
+- 按用户指示**未开始实验**：没有实现 A/B/C′/D，没有跑批，`STATUS.md` 仍是 `BLOCKED`。
+
+**翻车与返工**
+
+- 改 `ExperimentConfig.from_yaml` 时把 `model=model` 落在了 `return cls(...)` 里，被 11 项测试同时抓出 `NameError`；删除该行后全绿。属于机械改动漏改，不是设计问题。
+- 首轮跑 `pytest` 与 `raglab` 时用了 `PYTHONPATH=src ...` 的行内赋值，被 worktree 隔离策略判为"无法确认不是 git 操作"而拒绝执行；改为在实验目录内直接调用 `.venv/Scripts/python.exe`（`pyproject.toml` 已配 `pythonpath = ["src"]`）。
+
+## 2026-10-20 · 端点探针固化为 scripts/
+
+**用户关键原话**：`整理`（承接上一轮"探针在 `%TEMP%`，不在版本库，要复跑得重写"的提示）。
+
+**判断**：探针要留下，但**不能进 `src/raglab/`**。`raglab` 的 `index`/`run` 只该关心"候选能不能跑"，把端点探测与退避重试塞进去，等于让产品路径替实验决策。放在 `scripts/`：可复现、可被 review、不污染跑批链路。
+
+**关键产出**
+
+- `scripts/probe_endpoints.py`：合并此前 9 个一次性脚本（models / capabilities / budget / pacing×2 / rate / auth / multiturn / throughput）为一份带参数的探针。
+  - 检查项：`llm.auth`、`llm.connect`、`llm.tool_calling`、`llm.multiturn`、`embedding.auth`、`embedding.connect`（含维度与归一化判定）、`embedding.batch`。
+  - 可选：`--determinism`（3 次重复）、`--rate`（串行间隔探测）、`--embedding-batch N`。
+  - 输出：人类可读的 PASS/WARN/FAIL 列表，或 `--json`。
+- **复用产品代码而非另写一份**：全部经 `raglab.config.load_models` 与 `raglab.llm.OpenAIClient`，`require_live()` 门禁照旧——探针不能成为绕过门禁的后门。
+- **默认间隔 15s**，按实测限流设定。调小会自己撞 429，把限流误读成故障，正是上一轮踩过的坑。
+- 失败语义：任一检查 `fail` → 退出码 1；`warn` 不阻断（例如端点不校验密钥，是事实记录不是崩溃）；未设 `RAGLAB_LIVE` → 退出码 2；无可用候选 → 退出码 2。
+- `tests/test_probe_script.py`（5 项，**全离线**）：脚本存在、门禁拦截、无候选拒绝运行、失败路径报 fail 且不泄露密钥（注入假客户端，不发真实连接）、默认间隔 ≥ 15s。
+- 文档同步：`docs/runbook.md` 新增"端点连通性探针"一节、`README.md` 目录加 `scripts/`、`STATUS.md` 的 M4 实测记录改为"可用此脚本复现"。
+
+**实测（脚本本身跑通，非推断）**
+
+```
+[PASS] llm.auth           不带密钥返回 401
+[PASS] llm.connect        回复 'pong'，耗时 7.3s
+[PASS] llm.tool_calling   finish_reason='tool_calls'，调用 ['kb_lookup']
+[PASS] llm.multiturn      finish_reason='stop'，最终答案 980 字
+[PASS] embedding.auth     不带密钥返回 401
+[PASS] embedding.connect  1024 维，L2 范数 1.0000
+[PASS] embedding.batch    2 条一次通过，耗时 2.38s
+
+不可用候选（未探测）：
+  - local-flash（llm）：缺少 model
+  - local-bge-m3（embedding）：缺少可选依赖组 local-embed
+```
+
+与上一轮临时脚本的结论一致，说明合并没有改变判定口径。
+
+**被拒绝或纠偏的内容**
+
+- **没把探针做成 `raglab probe` 子命令**：那会让"发真实请求"成为产品 CLI 的一部分，且 `--help` 一列就会诱导人拿它当就绪检查。人工工具就该在 `scripts/`。
+- **没把探针加入 `npm test` / 默认 pytest 路径**：它触网。新增的 5 项测试只测脚本的**边界行为**（门禁、退出码、不泄密钥、默认间隔），不发请求。
+- 没为了让测试快就删掉默认 15s 间隔：改为在测试里显式传 `--spacing 0`，真实默认值保持按实测限流设定，并加一项测试锁住这个默认值。
+
+**翻车与返工**
+
+- 第一版脚本用了制表符缩进，与仓库 4 空格风格不一致，整体重写。
+- 第一版测试用「不可达端口 + 2s 超时」制造失败路径，虽然能过但要真连一次网络、还白等约 40s；改为 `monkeypatch` 注入假客户端后降到 0.6s，且符合"单测离线"要求。
+- 候选前缀逻辑最初写在循环内部反复遍历 `report.rows`，多候选时会重复加前缀；改为 `Report.prefix_since(start, id)` 只处理本次新增的行。
+
+**测试**：164 → **169 passed**（新增 5 项脚本守卫）。

@@ -1,15 +1,17 @@
 """配置加载（§9.2）。
 
 配置文件缺失或字段非法时抛 ``ConfigurationError``，不静默回退到默认值——
-回退会掩盖"用哪套参数跑了实验"这一关键事实。模型端点（M4）留空时允许加载，
-但任何 live 调用都会被 ``llm`` 层以 ``LiveGateError`` 拒绝。
+回退会掩盖"用哪套参数跑了实验"这一关键事实。
+
+两套配置，职责不重叠：
+- ``experiment.yaml``：实验设计（种子、语料/数据目录、导航文件、方案开关）。
+- ``models.yaml``：M4 端点与密钥，只存在于本地（已 gitignore）。缺失是合法状态，
+  此时 ``load_models`` 返回空配置；live 调用仍会被 ``llm`` 层的 ``LiveGateError`` 拒绝。
 """
 
 from __future__ import annotations
 
 import importlib.util
-import os
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -19,10 +21,6 @@ import yaml
 from .errors import ConfigurationError
 
 SCHEMES = ("A", "B", "C", "C_prime", "D")
-
-# 密钥只经环境变量注入，绝不写入版本库（spec §9.2）。
-DEFAULT_LLM_KEY_ENV = "RAGLAB_LLM_API_KEY"
-DEFAULT_EMBED_KEY_ENV = "RAGLAB_EMBED_API_KEY"
 
 # 可选依赖组 → 用于探测的模块名。用于判断本地候选是否真的能跑。
 OPTIONAL_GROUP_MODULES: dict[str, str] = {
@@ -52,47 +50,18 @@ def _load_yaml(path: Path) -> Any:
 
 
 @dataclass(frozen=True)
-class ModelConfig:
-    """LLM 与 embedding 端点（M4）。"""
-
-    llm_base_url: str | None = None
-    llm_model: str | None = None
-    llm_api_key_env: str = DEFAULT_LLM_KEY_ENV
-    embedding_base_url: str | None = None
-    embedding_model: str | None = None
-    embedding_api_key_env: str = DEFAULT_EMBED_KEY_ENV
-
-    @property
-    def llm_configured(self) -> bool:
-        return bool(self.llm_base_url and self.llm_model)
-
-    @property
-    def embedding_configured(self) -> bool:
-        return bool(self.embedding_base_url and self.embedding_model)
-
-    def llm_api_key(self, env: Mapping[str, str] | None = None) -> str | None:
-        """从环境变量读密钥；未设置返回 None（本地网关可不带 key）。"""
-
-        source = os.environ if env is None else env
-        value = source.get(self.llm_api_key_env)
-        return value or None
-
-    def embedding_api_key(self, env: Mapping[str, str] | None = None) -> str | None:
-        source = os.environ if env is None else env
-        value = source.get(self.embedding_api_key_env)
-        return value or None
-
-
-@dataclass(frozen=True)
 class ExperimentConfig:
-    """实验总配置。字段与 spec §8/§9 对应，不在此处扩展口径。"""
+    """实验总配置。字段与 spec §8/§9 对应，不在此处扩展口径。
+
+    M4 的端点与密钥一律来自本地 ``config/models.yaml``（见 ``load_models``），
+    本配置不含任何模型字段——两套配置并存会让"实际用了哪个端点"变得不可判定。
+    """
 
     seed: int = 20261019
     corpus_dir: str = "corpus/kb"
     data_dir: str = "data"
     results_dir: str = "results"
     navigation_files: tuple[str, ...] = ()
-    model: ModelConfig = field(default_factory=ModelConfig)
     schemes: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
@@ -101,25 +70,10 @@ class ExperimentConfig:
         if not isinstance(data, dict):
             raise ConfigurationError("experiment.yaml 顶层必须是映射")
 
-        model_raw = data.get("model") or {}
-        if not isinstance(model_raw, dict):
-            raise ConfigurationError("experiment.yaml model 必须是映射")
-        model = ModelConfig(
-            llm_base_url=model_raw.get("llm_base_url"),
-            llm_model=model_raw.get("llm_model"),
-            llm_api_key_env=model_raw.get("llm_api_key_env", DEFAULT_LLM_KEY_ENV),
-            embedding_base_url=model_raw.get("embedding_base_url"),
-            embedding_model=model_raw.get("embedding_model"),
-            embedding_api_key_env=model_raw.get(
-                "embedding_api_key_env", DEFAULT_EMBED_KEY_ENV
-            ),
-        )
-        for field_name in ("llm_api_key_env", "embedding_api_key_env"):
-            value = getattr(model, field_name)
-            if not isinstance(value, str) or not value:
-                raise ConfigurationError(
-                    f"experiment.yaml model.{field_name} 必须是非空字符串"
-                )
+        if "model" in data:
+            raise ConfigurationError(
+                "experiment.yaml 不再接受 model 字段：端点与密钥只在 config/models.yaml 中配置"
+            )
 
         navigation = data.get("navigation_files") or []
         if not isinstance(navigation, list) or not all(
@@ -144,7 +98,6 @@ class ExperimentConfig:
             data_dir=data.get("data_dir", "data"),
             results_dir=data.get("results_dir", "results"),
             navigation_files=tuple(navigation),
-            model=model,
             schemes=schemes,
         )
 

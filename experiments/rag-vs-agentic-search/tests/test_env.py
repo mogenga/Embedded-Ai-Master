@@ -5,13 +5,36 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from raglab.config import ModelConfig
+from raglab.config import ModelCandidate, ModelsConfig
 from raglab.env import capture_env, write_env
+
+
+def _models() -> ModelsConfig:
+    return ModelsConfig(
+        llm=(
+            ModelCandidate(
+                id="remote-llm-1",
+                kind="openai_compatible",
+                base_url="http://gateway.local/v1",
+                model="remote-model",
+                api_key="sk-super-secret-value",
+            ),
+        ),
+        embedding=(
+            ModelCandidate(
+                id="api-embed-1",
+                kind="openai_compatible",
+                base_url="https://api.example.com/v1",
+                model="remote-embed",
+                api_key="emb-secret-value",
+            ),
+        ),
+    )
 
 
 def test_capture_env_records_core_fields(tmp_path: Path) -> None:
     env = capture_env(tmp_path, seed=20261019)
-    for key in ("captured_at", "os", "python", "seed", "model", "live"):
+    for key in ("captured_at", "os", "python", "seed", "model_candidates", "live"):
         assert key in env
     assert env["seed"] == 20261019
     assert env["live"] is False
@@ -36,36 +59,32 @@ def test_lock_and_manifest_hashes_are_recorded(tmp_path: Path) -> None:
     assert isinstance(env["corpus_manifest_sha256"], str)
 
 
-def test_api_key_in_environment_is_never_recorded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """即使设置了密钥环境变量，env.json 也不得包含其值（T9）。"""
+def test_model_candidates_are_recorded_without_secrets(tmp_path: Path) -> None:
+    """T9：记录实际会用于跑批的候选端点，但不记录任何密钥值。"""
 
-    monkeypatch.setenv("RAGLAB_LLM_API_KEY", "sk-super-secret-value")
-    monkeypatch.setenv("RAGLAB_EMBED_API_KEY", "emb-secret-value")
-    model = ModelConfig(
-        llm_base_url="https://api.example.com/v1",
-        llm_model="remote-model",
-        embedding_base_url="https://api.example.com/v1",
-        embedding_model="remote-embed",
-    )
-    env = capture_env(tmp_path, seed=1, model=model)
+    env = capture_env(tmp_path, seed=1, models=_models())
     serialized = json.dumps(env)
     assert "sk-super-secret-value" not in serialized
     assert "emb-secret-value" not in serialized
 
+    rows = env["model_candidates"]
+    assert isinstance(rows, list)
+    assert {row["id"] for row in rows} == {"remote-llm-1", "api-embed-1"}
+    llm_row = next(row for row in rows if row["id"] == "remote-llm-1")
+    assert llm_row["base_url"] == "http://gateway.local/v1"
+    assert llm_row["model"] == "remote-model"
+    assert llm_row["api_key_set"] is True
+    assert llm_row["usable"] is True
 
-def test_gateway_url_recorded_but_no_secret(tmp_path: Path) -> None:
-    model = ModelConfig(
-        llm_base_url="http://gateway.local/v1",
-        llm_model="flash",
-    )
-    env = capture_env(tmp_path, seed=1, model=model)
-    model_block = env["model"]
-    assert isinstance(model_block, dict)
-    assert model_block["llm_base_url"] == "http://gateway.local/v1"
-    # 任何密钥字段都不应被记录。
-    assert "api_key" not in json.dumps(env).lower()
+
+def test_env_records_actual_endpoints_not_a_parallel_config(tmp_path: Path) -> None:
+    """回归：env.json 必须描述 models.yaml 里真实的候选，而不是另一份空配置。"""
+
+    env = capture_env(tmp_path, seed=1, models=_models())
+    rows = env["model_candidates"]
+    assert any(row["model"] == "remote-model" for row in rows)
+    # 旧实现写死的字段已移除，避免与真实端点不一致。
+    assert "model" not in env
 
 
 def test_write_env_creates_parent_dirs(tmp_path: Path) -> None:

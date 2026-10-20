@@ -15,7 +15,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .config import ModelConfig
+from .config import ModelsConfig
 
 
 def _sha256_file(path: Path) -> str | None:
@@ -69,13 +69,17 @@ def capture_env(
     *,
     seed: int,
     corpus_manifest: str | Path | None = None,
-    model: ModelConfig | None = None,
+    models: ModelsConfig | None = None,
     extra: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    """生成可写入 ``env.json`` 的字典；缺失项进 ``missing``。"""
+    """生成可写入 ``env.json`` 的字典；缺失项进 ``missing``。
+
+    ``models`` 传入**实际会用于跑批**的候选（``config/models.yaml``），而不是另一份
+    平行配置——T9 要回答的是"这次跑批用了哪个端点"，不是"配置文件里写过什么"。
+    """
 
     root = Path(project_root)
-    model = model or ModelConfig()
+    models = models or ModelsConfig()
 
     lock_hash = _sha256_file(root / "uv.lock")
     manifest_hash = (
@@ -95,13 +99,8 @@ def capture_env(
         "corpus_manifest_sha256": manifest_hash,
         "git_sha": sha,
         "seed": seed,
-        # 网关地址记录但不含密钥（T9）。
-        "model": {
-            "llm_base_url": model.llm_base_url,
-            "llm_model": model.llm_model,
-            "embedding_base_url": model.embedding_base_url,
-            "embedding_model": model.embedding_model,
-        },
+        # 网关地址与候选 id 记录但不含密钥（T9）。
+        "model_candidates": models.summary(),
         "live": os.environ.get("RAGLAB_LIVE") == "1",
     }
     if extra:

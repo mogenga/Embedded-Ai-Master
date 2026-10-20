@@ -19,6 +19,7 @@ uv run raglab split [--dev-ratio 0.7] [--dry-run]   # 写 data/splits.json
 uv run raglab score --run-id <id> [--partition dev|test|all] [--confirmatory]
 uv run raglab report --run-id <id>            # 由 scored CSV 生成 results/tables/
 uv run raglab env                             # 写 env.json（缺失项进 missing，不猜）
+uv run raglab models                          # 列出模型候选与可运行状态（不触网）
 ```
 
 - `import` 失败即退出码 2，错误逐条列在 `errors`，不生成占位语料或占位 gold。
@@ -29,7 +30,7 @@ uv run raglab env                             # 写 env.json（缺失项进 miss
 ## 仍未就绪（退出码 3）
 
 ```bash
-uv run raglab index    # 需 M1 语料 + M4 embedding
+uv run raglab index    # 需索引侧实现
 uv run raglab run      # 需方案实现（五方案当前为占位）
 ```
 
@@ -45,11 +46,7 @@ uv run pytest
 
 ## 配置模型端点与密钥（M4）
 
-两种方式，二选一。**密钥永远不进版本库。**
-
-### 方式一：本地 `config/models.yaml`（推荐）
-
-该文件已被 `.gitignore` 忽略，模板是 `config/models.example.yaml`：
+**唯一来源是本地 `config/models.yaml`**（已被 `.gitignore` 忽略）。`experiment.yaml` 不接受 `model` 段，出现即报错——两套端点配置并存会让"实际用了哪个端点"不可判定。
 
 ```bash
 cd experiments/rag-vs-agentic-search
@@ -70,42 +67,51 @@ llm:
       repeat: 3
 ```
 
-### 方式二：环境变量
+### 查看候选状态（不触网）
 
 ```bash
-export RAGLAB_LIVE=1
-export RAGLAB_LLM_BASE_URL=https://api.example.com/v1
-export RAGLAB_LLM_MODEL=<模型名>
-export RAGLAB_LLM_API_KEY=<密钥>
-
-# 方案 A 还需要 embedding 端点
-export RAGLAB_EMBED_BASE_URL=https://api.example.com/v1
-export RAGLAB_EMBED_MODEL=<embedding 模型名>
-export RAGLAB_EMBED_API_KEY=<密钥>
+uv run raglab models
 ```
 
-PowerShell：
+- 打印每个候选的 `usable` 与 `block_reason`，不发起任何请求。
+- `openai_compatible` 候选要求 `base_url` 与 `model` 齐全。
+- `local` 候选要求 `model` 齐全且 `requires` 声明的可选依赖组已安装（当前 `local-embed` → `sentence-transformers`）。
+- 全部候选都不可用时退出码 3。
+- `config/models.yaml` 缺失时返回空配置（M4 未就绪的合法状态），不报错。
+
+### 端点连通性探针（触网，人工运行）
+
+`raglab models` 只看配置字段，**不验证端点是否真的能连、能不能 tool calling、限流多严**。这些用独立脚本确认：
+
+```bash
+# PowerShell
+$env:RAGLAB_LIVE = "1"
+uv run python scripts/probe_endpoints.py
+
+# 全量（追加确定性与限流探测，较慢）
+uv run python scripts/probe_endpoints.py --determinism --rate --json
+```
+
+环境已就绪时也可直接调用 venv 解释器（此形式已实测通过，`uv run` 形式未单独验证）：
 
 ```powershell
 $env:RAGLAB_LIVE = "1"
-$env:RAGLAB_LLM_BASE_URL = "https://api.example.com/v1"
-$env:RAGLAB_LLM_MODEL = "<模型名>"
-$env:RAGLAB_LLM_API_KEY = "<密钥>"
+./.venv/Scripts/python.exe scripts/probe_endpoints.py
 ```
 
-### 校验与运行
+检查项：`llm.auth`（不带密钥应 401）、`llm.connect`、`llm.tool_calling`（方案 B 的前提）、`llm.multiturn`（工具结果回灌后能收敛到答案）、`embedding.auth`、`embedding.connect`（维度与是否已归一化）、`embedding.batch`。加了 `--determinism` / `--rate` 才跑对应两项。
 
-```bash
-uv run raglab run --scheme B
-```
+- 未设 `RAGLAB_LIVE=1` 时退出码 2，与产品代码同一道门禁，脚本不绕过。
+- 任一检查 fail 时退出码 1；warn 不阻断。
+- 默认相邻调用间隔 15s，按实测限流设定；调小会自己撞 429，别把限流误读成端点故障。
+- 输出只含 `api_key_set`，不含密钥；有单测把关。
+- **这是人工确认工具，不属于跑批路径**，因此放在 `scripts/` 而不是 `src/raglab/`。
 
-- `config/models.yaml` 缺失时加载为空配置（M4 未就绪的合法状态），不会报错。
-- `env.json` 只记录 base URL、模型名与 `api_key_set: true/false`，**不记录密钥值**。
-- 提交前自查：`git check-ignore -v config/models.yaml` 应输出匹配行。
+### 记录到 env.json（T9）
 
-- 未设置 API key 时客户端不发 `Authorization` 头（兼容本地网关）。
-- `env.json` 只记录 base URL 与模型名，**不记录密钥**；有测试断言这一点。
-- 环境变量名可在 `config/experiment.yaml` 的 `model.*_api_key_env` 中改写，但值本身永远不进配置。
+`uv run raglab env` 把 `models.yaml` 的**全部候选**（含不可用的，附 `block_reason`）写入 `env.json` 的 `model_candidates`，只含 `api_key_set: true/false`，**不记录密钥值**；有测试断言这一点。
+
+提交前自查：`git check-ignore -v config/models.yaml` 应输出匹配行。
 
 ## 常见失败
 

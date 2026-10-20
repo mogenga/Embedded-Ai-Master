@@ -236,7 +236,7 @@ def cmd_env(args: argparse.Namespace) -> int:
         PROJECT_ROOT,
         seed=config.seed,
         corpus_manifest=manifest if manifest.is_file() else None,
-        model=config.model,
+        models=load_models(PROJECT_ROOT / "config" / "models.yaml"),
     )
     target = Path(args.out) if args.out else PROJECT_ROOT / "env.json"
     write_env(target, env)
@@ -296,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     models_parser.set_defaults(func=cmd_models)
 
     for name, reason in (
-        ("index", "需要 M1 语料与 embedding 端点"),
+        ("index", "索引侧尚未实现（A / C′ 的切块与倒排/向量索引）"),
         ("run", "需要方案实现（骨架期全部为显式占位）"),
     ):
         step = sub.add_parser(name, help=f"（骨架期未实现）{reason}")
