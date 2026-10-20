@@ -96,11 +96,18 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
     }
   }
 
+  function modelUnavailableMessage(detail: string): string {
+    return `${detail}；请检查配置文件 ${path.join(opts.harnessHome, "providers.json")}，或设置环境变量 HARNESS_WEB_MODEL 指定模型引用`;
+  }
+
   function resolveProviders(): ProvidersConfig {
     try {
       return opts.providersText ? parseProviders(opts.providersText) : loadProviders(opts.harnessHome);
     } catch (error) {
-      throw new RunnerError("model_unavailable", `providers 不可用: ${messageOf(error)}`);
+      throw new RunnerError(
+        "model_unavailable",
+        modelUnavailableMessage(`providers 不可用: ${messageOf(error)}`),
+      );
     }
   }
 
@@ -109,12 +116,18 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
     const fallback = envModel !== undefined && envModel !== "" ? envModel : firstReference(providers);
     const modelRef = sessionModel ?? opts.model ?? fallback;
     if (modelRef === undefined || modelRef === "") {
-      throw new RunnerError("model_unavailable", "没有可用的模型引用");
+      throw new RunnerError(
+        "model_unavailable",
+        modelUnavailableMessage("没有可用的模型引用"),
+      );
     }
     try {
       resolveModelRef(providers, modelRef);
     } catch (error) {
-      throw new RunnerError("model_unavailable", messageOf(error));
+      throw new RunnerError(
+        "model_unavailable",
+        modelUnavailableMessage(`模型引用无效: ${messageOf(error)}`),
+      );
     }
     return modelRef;
   }
@@ -190,7 +203,9 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
         }
         if (!readySettled) {
           readySettled = true;
-          readyReject(new RunnerError("model_unavailable", "runSession 在会话就绪前结束"));
+          readyReject(
+            new RunnerError("model_unavailable", "会话启动失败: runSession 在会话就绪前结束"),
+          );
         }
       } catch (error) {
         if (!readySettled) {
@@ -198,7 +213,7 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
           readyReject(
             error instanceof RunnerError
               ? error
-              : new RunnerError("model_unavailable", messageOf(error)),
+              : new RunnerError("model_unavailable", `会话启动失败: ${messageOf(error)}`),
           );
         } else {
           process.stderr.write(`[session-runner] ${sessionId}: ${messageOf(error)}\n`);
@@ -216,7 +231,12 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
         ready,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            reject(new RunnerError("session_start_timeout", `会话在 ${readyTimeoutMs}ms 内未就绪`));
+            reject(
+              new RunnerError(
+                "session_start_timeout",
+                `会话未创建成功：会话在 ${readyTimeoutMs}ms 内未就绪`,
+              ),
+            );
           }, readyTimeoutMs);
         }),
       ]);
@@ -226,7 +246,10 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
       bridge.close();
       throw error instanceof RunnerError
         ? error
-        : new RunnerError("session_start_timeout", messageOf(error));
+        : new RunnerError(
+            "session_start_timeout",
+            `会话未创建成功：会话启动失败: ${messageOf(error)}`,
+          );
     } finally {
       if (timer !== undefined) clearTimeout(timer);
     }

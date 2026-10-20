@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RunOptions, runSession } from "../../src/index.js";
 import type { LoopEvent } from "../../src/loop/events.js";
 import { createSessionRunner, RunnerError } from "../../src/server/runner.js";
-import type { SessionRunner } from "../../src/server/runner.js";
+import type { ActionInput, SessionRunner } from "../../src/server/runner.js";
 import { createSession } from "../../src/session/session.js";
 import type { SessionHandle } from "../../src/session/session.js";
 
@@ -85,6 +85,15 @@ function newRunner(home: string, overrides: Parameters<typeof createSessionRunne
   return runner;
 }
 
+async function startError(runner: SessionRunner, input: ActionInput): Promise<RunnerError> {
+  const error = await runner.start(input).then(
+    () => undefined,
+    (reason: unknown) => reason,
+  );
+  expect(error).toBeInstanceOf(RunnerError);
+  return error as RunnerError;
+}
+
 beforeEach(() => {
   vi.unstubAllEnvs();
 });
@@ -137,10 +146,9 @@ describe("createSessionRunner", () => {
     const fake = createFakeRunSession({ neverReady: true, hang: true });
     const runner = newRunner(home, { runSessionImpl: fake.impl, readyTimeoutMs: 20 });
 
-    await expect(runner.start({ text: "hi" })).rejects.toMatchObject({
-      name: "RunnerError",
-      code: "session_start_timeout",
-    });
+    const error = await startError(runner, { text: "hi" });
+    expect(error.code).toBe("session_start_timeout");
+    expect(error.message).toContain("会话未创建成功");
     expect(fake.calls[0]?.signal?.aborted).toBe(true);
   });
 
@@ -200,7 +208,7 @@ describe("createSessionRunner", () => {
     ).rejects.toMatchObject({ code: "unknown_session" });
   });
 
-  it("无 providers 时 start 抛 model_unavailable", async () => {
+  it("无 providers 时 start 抛 model_unavailable 并提示配置文件与环境变量", async () => {
     const home = makeHome();
     const fake = createFakeRunSession();
     const runner = newRunner(home, {
@@ -208,19 +216,45 @@ describe("createSessionRunner", () => {
       providersText: "",
     });
 
-    await expect(runner.start({ text: "hi" })).rejects.toMatchObject({
-      code: "model_unavailable",
-    });
+    const error = await startError(runner, { text: "hi" });
+    expect(error.code).toBe("model_unavailable");
+    expect(error.message).toContain(path.join(home, "providers.json"));
+    expect(error.message).toContain("HARNESS_WEB_MODEL");
   });
 
-  it("providers JSON 损坏时抛 model_unavailable", async () => {
+  it("providers JSON 损坏时抛 model_unavailable 并提示配置文件与环境变量", async () => {
     const home = makeHome();
     const fake = createFakeRunSession();
     const runner = newRunner(home, { runSessionImpl: fake.impl, providersText: "{not json" });
 
-    await expect(runner.start({ text: "hi" })).rejects.toMatchObject({
-      code: "model_unavailable",
-    });
+    const error = await startError(runner, { text: "hi" });
+    expect(error.code).toBe("model_unavailable");
+    expect(error.message).toContain(path.join(home, "providers.json"));
+    expect(error.message).toContain("HARNESS_WEB_MODEL");
+  });
+
+  it("模型引用无效时抛 model_unavailable 并提示配置文件与环境变量", async () => {
+    const home = makeHome();
+    vi.stubEnv("HARNESS_WEB_MODEL", "alpha/no-such-model");
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+    const error = await startError(runner, { text: "hi" });
+    expect(error.code).toBe("model_unavailable");
+    expect(error.message).toContain(path.join(home, "providers.json"));
+    expect(error.message).toContain("HARNESS_WEB_MODEL");
+  });
+
+  it("providers 无可用引用时抛 model_unavailable 并提示配置文件与环境变量", async () => {
+    const home = makeHome();
+    vi.stubEnv("HARNESS_WEB_MODEL", "");
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl, providersText: "{}" });
+
+    const error = await startError(runner, { text: "hi" });
+    expect(error.code).toBe("model_unavailable");
+    expect(error.message).toContain(path.join(home, "providers.json"));
+    expect(error.message).toContain("HARNESS_WEB_MODEL");
   });
 
   it("HARNESS_WEB_MODEL 覆盖默认模型引用", async () => {
@@ -256,12 +290,17 @@ describe("createSessionRunner", () => {
     expect(fake.calls[0]?.model).toBe("alpha/m1");
   });
 
-  it("generator 在就绪前失败：start 抛出错误", async () => {
+  it("generator 在就绪前失败：保留 code 但文案说明会话启动失败", async () => {
     const home = makeHome();
     const fake = createFakeRunSession({ fail: new Error("boom") });
     const runner = newRunner(home, { runSessionImpl: fake.impl });
 
-    await expect(runner.start({ text: "hi" })).rejects.toBeInstanceOf(RunnerError);
+    const error = await startError(runner, { text: "hi" });
+    expect(error.code).toBe("model_unavailable");
+    expect(error.message).toContain("会话启动失败");
+    expect(error.message).toContain("boom");
+    expect(error.message).not.toContain("模型不可用");
+    expect(error.message).not.toContain("providers");
   });
 
   it("decide 对未知会话返回 unknown_session", async () => {
