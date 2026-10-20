@@ -24,7 +24,7 @@ export interface ProbeToolSpec {
   inputSchema?: z.ZodTypeAny;
   annotations?: ProbeToolAnnotations;
   meta?: Record<string, unknown>;
-  handler: (args: unknown) => Promise<ProbeToolResult>;
+  handler: (args: unknown, signal?: AbortSignal) => Promise<ProbeToolResult>;
 }
 
 export interface ProbeBackends {
@@ -64,8 +64,8 @@ const serialOpenSchema = z.object({
 });
 
 const serialReadSchema = z.object({
-  maxBytes: z.number().int().min(1).max(65536).default(256),
-  timeoutMs: z.number().int().min(0).max(600_000).default(1000),
+  maxBytes: z.number().int().min(1).max(4096).default(256),
+  timeoutMs: z.number().int().min(0).max(10_000).default(1000),
 });
 
 const serialWriteSchema = z.object({
@@ -112,13 +112,14 @@ function formatIssues(error: z.ZodError): string {
 
 function withSchema<T>(
   schema: z.ZodType<T>,
-  run: (args: T) => Promise<ProbeToolResult>,
-): (args: unknown) => Promise<ProbeToolResult> {
-  return async (args: unknown): Promise<ProbeToolResult> => {
+  run: (args: T, signal?: AbortSignal) => Promise<ProbeToolResult>,
+): (args: unknown, signal?: AbortSignal) => Promise<ProbeToolResult> {
+  return async (args: unknown, signal?: AbortSignal): Promise<ProbeToolResult> => {
+    if (signal?.aborted === true) return fail("aborted", "请求已取消");
     const parsed = schema.safeParse(args ?? {});
     if (!parsed.success) return invalidArgument(formatIssues(parsed.error));
     try {
-      return await run(parsed.data);
+      return await run(parsed.data, signal);
     } catch (error) {
       return toFailure(error);
     }
@@ -145,7 +146,7 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
     return backend;
   };
 
-  return [
+  const specs: ProbeToolSpec[] = [
     {
       name: "device_list",
       description: "列出可用的探针后端及是否已配置",
@@ -154,7 +155,7 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
         try {
           return ok({
             backends: [
-              { kind: "renode", available: true },
+              { kind: "renode", available: backends.renode.available?.() ?? true },
               {
                 kind: "openocd",
                 available:
@@ -261,8 +262,8 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
       inputSchema: memReadSchema,
       annotations: { readOnlyHint: true },
       meta: { evidence: true },
-      handler: withSchema(memReadSchema, async (args) => {
-        const memory = await requireActive().readMemory(args.address, args.length);
+      handler: withSchema(memReadSchema, async (args, signal) => {
+        const memory = await requireActive().readMemory(args.address, args.length, signal);
         return ok({ memory, deviceStatus: deviceStatus() });
       }),
     },
@@ -271,8 +272,8 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
       description: "写入目标内存并回读校验，返回操作声明",
       inputSchema: memWriteSchema,
       annotations: { destructiveHint: true },
-      handler: withSchema(memWriteSchema, async (args) => {
-        const result = await requireActive().writeMemory(args.address, args.bytes);
+      handler: withSchema(memWriteSchema, async (args, signal) => {
+        const result = await requireActive().writeMemory(args.address, args.bytes, signal);
         return ok({
           declaration: result.declaration,
           verified: result.verified,
@@ -308,8 +309,8 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
       inputSchema: serialReadSchema,
       annotations: { readOnlyHint: true },
       meta: { evidence: true },
-      handler: withSchema(serialReadSchema, async (args) => {
-        const data = await requireActive().serialRead(args.maxBytes, args.timeoutMs);
+      handler: withSchema(serialReadSchema, async (args, signal) => {
+        const data = await requireActive().serialRead(args.maxBytes, args.timeoutMs, signal);
         return ok({ data, deviceStatus: deviceStatus() });
       }),
     },
@@ -337,4 +338,12 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
       },
     },
   ];
+
+  return specs.map((spec) => ({
+    ...spec,
+    handler: async (args: unknown, signal?: AbortSignal) => {
+      if (signal?.aborted === true) return fail("aborted", "请求已取消");
+      return spec.handler(args, signal);
+    },
+  }));
 }

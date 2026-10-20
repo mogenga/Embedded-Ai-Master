@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { ProbeBackendError } from "./backend.js";
 import type {
   AttachOptions,
@@ -7,7 +8,7 @@ import type {
   ProbeBackend,
   SerialStatus,
 } from "./backend.js";
-import { RenodeMonitor } from "./renode.js";
+import { DEFAULT_RENODE_PATH, RenodeMonitor } from "./renode.js";
 import type { RenodeMonitorOptions } from "./renode.js";
 import { DEFAULT_SERIAL_HOST, TcpSerial } from "./serial.js";
 import type { SerialReadResult } from "./serial.js";
@@ -28,7 +29,7 @@ export interface RenodeMonitorLike {
 
 export interface SerialClientLike {
   open(host: string, port: number): Promise<void>;
-  read(maxBytes: number, timeoutMs: number): Promise<SerialReadResult>;
+  read(maxBytes: number, timeoutMs: number, signal?: AbortSignal): Promise<SerialReadResult>;
   write(data: Buffer): Promise<number>;
   close(): Promise<void>;
   status(): SerialStatus;
@@ -36,6 +37,7 @@ export interface SerialClientLike {
 
 export interface RenodeBackendEnv {
   renodePath?: string;
+  existsImpl?: (path: string) => boolean;
   monitorFactory?: (options: RenodeMonitorOptions) => RenodeMonitorLike;
   serialFactory?: () => SerialClientLike;
 }
@@ -63,6 +65,12 @@ function assertRange(address: number, length: number): void {
   }
   if (address + length - 1 > MAX_ADDRESS) {
     throw new ProbeBackendError("invalid_argument", "访问范围超出 32 位地址空间");
+  }
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted === true) {
+    throw new ProbeBackendError("aborted", "请求已取消");
   }
 }
 
@@ -98,6 +106,7 @@ export class RenodeBackend implements ProbeBackend {
   readonly kind = "renode" as const;
 
   readonly renodePath?: string;
+  private readonly existsImpl: (path: string) => boolean;
   private readonly monitorFactory: (options: RenodeMonitorOptions) => RenodeMonitorLike;
   private readonly serialFactory: () => SerialClientLike;
 
@@ -109,8 +118,14 @@ export class RenodeBackend implements ProbeBackend {
 
   constructor(env: RenodeBackendEnv = {}) {
     this.renodePath = env.renodePath;
+    this.existsImpl = env.existsImpl ?? ((path) => existsSync(path));
     this.monitorFactory = env.monitorFactory ?? ((options) => new RenodeMonitor(options));
     this.serialFactory = env.serialFactory ?? (() => new TcpSerial());
+  }
+
+  available(): boolean {
+    const target = this.renodePath?.trim() || DEFAULT_RENODE_PATH;
+    return this.existsImpl(target);
   }
 
   async attach(options: AttachOptions = {}): Promise<DeviceStatus> {
@@ -196,12 +211,18 @@ export class RenodeBackend implements ProbeBackend {
     };
   }
 
-  async readMemory(address: number, length: number): Promise<MemoryReadResult> {
+  async readMemory(
+    address: number,
+    length: number,
+    signal?: AbortSignal,
+  ): Promise<MemoryReadResult> {
     assertRange(address, length);
+    throwIfAborted(signal);
     const monitor = this.requireAttached();
 
     const bytes: number[] = [];
     for (let offset = 0; offset < length; offset += 1) {
+      throwIfAborted(signal);
       const current = address + offset;
       const output = await monitor.send(`sysbus ReadByte 0x${current.toString(16)}`);
       bytes.push(parseByteOutput(current, output));
@@ -212,8 +233,10 @@ export class RenodeBackend implements ProbeBackend {
   async writeMemory(
     address: number,
     bytes: number[],
+    signal?: AbortSignal,
   ): Promise<{ declaration: Declaration; verified: MemoryReadResult }> {
     assertRange(address, bytes.length);
+    throwIfAborted(signal);
     for (const byte of bytes) {
       if (!Number.isInteger(byte) || byte < 0 || byte > 0xff) {
         throw new ProbeBackendError("invalid_argument", `字节值必须是 0..255 的整数: ${byte}`);
@@ -230,13 +253,14 @@ export class RenodeBackend implements ProbeBackend {
     };
 
     for (let offset = 0; offset < length; offset += 1) {
+      throwIfAborted(signal);
       const current = address + offset;
       await monitor.send(
         `sysbus WriteByte 0x${current.toString(16)} 0x${bytes[offset].toString(16)}`,
       );
     }
 
-    const verified = await this.readMemory(address, length);
+    const verified = await this.readMemory(address, length, signal);
     const mismatch = verified.bytes.findIndex((byte, index) => byte !== bytes[index]);
     if (verified.bytes.length !== length || mismatch !== -1) {
       throw new ProbeBackendError(
@@ -281,9 +305,11 @@ export class RenodeBackend implements ProbeBackend {
   async serialRead(
     maxBytes: number,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<{ bytes: number[]; hex: string; text: string; timedOut: boolean; warning?: string }> {
+    throwIfAborted(signal);
     const serial = this.requireSerial();
-    const result = await serial.read(maxBytes, timeoutMs);
+    const result = await serial.read(maxBytes, timeoutMs, signal);
 
     const warnings = [RENODE_UART_WARNING];
     if (result.warning) warnings.push(result.warning);

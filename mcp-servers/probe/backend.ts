@@ -35,7 +35,6 @@ export interface AttachOptions {
   platform?: string;
   monitorPort?: number;
   renodePath?: string;
-  openocdConfig?: string;
 }
 
 export type ProbeErrorCode =
@@ -43,6 +42,7 @@ export type ProbeErrorCode =
   | "not_implemented"
   | "not_supported"
   | "invalid_argument"
+  | "aborted"
   | "serial_already_open"
   | "verification_failed"
   | "backend_unavailable"
@@ -66,15 +66,17 @@ export interface ProbeBackend {
   halt(): Promise<void>;
   resume(): Promise<void>;
   reset(): Promise<{ declaration: Declaration }>;
-  readMemory(address: number, length: number): Promise<MemoryReadResult>;
+  readMemory(address: number, length: number, signal?: AbortSignal): Promise<MemoryReadResult>;
   writeMemory(
     address: number,
     bytes: number[],
+    signal?: AbortSignal,
   ): Promise<{ declaration: Declaration; verified: MemoryReadResult }>;
   serialOpen(host: string, port: number): Promise<SerialStatus>;
   serialRead(
     maxBytes: number,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<{ bytes: number[]; hex: string; text: string; timedOut: boolean; warning?: string }>;
   serialWrite(data: Buffer): Promise<{ declaration: Declaration; bytesWritten: number }>;
   serialClose(): Promise<SerialStatus>;

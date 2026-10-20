@@ -117,6 +117,34 @@ describe("TcpSerial", () => {
     expect(result).toEqual({ bytes: [], timedOut: true });
   });
 
+  it("等待中的 read 被 abort 时拒绝且不消费字节", async () => {
+    const { harness } = await opened();
+    const controller = new AbortController();
+
+    const pending = harness.serial.read(8, 10_000, controller.signal);
+    controller.abort();
+
+    const error = await pending.catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ProbeBackendError);
+    expect((error as ProbeBackendError).code).toBe("aborted");
+    expect(harness.serial.status().bytesRead).toBe(0);
+    expect(harness.serial.status().open).toBe(true);
+  });
+
+  it("已 abort 的信号不会读取缓冲区数据", async () => {
+    const { harness, socket } = await opened();
+    socket.emitData([0x41]);
+    const controller = new AbortController();
+    controller.abort();
+
+    const error = await harness.serial
+      .read(8, 10, controller.signal)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ProbeBackendError);
+    expect((error as ProbeBackendError).code).toBe("aborted");
+    expect(harness.serial.status().bytesRead).toBe(0);
+  });
+
   it("write 返回写入长度并透传给 socket", async () => {
     const { harness, socket } = await opened();
 

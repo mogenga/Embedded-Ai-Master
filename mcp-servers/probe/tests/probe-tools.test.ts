@@ -462,12 +462,12 @@ describe("probeTools 工具面", () => {
     );
   });
 
-  it("串口后端返回 not_implemented 时工具显式透传错误码", async () => {
+  it("后端抛任意 ProbeBackendError 时工具显式透传错误码", async () => {
     const renode = new FakeBackend("renode");
     const tools = probeTools({ renode });
     await findTool(tools, "attach").handler({});
     for (const operation of ["serialOpen", "serialRead", "serialWrite", "serialClose", "serialStatus"]) {
-      renode.failOn(operation, new ProbeBackendError("not_implemented", "Task 5 实现"));
+      renode.failOn(operation, new ProbeBackendError("backend_error", "串口后端故障"));
     }
 
     const calls = [
@@ -481,7 +481,74 @@ describe("probeTools 工具面", () => {
     for (const [name, args] of calls) {
       const result = await findTool(tools, name).handler(args);
       expect(result.isError, name).toBe(true);
-      expect(errorCode(result), name).toBe("not_implemented");
+      expect(errorCode(result), name).toBe("backend_error");
     }
+  });
+
+  it("abort 后返回 aborted 且不继续读取内存", async () => {
+    const renode = new FakeBackend("renode");
+    const tools = probeTools({ renode });
+    await findTool(tools, "attach").handler({});
+    renode.calls.length = 0;
+
+    const controller = new AbortController();
+    controller.abort();
+    const result = await findTool(tools, "mem_read").handler(
+      { address: 0x20000000, length: 4 },
+      controller.signal,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(errorCode(result)).toBe("aborted");
+    expect(renode.calls).toEqual([]);
+  });
+
+  it("abort 后返回 aborted 且不继续读取串口", async () => {
+    const renode = new FakeBackend("renode");
+    const tools = probeTools({ renode });
+    await findTool(tools, "attach").handler({});
+    renode.calls.length = 0;
+
+    const controller = new AbortController();
+    controller.abort();
+    const result = await findTool(tools, "serial_read").handler(
+      { maxBytes: 16, timeoutMs: 100 },
+      controller.signal,
+    );
+
+    expect(result.isError).toBe(true);
+    expect(errorCode(result)).toBe("aborted");
+    expect(renode.calls).toEqual([]);
+  });
+
+  it("serial_read 参数超过 spec 上限时返回 invalid_argument", async () => {
+    const renode = new FakeBackend("renode");
+    const tools = probeTools({ renode });
+    await findTool(tools, "attach").handler({});
+    renode.calls.length = 0;
+
+    for (const args of [
+      { maxBytes: 4097 },
+      { maxBytes: 1, timeoutMs: 10_001 },
+    ]) {
+      const result = await findTool(tools, "serial_read").handler(args);
+      expect(result.isError).toBe(true);
+      expect(errorCode(result)).toBe("invalid_argument");
+    }
+    expect(renode.calls).toEqual([]);
+  });
+
+  it("serial_read 接受 spec 边界值 4096 / 10000", async () => {
+    const renode = new FakeBackend("renode");
+    const tools = probeTools({ renode });
+    await findTool(tools, "attach").handler({});
+
+    const result = await findTool(tools, "serial_read").handler({
+      maxBytes: 4096,
+      timeoutMs: 10_000,
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(renode.calls).toContain("serial_read:4096:10000");
   });
 });

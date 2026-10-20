@@ -217,13 +217,23 @@ describe("OpenOcdBackend 内存读取", () => {
     expect(await codeOf(() => backend.readMemory(0x20000000, 4))).toBe("backend_error");
   });
 
-  it("全 0 只标记 allZero，不解码为无故障", async () => {
+  it("全 0 标记 allZero 与 warning，不解码为无故障", async () => {
     const { backend } = setup(() => "0x20000000: 00000000");
     await backend.attach();
 
     const result = await backend.readMemory(0x20000000, 4);
     expect(result.allZero).toBe(true);
+    expect(result.warning).toBe("openocd_all_zero_or_unmapped");
     expect(result.bytes).toEqual([0, 0, 0, 0]);
+  });
+
+  it("非全 0 不附加 warning", async () => {
+    const { backend } = setup(() => "0x20000000: 01000000");
+    await backend.attach();
+
+    const result = await backend.readMemory(0x20000000, 4);
+    expect(result.allZero).toBe(false);
+    expect(result.warning).toBeUndefined();
   });
 });
 

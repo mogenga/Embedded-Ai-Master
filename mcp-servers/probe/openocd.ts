@@ -17,6 +17,7 @@ export const DEFAULT_OPENOCD_HOST = "127.0.0.1";
 export const DEFAULT_OPENOCD_TELNET_PORT = 4444;
 export const DEFAULT_TELNET_TIMEOUT_MS = 5_000;
 export const MAX_MEMORY_LENGTH = 256;
+export const ALL_ZERO_WARNING = "openocd_all_zero_or_unmapped";
 
 const MAX_ADDRESS = 0xffff_ffff;
 const PROMPT = "> ";
@@ -94,12 +95,21 @@ function toHexByte(value: number): string {
 }
 
 function buildReadResult(address: number, bytes: number[]): MemoryReadResult {
-  return {
+  const allZero = bytes.every((byte) => byte === 0);
+  const result: MemoryReadResult = {
     address,
     bytes,
     hex: bytes.map(toHexByte).join(""),
-    allZero: bytes.every((byte) => byte === 0),
+    allZero,
   };
+  if (allZero) result.warning = ALL_ZERO_WARNING;
+  return result;
+}
+
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted === true) {
+    throw new ProbeBackendError("aborted", "请求已取消");
+  }
 }
 
 function collectHexTokens(output: string): string[] {
@@ -331,12 +341,18 @@ export class OpenOcdBackend implements ProbeBackend {
     };
   }
 
-  async readMemory(address: number, length: number): Promise<MemoryReadResult> {
+  async readMemory(
+    address: number,
+    length: number,
+    signal?: AbortSignal,
+  ): Promise<MemoryReadResult> {
     assertRange(address, length);
+    throwIfAborted(signal);
     const bytes: number[] = [];
     let offset = 0;
 
     while (length - offset >= 4 && (address + offset) % 4 === 0) {
+      throwIfAborted(signal);
       const words = Math.floor((length - offset) / 4);
       const output = await this.sendCommand(`mdw ${toHex(address + offset)} ${words}`);
       for (const word of parseWords(output, words)) {
@@ -346,6 +362,7 @@ export class OpenOcdBackend implements ProbeBackend {
     }
 
     if (offset < length) {
+      throwIfAborted(signal);
       const remaining = length - offset;
       const output = await this.sendCommand(`mdb ${toHex(address + offset)} ${remaining}`);
       bytes.push(...parseBytes(output, remaining));
@@ -357,8 +374,10 @@ export class OpenOcdBackend implements ProbeBackend {
   async writeMemory(
     address: number,
     bytes: number[],
+    signal?: AbortSignal,
   ): Promise<{ declaration: Declaration; verified: MemoryReadResult }> {
     assertRange(address, bytes.length);
+    throwIfAborted(signal);
     for (const byte of bytes) {
       if (!Number.isInteger(byte) || byte < 0 || byte > 0xff) {
         throw new ProbeBackendError("invalid_argument", `字节值必须是 0..255 的整数: ${byte}`);
@@ -375,6 +394,7 @@ export class OpenOcdBackend implements ProbeBackend {
 
     let offset = 0;
     while (length - offset >= 4 && (address + offset) % 4 === 0) {
+      throwIfAborted(signal);
       const word =
         (bytes[offset] |
           (bytes[offset + 1] << 8) |
@@ -388,13 +408,14 @@ export class OpenOcdBackend implements ProbeBackend {
     }
 
     while (offset < length) {
+      throwIfAborted(signal);
       await this.sendCommand(
         `mwb ${toHex(address + offset)} 0x${toHexByte(bytes[offset])}`,
       );
       offset += 1;
     }
 
-    const verified = await this.readMemory(address, length);
+    const verified = await this.readMemory(address, length, signal);
     const mismatch = verified.bytes.findIndex((byte, index) => byte !== bytes[index]);
     if (verified.bytes.length !== length || mismatch !== -1) {
       throw new ProbeBackendError(

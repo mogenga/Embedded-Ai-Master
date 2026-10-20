@@ -1,6 +1,10 @@
 import { pathToFileURL } from "node:url";
 import { McpServer } from "@modelcontextprotocol/server";
-import type { AnyToolHandler, StandardSchemaWithJSON } from "@modelcontextprotocol/server";
+import type {
+  AnyToolHandler,
+  ServerContext,
+  StandardSchemaWithJSON,
+} from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
 import { z } from "zod";
 import { OpenOcdBackend } from "./openocd.js";
@@ -36,8 +40,8 @@ export function createProbeServer(backends: ProbeBackends = createProbeBackends(
         annotations: tool.annotations,
         _meta: tool.meta,
       },
-      (async (args: unknown) =>
-        tool.handler(args)) as unknown as AnyToolHandler<StandardSchemaWithJSON>,
+      (async (args: unknown, ctx: ServerContext) =>
+        tool.handler(args, ctx.mcpReq.signal)) as unknown as AnyToolHandler<StandardSchemaWithJSON>,
     );
   }
   return server;

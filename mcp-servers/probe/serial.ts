@@ -24,6 +24,7 @@ export type SerialConnect = (host: string, port: number) => Promise<SerialSocket
 interface PendingRead {
   wake(): void;
   reject(error: Error): void;
+  cleanup(): void;
   timer: NodeJS.Timeout;
 }
 
@@ -114,31 +115,50 @@ export class TcpSerial {
     socket.onClose(() => this.handleClose());
   }
 
-  async read(maxBytes: number, timeoutMs: number): Promise<SerialReadResult> {
+  async read(
+    maxBytes: number,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<SerialReadResult> {
     assertReadArgs(maxBytes, timeoutMs);
     if (!this.socket) throw new ProbeBackendError("backend_error", "串口未打开");
+    if (signal?.aborted === true) {
+      throw new ProbeBackendError("aborted", "串口读取已取消");
+    }
     if (this.pending) throw new ProbeBackendError("backend_error", "已有挂起的串口读取");
 
     if (this.buffer.length > 0) return this.consume(maxBytes, false);
 
     return new Promise<SerialReadResult>((resolve, reject) => {
+      const onAbort = (): void => {
+        if (this.pending !== entry) return;
+        this.pending = undefined;
+        entry.cleanup();
+        reject(new ProbeBackendError("aborted", "串口读取已取消"));
+      };
       const entry: PendingRead = {
         timer: setTimeout(() => {
           if (this.pending !== entry) return;
           this.pending = undefined;
+          entry.cleanup();
           resolve(this.consume(maxBytes, true));
         }, timeoutMs),
         wake: () => {
-          clearTimeout(entry.timer);
+          entry.cleanup();
           this.pending = undefined;
           resolve(this.consume(maxBytes, false));
         },
         reject: (error) => {
-          clearTimeout(entry.timer);
+          entry.cleanup();
           reject(error);
+        },
+        cleanup: () => {
+          clearTimeout(entry.timer);
+          signal?.removeEventListener("abort", onAbort);
         },
       };
       this.pending = entry;
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
   }
 
