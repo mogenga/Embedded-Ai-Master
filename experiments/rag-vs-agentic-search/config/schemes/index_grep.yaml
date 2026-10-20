@@ -1,0 +1,13 @@
+# 方案 C：现状基线（spec §8.4），忠实复现 kb-mcp。
+# 统一 dispatch：不读轨标签；lookup 有得分则取 top-2，否则走精确 token search。
+
+scheme: C
+params:
+  lookup_top_k: 2
+  # Recall@5 的“同排序扩展 top-5”单独标注 extended（T12），不改部署口径。
+  extended_recall_k: 5
+  token_patterns:
+    - "[A-Za-z_][A-Za-z0-9_]*"
+    - "0x[0-9A-Fa-f]+"
+  ablations:
+    - no_index

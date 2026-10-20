@@ -4,6 +4,31 @@
 >
 > 本目录是独立实验项目，位于主仓库根目录下的 `experiments/rag-vs-agentic-search/`，拥有自己的 `README.md`、`docs/` 与 `.gitignore`，不进入主仓库的 TypeScript 构建与测试收集范围。
 
+## 骨架状态（2026-10-20）
+
+素材（M1-M5）仍未到位。**不依赖素材的后段链路已闭环**：导入校验 → 分层切分 → 评分 → 表格，全部可离线运行并有 143 项 pytest 覆盖。五个方案与图表仍为**显式占位**，调用即抛 `FeatureNotImplemented`，不会返回空候选冒充结果。
+
+```
+src/raglab/
+├── paths.py       # POSIX 归一化与越界防护
+├── corpus.py      # manifest 生成/校验（T1）
+├── assets.py      # JSONL schema + G0 交叉校验
+├── intake.py      # 导入门禁编排（失败即中止）
+├── splitting.py   # dev/test 分层切分（§7.4）
+├── metrics.py     # Recall/Hit/MRR/nDCG/假候选/拒答/AUROC
+├── scoring.py     # 逐查询评分 + 分组汇总
+├── stats.py       # McNemar 精确检验、配对 bootstrap、Holm
+├── prereg.py      # 预注册哈希 + confirmatory 门禁（T2）
+├── env.py         # env.json 环境记录（T9）
+├── llm.py         # OpenAI 兼容客户端 + live 门禁
+├── config.py      # experiment.yaml / schemes/*.yaml
+├── runner.py      # 统一契约跑批骨架（ITT、连续网关错误中止）
+├── schemes/       # 五个方案（占位）
+└── report/        # 表格写入（已实现）/ 图表（占位）
+```
+
+已实现的 CLI 子命令：`import`、`split`、`score`、`report`、`env`。仍阻塞：`index`（需 M1+M4）、`run`（需方案实现）。
+
 ## 这个实验回答什么
 
 在本项目的嵌入式调试知识库语料与查询分布上，比较五种“第一跳找对文件”的检索方案：
@@ -36,17 +61,18 @@
 
 ```
 experiments/rag-vs-agentic-search/
-├── README.md          # 本文件：独立入口
-├── STATUS.md          # 状态与阻塞项（素材到位后更新）
-├── docs/              # 实验自己的文档（协议摘要、指标、标注指南、runbook）
-├── .gitignore         # 忽略语料、虚拟环境、原始 trace 与缓存
-├── pyproject.toml     # uv 项目与依赖声明（待实现阶段添加）
-├── config/            # 方案配置与提示词（待实现阶段添加）
-├── corpus/            # 导入的语料，不进版本库
-├── data/              # 评测集 JSONL，进版本库
-├── src/raglab/        # 实验代码（待实现阶段添加）
-├── tests/             # pytest 测试（待实现阶段添加）
-└── results/           # runs/、scored/、figures/、tables/（待跑批后生成）
+├── README.md            # 本文件：独立入口
+├── STATUS.md            # 状态与阻塞项（素材到位后更新）
+├── PREREGISTRATION.md   # 预注册模板（DRAFT，G0 通过后冻结并记哈希）
+├── docs/                # 实验自己的文档（协议清单、指标映射、标注指南、runbook）
+├── .gitignore           # 忽略语料、虚拟环境、原始 trace 与缓存
+├── pyproject.toml       # uv 项目与依赖声明
+├── config/              # experiment.yaml / models.yaml / schemes/*.yaml / prompts/
+├── corpus/              # 导入的语料，不进版本库
+├── data/                # 评测集 JSONL，进版本库（当前只有 README，无占位数据）
+├── src/raglab/          # 实验代码（纯逻辑已实现，方案为占位）
+├── tests/               # pytest 离线单测
+└── results/             # runs/、scored/、figures/、tables/（待跑批后生成）
 ```
 
 ## 权威设计

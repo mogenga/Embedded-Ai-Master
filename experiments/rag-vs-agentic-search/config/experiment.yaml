@@ -1,0 +1,43 @@
+# 实验总配置。字段含义见主仓库 spec §9.2；任何字段缺失都会显式报错，不静默回退。
+
+seed: 20261019
+
+corpus_dir: corpus/kb
+data_dir: data
+results_dir: results
+
+# T11：导航文件可为方案内部读取，但任何方案都不得把它们作为候选输出。
+# _inbox.md 是 kb_contribute 收件箱（38 条未审阅条目），cases/_about.md 是使用说明；
+# 二者与 _sources.md 一样不属于可检索语料，统一列入导航清单。
+navigation_files:
+  - index.yaml
+  - _vendor-index.md
+  - _sources.md
+  - _inbox.md
+  - _about.md
+
+# M4：模型端点。未填写时 A/C/C′ 的离线部分仍可开发，B/D 与 API embedding 一律 BLOCKED。
+# 环境变量优先级：RAGLAB_LLM_BASE_URL / RAGLAB_LLM_MODEL / RAGLAB_EMBED_BASE_URL / RAGLAB_EMBED_MODEL
+model:
+  llm_base_url: null
+  llm_model: null
+  embedding_base_url: null
+  embedding_model: null
+
+# 方案开关；params 的具体口径见 config/schemes/*.yaml 与 spec §6.3 / §8。
+schemes:
+  A:
+    enabled: false
+    reason: "M4 embedding 端点未提供"
+  B:
+    enabled: false
+    reason: "M4 LLM 端点未提供"
+  C:
+    enabled: false
+    reason: "M3 kb-mcp 算法未提供，忠实复现待实现"
+  C_prime:
+    enabled: false
+    reason: "切分与分词网格待 dev 调参实现"
+  D:
+    enabled: false
+    reason: "条件启用：仅 H5 有信号时运行"
