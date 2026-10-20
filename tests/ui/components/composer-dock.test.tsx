@@ -90,6 +90,24 @@ describe("composer", () => {
     expect(root.textContent).toContain("发送失败，输入已保留");
   });
 
+  it("sendError 在 Composer 区域显示可读错误", () => {
+    const root = mount();
+    render(<Composer onSend={() => {}} errorMessage="发送失败（HTTP 409）：会话忙" />, root);
+    expect(root.querySelector(".composer-error")?.textContent).toContain("发送失败（HTTP 409）：会话忙");
+  });
+
+  it("异步发送失败且带 errorMessage 时优先显示具体错误", async () => {
+    const root = mount();
+    render(<Composer onSend={() => Promise.reject(new Error("boom"))} errorMessage="发送失败（HTTP 500）" />, root);
+    const ta = root.querySelector("textarea")!;
+    ta.value = "重试我";
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    ta.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(ta.value).toBe("重试我");
+    expect(root.querySelector(".composer-error")?.textContent).toContain("发送失败（HTTP 500）");
+  });
+
   it("发送后滚动消息流到底部", async () => {
     const stream = document.createElement("div");
     stream.className = "cnv-stream";

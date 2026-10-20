@@ -24,6 +24,7 @@ export interface WorkbenchState {
   detailError?: string;
   switching?: boolean;
   streamError?: string;
+  sendError?: string;
   failedSessionId?: string;
 }
 

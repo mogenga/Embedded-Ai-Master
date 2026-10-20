@@ -16,11 +16,21 @@ function rootEntry(): Plugin {
   };
 }
 
+const apiTarget = `http://127.0.0.1:${process.env.HARNESS_UI_PORT ?? "5174"}`;
+
 export default defineConfig({
   plugins: [preact(), rootEntry()],
   server: {
     proxy: {
-      "/api": `http://127.0.0.1:${process.env.HARNESS_UI_PORT ?? "5174"}`,
+      "/api": {
+        target: apiTarget,
+        changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on("proxyReq", (proxyReq) => {
+            proxyReq.setHeader("origin", apiTarget);
+          });
+        },
+      },
     },
   },
   build: {

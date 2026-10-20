@@ -1,6 +1,7 @@
 import type { ComponentChildren, JSX } from "preact";
 import { Icon } from "../../icons.js";
 import type { TranscriptEvent, TranscriptView } from "../../view/transcript.js";
+import { ApprovalNotice } from "./approval-notice.js";
 import { GuardNotice } from "./guard-notice.js";
 import { ToolCard } from "./tool-card.js";
 import { VerdictCard } from "./verdict-card.js";
@@ -17,9 +18,15 @@ type PermissionEvent = Extract<TranscriptEvent, { kind: "permission" }>;
 
 type InterruptedEvent = Extract<TranscriptEvent, { kind: "interrupted" }>;
 
-interface GuardHandlers {
+interface ConversationHandlers {
+  sessionId?: string;
   onGuardConfirm?: (guard: GuardEvent["guard"]) => void;
   onGuardReject?: (guard: GuardEvent["guard"]) => void;
+  onApprovalDecision?: (
+    sessionId: string,
+    requestId: string,
+    decision: "allow" | "deny",
+  ) => Promise<void>;
 }
 
 function renderInline(text: string): ComponentChildren {
@@ -108,7 +115,7 @@ function PermissionNotice({ entry }: { entry: PermissionEvent }): JSX.Element {
   );
 }
 
-function renderEvent(entry: TranscriptEvent, handlers: GuardHandlers): JSX.Element {
+function renderEvent(entry: TranscriptEvent, handlers: ConversationHandlers): JSX.Element {
   switch (entry.kind) {
     case "user":
       return <UserTurn key={entry.id} entry={entry} />;
@@ -134,15 +141,24 @@ function renderEvent(entry: TranscriptEvent, handlers: GuardHandlers): JSX.Eleme
     case "permission":
       return <PermissionNotice key={entry.id} entry={entry} />;
     case "approval":
-      return <></>;
+      return (
+        <ApprovalNotice
+          key={entry.id}
+          approval={entry.approval}
+          sessionId={handlers.sessionId}
+          onDecision={handlers.onApprovalDecision}
+        />
+      );
   }
 }
 
 export function MessageStream({
   view,
+  sessionId,
   onGuardConfirm,
   onGuardReject,
-}: { view: TranscriptView } & GuardHandlers): JSX.Element {
-  const handlers: GuardHandlers = { onGuardConfirm, onGuardReject };
+  onApprovalDecision,
+}: { view: TranscriptView } & ConversationHandlers): JSX.Element {
+  const handlers: ConversationHandlers = { sessionId, onGuardConfirm, onGuardReject, onApprovalDecision };
   return <div class="messages">{view.events.map((entry) => renderEvent(entry, handlers))}</div>;
 }

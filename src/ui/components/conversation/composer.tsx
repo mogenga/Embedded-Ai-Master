@@ -9,10 +9,12 @@ export function Composer({
   onSend,
   canSend = onSend !== undefined,
   disabledReason,
+  errorMessage,
 }: {
   onSend?: (text: string) => void | Promise<void>;
   canSend?: boolean;
   disabledReason?: string;
+  errorMessage?: string;
 }): JSX.Element {
   const [text, setText] = useState("");
   const [failed, setFailed] = useState(false);
@@ -123,9 +125,9 @@ export function Composer({
           {disabledReason ?? "未配置提交端点"}
         </p>
       )}
-      {failed ? (
-        <p class="composer-note" role="status">
-          发送失败，输入已保留
+      {failed || errorMessage !== undefined ? (
+        <p class="composer-note composer-error" role="status">
+          {errorMessage ?? "发送失败，输入已保留"}
         </p>
       ) : null}
     </div>

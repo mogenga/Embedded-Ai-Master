@@ -1,5 +1,5 @@
 import { render } from "preact";
-import { ApiError } from "./api/client.js";
+import { ApiError, fetchSessions } from "./api/client.js";
 import type { DeviceStatus } from "./api/client.js";
 import { createSessionEventStream } from "./api/event-stream.js";
 import { loadSessionView, loadWorkbench } from "./api/load.js";
@@ -23,6 +23,7 @@ import { applyTheme, onChangeMedia, persistTheme, readStoredTheme } from "./them
 import type { ThemeChoice } from "./theme.js";
 import { UNKNOWN_DEVICE } from "./view/device.js";
 import { postAction } from "./view/sse.js";
+import type { HttpError } from "./view/sse.js";
 import { emptyTranscriptView } from "./view/transcript.js";
 import "./styles.css";
 
@@ -36,7 +37,8 @@ function readUrl(value: unknown): string | undefined {
 }
 
 const eventsUrl = readUrl(import.meta.env.VITE_EVENT_STREAM_URL) ?? "/api/events";
-const actionUrl = readUrl(import.meta.env.VITE_ACTION_URL);
+const actionUrl = readUrl(import.meta.env.VITE_ACTION_URL) ?? "/api/actions";
+const approvalUrl = readUrl(import.meta.env.VITE_APPROVAL_URL) ?? "/api/approvals";
 
 let state: WorkbenchState = {
   connection: "loading",
@@ -59,6 +61,32 @@ function errorMessageOf(error: unknown): string {
   if (error instanceof ApiError && error.code === "invalid_response") return "接口返回内容无法解析";
   if (error instanceof ApiError) return `接口返回错误（${error.code}，HTTP ${error.status}）`;
   return "无法连接本地服务，请确认已运行 node dist/server/serve.js";
+}
+
+function isHttpError(error: unknown): error is HttpError {
+  return typeof error === "object" && error !== null && (error as { code?: unknown }).code === "http_error";
+}
+
+function serverMessage(text: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const detail = (parsed as { error?: unknown }).error;
+    if (typeof detail !== "object" || detail === null) return undefined;
+    const message = (detail as { message?: unknown }).message;
+    return typeof message === "string" && message.length > 0 ? message : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function actionErrorText(error: unknown): string {
+  if (isHttpError(error)) {
+    const detail = serverMessage(error.text);
+    return detail === undefined ? `发送失败（HTTP ${error.status}）` : `发送失败（HTTP ${error.status}）：${detail}`;
+  }
+  if (error instanceof Error && error.message.length > 0) return `发送失败：${error.message}`;
+  return "发送失败，请确认本地服务可用";
 }
 
 const controller = createSessionStreamController({
@@ -108,8 +136,10 @@ function renderApp(): void {
         kbRoot={state.kbRoot}
         device={state.device}
         mcpStatuses={state.mcpStatuses}
-        onSend={actionUrl === undefined ? undefined : (text) => postAction(actionUrl, { text })}
-        canSend={actionUrl !== undefined}
+        onSend={(text) => send(text)}
+        onApprovalDecision={decideApproval}
+        onNewSession={newSession}
+        sendError={state.sendError}
         themeChoice={themeChoice}
         onThemeChange={(choice) => {
           themeChoice = choice;
@@ -155,8 +185,55 @@ async function load(): Promise<void> {
   }
 }
 
-async function selectSession(id: string): Promise<void> {
-  const isCurrent = gate.begin();
+async function send(text: string): Promise<void> {
+  let created: { sessionId: string };
+  try {
+    created = await postAction<{ sessionId: string }>(actionUrl, {
+      text,
+      ...(state.activeSessionId === undefined ? {} : { sessionId: state.activeSessionId }),
+    });
+  } catch (error) {
+    state = { ...state, sendError: actionErrorText(error) };
+    renderApp();
+    throw error;
+  }
+  state = { ...state, sendError: undefined };
+  try {
+    const listed = await fetchSessions({ fetchImpl });
+    state = { ...state, sessions: listed.sessions, sessionErrors: listed.errors };
+    renderApp();
+  } catch {
+    // 提交已成功；列表刷新失败不阻断新会话的加载
+  }
+  await selectSession(created.sessionId);
+}
+
+async function decideApproval(
+  sessionId: string,
+  requestId: string,
+  decision: "allow" | "deny",
+): Promise<void> {
+  try {
+    await postAction(approvalUrl, { sessionId, requestId, decision });
+  } catch (error) {
+    throw new Error(actionErrorText(error));
+  }
+}
+
+function newSession(): void {
+  controller.close();
+  state = {
+    ...state,
+    activeSessionId: undefined,
+    events: [],
+    view: emptyTranscriptView(),
+    lastSeq: -1,
+    sendError: undefined,
+  };
+  renderApp();
+}
+
+async function selectSession(id: string): Promise<void> {  const isCurrent = gate.begin();
   state = startSessionSwitch(state);
   renderApp();
   controller.close();

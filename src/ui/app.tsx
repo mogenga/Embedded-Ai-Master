@@ -37,6 +37,13 @@ export interface AppProps {
   streamError?: string;
   onGuardConfirm?: (guard: GuardModel) => void;
   onGuardReject?: (guard: GuardModel) => void;
+  onApprovalDecision?: (
+    sessionId: string,
+    requestId: string,
+    decision: "allow" | "deny",
+  ) => Promise<void>;
+  onNewSession?: () => void;
+  sendError?: string;
 }
 
 function formatTokens(value: number): string {
@@ -88,6 +95,9 @@ export function App({
   streamError,
   onGuardConfirm,
   onGuardReject,
+  onApprovalDecision,
+  onNewSession,
+  sendError,
 }: AppProps): JSX.Element {
   const title = activeSessionId ?? "未选择会话";
   const busy = connection === "loading";
@@ -115,7 +125,7 @@ export function App({
           />
         </aside>
         <main class="conversation" aria-label="对话" data-status={view.status}>
-          <ConversationHeader title={title} status={view.status} />
+          <ConversationHeader title={title} status={view.status} onNewSession={onNewSession} />
           <PathLine steps={view.steps} />
           {busy ? <p class="cnv-state">加载中…</p> : null}
           {failed ? (
@@ -135,13 +145,16 @@ export function App({
           {busy || failed ? null : (
             <ConversationStream
               view={view}
+              sessionId={activeSessionId ?? view.sessionId}
               onGuardConfirm={onGuardConfirm ?? logGuard("确认")}
               onGuardReject={onGuardReject ?? logGuard("拒绝")}
+              onApprovalDecision={onApprovalDecision}
             />
           )}
           <Composer
             onSend={onSend}
             canSend={onSend !== undefined && canSend && connection === "ready" && !switching && !failed}
+            errorMessage={sendError}
             disabledReason={
               connection !== "ready"
                 ? "会话尚未就绪，暂不能发送"

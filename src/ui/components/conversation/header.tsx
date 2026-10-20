@@ -13,9 +13,11 @@ const STATUS_LABEL: Record<ConversationStatus, string> = {
 export function ConversationHeader({
   title,
   status,
+  onNewSession,
 }: {
   title: string;
   status: ConversationStatus;
+  onNewSession?: () => void;
 }): JSX.Element {
   return (
     <header class="cnv-head">
@@ -29,6 +31,12 @@ export function ConversationHeader({
         </span>
       </div>
       <div class="cnv-actions">
+        {onNewSession === undefined ? null : (
+          <button type="button" class="btn-ghost" onClick={onNewSession}>
+            <Icon name="i-plus" size={14} />
+            <span>新会话</span>
+          </button>
+        )}
         <button type="button" class="btn-ghost">
           <Icon name="i-refresh" size={14} />
           <span>回放</span>
