@@ -1,3 +1,4 @@
+import { MCP_STATUS_PAYLOAD_KINDS } from "../session/types.js";
 import type { McpStatusPayload, McpStatusPayloadKind, SessionEvent, SessionEventEnvelope } from "../session/types.js";
 import type { DeviceStatus, KbNode, SessionSummary } from "./api/client.js";
 import type { LoadedSession, LoadedWorkbench } from "./api/load.js";
@@ -31,19 +32,7 @@ export interface RetryTarget {
   id?: string;
 }
 
-const MCP_STATUS_KINDS: ReadonlySet<string> = new Set<McpStatusPayloadKind>([
-  "connected",
-  "connect_failed",
-  "tools_changed",
-  "tools_refresh_failed",
-  "tool_invalid_schema",
-  "listener_failed",
-  "call_failed",
-  "config_failed",
-  "config_warning",
-  "project_config_skipped",
-  "tool_name_renamed",
-]);
+const MCP_STATUS_KINDS: ReadonlySet<string> = new Set(MCP_STATUS_PAYLOAD_KINDS);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);

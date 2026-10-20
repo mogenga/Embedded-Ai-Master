@@ -17,7 +17,7 @@ import path from "node:path";
 import { SessionCorruptionError } from "../src/session/errors.js";
 import { readSessionSnapshot } from "../src/session/persistence.js";
 import { createSession } from "../src/session/session.js";
-import { createLogTailEventSource, splitCompleteLines } from "../src/events/log-tail.js";
+import { createLogTailEventSource } from "../src/events/log-tail.js";
 import { SessionNotFoundError } from "../src/events/types.js";
 import type { SessionEvent } from "../src/session/types.js";
 
@@ -205,26 +205,6 @@ describe("readSessionSnapshot", () => {
     await expect(readSessionSnapshot(dir, { allowTrailingPartial: true })).rejects.toBeInstanceOf(
       SessionCorruptionError,
     );
-  });
-});
-
-describe("splitCompleteLines", () => {
-  it("中文多字节按字节中间拆分后重组不产生替换字符", () => {
-    const line = JSON.stringify(event(0, { content: "中文测试" }));
-    const bytes = Buffer.from(`${line}\n`, "utf8");
-    const charIndex = bytes.indexOf(Buffer.from("中", "utf8"));
-    const split = charIndex + 1;
-    expect(charIndex).toBeGreaterThan(0);
-
-    const first = splitCompleteLines(bytes.subarray(0, split));
-    expect(first.lines).toEqual([]);
-    expect(first.rest.equals(bytes.subarray(0, split))).toBe(true);
-
-    const second = splitCompleteLines(Buffer.concat([first.rest, bytes.subarray(split)]));
-    expect(second.lines).toEqual([line]);
-    expect(second.rest.length).toBe(0);
-    expect(second.lines[0]).not.toContain("\uFFFD");
-    expect(JSON.parse(second.lines[0]!) as SessionEvent).toEqual(event(0, { content: "中文测试" }));
   });
 });
 

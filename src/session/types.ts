@@ -62,6 +62,21 @@ export type McpStatusPayloadKind =
   | "project_config_skipped"
   | "tool_name_renamed";
 
+// 运行时白名单:type 只是编译期约束,日志/SSE 的内容不可信,必须有一处可被代码读取的清单。
+export const MCP_STATUS_PAYLOAD_KINDS: readonly McpStatusPayloadKind[] = [
+  "connected",
+  "connect_failed",
+  "tools_changed",
+  "tools_refresh_failed",
+  "tool_invalid_schema",
+  "listener_failed",
+  "call_failed",
+  "config_failed",
+  "config_warning",
+  "project_config_skipped",
+  "tool_name_renamed",
+];
+
 export interface McpStatusPayload {
   kind: McpStatusPayloadKind;
   server?: string;

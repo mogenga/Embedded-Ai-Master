@@ -122,18 +122,6 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-export function splitCompleteLines(bytes: Buffer): { lines: string[]; rest: Buffer } {
-  const lines: string[] = [];
-  let start = 0;
-  for (;;) {
-    const newline = bytes.indexOf(0x0a, start);
-    if (newline < 0) break;
-    lines.push(decodeEventLine(bytes.subarray(start, newline)));
-    start = newline + 1;
-  }
-  return { lines, rest: bytes.subarray(start) };
-}
-
 async function* followImplementation(
   sessionsRoot: string,
   pollMs: number,

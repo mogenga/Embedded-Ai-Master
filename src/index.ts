@@ -37,6 +37,7 @@ import { SessionResumeError } from "./session/errors.js";
 import { readSessionDir } from "./session/persistence.js";
 import { createSession, resumeSession } from "./session/session.js";
 import type { SessionHandle } from "./session/session.js";
+import { MCP_STATUS_PAYLOAD_KINDS } from "./session/types.js";
 import type { McpStatusPayload, McpStatusPayloadKind } from "./session/types.js";
 import { createBuiltinTools } from "./tools/builtin.js";
 import { isWindowsReservedName } from "./tools/pipeline.js";
@@ -204,19 +205,7 @@ export interface McpSessionStatus {
   message?: string;
 }
 
-const MCP_STATUS_PAYLOAD_KINDS: ReadonlySet<string> = new Set<McpStatusPayloadKind>([
-  "connected",
-  "connect_failed",
-  "tools_changed",
-  "tools_refresh_failed",
-  "tool_invalid_schema",
-  "listener_failed",
-  "call_failed",
-  "config_failed",
-  "config_warning",
-  "project_config_skipped",
-  "tool_name_renamed",
-]);
+const MCP_STATUS_KIND_SET: ReadonlySet<string> = new Set(MCP_STATUS_PAYLOAD_KINDS);
 
 export function toMcpStatusPayload(
   input: McpStatusEvent | McpSessionStatus,
@@ -240,7 +229,7 @@ export function toMcpStatusPayload(
         ? source.status.slice("mcp_".length)
         : source.status;
   // MCP 状态是观测性数据:未知 kind 直接跳过,不能把诊断通道升级为会话错误。
-  if (kind === undefined || !MCP_STATUS_PAYLOAD_KINDS.has(kind)) {
+  if (kind === undefined || !MCP_STATUS_KIND_SET.has(kind)) {
     console.error(`[mcp] unknown status event skipped: ${String(kind)}`);
     return undefined;
   }
