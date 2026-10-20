@@ -73,6 +73,7 @@ def test_parser_has_all_commands() -> None:
         "score",
         "report",
         "env",
+        "models",
     }
 
 

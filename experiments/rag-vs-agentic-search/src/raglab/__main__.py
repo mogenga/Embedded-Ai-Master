@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 from .assets import Query
-from .config import ExperimentConfig
+from .config import ExperimentConfig, load_models
 from .env import capture_env, write_env
 from .errors import BlockedError, ConfigurationError, IntakeError, RaglabError
 from .intake import intake_or_raise, load_queries, run_intake
@@ -206,6 +206,28 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_models(args: argparse.Namespace) -> int:
+    """列出模型候选及其可运行状态；不发起任何网络请求。"""
+
+    config = _load_config(Path(args.config))
+    models = load_models(PROJECT_ROOT / "config" / "models.yaml")
+    rows = models.summary()
+    if not rows:
+        print("未配置任何模型候选：请复制 config/models.example.yaml 为 models.yaml")
+        payload = {"usable_llm": 0, "usable_embedding": 0, "candidates": []}
+    else:
+        payload = {
+            "usable_llm": len(models.usable_llm()),
+            "usable_embedding": len(models.usable_embedding()),
+            "candidates": rows,
+        }
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    # 有候选但一个都跑不了时，明确以非零码提示，不让调用方误以为就绪。
+    if rows and payload["usable_llm"] == 0 and payload["usable_embedding"] == 0:
+        raise BlockedError("所有模型候选都不可用，见上面的 block_reason")
+    return 0
+
+
 def cmd_env(args: argparse.Namespace) -> int:
     config = _load_config(Path(args.config))
     corpus_dir, _, _ = _project_paths(config)
@@ -269,6 +291,9 @@ def build_parser() -> argparse.ArgumentParser:
     env_parser = sub.add_parser("env", help="记录运行环境（§9.2 / T9）")
     env_parser.add_argument("--out", help="env.json 输出路径")
     env_parser.set_defaults(func=cmd_env)
+
+    models_parser = sub.add_parser("models", help="列出模型候选与可运行状态（不触网）")
+    models_parser.set_defaults(func=cmd_models)
 
     for name, reason in (
         ("index", "需要 M1 语料与 embedding 端点"),

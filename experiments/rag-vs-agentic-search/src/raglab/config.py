@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import importlib.util
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,24 @@ import yaml
 from .errors import ConfigurationError
 
 SCHEMES = ("A", "B", "C", "C_prime", "D")
+
+# 密钥只经环境变量注入，绝不写入版本库（spec §9.2）。
+DEFAULT_LLM_KEY_ENV = "RAGLAB_LLM_API_KEY"
+DEFAULT_EMBED_KEY_ENV = "RAGLAB_EMBED_API_KEY"
+
+# 可选依赖组 → 用于探测的模块名。用于判断本地候选是否真的能跑。
+OPTIONAL_GROUP_MODULES: dict[str, str] = {
+    "local-embed": "sentence_transformers",
+}
+
+
+def _optional_available(group: str) -> bool:
+    """可选依赖组是否已安装；组名未知时按不可用处理（不猜）。"""
+
+    module = OPTIONAL_GROUP_MODULES.get(group)
+    if module is None:
+        return False
+    return importlib.util.find_spec(module) is not None
 
 
 def _load_yaml(path: Path) -> Any:
@@ -36,8 +57,10 @@ class ModelConfig:
 
     llm_base_url: str | None = None
     llm_model: str | None = None
+    llm_api_key_env: str = DEFAULT_LLM_KEY_ENV
     embedding_base_url: str | None = None
     embedding_model: str | None = None
+    embedding_api_key_env: str = DEFAULT_EMBED_KEY_ENV
 
     @property
     def llm_configured(self) -> bool:
@@ -46,6 +69,18 @@ class ModelConfig:
     @property
     def embedding_configured(self) -> bool:
         return bool(self.embedding_base_url and self.embedding_model)
+
+    def llm_api_key(self, env: Mapping[str, str] | None = None) -> str | None:
+        """从环境变量读密钥；未设置返回 None（本地网关可不带 key）。"""
+
+        source = os.environ if env is None else env
+        value = source.get(self.llm_api_key_env)
+        return value or None
+
+    def embedding_api_key(self, env: Mapping[str, str] | None = None) -> str | None:
+        source = os.environ if env is None else env
+        value = source.get(self.embedding_api_key_env)
+        return value or None
 
 
 @dataclass(frozen=True)
@@ -72,9 +107,19 @@ class ExperimentConfig:
         model = ModelConfig(
             llm_base_url=model_raw.get("llm_base_url"),
             llm_model=model_raw.get("llm_model"),
+            llm_api_key_env=model_raw.get("llm_api_key_env", DEFAULT_LLM_KEY_ENV),
             embedding_base_url=model_raw.get("embedding_base_url"),
             embedding_model=model_raw.get("embedding_model"),
+            embedding_api_key_env=model_raw.get(
+                "embedding_api_key_env", DEFAULT_EMBED_KEY_ENV
+            ),
         )
+        for field_name in ("llm_api_key_env", "embedding_api_key_env"):
+            value = getattr(model, field_name)
+            if not isinstance(value, str) or not value:
+                raise ConfigurationError(
+                    f"experiment.yaml model.{field_name} 必须是非空字符串"
+                )
 
         navigation = data.get("navigation_files") or []
         if not isinstance(navigation, list) or not all(
@@ -102,6 +147,151 @@ class ExperimentConfig:
             model=model,
             schemes=schemes,
         )
+
+
+@dataclass(frozen=True)
+class ModelCandidate:
+    """``models.yaml`` 中的一个候选端点。
+
+    ``api_key`` 只可能来自本地 ``config/models.yaml``（已 gitignore）；模板文件里恒为 null。
+    """
+
+    id: str
+    kind: str
+    base_url: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    temperature: float = 0.0
+    repeat: int = 1
+    supports_seed: bool = False
+    requires: str | None = None
+
+    @property
+    def usable(self) -> bool:
+        """候选是否真的能跑。
+
+        - ``openai_compatible``：必须有 ``base_url`` 与 ``model``。
+        - ``local``：必须有 ``model``，且声明在 ``requires`` 里的可选依赖已安装。
+          只写 ``model`` 但依赖缺失的候选**不算可用**——否则会把跑不起来的候选
+          选进实验，再在跑批时失败。
+        """
+
+        if self.kind == "local":
+            if self.model is None:
+                return False
+            return self.requires is None or _optional_available(self.requires)
+        return bool(self.base_url and self.model)
+
+    @property
+    def block_reason(self) -> str | None:
+        """不可用的原因；可用时返回 None。"""
+
+        if self.usable:
+            return None
+        if self.kind == "local":
+            if self.model is None:
+                return "缺少 model"
+            return f"缺少可选依赖组 {self.requires}"
+        missing = [
+            name
+            for name, value in (("base_url", self.base_url), ("model", self.model))
+            if not value
+        ]
+        return f"缺少 {'/'.join(missing)}"
+
+    def redacted(self) -> dict[str, Any]:
+        """用于日志与 env.json：不暴露密钥。"""
+
+        return {
+            "id": self.id,
+            "kind": self.kind,
+            "base_url": self.base_url,
+            "model": self.model,
+            "api_key_set": self.api_key is not None,
+            "temperature": self.temperature,
+            "repeat": self.repeat,
+            "supports_seed": self.supports_seed,
+        }
+
+
+@dataclass(frozen=True)
+class ModelsConfig:
+    llm: tuple[ModelCandidate, ...] = ()
+    embedding: tuple[ModelCandidate, ...] = ()
+
+    def usable_llm(self) -> list[ModelCandidate]:
+        return [candidate for candidate in self.llm if candidate.usable]
+
+    def usable_embedding(self) -> list[ModelCandidate]:
+        return [candidate for candidate in self.embedding if candidate.usable]
+
+    def summary(self) -> list[dict[str, Any]]:
+        """每个候选的可运行状态；供 CLI 与 env.json 记录。"""
+
+        rows: list[dict[str, Any]] = []
+        for section, candidates in (("llm", self.llm), ("embedding", self.embedding)):
+            for candidate in candidates:
+                row = candidate.redacted()
+                row["section"] = section
+                row["usable"] = candidate.usable
+                row["block_reason"] = candidate.block_reason
+                rows.append(row)
+        return rows
+
+
+def _parse_candidates(raw: Any, *, where: str) -> tuple[ModelCandidate, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigurationError(f"{where} 必须是数组")
+    candidates: list[ModelCandidate] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            raise ConfigurationError(f"{where}[{index}] 必须是映射")
+        candidate_id = item.get("id")
+        kind = item.get("kind")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            raise ConfigurationError(f"{where}[{index}].id 必须是非空字符串")
+        if not isinstance(kind, str) or not kind:
+            raise ConfigurationError(f"{where}[{index}].kind 必须是非空字符串")
+        api_key = item.get("api_key")
+        if api_key is not None and not isinstance(api_key, str):
+            raise ConfigurationError(f"{where}[{index}].api_key 必须是字符串或 null")
+        candidates.append(
+            ModelCandidate(
+                id=candidate_id,
+                kind=kind,
+                base_url=item.get("base_url"),
+                model=item.get("model"),
+                api_key=api_key or None,
+                temperature=float(item.get("temperature", 0.0) or 0.0),
+                repeat=int(item.get("repeat", 1) or 1),
+                supports_seed=bool(item.get("supports_seed", False)),
+                requires=item.get("requires"),
+            )
+        )
+    return tuple(candidates)
+
+
+def load_models(path: str | Path) -> ModelsConfig:
+    """加载 ``config/models.yaml``；文件不存在时返回空配置（M4 未就绪的合法状态）。"""
+
+    resolved = Path(path)
+    if not resolved.is_file():
+        return ModelsConfig()
+    data = _load_yaml(resolved)
+    if not isinstance(data, dict):
+        raise ConfigurationError(f"{resolved.name} 顶层必须是映射")
+
+    def candidates(section: str) -> tuple[ModelCandidate, ...]:
+        block = data.get(section)
+        if block is None:
+            return ()
+        if not isinstance(block, dict):
+            raise ConfigurationError(f"{resolved.name} 的 {section} 必须是映射")
+        return _parse_candidates(block.get("candidates"), where=f"{section}.candidates")
+
+    return ModelsConfig(llm=candidates("llm"), embedding=candidates("embedding"))
 
 
 @dataclass(frozen=True)

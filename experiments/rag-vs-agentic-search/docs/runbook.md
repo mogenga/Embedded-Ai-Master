@@ -43,14 +43,69 @@ uv run pytest
 
 默认不触网：`raglab.llm` 在未设置 `RAGLAB_LIVE=1` 时抛 `LiveGateError`；客户端测试用 `httpx.MockTransport`。
 
-## live 运行（素材到位后）
+## 配置模型端点与密钥（M4）
+
+两种方式，二选一。**密钥永远不进版本库。**
+
+### 方式一：本地 `config/models.yaml`（推荐）
+
+该文件已被 `.gitignore` 忽略，模板是 `config/models.example.yaml`：
+
+```bash
+cd experiments/rag-vs-agentic-search
+cp config/models.example.yaml config/models.yaml
+```
+
+然后编辑 `config/models.yaml`，填入 `base_url`、`model`、`api_key`：
+
+```yaml
+llm:
+  candidates:
+    - id: remote-llm-1
+      kind: openai_compatible
+      base_url: https://api.example.com/v1
+      model: your-model-name
+      api_key: sk-your-key
+      temperature: 0.0
+      repeat: 3
+```
+
+### 方式二：环境变量
 
 ```bash
 export RAGLAB_LIVE=1
-export RAGLAB_LLM_BASE_URL=...   # M4
-export RAGLAB_LLM_MODEL=...
+export RAGLAB_LLM_BASE_URL=https://api.example.com/v1
+export RAGLAB_LLM_MODEL=<模型名>
+export RAGLAB_LLM_API_KEY=<密钥>
+
+# 方案 A 还需要 embedding 端点
+export RAGLAB_EMBED_BASE_URL=https://api.example.com/v1
+export RAGLAB_EMBED_MODEL=<embedding 模型名>
+export RAGLAB_EMBED_API_KEY=<密钥>
+```
+
+PowerShell：
+
+```powershell
+$env:RAGLAB_LIVE = "1"
+$env:RAGLAB_LLM_BASE_URL = "https://api.example.com/v1"
+$env:RAGLAB_LLM_MODEL = "<模型名>"
+$env:RAGLAB_LLM_API_KEY = "<密钥>"
+```
+
+### 校验与运行
+
+```bash
 uv run raglab run --scheme B
 ```
+
+- `config/models.yaml` 缺失时加载为空配置（M4 未就绪的合法状态），不会报错。
+- `env.json` 只记录 base URL、模型名与 `api_key_set: true/false`，**不记录密钥值**。
+- 提交前自查：`git check-ignore -v config/models.yaml` 应输出匹配行。
+
+- 未设置 API key 时客户端不发 `Authorization` 头（兼容本地网关）。
+- `env.json` 只记录 base URL 与模型名，**不记录密钥**；有测试断言这一点。
+- 环境变量名可在 `config/experiment.yaml` 的 `model.*_api_key_env` 中改写，但值本身永远不进配置。
 
 ## 常见失败
 

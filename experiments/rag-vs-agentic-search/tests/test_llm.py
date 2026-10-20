@@ -72,6 +72,41 @@ def test_chat_surfaces_gateway_error() -> None:
         client.chat([{"role": "user", "content": "hi"}], model="m")
 
 
+def test_api_key_sent_as_bearer_header() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization", "")
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "ok"}}], "usage": {}}
+        )
+
+    client = OpenAIClient(
+        "https://api.example.com/v1",
+        api_key="sk-secret",
+        client=_mock_client(handler),
+        require_live_gate=False,
+    )
+    client.chat([{"role": "user", "content": "hi"}], model="m")
+    assert seen["auth"] == "Bearer sk-secret"
+
+
+def test_no_authorization_header_without_api_key() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["auth"] = request.headers.get("authorization", "")
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "ok"}}], "usage": {}}
+        )
+
+    client = OpenAIClient(
+        "http://localhost:8080/v1", client=_mock_client(handler), require_live_gate=False
+    )
+    client.chat([{"role": "user", "content": "hi"}], model="m")
+    assert seen["auth"] == ""
+
+
 def test_chat_rejects_malformed_response() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": []})

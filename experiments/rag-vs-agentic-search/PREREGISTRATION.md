@@ -50,7 +50,7 @@ H1-H7 定义见 [`docs/rag-vs-agentic-search-todo.md`](../../../docs/rag-vs-agen
 | LLM | 待填 | dev Recall@2 最高；差距 < 2pp 时优先本地/低成本 |
 | Embedding | 本地 bge-m3 类 / API 候选 | 同上 |
 
-端点、模型名与版本写入 `config/models.yaml`；密钥只经环境变量注入，不进版本库。
+端点、模型名与版本写入本地 `config/models.yaml`（已被 `.gitignore` 忽略，模板见 `config/models.example.yaml`）。密钥只能存在于本地文件或环境变量中，**任何情况下不进版本库**；冻结时记录候选 `id` 与 `model`，不记录密钥。
 
 ## 6. 提示词与导航文件
 

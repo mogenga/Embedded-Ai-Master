@@ -67,7 +67,8 @@ experiments/rag-vs-agentic-search/
 ├── docs/                # 实验自己的文档（协议清单、指标映射、标注指南、runbook）
 ├── .gitignore           # 忽略语料、虚拟环境、原始 trace 与缓存
 ├── pyproject.toml       # uv 项目与依赖声明
-├── config/              # experiment.yaml / models.yaml / schemes/*.yaml / prompts/
+├── config/              # experiment.yaml / models.example.yaml / schemes/*.yaml / prompts/
+│                        # 本地 models.yaml 含密钥，已被 .gitignore 忽略
 ├── corpus/              # 导入的语料，不进版本库
 ├── data/                # 评测集 JSONL，进版本库（当前只有 README，无占位数据）
 ├── src/raglab/          # 实验代码（纯逻辑已实现，方案为占位）

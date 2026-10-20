@@ -17,12 +17,18 @@ navigation_files:
   - _about.md
 
 # M4：模型端点。未填写时 A/C/C′ 的离线部分仍可开发，B/D 与 API embedding 一律 BLOCKED。
-# 环境变量优先级：RAGLAB_LLM_BASE_URL / RAGLAB_LLM_MODEL / RAGLAB_EMBED_BASE_URL / RAGLAB_EMBED_MODEL
+#
+# 端点与模型名可写在此处，也可由环境变量覆盖；**API key 只能走环境变量**，
+# 绝不写进本文件或任何进版本库的文件（spec §9.2 / T9）。
+#   RAGLAB_LLM_BASE_URL / RAGLAB_LLM_MODEL / RAGLAB_LLM_API_KEY
+#   RAGLAB_EMBED_BASE_URL / RAGLAB_EMBED_MODEL / RAGLAB_EMBED_API_KEY
 model:
   llm_base_url: null
   llm_model: null
+  llm_api_key_env: RAGLAB_LLM_API_KEY
   embedding_base_url: null
   embedding_model: null
+  embedding_api_key_env: RAGLAB_EMBED_API_KEY
 
 # 方案开关；params 的具体口径见 config/schemes/*.yaml 与 spec §6.3 / §8。
 schemes:

@@ -35,6 +35,46 @@
 
 **翻车与返工**：无。
 
+## 2026-10-20 · models.yaml 改为本地密钥文件
+
+**用户关键原话**：`model.yaml填apikey应该ignore`。
+
+**问题**：`config/models.yaml` 已被 c340423 提交跟踪，在里面填 key 会直接进版本库。
+
+**关键产出**
+
+- `git rm --cached config/models.yaml` 取消跟踪；`.gitignore` 增加 `config/models.yaml` 与环境文件规则。
+- 新增 `config/models.example.yaml` 模板（不含密钥，`api_key: null`），入库。
+- 本地 `config/models.yaml` 保留在磁盘上作可填写的本地副本。
+- **补齐代码缺口**：此前没有任何代码读取 `models.yaml`，填了也不会生效。新增 `ModelCandidate` / `ModelsConfig` / `load_models()`，支持 `api_key`、`usable` 判定与 `redacted()`（日志/`env.json` 用，不暴露密钥）。
+- 测试 155 → **165 passed**：新增模板可解析且无 `sk-`、本地文件被 ignore、本地文件未被跟踪、key 从本地文件加载、`redacted()` 不含密钥、`usable` 判定、四种非法配置拒绝。
+
+**被拒绝或纠偏的内容**
+
+- 未把 `models.example.yaml` 做成"复制即用"的完整配置：`base_url`/`model` 保持 `null`，避免误以为模板里填的就是生效值。
+- `models.yaml` 缺失时返回空 `ModelsConfig` 而非报错——M4 未就绪是合法状态，不应阻塞 C′ 等离线工作。
+
+## 2026-10-20 · 远程 API 密钥接线
+
+**用户关键原话**：`M4的APIKEY填在哪`；`远程API`。
+
+**背景**：此前 `OpenAIClient` 虽接受 `api_key` 参数，但**没有任何代码把环境变量传进去**，M4 即使配了密钥也不会生效。
+
+**关键产出**
+
+- `config.py`：`ModelConfig` 新增 `llm_api_key_env` / `embedding_api_key_env`（默认 `RAGLAB_LLM_API_KEY` / `RAGLAB_EMBED_API_KEY`）与 `llm_api_key()` / `embedding_api_key()` 读取方法；空值报 `ConfigurationError`。
+- `config/experiment.yaml` 与 `config/models.yaml`：声明 `api_key_env` 字段，注明密钥只走环境变量。
+- `docs/runbook.md`：补 bash 与 PowerShell 两套 live 运行的环境变量设置。
+- 测试 148 → **155 passed**：新增 key 默认值、env 读取与覆盖、空名拒绝、Bearer 头发送、无 key 不发头、以及 `env.json` 不含密钥值的断言。
+
+**被拒绝或纠偏的内容**
+
+- **未提供 `.env` 文件方案**：实验目录的 `.gitignore` 没有 `.env` 规则，且代码未引 dotenv；写进 `.env` 有被误提交的风险。统一走环境变量。
+- **未把 key 写进 `experiment.yaml` / `models.yaml`**：spec §9.2 与 T9 明确密钥不入库。
+- 未让 `env.json` 记录密钥：只记 base URL 与模型名，并有测试断言序列化结果不含密钥值。
+
+**遗留**：A/B/D 的实现尚未落地，密钥接线只是让实现阶段可用；当前 `index`/`run` 仍退出码 3。
+
 ## 2026-10-20 · 修 frontmatter + 自建查询集
 
 **用户关键原话**：`修；自建查询集。给我提交信息我自行提交`。

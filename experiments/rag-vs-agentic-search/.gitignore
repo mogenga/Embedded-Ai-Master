@@ -16,3 +16,11 @@ results/runs/
 .cache/
 .uv-cache/
 *.log
+
+# 本地模型配置（可能含 API key）。模板见 config/models.example.yaml
+config/models.yaml
+
+# 本地密钥文件（永不入库）
+.env
+.env.*
+!.env.example

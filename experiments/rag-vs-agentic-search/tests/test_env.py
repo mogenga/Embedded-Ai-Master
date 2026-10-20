@@ -36,6 +36,25 @@ def test_lock_and_manifest_hashes_are_recorded(tmp_path: Path) -> None:
     assert isinstance(env["corpus_manifest_sha256"], str)
 
 
+def test_api_key_in_environment_is_never_recorded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """即使设置了密钥环境变量，env.json 也不得包含其值（T9）。"""
+
+    monkeypatch.setenv("RAGLAB_LLM_API_KEY", "sk-super-secret-value")
+    monkeypatch.setenv("RAGLAB_EMBED_API_KEY", "emb-secret-value")
+    model = ModelConfig(
+        llm_base_url="https://api.example.com/v1",
+        llm_model="remote-model",
+        embedding_base_url="https://api.example.com/v1",
+        embedding_model="remote-embed",
+    )
+    env = capture_env(tmp_path, seed=1, model=model)
+    serialized = json.dumps(env)
+    assert "sk-super-secret-value" not in serialized
+    assert "emb-secret-value" not in serialized
+
+
 def test_gateway_url_recorded_but_no_secret(tmp_path: Path) -> None:
     model = ModelConfig(
         llm_base_url="http://gateway.local/v1",
