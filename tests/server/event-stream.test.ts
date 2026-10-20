@@ -521,6 +521,77 @@ describe("SSE 事件流", () => {
     expect(frames.some((frame) => frame.event === "stream_end")).toBe(false);
   });
 
+  it("实时阶段完全不读的客户端在写超时后收到 slow_consumer 并关闭", async () => {
+    class StalledResponse extends EventEmitter {
+      headersSent = false;
+      destroyed = false;
+      writableEnded = false;
+      statusCode = 0;
+      frames: string[] = [];
+
+      writeHead(): this {
+        this.headersSent = true;
+        return this;
+      }
+
+      flushHeaders(): void {}
+
+      setHeader(): void {}
+
+      write(chunk: string): boolean {
+        this.frames.push(String(chunk));
+        // 实时数据帧永远写不出去;控制帧(stream_error)可以写出。
+        if (String(chunk).startsWith("id: ")) return false;
+        return true;
+      }
+
+      end(): void {
+        this.writableEnded = true;
+        this.emit("finish");
+      }
+    }
+
+    const fake = fakeSource({
+      header: header("open"),
+      followImpl: async function* () {
+        for (let seq = 0; seq < 100; seq += 1) {
+          yield envelope(seq, "x".repeat(4 * 1024));
+        }
+      },
+    });
+    const req = Object.assign(new EventEmitter(), {
+      url: "/api/events?sessionId=s1",
+      method: "GET",
+      headers: {},
+      resume(): void {},
+    });
+    const res = new StalledResponse();
+    const handler = createEventStreamHandler({
+      eventSource: fake.source,
+      liveQueueMax: 2,
+      liveWriteTimeoutMs: 20,
+      heartbeatMs: 1_000,
+    });
+
+    await Promise.race([
+      handler(
+        req as unknown as import("node:http").IncomingMessage,
+        res as unknown as import("node:http").ServerResponse,
+      ),
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("stalled live consumer did not end handler")), 1_000),
+      ),
+    ]);
+
+    const errorFrame = res.frames.find((frame) => frame.includes("stream_error"));
+    expect(errorFrame).toBeDefined();
+    expect(JSON.parse(errorFrame!.split("data: ")[1]!)).toEqual({
+      code: "slow_consumer",
+      lastSeq: -1,
+    });
+    expect(res.writableEnded).toBe(true);
+  });
+
   it("客户端断开触发 follow abort", async () => {
     let followSignal: AbortSignal | undefined;
     const { url } = await startStream({

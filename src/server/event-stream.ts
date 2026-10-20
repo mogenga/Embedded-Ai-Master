@@ -11,6 +11,7 @@ export interface EventStreamOptions {
   heartbeatMs?: number;
   liveQueueMax?: number;
   replayTimeoutMs?: number;
+  liveWriteTimeoutMs?: number;
 }
 
 const DEFAULT_RETRY_MS = 3_000;
@@ -153,6 +154,14 @@ export function createEventStreamHandler(
     && opts.replayTimeoutMs > 0
       ? Math.floor(opts.replayTimeoutMs)
       : Math.max(1, heartbeatMs * 2);
+  // 实时阶段的单帧写超时。没有它时,一个停止读取的客户端会让 consume 永远等在 drain 上,
+  // 队列溢出分支永远不可达,slow_consumer 与连接关闭都不会发生。
+  const liveWriteTimeoutMs =
+    opts.liveWriteTimeoutMs !== undefined
+    && Number.isFinite(opts.liveWriteTimeoutMs)
+    && opts.liveWriteTimeoutMs > 0
+      ? Math.floor(opts.liveWriteTimeoutMs)
+      : replayTimeoutMs;
 
   return async function handler(req, res): Promise<void> {
     let cursor: RequestCursor;
@@ -311,8 +320,12 @@ export function createEventStreamHandler(
             continue;
           }
           if (event.seq <= writtenSeq) continue;
-          const outcome = await writeBlock(res, eventFrame(event), signal);
+          const outcome = await writeBlock(res, eventFrame(event), signal, liveWriteTimeoutMs);
           if (outcome === "aborted") return { kind: "aborted" };
+          if (outcome === "timeout") {
+            // 单帧写不出去即视为慢客户端:按溢出语义发 stream_error 后关闭。
+            return { kind: "overflow" };
+          }
           if (outcome === "error") {
             return { kind: "error", error: new Error("SSE write failed") };
           }
