@@ -80,6 +80,7 @@ describe('KbService', () => {
     writeFixture(root, 'index.yaml', INDEX_FIXTURE)
     writeFixture(root, '_inbox.md', INBOX_FIXTURE)
     writeFixture(root, '_about.md', ABOUT_FIXTURE)
+    writeFixture(root, 'cases/_about.md', ABOUT_FIXTURE)
     writeFixture(root, 'protocols/uart/no-output.md', NO_OUTPUT_FIXTURE)
     writeFixture(root, 'protocols/uart/garbled-data.md', GARBLED_FIXTURE)
     writeFixture(root, 'notes.txt', 'UART 但扩展名不在白名单\n')
@@ -179,6 +180,11 @@ describe('KbService', () => {
       expect(result.content).toContain('UART 待归档候选')
     })
 
+    it('_about.md 与 cases/_about.md 按 basename 标记为 unreviewed', () => {
+      expect(service.read('_about.md').reviewStatus).toBe('unreviewed')
+      expect(service.read('cases/_about.md').reviewStatus).toBe('unreviewed')
+    })
+
     it('普通 markdown 标记为 reviewed', () => {
       expect(service.read('protocols/uart/garbled-data.md').reviewStatus).toBe('reviewed')
     })
@@ -276,7 +282,7 @@ describe('KbService', () => {
     it('统计 markdown 文件数、索引条目与索引存在性', () => {
       expect(service.status()).toEqual({
         root: realpathSync(root),
-        fileCount: 5,
+        fileCount: 6,
         indexEntries: 3,
         indexPresent: true,
       })

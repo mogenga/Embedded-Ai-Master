@@ -151,7 +151,7 @@ export class KbService {
       path: relative,
       content,
       frontmatterParsed: parsed.parsed,
-      reviewStatus: path.posix.basename(relative) === '_inbox.md' ? 'unreviewed' : 'reviewed',
+      reviewStatus: NAVIGATION_FILES.has(path.posix.basename(relative)) ? 'unreviewed' : 'reviewed',
     }
     if (parsed.parsed) result.frontmatter = parsed.data
     return result
