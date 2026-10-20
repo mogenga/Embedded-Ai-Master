@@ -78,6 +78,17 @@ export interface PermissionModel {
   reason: string;
 }
 
+export interface ApprovalModel {
+  requestId: string;
+  callId: string;
+  tool: string;
+  reason: string;
+  preset: string;
+  paramsPreviewText?: string;
+  deadlineAt?: string;
+  status: "pending" | "allowed" | "denied" | "expired" | "aborted";
+}
+
 export type TranscriptEvent =
   | { id: string; kind: "user"; text: string }
   | { id: string; kind: "assistant"; text: string }
@@ -86,6 +97,7 @@ export type TranscriptEvent =
   | { id: string; kind: "verdict"; verdict: VerdictModel }
   | { id: string; kind: "guard"; guard: GuardModel }
   | { id: string; kind: "permission"; permission: PermissionModel }
+  | { id: string; kind: "approval"; approval: ApprovalModel }
   | { id: string; kind: "interrupted"; reason: string };
 
 export interface TranscriptView {
@@ -310,6 +322,33 @@ function toGuardModel(raw: Record<string, unknown>): GuardModel {
   };
 }
 
+const PREVIEW_MAX_KEYS = 8;
+const PREVIEW_MAX_VALUE_LENGTH = 200;
+
+function previewValueText(value: unknown): string {
+  if (typeof value === "string") return value.slice(0, PREVIEW_MAX_VALUE_LENGTH);
+  const text = JSON.stringify(value) ?? String(value);
+  return text.slice(0, PREVIEW_MAX_VALUE_LENGTH);
+}
+
+function flattenPreview(preview: unknown): string | undefined {
+  if (!isRecord(preview)) return undefined;
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(preview)) {
+    if (parts.length >= PREVIEW_MAX_KEYS) break;
+    parts.push(`${key}=${previewValueText(value)}`);
+  }
+  return parts.length > 0 ? parts.join(", ") : undefined;
+}
+
+function approvalStatus(payload: Record<string, unknown>): ApprovalModel["status"] {
+  if (payload.effective === "allow") return "allowed";
+  const reason = asString(payload.reason) ?? "";
+  if (reason.startsWith("approval_timeout")) return "expired";
+  if (reason.startsWith("approval_aborted")) return "aborted";
+  return "denied";
+}
+
 type UsageModel = NonNullable<TranscriptView["usage"]>;
 
 function mergeUsage(current: UsageModel | undefined, payload: Record<string, unknown>): UsageModel {
@@ -374,6 +413,7 @@ interface ViewMeta {
 export function transcriptFromSession(events: readonly SessionEvent[]): TranscriptView {
   const out: TranscriptEvent[] = [];
   const tools = new Map<string, Extract<TranscriptEvent, { kind: "tool" }>>();
+  const approvals = new Map<string, Extract<TranscriptEvent, { kind: "approval" }>>();
   let usage: UsageModel | undefined;
   let cost: number | undefined;
   let interruptReason: string | undefined;
@@ -440,23 +480,52 @@ export function transcriptFromSession(events: readonly SessionEvent[]): Transcri
         if (card !== undefined) card.tool.state = "running";
         break;
       }
+      case "approval_request": {
+        const callId = asString(payload.callId);
+        if (callId === undefined) break;
+        const approval: ApprovalModel = {
+          requestId: asString(payload.requestId) ?? "",
+          callId,
+          tool: asString(payload.tool) ?? "",
+          reason: asString(payload.reason) ?? "",
+          preset: asString(payload.preset) ?? "",
+          status: "pending",
+        };
+        const deadlineAt = asString(payload.deadlineAt);
+        if (deadlineAt !== undefined) approval.deadlineAt = deadlineAt;
+        const previewText = flattenPreview(payload.paramsPreview);
+        if (previewText !== undefined) approval.paramsPreviewText = previewText;
+        const entry: Extract<TranscriptEvent, { kind: "approval" }> = {
+          id: `ev-${event.seq}`,
+          kind: "approval",
+          approval,
+        };
+        out.push(entry);
+        approvals.set(callId, entry);
+        break;
+      }
       case "permission_decision": {
         const callId = asString(payload.callId);
         if (callId === undefined) break;
-        out.push({
-          id: `ev-${event.seq}`,
-          kind: "permission",
-          permission: {
-            callId,
-            tool: asString(payload.tool) ?? "",
-            action:
-              payload.action === "allow" || payload.action === "ask" || payload.action === "deny"
-                ? payload.action
-                : "deny",
-            effective: payload.effective === "allow" ? "allow" : "deny",
-            reason: asString(payload.reason) ?? "",
-          },
-        });
+        const approval = approvals.get(callId);
+        if (approval !== undefined) {
+          approval.approval.status = approvalStatus(payload);
+        } else {
+          out.push({
+            id: `ev-${event.seq}`,
+            kind: "permission",
+            permission: {
+              callId,
+              tool: asString(payload.tool) ?? "",
+              action:
+                payload.action === "allow" || payload.action === "ask" || payload.action === "deny"
+                  ? payload.action
+                  : "deny",
+              effective: payload.effective === "allow" ? "allow" : "deny",
+              reason: asString(payload.reason) ?? "",
+            },
+          });
+        }
         if (payload.effective !== "allow") {
           const card = tools.get(callId);
           if (card !== undefined) {
@@ -555,6 +624,7 @@ export const TRANSCRIPT_KINDS: ReadonlySet<string> = new Set([
   "verdict",
   "guard",
   "permission",
+  "approval",
   "interrupted",
 ]);
 const LOOP_KINDS = new Set(["model_message", "tool_use", "tool_result", "turn_end", "compacted", "done"]);

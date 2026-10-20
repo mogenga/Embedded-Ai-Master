@@ -31,6 +31,64 @@ function lastTool(events: readonly SessionEvent[]): Extract<TranscriptEvent, { k
   return view.events.filter((e) => e.kind === "tool").at(-1) as Extract<TranscriptEvent, { kind: "tool" }>;
 }
 
+function approvalEvents(): SessionEvent[] {
+  return [
+    { seq: 1, ts: "t", type: "user", payload: { content: "症状" } },
+    {
+      seq: 2,
+      ts: "t",
+      type: "assistant",
+      payload: { content: "", toolCalls: [{ id: "c1", name: "mem_write", arguments: { address: "0x0", value: "1" } }] },
+    },
+    {
+      seq: 3,
+      ts: "t",
+      parent: 2,
+      type: "approval_request",
+      payload: {
+        requestId: "req-1",
+        callId: "c1",
+        tool: "mem_write",
+        action: "ask",
+        access: "write",
+        reason: "write 需要人工确认",
+        preset: "read-only",
+        paramsDigest: "digest",
+        paramsKeys: ["address", "value"],
+        paramsPreview: { address: "0x0800_0000", value: "1" },
+        deadlineAt: "2026-10-20T10:00:30.000Z",
+      },
+    },
+  ];
+}
+
+function decisionEvent(reason: string, effective: "allow" | "deny", callId = "c1"): SessionEvent {
+  return {
+    seq: 4,
+    ts: "t",
+    parent: 2,
+    type: "permission_decision",
+    payload: {
+      callId,
+      tool: "mem_write",
+      action: effective === "allow" ? "allow" : "deny",
+      effective,
+      reason,
+      preset: "read-only",
+      source: "builtin",
+      paramsDigest: "digest",
+      paramsKeys: ["address", "value"],
+    },
+  };
+}
+
+function approvalOf(events: readonly SessionEvent[]): Extract<TranscriptEvent, { kind: "approval" }> {
+  return transcriptFromSession(events).events.find((e) => e.kind === "approval") as Extract<
+    TranscriptEvent,
+    { kind: "approval" }
+  >;
+}
+
 describe("transcript", () => {
   it("user 事件渲染为用户气泡", () => {
     const v = transcriptFromSession(makeSessionEvents());
@@ -286,6 +344,86 @@ describe("transcript", () => {
 
   it("TRANSCRIPT_KINDS 包含 permission", () => {
     expect([...TRANSCRIPT_KINDS]).toContain("permission");
+  });
+
+  it("approval_request 投影为 pending 审批卡", () => {
+    const approval = approvalOf(approvalEvents());
+    expect(approval).toMatchObject({
+      id: "ev-3",
+      kind: "approval",
+      approval: {
+        requestId: "req-1",
+        callId: "c1",
+        tool: "mem_write",
+        reason: "write 需要人工确认",
+        preset: "read-only",
+        deadlineAt: "2026-10-20T10:00:30.000Z",
+        status: "pending",
+      },
+    });
+    expect([...TRANSCRIPT_KINDS]).toContain("approval");
+  });
+
+  it("paramsPreview 扁平化为展示文本：最多 8 键、单值 200 字符且不改写原 payload", () => {
+    const preview: Record<string, unknown> = {};
+    for (let i = 1; i <= 12; i += 1) preview[`k${i}`] = i === 1 ? "x".repeat(250) : `v${i}`;
+    const events = approvalEvents();
+    events[2].payload = { ...events[2].payload, paramsPreview: preview };
+
+    const text = approvalOf(events).approval.paramsPreviewText;
+    expect(typeof text).toBe("string");
+    expect(text).toContain("k1=");
+    expect(text).toContain("x".repeat(200));
+    expect(text).not.toContain("x".repeat(201));
+    expect(text).toContain("k8=");
+    expect(text).not.toContain("k9=");
+    expect((text as string).split(", ")).toHaveLength(8);
+    expect(preview.k1).toBe("x".repeat(250));
+    expect(events[2].payload.paramsPreview).toBe(preview);
+  });
+
+  it("无 paramsPreview 时 paramsPreviewText 缺省", () => {
+    const events = approvalEvents();
+    const payload = { ...events[2].payload };
+    delete payload.paramsPreview;
+    events[2].payload = payload;
+    expect(approvalOf(events).approval.paramsPreviewText).toBeUndefined();
+  });
+
+  it("permission_decision allow 命中审批卡：status allowed 且不新增 permission 事件", () => {
+    const view = transcriptFromSession([...approvalEvents(), decisionEvent("user_approved", "allow")]);
+    const approvals = view.events.filter((event) => event.kind === "approval") as Array<
+      Extract<TranscriptEvent, { kind: "approval" }>
+    >;
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0].approval.status).toBe("allowed");
+    expect(view.events.some((event) => event.kind === "permission")).toBe(false);
+  });
+
+  it.each([
+    ["approval_timeout: 30s", "expired"],
+    ["approval_aborted: user", "aborted"],
+    ["user_denied", "denied"],
+  ])("permission_decision deny %s → %s", (reason, status) => {
+    const view = transcriptFromSession([...approvalEvents(), decisionEvent(reason, "deny")]);
+    const approvals = view.events.filter((event) => event.kind === "approval") as Array<
+      Extract<TranscriptEvent, { kind: "approval" }>
+    >;
+    expect(approvals).toHaveLength(1);
+    expect(approvals[0].approval.status).toBe(status);
+    expect(view.events.some((event) => event.kind === "permission")).toBe(false);
+    const tool = view.events.find((event) => event.kind === "tool") as Extract<TranscriptEvent, { kind: "tool" }>;
+    expect(tool.tool.state).toBe("failed");
+  });
+
+  it("callId 未命中审批卡时 permission_decision 仍生成 permission 事件", () => {
+    const view = transcriptFromSession([...approvalEvents(), decisionEvent("user_denied", "deny", "c-other")]);
+    expect(view.events.some((event) => event.kind === "permission")).toBe(true);
+
+    const approvals = view.events.filter((event) => event.kind === "approval") as Array<
+      Extract<TranscriptEvent, { kind: "approval" }>
+    >;
+    expect(approvals[0].approval.status).toBe("pending");
   });
 
   it("mcp_status 与 device_status 不进入正文事件", () => {
