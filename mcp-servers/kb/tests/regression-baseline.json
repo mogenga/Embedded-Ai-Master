@@ -9,17 +9,18 @@
   },
   "index": {
     "total": 50,
-    "recallAt2": 0.46,
-    "hitAt1": 0.4,
-    "mrr": 0.43
+    "recallAt2": 0.44,
+    "hitAt1": 0.38,
+    "mrr": 0.41
   },
   "search": {
     "total": 30,
-    "hitAt1": 0.43333333333333335
+    "hitAt1": 0.13333333333333333,
+    "goldInTop20": 0.43333333333333335
   },
   "negatives": {
     "total": 25,
-    "refusalRate": 0.56
+    "refusalRate": 0.84
   },
   "layers": {
     "goldIndexed": 69,

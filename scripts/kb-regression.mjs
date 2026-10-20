@@ -158,7 +158,7 @@ function printTable(report) {
   console.log("");
   console.log("search track");
   console.log(
-    `  total ${report.search.total} | Hit@1 ${formatRate(report.search.hitAt1)} | firstHitGold ${report.search.firstHitGold}`,
+    `  total ${report.search.total} | Hit@1 ${formatRate(report.search.hitAt1)} | goldInTop20 ${formatRate(report.search.goldInTop20)}`,
   );
   console.log("");
   console.log("negatives");
@@ -274,7 +274,7 @@ async function main() {
   const search = {
     total: 0,
     hitAt1: 0,
-    firstHitGold: 0,
+    goldInTop20: 0,
     misses: [],
   };
   for (const query of searchQueries) {
@@ -291,12 +291,12 @@ async function main() {
     }
     const result = service.search(tokens, SEARCH_LIMIT);
     const hitPaths = [...new Set(result.hits.map((hit) => hit.path))];
-    const goldHit = query.gold.some((gold) => hitPaths.includes(gold));
-    if (goldHit) search.hitAt1 += 1;
+    const goldInTop20 = query.gold.some((gold) => hitPaths.includes(gold));
+    if (goldInTop20) search.goldInTop20 += 1;
     if (result.hits.length > 0 && query.gold.includes(result.hits[0].path)) {
-      search.firstHitGold += 1;
+      search.hitAt1 += 1;
     }
-    if (!goldHit) {
+    if (!goldInTop20) {
       search.misses.push({
         id: query.id,
         gold: query.gold,
@@ -347,7 +347,7 @@ async function main() {
     search: {
       total: search.total,
       hitAt1: rate(search.hitAt1, search.total),
-      firstHitGold: search.firstHitGold,
+      goldInTop20: rate(search.goldInTop20, search.total),
       misses: search.misses,
     },
     negatives: {
@@ -388,6 +388,7 @@ async function main() {
       search: {
         total: report.search.total,
         hitAt1: report.search.hitAt1,
+        goldInTop20: report.search.goldInTop20,
       },
       negatives: {
         total: report.negatives.total,

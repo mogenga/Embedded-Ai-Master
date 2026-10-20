@@ -19,7 +19,7 @@ interface NegativeRecord {
 
 interface RegressionBaseline {
   index: { total: number; recallAt2: number; hitAt1: number; mrr: number }
-  search: { total: number; hitAt1: number }
+  search: { total: number; hitAt1: number; goldInTop20: number }
   negatives: { total: number; refusalRate: number }
 }
 
@@ -63,6 +63,11 @@ if (missingAssets.length === 0 && !existsSync(BASELINE_PATH)) {
   throw new Error(`缺少回归基线: ${BASELINE_PATH}`)
 }
 
+const baseline =
+  missingAssets.length === 0
+    ? (JSON.parse(readFileSync(BASELINE_PATH, 'utf8')) as RegressionBaseline)
+    : undefined
+
 const suite = missingAssets.length === 0 ? describe : describe.skip
 const suiteName =
   missingAssets.length === 0
@@ -70,38 +75,52 @@ const suiteName =
     : `KB 双轨回归（已跳过：缺少 ${missingAssets.join('、')}）`
 
 suite(suiteName, () => {
-  const baseline = JSON.parse(readFileSync(BASELINE_PATH, 'utf8')) as RegressionBaseline
-  const queries = readJsonl<QueryRecord>(QUERIES_PATH)
-  const negatives = readJsonl<NegativeRecord>(NEGATIVES_PATH)
+  const expected = baseline as RegressionBaseline
+  const queries = missingAssets.length === 0 ? readJsonl<QueryRecord>(QUERIES_PATH) : []
+  const negatives = missingAssets.length === 0 ? readJsonl<NegativeRecord>(NEGATIVES_PATH) : []
   const service = new KbService(KB_ROOT)
 
-  it('index 轨 Recall@2 不低于基线', () => {
+  it('index 轨 Recall@2 / Hit@1 / MRR 不低于基线', () => {
     const indexQueries = queries.filter((query) => query.track === 'index')
     let recallSum = 0
+    let hitAt1 = 0
+    let mrrSum = 0
     for (const query of indexQueries) {
       const result = service.lookup(query.text, LOOKUP_LIMIT)
       const candidatePaths = result.candidates.map((candidate) => candidate.path)
       const matched = query.gold.filter((gold) => candidatePaths.includes(gold))
       recallSum += matched.length / query.gold.length
+      const rank = candidatePaths.findIndex((candidate) => query.gold.includes(candidate))
+      if (rank === 0) hitAt1 += 1
+      if (rank >= 0) mrrSum += 1 / (rank + 1)
     }
-    const recallAt2 = indexQueries.length === 0 ? 0 : recallSum / indexQueries.length
-    expect(indexQueries.length).toBe(baseline.index.total)
-    expect(recallAt2).toBeGreaterThanOrEqual(baseline.index.recallAt2)
+    const total = indexQueries.length
+    expect(total).toBe(expected.index.total)
+    expect(total === 0 ? 0 : recallSum / total).toBeGreaterThanOrEqual(
+      expected.index.recallAt2,
+    )
+    expect(total === 0 ? 0 : hitAt1 / total).toBeGreaterThanOrEqual(expected.index.hitAt1)
+    expect(total === 0 ? 0 : mrrSum / total).toBeGreaterThanOrEqual(expected.index.mrr)
   })
 
-  it('search 轨 Hit@1 不低于基线', () => {
+  it('search 轨严格 Hit@1 与 goldInTop20 不低于基线', () => {
     const searchQueries = queries.filter((query) => query.track === 'search')
-    let hits = 0
+    let hitAt1 = 0
+    let goldInTop20 = 0
     for (const query of searchQueries) {
       const tokens = extractTokens(query.text)
       if (tokens.length === 0) continue
       const result = service.search(tokens, SEARCH_LIMIT)
       const hitPaths = new Set(result.hits.map((hit) => hit.path))
-      if (query.gold.some((gold) => hitPaths.has(gold))) hits += 1
+      if (result.hits.length > 0 && query.gold.includes(result.hits[0].path)) hitAt1 += 1
+      if (query.gold.some((gold) => hitPaths.has(gold))) goldInTop20 += 1
     }
-    const hitAt1 = searchQueries.length === 0 ? 0 : hits / searchQueries.length
-    expect(searchQueries.length).toBe(baseline.search.total)
-    expect(hitAt1).toBeGreaterThanOrEqual(baseline.search.hitAt1)
+    const total = searchQueries.length
+    expect(total).toBe(expected.search.total)
+    expect(total === 0 ? 0 : hitAt1 / total).toBeGreaterThanOrEqual(expected.search.hitAt1)
+    expect(total === 0 ? 0 : goldInTop20 / total).toBeGreaterThanOrEqual(
+      expected.search.goldInTop20,
+    )
   })
 
   it('负样本拒答率不低于基线', () => {
@@ -111,7 +130,7 @@ suite(suiteName, () => {
       if (result.found === false) refused += 1
     }
     const refusalRate = negatives.length === 0 ? 0 : refused / negatives.length
-    expect(negatives.length).toBe(baseline.negatives.total)
-    expect(refusalRate).toBeGreaterThanOrEqual(baseline.negatives.refusalRate)
+    expect(negatives.length).toBe(expected.negatives.total)
+    expect(refusalRate).toBeGreaterThanOrEqual(expected.negatives.refusalRate)
   })
 })

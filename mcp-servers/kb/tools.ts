@@ -79,9 +79,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
     annotations: { readOnlyHint: true },
     handler: withSchema(lookupSchema, async (args) => {
       try {
-        const result = service.lookup(args.query, args.limit)
-        if (result.reason === 'empty_query') return fail('empty_query', 'query 不能为空')
-        return ok(result)
+        return ok(service.lookup(args.query, args.limit))
       } catch (error) {
         if (error instanceof KbServiceError) return fail(error.code, error.message)
         return fail('index_invalid', errorMessage(error))

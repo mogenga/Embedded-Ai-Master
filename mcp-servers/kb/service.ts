@@ -65,10 +65,72 @@ const DEFAULT_SEARCH_LIMIT = 20
 const TAG_WEIGHT = 2
 const CONFIDENCE_THRESHOLD = 1.75
 const OOV_PENALTY = 0.75
+const TECH_COVERAGE_RATIO = 0.5
 const QUERY_TOKEN_PATTERN = /0x[0-9A-Fa-f]+|[A-Za-z_][A-Za-z0-9_]*/g
 const CJK_PATTERN = /[\u4e00-\u9fff]/
 const PURE_ASCII_WORD = /^[A-Za-z][A-Za-z0-9_]*$/
 const BOUNDARY_PATTERN_CACHE = new Map<string, RegExp>()
+const ENGLISH_STOPWORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'are',
+  'as',
+  'at',
+  'be',
+  'but',
+  'by',
+  'can',
+  'could',
+  'did',
+  'do',
+  'does',
+  'for',
+  'from',
+  'had',
+  'has',
+  'have',
+  'how',
+  'if',
+  'in',
+  'into',
+  'is',
+  'it',
+  'its',
+  'no',
+  'not',
+  'of',
+  'on',
+  'or',
+  'our',
+  'should',
+  'so',
+  'than',
+  'that',
+  'the',
+  'their',
+  'then',
+  'there',
+  'these',
+  'they',
+  'this',
+  'to',
+  'was',
+  'we',
+  'were',
+  'what',
+  'when',
+  'where',
+  'which',
+  'who',
+  'why',
+  'will',
+  'with',
+  'would',
+  'you',
+  'your',
+])
+const GENERIC_TECH_TOKENS = new Set(['cpu', 'mcu', 'soc'])
 
 function compareText(left: string, right: string): number {
   if (left < right) return -1
@@ -125,6 +187,44 @@ function extractQueryTokens(query: string): string[] {
   return [...seen]
 }
 
+function extractTechTokens(query: string): string[] {
+  const seen = new Set<string>()
+  for (const match of query.matchAll(QUERY_TOKEN_PATTERN)) {
+    const raw = match[0]
+    if (raw.length < 2) continue
+    const normalized = raw.toLowerCase()
+    if (seen.has(normalized)) continue
+    if (GENERIC_TECH_TOKENS.has(normalized)) continue
+    const isAcronym = /^[A-Z][A-Z0-9_]+$/.test(raw)
+    if (!isAcronym && ENGLISH_STOPWORDS.has(normalized)) continue
+    seen.add(normalized)
+  }
+  return [...seen]
+}
+
+function entrySearchText(entry: IndexEntry): string {
+  return [entry.title, entry.summary, entry.path, ...entry.keywords, ...entry.tags]
+    .join('\n')
+    .toLowerCase()
+}
+
+function countTechCoverage(entry: IndexEntry, techTokens: string[]): number {
+  if (techTokens.length === 0) return 0
+  const text = entrySearchText(entry)
+  let covered = 0
+  for (const token of techTokens) {
+    if (matchesToken(text, token)) covered += 1
+  }
+  return covered
+}
+
+function hasEnoughTechCoverage(covered: number, total: number): boolean {
+  if (total === 0) return true
+  if (covered === 0) return false
+  if (total === 1) return true
+  return covered / total > TECH_COVERAGE_RATIO
+}
+
 function buildVocabulary(entries: IndexEntry[]): Set<string> {
   const vocabulary = new Set<string>()
   for (const entry of entries) {
@@ -173,9 +273,19 @@ export class KbService {
 
     const needle = trimmed.toLowerCase()
     const factor = confidenceFactor(trimmed, buildVocabulary(entries))
-    const scored = entries
-      .map((entry) => ({ entry, score: scoreEntry(entry, needle) * factor }))
+    const techTokens = extractTechTokens(trimmed)
+    const lexical = entries
+      .map((entry) => ({
+        entry,
+        score: scoreEntry(entry, needle) * factor,
+        techCovered: countTechCoverage(entry, techTokens),
+      }))
       .filter((candidate) => candidate.score > 0)
+
+    const scored = lexical
+      .filter((candidate) =>
+        hasEnoughTechCoverage(candidate.techCovered, techTokens.length),
+      )
       .sort(
         (left, right) =>
           right.score - left.score || compareText(left.entry.path, right.entry.path),
@@ -195,7 +305,7 @@ export class KbService {
       return {
         found: false,
         candidates: [],
-        reason: scored.length === 0 ? 'no_match' : 'low_confidence',
+        reason: lexical.length === 0 ? 'no_match' : 'low_confidence',
       }
     }
     return { found: true, candidates }

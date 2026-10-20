@@ -130,11 +130,15 @@ describe('kbTools', () => {
     })
   })
 
-  it('kb_lookup 空 query 返回 empty_query 错误而非抛异常', async () => {
+  it('kb_lookup 空 query 返回 found=false 与 empty_query', async () => {
     const result = await findTool(tools, 'kb_lookup').handler({ query: '   ' })
 
-    expect(result.isError).toBe(true)
-    expect(errorCode(result)).toBe('empty_query')
+    expect(result.isError).toBeUndefined()
+    expect(structured(result)).toMatchObject({
+      found: false,
+      candidates: [],
+      reason: 'empty_query',
+    })
   })
 
   it('kb_read 读取文件并保留 reviewStatus', async () => {

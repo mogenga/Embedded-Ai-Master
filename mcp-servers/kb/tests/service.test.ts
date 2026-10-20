@@ -152,6 +152,36 @@ describe('KbService', () => {
       })
     })
 
+    it('单一技术 token 未被条目覆盖时拒答', () => {
+      expect(service.lookup('乱码 ESP32')).toEqual({
+        found: false,
+        candidates: [],
+        reason: 'low_confidence',
+      })
+    })
+
+    it('多个技术 token 只覆盖一半时拒答', () => {
+      expect(service.lookup('uart xyz')).toEqual({
+        found: false,
+        candidates: [],
+        reason: 'low_confidence',
+      })
+    })
+
+    it('技术 token 覆盖超过一半时命中', () => {
+      const result = service.lookup('i2c nack')
+
+      expect(result.found).toBe(true)
+      expect(result.candidates[0]?.path).toBe('protocols/i2c/nack.md')
+    })
+
+    it('CPU/MCU 等泛指词不计入技术 token', () => {
+      const result = service.lookup('CPU nack')
+
+      expect(result.found).toBe(true)
+      expect(result.candidates[0]?.path).toBe('protocols/i2c/nack.md')
+    })
+
     it('同分按 path 字典序稳定排序，limit 截断', () => {
       const result = service.lookup('uart', 1)
 
