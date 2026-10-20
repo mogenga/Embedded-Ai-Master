@@ -8,7 +8,7 @@ import { createLogTailEventSource } from "../src/events/log-tail.js";
 import { runSession } from "../src/index.js";
 import { createUiServer } from "../src/server/api.js";
 import type { SessionEventEnvelope } from "../src/session/types.js";
-import { transcriptFromSession } from "../src/ui/view/transcript.js";
+import { sessionEventsToMessages } from "../desktop/renderer/protocol.js";
 
 const MCP_FIXTURE = path.join(import.meta.dirname, "fixtures", "mcp-echo-server.mjs");
 const SESSION_ID = "e2e-device";
@@ -204,7 +204,8 @@ describe("事件流端到端", () => {
       const detail = (await (await fetch(`${base}/api/sessions/${SESSION_ID}`)).json()) as {
         events: SessionEventEnvelope[];
       };
-      expect(transcriptFromSession(merged)).toEqual(transcriptFromSession(detail.events));
+      // 合并 SSE 重放与实时尾部后，桌面渲染器重建的消息序列必须与整篇日志一致。
+      expect(sessionEventsToMessages(merged)).toEqual(sessionEventsToMessages(detail.events));
     } finally {
       await ui.close();
     }

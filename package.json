@@ -19,24 +19,17 @@
     "diagnosis:e2e": "node scripts/diagnosis-e2e.mjs",
     "kb:regression": "node scripts/kb-regression.mjs",
     "kb:review": "node scripts/kb-review.mjs",
-    "build:web": "vite build",
     "serve:ui": "node dist/server/serve.js",
-    "dev:web": "vite",
-    "verify:ui": "node scripts/verify-ui.mjs",
-    "test:ui": "vitest run tests/ui",
-    "typecheck:web": "tsc -p tsconfig.web.json --noEmit"
+    "test:desktop": "vitest run tests/desktop"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.3.1",
-    "preact": "^10.29.8",
     "zod": "^4.0.0"
   },
   "devDependencies": {
     "@modelcontextprotocol/server": "^2.3.1",
-    "@preact/preset-vite": "^2.10.6",
     "@types/node": "^24.10.0",
     "@vitest/coverage-v8": "^4.1.6",
-    "happy-dom": "^21.0.3",
     "typescript": "^5.9.3",
     "vite": "^8.3.4",
     "vitest": "^4.1.6"

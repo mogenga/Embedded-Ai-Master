@@ -1,0 +1,373 @@
+import { describe, expect, it } from "vitest";
+import {
+  createContext,
+  initialState,
+  MAX_TOOL_OUTPUT_BYTES,
+  sessionEventToHostEvents,
+  sessionEventsToMessages,
+  sessionLoadedEvent,
+  sessionsEvent,
+  summarizeToolCall,
+} from "../../desktop/renderer/protocol.js";
+
+function ev(seq, type, payload, parent) {
+  const event = { seq, ts: "2026-10-20T00:00:00.000Z", type, payload };
+  if (parent !== undefined) event.parent = parent;
+  return event;
+}
+
+function translate(events, ctx = createContext({ sessionId: "s1" })) {
+  const out = [];
+  for (const event of events) out.push(...sessionEventToHostEvents(event, ctx));
+  return { out, ctx };
+}
+
+describe("summarizeToolCall", () => {
+  it("优先取 path/command/pattern 等命名参数", () => {
+    expect(summarizeToolCall("read_file", { path: "src/a.ts", offset: 0 })).toBe("src/a.ts");
+    expect(summarizeToolCall("shell", { command: "npm test" })).toBe("npm test");
+    expect(summarizeToolCall("grep", { pattern: "TODO" })).toBe("TODO");
+    expect(summarizeToolCall("probe", { address: 536870912 })).toBe("536870912");
+  });
+
+  it("无匹配参数时回退到工具名", () => {
+    expect(summarizeToolCall("mcp__probe__halt", {})).toBe("mcp__probe__halt");
+    expect(summarizeToolCall("mcp__probe__halt", null)).toBe("mcp__probe__halt");
+  });
+
+  it("长参数截断到 120 字符", () => {
+    expect(summarizeToolCall("read_file", { path: "x".repeat(200) })).toHaveLength(120);
+  });
+});
+
+describe("assistant 三段合成", () => {
+  it("assistant 事件展开为 start/delta/end", () => {
+    const { out, ctx } = translate([
+      ev(0, "assistant", { content: "你好", toolCalls: [] }),
+    ]);
+    expect(out).toStrictEqual([
+      { type: "assistant_start" },
+      { type: "assistant_delta", text: "你好" },
+      { type: "assistant_end" },
+    ]);
+    expect(ctx.lastAssistantText).toBe("你好");
+  });
+
+  it("空 content 也发 start/end，不发 delta", () => {
+    const { out } = translate([ev(0, "assistant", { content: "", toolCalls: [] })]);
+    expect(out).toStrictEqual([{ type: "assistant_start" }, { type: "assistant_end" }]);
+  });
+
+  it("记录 toolCalls 供 tool_started 摘要使用", () => {
+    const { out, ctx } = translate([
+      ev(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "read_file", arguments: { path: "src/a.ts" } }],
+      }),
+      ev(1, "tool_started", { callId: "c1", tool: "read_file", access: "read" }, 0),
+    ]);
+    expect(ctx.pendingCalls.get("c1")).toStrictEqual({
+      name: "read_file",
+      arguments: { path: "src/a.ts" },
+    });
+    expect(out).toContainEqual({
+      type: "tool_start",
+      name: "read_file",
+      summary: "src/a.ts",
+      id: "c1",
+    });
+  });
+});
+
+describe("tool_result", () => {
+  it("成功时输出 tool_end + tool_output", () => {
+    const { out } = translate([
+      ev(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "read_file", arguments: { path: "a.ts" } }],
+      }),
+      ev(1, "tool_started", { callId: "c1", tool: "read_file" }, 0),
+      ev(2, "tool_result", { id: "c1", ok: true, text: "file body", toolName: "read_file" }, 0),
+    ]);
+    const tail = out.slice(out.findIndex((item) => item.type === "tool_end"));
+    expect(tail).toStrictEqual([
+      { type: "tool_end", name: "read_file", ok: true, summary: "a.ts", id: "c1" },
+      { type: "tool_output", name: "read_file", content: "file body" },
+    ]);
+  });
+
+  it("失败时只发 tool_end，不把错误文本画成工具输出", () => {
+    const { out } = translate([
+      ev(0, "tool_result", { id: "c1", ok: false, text: "boom", toolName: "shell" }),
+    ]);
+    expect(out).toStrictEqual([
+      // The call was refused before it started, so the row is created here —
+      // otherwise a denied call would be missing from the transcript.
+      { type: "tool_start", name: "shell", summary: "shell", id: "c1" },
+      { type: "tool_end", name: "shell", ok: false, summary: "shell", id: "c1" },
+    ]);
+  });
+
+  it("已有 tool_started 时 tool_result 不再补一行 tool_start", () => {
+    const { out } = translate([
+      ev(0, "tool_started", { callId: "c1", tool: "shell" }),
+      ev(1, "tool_result", { id: "c1", ok: false, text: "boom", toolName: "shell" }),
+    ]);
+    expect(out.filter((item) => item.type === "tool_start")).toHaveLength(1);
+  });
+
+  it("超长输出按 UTF-8 字节截断且不产生替换字符", () => {
+    const { out } = translate([
+      ev(0, "tool_result", {
+        id: "c1",
+        ok: true,
+        text: "😀".repeat(MAX_TOOL_OUTPUT_BYTES),
+        toolName: "echo",
+      }),
+    ]);
+    const output = out.find((item) => item.type === "tool_output");
+    expect(output.content).toContain("…[truncated]");
+    expect(output.content).not.toContain("�");
+    const body = output.content.replace("\n…[truncated]", "");
+    expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(MAX_TOOL_OUTPUT_BYTES);
+  });
+});
+
+describe("审批与权限", () => {
+  it("approval_request → permission_request", () => {
+    const { out } = translate([
+      ev(0, "approval_request", {
+        requestId: "req-1",
+        callId: "c1",
+        tool: "mcp__probe__mem_write",
+        action: "ask",
+        reason: "写 SRAM",
+        preset: "diagnose",
+        paramsDigest: "d",
+        paramsKeys: ["address"],
+        deadlineAt: "2026-10-20T00:01:00.000Z",
+      }),
+    ]);
+    expect(out).toStrictEqual([
+      {
+        type: "permission_request",
+        id: "req-1",
+        question: "mcp__probe__mem_write: 写 SRAM",
+        detail: {
+          tool: "mcp__probe__mem_write",
+          preset: "diagnose",
+          paramsPreview: {},
+          deadlineAt: "2026-10-20T00:01:00.000Z",
+        },
+      },
+    ]);
+  });
+
+  it("permission_decision 拒绝时补 notice，允许时不产出", () => {
+    const denied = translate([
+      ev(0, "permission_decision", { callId: "c1", tool: "shell", effective: "deny", reason: "未授权" }),
+    ]);
+    expect(denied.out).toStrictEqual([
+      { type: "notice", level: "warn", text: "已拒绝 shell: 未授权" },
+    ]);
+    const allowed = translate([
+      ev(0, "permission_decision", { callId: "c1", tool: "shell", effective: "allow", reason: "ok" }),
+    ]);
+    expect(allowed.out).toStrictEqual([]);
+  });
+
+  it("审批超时由 permission_decision 关闭审批条", () => {
+    const ctx = createContext({ sessionId: "s1" });
+    const asked = translate(
+      [
+        ev(0, "approval_request", { requestId: "req-1", callId: "c1", tool: "shell", reason: "r" }),
+      ],
+      ctx,
+    );
+    expect(asked.out[0].type).toBe("permission_request");
+    const decided = translate(
+      [ev(1, "permission_decision", { requestId: "req-1", callId: "c1", tool: "shell", effective: "deny", reason: "approval_timeout" })],
+      ctx,
+    );
+    expect(decided.out).toStrictEqual([
+      { type: "permission_closed", id: "req-1" },
+      { type: "notice", level: "warn", text: "已拒绝 shell: approval_timeout" },
+    ]);
+    expect(ctx.pendingApprovals.size).toBe(0);
+  });
+});
+
+describe("运行状态", () => {
+  it("status done → run_end", () => {
+    const ctx = createContext({ sessionId: "s1" });
+    ctx.running = true;
+    const { out } = translate([ev(0, "status", { status: "done", finishReason: "no_tool_calls" })], ctx);
+    expect(out).toStrictEqual([{ type: "run_end" }]);
+    expect(ctx.running).toBe(false);
+  });
+
+  it("interrupted → notice + run_end", () => {
+    const { out, ctx } = translate([ev(0, "interrupted", { reason: "aborted" })]);
+    expect(out).toStrictEqual([
+      { type: "notice", level: "warn", text: "已中止" },
+      { type: "run_end" },
+    ]);
+    expect(ctx.running).toBe(false);
+  });
+
+  it("usage → usage 事件字段映射", () => {
+    const { out } = translate([
+      ev(0, "usage", { promptTokens: 10, completionTokens: 2, cachedTokens: 3 }),
+    ]);
+    expect(out).toStrictEqual([
+      { type: "usage", usage: { inputTokens: 10, outputTokens: 2, cachedTokens: 3 } },
+    ]);
+  });
+});
+
+describe("其他事件", () => {
+  it("device_status → board_state 携带原始 state", () => {
+    const { out } = translate([
+      ev(0, "device_status", {
+        callId: "c1",
+        server: "probe",
+        tool: "mcp__probe__attach",
+        state: { probe: "attached", cpu: "halted" },
+      }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].type).toBe("board_state");
+    expect(out[0].state.device).toStrictEqual({ probe: "attached", cpu: "halted" });
+    expect(out[0].state.tool).toBe("mcp__probe__attach");
+  });
+
+  it("mcp_status 成功为 dim、失败为 warn", () => {
+    expect(
+      translate([ev(0, "mcp_status", { kind: "connected", server: "probe", toolCount: 2 })]).out,
+    ).toStrictEqual([{ type: "notice", level: "dim", text: "MCP probe: connected" }]);
+    expect(
+      translate([ev(0, "mcp_status", { kind: "connect_failed", server: "kb", message: "spawn" })]).out,
+    ).toStrictEqual([{ type: "notice", level: "warn", text: "MCP kb: connect_failed — spawn" }]);
+  });
+
+  it("compaction summary 产出 compacted", () => {
+    const { out } = translate([
+      ev(0, "compaction", { kind: "summary", summary: "s", coversUpToSeq: 4 }),
+    ]);
+    expect(out).toStrictEqual([
+      { type: "compacted", removed: 0, level: "summary", before: 5, after: 0 },
+    ]);
+  });
+
+  it("user/system/checkpoint/tool_call 不产出", () => {
+    const { out } = translate([
+      ev(0, "system", { content: "sys" }),
+      ev(1, "user", { content: "hi" }),
+      ev(2, "checkpoint", { turn: 1 }),
+      ev(3, "tool_call", { id: "c1" }),
+    ]);
+    expect(out).toStrictEqual([]);
+  });
+
+  it("未知类型显式 warn 而不是静默", () => {
+    const { out } = translate([ev(0, "mystery", {})]);
+    expect(out).toStrictEqual([
+      { type: "notice", level: "warn", text: "未识别的事件类型: mystery" },
+    ]);
+  });
+
+  it("重复 seq 被游标丢弃", () => {
+    const ctx = createContext({ sessionId: "s1" });
+    translate([ev(3, "assistant", { content: "a", toolCalls: [] })], ctx);
+    const again = sessionEventToHostEvents(ev(3, "assistant", { content: "a", toolCalls: [] }), ctx);
+    expect(again).toStrictEqual([]);
+    expect(ctx.lastSeq).toBe(3);
+  });
+});
+
+describe("sessionEventsToMessages", () => {
+  const events = [
+    ev(0, "system", { content: "sys" }),
+    ev(1, "user", { content: "串口没输出" }),
+    ev(2, "assistant", {
+      content: "先看 KB",
+      toolCalls: [{ id: "c1", name: "mcp__kb__kb_lookup", arguments: { query: "串口" } }],
+    }),
+    ev(3, "tool_started", { callId: "c1", tool: "mcp__kb__kb_lookup" }, 2),
+    ev(4, "tool_result", { id: "c1", ok: true, text: "hit", toolName: "mcp__kb__kb_lookup" }, 2),
+  ];
+
+  it("重建 user/assistant/tool 行", () => {
+    expect(sessionEventsToMessages(events)).toStrictEqual([
+      { role: "user", text: "串口没输出", index: 0, images: 0 },
+      { role: "assistant", text: "先看 KB" },
+      {
+        role: "tool",
+        name: "mcp__kb__kb_lookup",
+        summary: "串口",
+        ok: true,
+        done: true,
+      },
+    ]);
+  });
+
+  it("空对话返回空数组", () => {
+    expect(sessionEventsToMessages([])).toStrictEqual([]);
+    expect(sessionEventsToMessages(undefined)).toStrictEqual([]);
+  });
+});
+
+describe("state / sessions / session_loaded", () => {
+  it("initialState 使用内核预设与模型引用", () => {
+    const state = initialState({
+      sessionId: "s1",
+      cwd: "E:/proj",
+      mode: "diagnose",
+      model: "gw/flash",
+      models: [{ id: "gw/flash", name: "flash", contextLength: 8192 }],
+    });
+    expect(state).toMatchObject({
+      type: "state",
+      sessionId: "s1",
+      cwd: "E:/proj",
+      mode: "diagnose",
+      model: "gw/flash",
+      locale: "zh",
+      effortChoices: { levels: [], default: "", fixed: "" },
+    });
+    expect(state.models).toHaveLength(1);
+  });
+
+  it("sessionsEvent 把 workdir 映射为 cwd 并给出 renderer 需要的字段", () => {
+    const event = sessionsEvent([
+      { id: "s1", createdAt: "2026-10-20T00:00:00.000Z", status: "closed", workdir: "E:/p", model: "gw/flash" },
+    ]);
+    expect(event.sessions[0]).toStrictEqual({
+      id: "s1",
+      cwd: "E:/p",
+      model: "gw/flash",
+      createdAt: "2026-10-20T00:00:00.000Z",
+      updatedAt: "2026-10-20T00:00:00.000Z",
+      title: "",
+      summary: "s1",
+      pinned: false,
+      archived: false,
+      status: "ready",
+    });
+    expect(event.total).toBe(1);
+  });
+
+  it("sessionLoadedEvent 携带消息与模式", () => {
+    const event = sessionLoadedEvent([ev(0, "user", { content: "hi" })], {
+      cwd: "E:/p",
+      mode: "read-only",
+    });
+    expect(event).toStrictEqual({
+      type: "session_loaded",
+      messages: [{ role: "user", text: "hi", index: 0, images: 0 }],
+      cwd: "E:/p",
+      mode: "read-only",
+      effort: "auto",
+    });
+  });
+});

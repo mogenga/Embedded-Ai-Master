@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildMessages } from "../src/context/build.js";
-import { transcriptFromSession } from "../src/ui/view/transcript.js";
+import { sessionEventsToMessages, sessionEventToHostEvents, createContext } from "../desktop/renderer/protocol.js";
 import type {
   DeviceStatusPayload,
   McpStatusPayload,
@@ -29,9 +29,14 @@ describe("新事件类型", () => {
     expect(buildMessages(events).length).toBe(0);
   });
 
-  it("transcript 投影不产生工具卡片且状态保持 idle", () => {
-    const view = transcriptFromSession(events);
-    expect(view.events.filter((event) => event.kind === "tool")).toEqual([]);
-    expect(view.status).toBe("idle");
+  it("桌面协议层不把状态类事件画成消息", () => {
+    expect(sessionEventsToMessages(events)).toEqual([]);
+  });
+
+  it("桌面协议层把 device_status 与 mcp_status 转成状态事件", () => {
+    const ctx = createContext({ sessionId: "s" });
+    const out = events.flatMap((event) => sessionEventToHostEvents(event, ctx));
+    expect(out.map((message) => message.type)).toStrictEqual(["tool_start", "notice", "board_state"]);
+    expect(out.filter((message) => message.type === "notice")[0].level).toBe("dim");
   });
 });

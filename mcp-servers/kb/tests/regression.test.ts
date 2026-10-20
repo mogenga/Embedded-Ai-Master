@@ -147,6 +147,10 @@ suite(suiteName, () => {
   const negatives = missingAssets.length === 0 ? readJsonl<NegativeRecord>(NEGATIVES_PATH) : []
   const service = new KbService(KB_ROOT)
 
+  // 这两个用例对真实语料做检索，是 CPU 密集型：并行跑满 worker 时单次可达数秒。
+  // 默认 5s 超时在大套件里会误报，给回真实工作量的余量（仍远小于「卡死」）。
+  const RETRIEVAL_TIMEOUT_MS = 30_000
+
   it('index 轨 Recall@2 / Hit@1 / MRR 不低于基线', () => {
     const indexQueries = queries.filter((query) => query.track === 'index')
     let recallSum = 0
@@ -168,7 +172,7 @@ suite(suiteName, () => {
     )
     expect(total === 0 ? 0 : hitAt1 / total).toBeGreaterThanOrEqual(expected.index.hitAt1)
     expect(total === 0 ? 0 : mrrSum / total).toBeGreaterThanOrEqual(expected.index.mrr)
-  })
+  }, RETRIEVAL_TIMEOUT_MS)
 
   it('search 轨严格 Hit@1 与 goldInTop20 不低于基线', () => {
     const searchQueries = queries.filter((query) => query.track === 'search')
@@ -188,7 +192,7 @@ suite(suiteName, () => {
     expect(total === 0 ? 0 : goldInTop20 / total).toBeGreaterThanOrEqual(
       expected.search.goldInTop20,
     )
-  })
+  }, RETRIEVAL_TIMEOUT_MS)
 
   it('负样本拒答率不低于基线', () => {
     let refused = 0
@@ -199,5 +203,5 @@ suite(suiteName, () => {
     const refusalRate = negatives.length === 0 ? 0 : refused / negatives.length
     expect(negatives.length).toBe(expected.negatives.total)
     expect(refusalRate).toBeGreaterThanOrEqual(expected.negatives.refusalRate)
-  })
+  }, RETRIEVAL_TIMEOUT_MS)
 })

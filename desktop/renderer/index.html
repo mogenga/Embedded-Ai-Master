@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src 'self'"
+    />
+    <title>Embedded AI Master</title>
+    <!-- An inline icon keeps the browser from requesting /favicon.ico, which
+         this static root does not serve. -->
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="settings.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <!-- Sidebar: sessions, workspace, settings -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <div class="brand">
+            <svg class="mark" aria-hidden="true"><use href="#i-mark"></use></svg>
+            <span class="wordmark">Embedded AI Master</span>
+          </div>
+        </div>
+
+        <div class="sidebar-actions">
+          <button class="new-chat" id="new-session">
+            <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+            <span data-i18n="newSession">New chat</span>
+          </button>
+        </div>
+
+        <div class="sidebar-section-head">
+          <span data-i18n="sessions">Sessions</span>
+          <button class="icon-button small" id="session-filter" data-i18n-title="sessionFilterAll" aria-haspopup="menu" aria-expanded="false">
+            <svg class="icon" aria-hidden="true"><use href="#i-sliders"></use></svg>
+          </button>
+          <button class="icon-button small" id="toggle-archived" data-i18n-title="showArchived">
+            <svg class="icon" aria-hidden="true"><use href="#i-archive"></use></svg>
+          </button>
+          <button class="icon-button small" id="refresh-sessions" data-i18n-title="refresh">
+            <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
+          </button>
+        </div>
+        <div class="session-search">
+          <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
+          <input id="session-search" type="search" spellcheck="false" autocomplete="off" />
+        </div>
+        <nav class="session-list" id="session-list" aria-label="Sessions"></nav>
+        <!-- Drag handle on the sidebar's right edge. It is a focusable
+             separator so the width can also be changed with the keyboard
+             (arrow keys), not only with a mouse. -->
+        <div
+          class="sidebar-resizer"
+          id="sidebar-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          tabindex="0"
+        ></div>
+      </aside>
+
+      <!-- Main column -->
+      <div class="main">
+        <header class="topbar">
+          <button class="icon-button small topbar-sidebar-toggle" id="topbar-sidebar-toggle" data-i18n-title="toggleSidebar">
+            <svg class="icon" aria-hidden="true"><use href="#i-panel-left"></use></svg>
+          </button>
+          <button class="topbar-cwd" id="topbar-cwd" data-i18n-title="changeFolderTitle">
+            <span class="topbar-cwd-name" id="topbar-cwd-name">Prometheus</span>
+            <span class="topbar-cwd-branch" id="topbar-cwd-branch" hidden></span>
+          </button>
+          <button class="icon-button small worktree-toggle" id="worktree-button" data-i18n-title="worktreeLabel" aria-haspopup="menu" aria-expanded="false">
+            <svg class="icon" aria-hidden="true"><use href="#i-branch"></use></svg>
+          </button>
+          <div class="worktree-panel" id="worktree-panel" hidden>
+            <p class="worktree-copy" id="worktree-copy" data-i18n="worktreeExplain">
+              Run this session in its own git worktree so your working copy stays untouched.
+            </p>
+            <div class="worktree-actions" id="worktree-actions-off">
+              <button class="btn btn-primary small" id="worktree-enable" data-i18n="worktreeEnable">Start isolated</button>
+            </div>
+            <div class="worktree-actions" id="worktree-actions-on" hidden>
+              <button class="btn small" id="worktree-diff" data-i18n="worktreeDiff">View diff</button>
+              <button class="btn small" id="worktree-merge" data-i18n="worktreeMerge">Merge back</button>
+              <button class="btn btn-quiet small" id="worktree-discard" data-i18n="worktreeDiscard">Discard</button>
+            </div>
+          </div>
+          <div class="titlebar-spacer"></div>
+          <div class="titlebar-status">
+            <button class="goal-badge" id="goal-badge" hidden type="button" data-i18n-title="goalStopTitle">
+              <span id="goal-badge-text"></span>
+            </button>
+            <span class="status-dot" id="status-dot"></span>
+            <span class="status-text" id="status-text" data-i18n="statusStarting">starting</span>
+          </div>
+          <div class="topbar-actions">
+            <!-- Changes and the terminal are not wired to this kernel yet;
+                 a button that only produced a "not connected" notice would be
+                 worse than no button. -->
+            <button class="icon-button" id="changes-button" data-i18n-title="changesTitle" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-file-diff"></use></svg>
+              <span class="icon-badge" id="changes-badge" hidden>0</span>
+            </button>
+            <button class="icon-button" id="terminal-button" data-i18n-title="terminalTitle" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-terminal"></use></svg>
+            </button>
+            <button class="icon-button" id="more-button" data-i18n-title="more" aria-haspopup="menu" aria-expanded="false" hidden>
+              <svg class="icon" aria-hidden="true"><use href="#i-more"></use></svg>
+            </button>
+            <button class="icon-button" id="settings-button" data-i18n-title="settings">
+              <svg class="icon" aria-hidden="true"><use href="#i-sliders"></use></svg>
+            </button>
+          </div>
+          <div class="topbar-menu" id="topbar-menu" role="menu" hidden>
+            <button class="menu-row" id="menu-export" role="menuitem">
+              <svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>
+              <span data-i18n="menuExport">Export conversation</span>
+            </button>
+            <button class="menu-row" id="menu-new-window" role="menuitem">
+              <svg class="icon" aria-hidden="true"><use href="#i-new-window"></use></svg>
+              <span data-i18n="menuNewWindow">New window</span>
+            </button>
+            <button class="menu-row" id="menu-split-view" role="menuitem">
+              <svg class="icon" aria-hidden="true"><use href="#i-new-window"></use></svg>
+              <span data-i18n="menuSplitView">Open this session in split view</span>
+            </button>
+            <button class="menu-row" id="menu-shortcuts" role="menuitem">
+              <svg class="icon" aria-hidden="true"><use href="#i-keyboard"></use></svg>
+              <span data-i18n="menuShortcuts">Keyboard shortcuts</span>
+            </button>
+            <div class="menu-separator"></div>
+            <div class="menu-setting" role="group" aria-label="Theme">
+              <span class="menu-setting-label" data-i18n="settingsTheme">Theme</span>
+              <div class="menu-segmented" id="menu-theme">
+                <button data-theme-choice="system" data-i18n="themeSystem">System</button>
+                <button data-theme-choice="light" data-i18n="themeLight">Light</button>
+                <button data-theme-choice="dark" data-i18n="themeDark">Dark</button>
+                <button data-theme-choice="high-contrast" data-i18n="themeHighContrast">High contrast</button>
+              </div>
+            </div>
+            <div class="menu-setting" role="group" aria-label="Language">
+              <span class="menu-setting-label" data-i18n="language">Language</span>
+              <div class="menu-segmented" id="menu-locale">
+                <button data-locale="en">EN</button>
+                <button data-locale="zh">中文</button>
+              </div>
+            </div>
+            <div class="menu-separator"></div>
+            <button class="menu-row danger" id="menu-clear" role="menuitem">
+              <svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>
+              <span data-i18n="clearSession">Clear conversation</span>
+            </button>
+          </div>
+          <div class="window-controls" id="window-controls" hidden>
+            <button class="window-button" data-window="minimize" data-i18n-title="minimize">
+              <svg class="icon" aria-hidden="true"><use href="#i-win-minimize"></use></svg>
+            </button>
+            <button class="window-button" data-window="maximize" id="window-maximize" data-i18n-title="maximize">
+              <svg class="icon glyph-maximize" aria-hidden="true"><use href="#i-win-maximize"></use></svg>
+              <svg class="icon glyph-restore" aria-hidden="true"><use href="#i-win-restore"></use></svg>
+            </button>
+            <button class="window-button window-close" data-window="close" data-i18n-title="close">
+              <svg class="icon" aria-hidden="true"><use href="#i-win-close"></use></svg>
+            </button>
+          </div>
+        </header>
+
+        <div class="main-body">
+          <div class="chat-column">
+            <main class="transcript" id="transcript" aria-live="polite" aria-busy="false">
+              <div class="find-bar" id="find-bar" hidden>
+                <input id="find-input" type="search" spellcheck="false" autocomplete="off" />
+                <span class="find-count" id="find-count"></span>
+                <button class="icon-button small" id="find-prev" data-i18n-title="previousMatch">
+                  <svg class="icon" aria-hidden="true"><use href="#i-chevron-up"></use></svg>
+                </button>
+                <button class="icon-button small" id="find-next" data-i18n-title="nextMatch">
+                  <svg class="icon" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
+                </button>
+                <button class="icon-button small" id="find-close" data-i18n-title="close">
+                  <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+                </button>
+              </div>
+              <div class="transcript-scroll" id="transcript-scroll">
+                <section class="empty-state" id="empty-state">
+                  <svg class="empty-mark" aria-hidden="true"><use href="#i-mark"></use></svg>
+                  <h1 data-i18n="emptyTitle">What should we build?</h1>
+                  <p data-i18n="emptyBody">Prometheus reads, edits, and runs your code. It asks before changing files unless you switch the mode.</p>
+                  <div class="suggestions">
+                    <button class="suggestion" id="setup-button" data-i18n="setupTitle" hidden>
+                      Set up a connection
+                    </button>
+                    <button class="suggestion" data-prompt-key="suggestionSummarizePrompt" data-i18n="suggestionSummarize" data-prompt="Summarize this project and list the main entry points.">
+                      Summarize this project
+                    </button>
+                    <button class="suggestion" data-prompt-key="suggestionFailingTestsPrompt" data-i18n="suggestionFailingTests" data-prompt="Find failing tests and fix them. Verify with the project's test command.">
+                      Fix the failing tests
+                    </button>
+                    <button class="suggestion" data-prompt-key="suggestionDocumentPrompt" data-i18n="suggestionDocument" data-prompt="Create a PROMETHEUS.md describing how this project is built, tested, and organized.">
+                      Document the repo
+                    </button>
+                  </div>
+                </section>
+              </div>
+              <button class="scroll-bottom" id="scroll-bottom" hidden data-i18n-title="scrollToLatest">
+                <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
+              </button>
+            </main>
+
+            <section class="composer-region" id="composer-region">
+              <div class="pending-permission" id="pending-permission" hidden>
+                <div class="pending-body">
+                  <div class="pending-question" id="pending-question"></div>
+                  <div class="pending-diff" id="pending-diff" hidden></div>
+                </div>
+                <div class="pending-actions">
+                  <button class="btn btn-primary" data-permission="yes" data-i18n="allow">Allow</button>
+                  <!-- The kernel's approval bridge answers one request at a
+                       time; a persistent "always" rule does not exist, so the
+                       button would promise something it cannot keep. -->
+                  <button class="btn" data-permission="always" data-i18n="alwaysAllow" hidden>Always allow</button>
+                  <button class="btn btn-quiet" data-permission="no" data-i18n="deny">Deny</button>
+                  <div class="pending-choices" id="pending-choices" hidden></div>
+                </div>
+              </div>
+
+              <!-- One box: the textarea and every control that shapes the request
+                   live in the same frame. A second row of pills under the box
+                   was noise. -->
+              <div class="composer">
+                <div class="attachments" id="attachments" hidden></div>
+                <div class="file-mention" id="file-mention" hidden role="listbox"></div>
+                <div class="command-menu" id="command-menu" hidden role="listbox"></div>
+                <div class="composer-input-row">
+                  <div class="composer-suggestion" id="composer-suggestion" hidden>
+                    <span class="composer-suggestion-text"></span>
+                    <span class="composer-suggestion-hint" data-i18n="suggestionAccept">Tab to accept</span>
+                  </div>
+                  <textarea
+                    id="input"
+                    rows="1"
+                    data-i18n-placeholder="composerPlaceholder"
+                    placeholder="Ask Prometheus to change, explain, or build something…"
+                    spellcheck="false"
+                  ></textarea>
+                  <div class="composer-actions">
+                    <span class="queued-badge" id="queued-badge" hidden></span>
+                    <button class="icon-button small voice-button" id="voice-button" hidden data-i18n-title="voiceStart">
+                      <svg class="icon" aria-hidden="true"><use href="#i-mic"></use></svg>
+                    </button>
+                    <button class="stop-button" id="stop-button" data-i18n="stop" data-i18n-title="stopTitle" hidden>Stop</button>
+                    <button class="send-button" id="send-button" data-i18n-title="sendTitle">
+                      <svg class="icon" aria-hidden="true"><use href="#i-arrow-up"></use></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="composer-bar">
+                  <div class="controls">
+                    <!-- The "+" is the one place things are added to a turn:
+                         files, a folder, a slash command. The permission mode
+                         lives here too, the way it does in Claude: it is a
+                         setting for the turn, not something steered with every
+                         message, and six modes never fit a rail. -->
+                    <!-- Attachments and slash commands have no backend here;
+                         the "+" would open a menu of dead rows. The mode
+                         picker stays: it maps onto the kernel's presets. -->
+                    <div class="plus-control" id="plus-control" hidden>
+                      <button class="icon-button small plus-button" id="plus-button" aria-haspopup="menu" aria-expanded="false" data-i18n-title="plusMenuTitle">
+                        <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
+                      </button>
+                      <div class="plus-menu" id="plus-menu" role="menu" hidden>
+                        <button role="menuitem" id="plus-add-files">
+                          <svg class="icon" aria-hidden="true"><use href="#i-paperclip"></use></svg>
+                          <span data-i18n="plusAddFiles">Add files or photos</span>
+                        </button>
+                        <button role="menuitem" id="plus-add-folder">
+                          <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
+                          <span data-i18n="plusAddFolder">Add folder</span>
+                        </button>
+                        <button role="menuitem" id="plus-slash">
+                          <svg class="icon" aria-hidden="true"><use href="#i-slash"></use></svg>
+                          <span data-i18n="plusSlash">Slash commands</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div class="mode-control" id="mode-control">
+                      <button class="mode-picker" id="mode-picker" aria-haspopup="menu" aria-expanded="false">
+                        <span id="mode-label" data-i18n="modeDiagnose">Diagnose</span>
+                        <svg class="icon" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
+                      </button>
+                      <div class="mode-menu" id="mode-menu" role="menu" hidden></div>
+                    </div>
+                    <div class="board-control" id="board-control" hidden>
+                      <button class="chip-button board-picker" id="board-picker" aria-haspopup="menu" aria-expanded="false">
+                        <span class="chip-key" data-i18n="boardChipLabel">Board</span>
+                        <span id="board-chip-value">—</span>
+                        <svg class="icon" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
+                      </button>
+                      <div class="board-menu" id="board-menu" role="menu" hidden></div>
+                    </div>
+                  </div>
+                  <div class="controls controls-right">
+                    <div class="model-control" id="model-control">
+                      <button class="chip-button model-picker" id="model-picker" aria-haspopup="listbox" aria-expanded="false">
+                        <span id="model-label" data-i18n="loadingModels">loading models…</span>
+                        <svg class="icon" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
+                      </button>
+                      <div class="model-menu" id="model-menu" role="listbox" hidden></div>
+                    </div>
+                    <!-- Reasoning effort is a provider parameter this kernel
+                         does not send; the control would change nothing. -->
+                    <div class="effort-control" id="effort-control" hidden>
+                      <button class="chip-button effort-picker" id="effort-picker" aria-haspopup="menu" aria-expanded="false">
+                        <span id="effort-label">Auto</span>
+                        <svg class="icon" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
+                      </button>
+                      <div class="effort-menu" id="effort-menu" role="menu" hidden></div>
+                    </div>
+                    <!-- The usage chip sits last: it is the session's running
+                         accounting, not a control for the next message. The
+                         kernel reports spend, not context occupancy, so the
+                         percentage is omitted rather than invented. -->
+                    <button class="context-chip" id="usage-meter" aria-haspopup="dialog" aria-expanded="false" data-i18n-title="usageTitle">
+                      <span id="context-length">—</span>
+                      <span class="context-pct" id="context-label" hidden>0%</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="usage-popover" id="usage-popover" hidden role="dialog" aria-label="Context window">
+                  <div class="usage-head">
+                    <span data-i18n="usageContext">Context window</span>
+                    <span class="usage-head-value" id="usage-context-value">—</span>
+                  </div>
+                  <!-- One bar, segmented by kind: the width of each colour is
+                       that part's share of the window, so a glance says which
+                       category is the one worth acting on. -->
+                  <div class="usage-stack" id="usage-stack"></div>
+                  <div class="usage-breakdown" id="usage-breakdown"></div>
+                  <div class="usage-foot">
+                    <span class="usage-foot-item"><span data-i18n="usageInput">Input</span> <span class="usage-value" id="usage-input-value">0</span></span>
+                    <span class="usage-foot-item"><span data-i18n="usageCached">Cached</span> <span class="usage-value" id="usage-cached-value">0</span></span>
+                    <span class="usage-foot-item"><span data-i18n="usageOutput">Output</span> <span class="usage-value" id="usage-output-value">0</span></span>
+                  </div>
+                  <div class="usage-row total">
+                    <span data-i18n="usageTotal">Total this session</span>
+                    <span class="usage-value" id="usage-total-value">0</span>
+                  </div>
+                  <button type="button" class="btn btn-quiet small usage-reset" id="usage-reset" data-i18n="usageReset">Reset counter</button>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <section class="workbench" id="workbench" hidden>
+            <div class="workbench-head">
+              <div class="workbench-tabs" id="workbench-tabs" role="tablist">
+                <!-- Only the panes with a backend are listed: files/diff/
+                     history/tasks/artifact/terminal/browser have no kernel
+                     counterpart yet, and an empty tab that can never fill is
+                     not a placeholder — it is a dead end. -->
+                <button role="tab" aria-selected="true" tabindex="0" data-pane="board" class="active" data-i18n="paneBoard">Board</button>
+                <button role="tab" aria-selected="false" tabindex="-1" data-pane="serial" data-i18n="paneSerial">Serial</button>
+              </div>
+              <div class="workbench-meta" id="workbench-meta"></div>
+              <button class="icon-button small" id="close-workbench" data-i18n-title="closePane">
+                <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+              </button>
+            </div>
+            <!-- The session/last-turn switch is a property of the diff, not of
+                 the pane strip. It shares the git bar's row so it costs no
+                 vertical space of its own. -->
+            <div class="comments-bar" id="comments-bar" hidden>
+              <span class="comments-count" id="comments-count"></span>
+              <button class="btn btn-quiet small" id="comments-clear" data-i18n="commentClear">Clear</button>
+              <button class="btn btn-primary small" id="comments-send" data-i18n="commentSend">Send to agent</button>
+            </div>
+            <div class="workbench-body">
+              <div class="pane-tree file-tree" id="pane-tree" hidden></div>
+              <aside class="diff-filelist" id="diff-filelist" hidden></aside>
+              <div class="diff-pane" id="diff-pane">
+                <div class="git-bar" id="git-bar" hidden>
+                  <button class="git-branch" id="git-branch" data-i18n-title="copyBranch">
+                    <svg class="icon" aria-hidden="true"><use href="#i-branch"></use></svg>
+                    <span id="git-branch-name">—</span>
+                  </button>
+                  <span class="git-sync" id="git-sync"></span>
+                  <div class="diff-scope" id="diff-scope" role="radiogroup" aria-label="Diff scope" hidden>
+                    <button role="radio" data-scope="session" class="active" data-i18n="scopeSession">Session</button>
+                    <button role="radio" data-scope="turn" data-i18n="scopeTurn">Last turn</button>
+                  </div>
+                </div>
+                <div class="pr-bar" id="pr-bar" hidden>
+                  <span class="pr-state" id="pr-state"></span>
+                  <span class="pr-title" id="pr-title"></span>
+                  <button class="link-button pr-open" id="pr-open" hidden data-i18n="prOpen">Open</button>
+                  <span class="pr-checks" id="pr-checks"></span>
+                  <button class="link-button" id="pr-fix-ci" hidden data-i18n="prFixCi">Fix failing CI</button>
+                  <button class="link-button" id="pr-rerun" hidden data-i18n="prRerun">Re-run checks</button>
+                  <button class="btn btn-quiet small" id="pr-create" hidden data-i18n="prCreate">Create PR</button>
+                </div>
+                <div class="changes-summary" id="changes-summary"></div>
+                <div class="diff-root" id="diff-root"></div>
+                <div class="git-commit" id="git-commit" hidden>
+                  <textarea id="git-message" rows="2" spellcheck="false" data-i18n-placeholder="commitMessagePlaceholder" placeholder="Commit message"></textarea>
+                  <div class="git-commit-actions">
+                    <span class="git-commit-note" id="git-commit-note"></span>
+                    <button class="btn btn-primary small" id="git-commit-button" data-i18n="commitAll">Commit all</button>
+                  </div>
+                </div>
+              </div>
+              <div class="changes-list" id="changes-list" hidden></div>
+              <div class="tasks-root" id="tasks-root" hidden>
+                <div class="tasks-list" id="tasks-list"></div>
+              </div>
+              <div class="history-root" id="history-root" hidden>
+                <div class="checkpoint-list" id="checkpoint-list"></div>
+              </div>
+              <div class="artifact-list-pane" id="artifact-list-pane" hidden>
+                <div class="artifact-list" id="artifact-list"></div>
+              </div>
+              <div class="file-root" id="file-root" hidden></div>
+              <div class="terminal-root" id="terminal-root" hidden>
+                <pre class="terminal-output" id="terminal-output" tabindex="0"></pre>
+                <div class="terminal-input-row">
+                  <span class="terminal-prompt" id="terminal-prompt">&gt;</span>
+                  <input
+                    class="terminal-input"
+                    id="terminal-input"
+                    spellcheck="false"
+                    autocomplete="off"
+                    data-i18n-placeholder="terminalPlaceholder"
+                    placeholder="Run a command in the workspace…"
+                  />
+                  <button class="btn btn-quiet small" id="terminal-restart" data-i18n="terminalRestart">Restart</button>
+                </div>
+              </div>
+              <div class="board-root" id="board-root" hidden>
+                <div class="board-toolbar">
+                  <button class="btn btn-quiet small" id="board-refresh" data-i18n="boardRefresh">Refresh</button>
+                </div>
+                <div class="board-body" id="board-body"></div>
+              </div>
+              <div class="serial-root" id="serial-root" hidden>
+                <div class="serial-toolbar">
+                  <label class="serial-field">
+                    <span class="serial-field-key" data-i18n="serialPort">Port</span>
+                    <select class="serial-select" id="serial-port"></select>
+                  </label>
+                  <label class="serial-field">
+                    <span class="serial-field-key" data-i18n="serialBaud">Baud</span>
+                    <select class="serial-select" id="serial-baud"></select>
+                  </label>
+                  <span class="serial-spacer"></span>
+                  <button class="btn btn-primary small" id="serial-toggle" data-i18n="serialStart">Start</button>
+                </div>
+                <div class="serial-toolbar serial-toolbar-controls">
+                  <div class="serial-filter" id="serial-filter" role="radiogroup" aria-label="Filter">
+                    <button role="radio" data-filter="all" class="active" data-i18n="serialFilterAll">All</button>
+                    <button role="radio" data-filter="warn" data-i18n="serialFilterWarn">Warnings</button>
+                    <button role="radio" data-filter="error" data-i18n="serialFilterError">Errors</button>
+                  </div>
+                  <span class="serial-spacer"></span>
+                  <button class="icon-button small" id="serial-pause" data-i18n-title="serialPause">
+                    <svg class="icon" aria-hidden="true"><use href="#i-pause"></use></svg>
+                  </button>
+                  <button class="icon-button small" id="serial-clear" data-i18n-title="serialClear">
+                    <svg class="icon" aria-hidden="true"><use href="#i-trash"></use></svg>
+                  </button>
+                  <button class="icon-button small" id="serial-export" data-i18n-title="serialExport">
+                    <svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>
+                  </button>
+                  <button class="serial-follow" id="serial-follow" aria-pressed="true" data-i18n-title="serialFollow">
+                    <svg class="icon" aria-hidden="true"><use href="#i-pin"></use></svg>
+                    <span data-i18n="serialFollowLabel">Follow</span>
+                  </button>
+                </div>
+                <div class="serial-status-row">
+                  <span class="serial-status" id="serial-status"></span>
+                </div>
+                <div class="serial-output" id="serial-output" tabindex="0"></div>
+              </div>
+              <div class="artifact-root" id="artifact-root" hidden></div>
+              <div class="browser-root" id="browser-root" hidden>
+                <div class="browser-toolbar">
+                  <button class="icon-button small" id="browser-back" data-i18n-title="back">
+                    <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg>
+                  </button>
+                  <button class="icon-button small" id="browser-forward" data-i18n-title="forward">
+                    <svg class="icon" aria-hidden="true"><use href="#i-chevron-right"></use></svg>
+                  </button>
+                  <button class="icon-button small" id="browser-reload" data-i18n-title="reload">
+                    <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
+                  </button>
+                  <input class="browser-url" id="browser-url" spellcheck="false" placeholder="https://example.com" />
+                  <button class="btn btn-quiet small" id="browser-use" data-i18n="browserUsePage">Use page</button>
+                </div>
+                <div class="browser-page" id="browser-page" data-hint="The page renders in this area."></div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal-scrim" id="modal-scrim" hidden></div>
+
+    <!-- Settings is a full-window page, not a modal: a rail of groups on the
+         left, one scrolling pane on the right, and every change applies
+         immediately. -->
+    <dialog class="settings-dialog" id="settings-dialog" hidden>
+      <div class="settings-form" id="settings-form">
+        <aside class="settings-rail">
+          <div class="settings-rail-head">
+            <button type="button" class="icon-button small" id="settings-back" data-i18n-title="back">
+              <svg class="icon" aria-hidden="true"><use href="#i-chevron-left"></use></svg>
+            </button>
+            <h2 data-i18n="settings">Settings</h2>
+          </div>
+          <div class="settings-search">
+            <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
+            <input id="settings-search" type="search" spellcheck="false" autocomplete="off" data-i18n-placeholder="searchSettings" placeholder="Search settings" />
+          </div>
+          <nav class="settings-nav" id="settings-nav" role="tablist" aria-orientation="vertical"></nav>
+          <div class="settings-rail-foot">
+            <button type="button" class="settings-profile" id="settings-profile" title="Change the working folder">
+              <span class="settings-avatar" aria-hidden="true">P</span>
+              <span class="settings-profile-copy">
+                <span class="settings-profile-name" id="settings-profile-name">Local workspace</span>
+                <span class="settings-profile-sub" id="settings-profile-sub">Local workspace</span>
+              </span>
+            </button>
+          </div>
+        </aside>
+        <div class="settings-main">
+          <div class="settings-panes" id="settings-panes"></div>
+        </div>
+      </div>
+    </dialog>
+
+    <div class="palette-scrim" id="palette-scrim" hidden></div>
+    <div class="command-palette" id="command-palette" hidden role="dialog" aria-label="Command palette">
+      <input class="palette-input" id="palette-input" spellcheck="false" autocomplete="off" />
+      <div class="palette-list" id="palette-list"></div>
+    </div>
+
+    <dialog class="shortcuts-dialog" id="shortcuts-dialog" hidden>
+      <header class="dialog-head">
+        <h2 data-i18n="shortcuts">Keyboard shortcuts</h2>
+        <button type="button" class="icon-button" id="shortcuts-close" data-i18n-title="close">
+          <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
+        </button>
+      </header>
+      <div class="shortcut-grid" id="shortcut-grid"></div>
+    </dialog>
+
+    <!-- Electron 里 window.prompt() 是被禁用的（调用直接返回 null），
+         所以任何需要用户输入一行文字的地方都得有自己的对话框。 -->
+    <dialog class="input-dialog" id="input-dialog" hidden>
+      <form method="dialog">
+        <label class="input-dialog-label" id="input-dialog-label" for="input-dialog-field"></label>
+        <input class="input-dialog-field" id="input-dialog-field" type="text" autocomplete="off" />
+        <footer class="input-dialog-actions">
+          <button type="button" class="btn" id="input-dialog-cancel" data-i18n="cancel">Cancel</button>
+          <button type="submit" class="btn btn-primary" id="input-dialog-ok" data-i18n="ok">OK</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <!-- bridge.js installs window.prometheus when there is no Electron
+         preload (browser form). Under Electron it sees the preload's object
+         and does nothing. Module scripts run in order, so app.js always sees
+         the bridge's object. -->
+    <script type="module" src="bridge.js"></script>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

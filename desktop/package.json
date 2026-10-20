@@ -1,0 +1,14 @@
+{
+  "name": "embedded-ai-master-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Desktop shell for Embedded AI Master — Electron window over the kernel",
+  "type": "module",
+  "scripts": {
+    "desktop": "electron main.js",
+    "start": "electron main.js"
+  },
+  "devDependencies": {
+    "electron": "^44.9.0"
+  }
+}

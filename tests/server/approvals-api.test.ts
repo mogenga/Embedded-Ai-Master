@@ -31,6 +31,7 @@ function runnerReturning(outcome: RunnerDecideOutcome): SessionRunner {
   return {
     start: vi.fn(async () => ({ sessionId: "created-1", created: true })),
     decide: vi.fn(async () => outcome),
+    abort: vi.fn(() => true),
     close: vi.fn(async () => {}),
   };
 }

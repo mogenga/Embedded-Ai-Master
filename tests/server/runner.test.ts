@@ -393,6 +393,39 @@ describe("createSessionRunner", () => {
     });
   });
 
+  it("abort 中止运行中的会话并返回 true", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession({ hang: true });
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+    const { sessionId } = await runner.start({ text: "hi" });
+    expect(runner.abort(sessionId)).toBe(true);
+    expect(fake.calls[0]?.signal?.aborted).toBe(true);
+    await runner.close();
+  });
+
+  it("abort 对已结束或不存在的会话返回 false", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+    const { sessionId } = await runner.start({ text: "hi" });
+    // 让 generator 跑完并注销；未关闭的 runner 仍应如实说“没有可中止的”。
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(runner.abort("no-such-session")).toBe(false);
+    expect(runner.abort(sessionId)).toBe(false);
+  });
+
+  it("close 后 abort 返回 false", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession({ hang: true });
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+    const { sessionId } = await runner.start({ text: "hi" });
+
+    await runner.close();
+    expect(runner.abort(sessionId)).toBe(false);
+  });
+
   it("close 中止运行中的会话", async () => {
     const home = makeHome();
     const fake = createFakeRunSession({ hang: true });

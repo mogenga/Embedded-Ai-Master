@@ -10,5 +10,5 @@
     "skipLibCheck": true
   },
   "include": ["src", "tests", "mcp-servers"],
-  "exclude": ["src/ui", "tests/ui"]
+  "exclude": []
 }

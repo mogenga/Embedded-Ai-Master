@@ -220,6 +220,21 @@ async function handleAction(
   sendJson(res, 202, outcome);
 }
 
+async function handleAbort(
+  req: IncomingMessage,
+  res: ServerResponse,
+  runner: SessionRunner,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  if (typeof body.sessionId !== "string" || !isValidSessionId(body.sessionId)) {
+    throw new HttpError(400, "invalid_session_id", "sessionId 必须是合法的会话 id");
+  }
+  // Aborting a run that already finished is not an error: the click and the
+  // finish can race, and a 404 would show a failure for a run that is gone.
+  const aborted = runner.abort(body.sessionId);
+  sendJson(res, 202, { sessionId: body.sessionId, aborted });
+}
+
 async function handleApproval(
   req: IncomingMessage,
   res: ServerResponse,
@@ -447,7 +462,11 @@ async function serveStatic(
   } catch {
     throw new HttpError(400, "invalid_path", "非法的路径");
   }
-  const isIndex = decoded === "/" || decoded === "/web/index.html";
+  // The ported desktop renderer is a directory of plain files whose entry is
+  // `index.html`; the old Vite build nested it under `web/`. Accept both so a
+  // stale dist-web keeps working during the transition.
+  const isLegacyIndex = decoded === "/web/index.html";
+  const isIndex = decoded === "/" || decoded === "/index.html" || isLegacyIndex;
   if (decoded.includes("\0") || (!isIndex && decoded.split(/[\\/]/).includes(".."))) {
     throw new HttpError(400, "invalid_path", "非法的路径");
   }
@@ -458,9 +477,11 @@ async function serveStatic(
   if (realRoot === null) {
     throw new HttpError(404, "not_found", "未找到");
   }
-  const target = isIndex
+  const target = isLegacyIndex
     ? path.join(staticRoot, "web", "index.html")
-    : path.join(staticRoot, decoded);
+    : isIndex
+      ? path.join(staticRoot, "index.html")
+      : path.join(staticRoot, decoded);
   const realTarget = await realpathOrNull(target);
   if (realTarget === null) {
     throw new HttpError(404, "not_found", "未找到");
@@ -534,6 +555,12 @@ export function createApiHandler(
         requireMethod(method, "POST");
         requireWriteRequest(req, opts.port);
         await handleAction(req, res, requireRunner(opts.runner));
+        return;
+      }
+      if (pathname === "/api/abort") {
+        requireMethod(method, "POST");
+        requireWriteRequest(req, opts.port);
+        await handleAbort(req, res, requireRunner(opts.runner));
         return;
       }
       if (pathname === "/api/approvals") {

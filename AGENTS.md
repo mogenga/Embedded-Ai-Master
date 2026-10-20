@@ -1,6 +1,6 @@
 # AGENTS.md — Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 工具。当前处于 **M1/P0 交付后、M2 启动前**：P0 内核（`src/`）与 Web 工作台（`src/ui/`、`web/`）已实现，测试在 `tests/`，构建与脚本配置见 `package.json` / `tsconfig*.json` / `vite.config.ts` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
+面向嵌入式调试场景的 agent 工具。当前处于 **M2 阶段 3 已合并**：P0 内核（`src/`）与桌面/浏览器双形态前端（`desktop/`）已实现，测试在 `tests/`（`tests/desktop` 为协议层与宿主），构建与脚本配置见 `package.json` / `tsconfig*.json` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
 
 ## 事实源（先读这些，别猜）
 - `docs/BRD.md` — 业务需求（领域层 BR-xx / 平台层 PLAT-xx）、硬性规则 R1-R9、路线图 M1-M4。
@@ -18,7 +18,7 @@
 ## 常用命令（以 `package.json` 与 `README.md` 为准）
 
 - 测试与构建：`npm test`（vitest run，不触网）、`npm run coverage`（lines 阈值 85%）、`npm run typecheck`、`npm run lint`（当前等同 `tsc --noEmit`，见 D-006）、`npm run build`。
-- 前端：`npm run build:web`、`npm run test:ui`、`npm run typecheck:web`、`npm run verify:ui`（V1-V14 浏览器验收，需 Chrome/Edge）。
+- 前端：`npm run serve:ui`（浏览器形态，静态托管 `desktop/renderer`）、`npm run test:desktop`（协议层与桌面宿主测试）；桌面形态需用户先执行 `npm --prefix desktop install`，再 `npm --prefix desktop run desktop`。
 - live 测试默认跳过；开启方式见 README「live 测试」。
 - **依赖安装禁令同样适用于此**：只输出命令给用户，不代为执行（见下文）。
 

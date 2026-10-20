@@ -11,7 +11,9 @@ function resolvePort(): number {
 
 const host = "127.0.0.1";
 const port = resolvePort();
-const staticRoot = process.env.HARNESS_UI_STATIC?.trim() || "dist-web";
+// The desktop renderer is served as source: plain ES modules with no build
+// step. `HARNESS_UI_STATIC` still points at any directory with an index.html.
+const staticRoot = process.env.HARNESS_UI_STATIC?.trim() || "desktop/renderer";
 
 const ui = createUiServer({
   harnessHome: resolveHarnessHome(),

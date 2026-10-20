@@ -3,7 +3,7 @@ import path from "node:path";
 import { loadProviders, parseProviders, resolveModelRef } from "../config/providers.js";
 import type { ProvidersConfig } from "../config/providers.js";
 import { runSession } from "../index.js";
-import type { RunOptions } from "../index.js";
+import type { RunOptions, RunPermissionOptions } from "../index.js";
 import { SessionCorruptionError } from "../session/errors.js";
 import { isValidSessionId } from "../session/handle.js";
 import { readSessionHeader } from "../session/persistence.js";
@@ -54,6 +54,8 @@ export interface SessionRunner {
     requestId: string,
     decision: "allow" | "deny",
   ): Promise<RunnerDecideOutcome>;
+  /** Abort the run in flight. Returns false when there is nothing to abort. */
+  abort(sessionId: string): boolean;
   close(): Promise<void>;
 }
 
@@ -66,6 +68,11 @@ export interface SessionRunnerOptions {
   readyTimeoutMs?: number;
   runSessionImpl?: typeof runSession;
   cwd?: string;
+  /**
+   * Permission options applied to every run this runner starts. The approval
+   * bridge is always the runner's own; a caller cannot replace it.
+   */
+  permissions?: Omit<RunPermissionOptions, "prompter">;
 }
 
 interface RunnerEntry {
@@ -227,7 +234,7 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
       home: opts.harnessHome,
       providersText: JSON.stringify(providers),
       signal: controller.signal,
-      permissions: { prompter: bridge },
+      permissions: { ...(opts.permissions ?? {}), prompter: bridge },
       onSession: (session) => {
         bridge.bindSession(session);
         if (readySettled) return;
@@ -315,6 +322,16 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
     return entry.bridge.decide(requestId, decision);
   }
 
+  function abort(sessionId: string): boolean {
+    // 关闭后注册表为空：返回 false 而不是伪装成“已中止”。
+    if (closed) return false;
+    const entry = registry.get(sessionId);
+    if (entry === undefined) return false;
+    entry.controller.abort();
+    entry.bridge.close();
+    return true;
+  }
+
   async function close(): Promise<void> {
     closed = true;
     const entries = [...registry.values()];
@@ -336,5 +353,5 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
     }
   }
 
-  return { start, decide, close };
+  return { start, decide, abort, close };
 }

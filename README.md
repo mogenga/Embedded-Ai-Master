@@ -1,14 +1,14 @@
 # Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 内核，附带一个可运行的 Web 诊断工作台。当前交付 P0 内核（主循环与模型接入、会话事实源、内置工具、headless demo）与前端工作台（三栏布局、三态主题、消息流、调试坞、真实会话/知识库/设备状态读取）。
+面向嵌入式调试场景的 agent 内核，附带一个可运行的诊断工作台。当前交付 P0 内核（主循环与模型接入、会话事实源、内置工具、headless demo）与桌面/浏览器双形态前端（会话、转录、工具卡、审批、板卡与串口面板、设置）。
 
 ## 技术栈
 
 - TypeScript + Node.js >= 24（ESM-only）
 - Zod v4
 - Vitest v4
-- Preact 10 + Vite 8（前端工作台；`@preact/preset-vite`、happy-dom 仅用于构建与测试）
-- 实时通道：SSE + HTTP POST（前端保留 `EventSource` 替换点，当前交付抽象层）
+- 前端：纯 ES 模块（无框架、无打包器），桌面态由 Electron 承载，浏览器态由 `src/server` 静态托管
+- 实时通道：SSE + HTTP POST；桌面态为 NDJSON over stdio
 
 ## 安装
 
@@ -25,11 +25,16 @@ npm run lint        # 当前为 tsc --noEmit
 npm run typecheck   # tsc --noEmit（内核）
 npm run build       # 编译到 dist/
 
-npm run dev:web       # 启动前端开发服务器（Vite）
-npm run build:web     # 构建前端到 dist-web/
-npm run test:ui       # 仅跑前端测试（tests/ui）
-npm run typecheck:web # 前端类型检查（tsconfig.web.json）
-npm run verify:ui     # V1-V14 浏览器视觉验收（需 Chrome/Edge）
+npm run serve:ui      # 浏览器形态：静态托管 desktop/renderer 并运行 API（默认 5174）
+npm run test:desktop  # 桌面宿主与协议层测试（tests/desktop）
+```
+
+桌面形态需要先安装 Electron（agent 不代为安装）：
+
+```bash
+npm --prefix desktop install
+npm run build          # 桌面宿主复用 dist/
+npm --prefix desktop run desktop
 ```
 
 ## 目录结构
@@ -45,11 +50,14 @@ src/
 ├── session/      append-only JSONL 会话
 ├── server/       只读 HTTP API（会话 / 知识库 / 设备）与静态资源服务
 ├── tools/        工具契约、注册表、echo/fs/shell/glob/grep、五阶段执行管线
-├── ui/           前端工作台（Preact 组件、TranscriptView 投影、SSE 抽象）
 └── index.ts      runSession 装配
-web/              Vite 入口 HTML
-scripts/          verify-ui.mjs 浏览器视觉验收
-tests/            Vitest 测试（tests/ui 为前端测试）
+desktop/
+├── main.js       Electron 主进程（窗口、IPC、宿主生命周期）
+├── preload.cjs   contextBridge 桥
+├── host/host.js  桌面宿主：NDJSON 分发器，复用 dist/ 下的内核模块
+└── renderer/     纯 ES 模块前端（app.js / bridge.js / protocol.js / 样式与 i18n）
+scripts/          端到端脚本（probe、diagnosis、kb 回归与审核）
+tests/            Vitest 测试（tests/desktop 为桌面宿主与协议层）
 docs/             设计、计划与已知问题
 ```
 
@@ -422,20 +430,24 @@ demo 不读取 `HARNESS_COMPAT_API_KEY`（该变量仅 live 测试使用）；de
 
 会话写入 `$HARNESS_HOME/sessions/<id>/`：`header.json`、`session.v1.jsonl`、按需生成 `session.vN.jsonl` 与 `artifacts/`。
 
-## Web 工作台
+## 工作台（桌面 / 浏览器双形态）
 
-工作台没有演示数据：页面启动后从本地服务的 `/api/*` 读取真实会话、知识库与设备状态。
+前端是 `desktop/renderer/` 下的一套纯 ES 模块，同一份代码跑在两种形态：
+
+- **桌面**：Electron 窗口 + `desktop/host/host.js` 宿主进程（NDJSON over stdio），宿主复用 `dist/` 下的内核模块。
+- **浏览器**：`src/server` 静态托管同一目录，`desktop/renderer/bridge.js` 在没有 preload 时注入 `window.prometheus`，把协议映射到 `/api/*`。
 
 ```bash
-npm run build       # 内核产物 dist/server/serve.js
-npm run build:web   # 前端产物 dist-web/
-npm run serve:ui    # 真实数据服务，默认 http://127.0.0.1:5174/
+npm run build          # 内核产物 dist/server/serve.js（桌面宿主也依赖它）
+npm run serve:ui       # 浏览器形态，默认 http://127.0.0.1:5174/
+
+npm --prefix desktop install   # 桌面形态的一次性依赖安装（由用户执行）
+npm --prefix desktop run desktop
 ```
 
-- **环境变量**：`HARNESS_UI_PORT` 改监听端口（默认 `5174`）；`HARNESS_HOME` 指定会话与知识库根目录（默认 `~/.harness`）；`HARNESS_UI_STATIC` 指定前端静态产物目录（默认 `dist-web`）；`HARNESS_WEB_MODEL` 指定 Web 会话默认模型引用；`VITE_EVENT_STREAM_URL` 覆盖事件流地址（默认 `/api/events`）。服务只监听 `127.0.0.1`。
+- **环境变量**：`HARNESS_UI_PORT` 改监听端口（默认 `5174`）；`HARNESS_HOME` 指定会话与知识库根目录（默认 `~/.harness`）；`HARNESS_UI_STATIC` 指定静态目录（默认 `desktop/renderer`）；`HARNESS_WEB_MODEL` 指定默认模型引用。服务只监听 `127.0.0.1`。
 - **本机边界**：`/api/*` 校验 `Host` / `Origin` 必须为 `127.0.0.1` / `localhost` / `::1` 且端口等于监听端口；跨源返回 403 `forbidden_host` / `forbidden_origin`，用于阻断 DNS rebinding 与跨源读取（D-067 已解决）。写端点额外拒绝浏览器自动发送的 `Sec-Fetch-Site: cross-site`（403 `forbidden_origin`），覆盖真正的跨站页面；同 site 但不同端口（如 `localhost:5173` 页面写 `127.0.0.1:5174`）通常标记为 `same-site`，由 `Origin` 的 loopback + 端口一致性校验拦截。非浏览器客户端不发送该头，仍以 `Origin` 为准（D-146）。
-- **架构**：Preact 只承担组件化与增量 diff；全部业务状态经 `src/ui/view/transcript.ts` 的纯函数投影 `TranscriptView`。前端类型直接复用内核 `SessionEvent` / `LoopEvent` / `ToolResultPayload` / `ToolAnnotations`，不维护第二套事件模型。
-- **数据加载**：首屏并行请求 `/api/sessions`、`/api/kb`、`/api/device`，再按会话列表首项请求 `/api/sessions/<id>` 的真实事件日志；切换会话重新拉取。调试坞的寄存器与日志由工具卡投影，不再使用静态演示数据。
+- **协议层**：`desktop/renderer/protocol.js` 把内核 `SessionEvent` 翻译成渲染器认识的事件（`assistant` → `start/delta/end`、`tool_started`+`tool_result` → 工具行、`approval_request` → 审批条等）。桌面宿主与浏览器 bridge 共用这一层，两种形态对同一份日志给出同一套 UI。
 - **API**：
 
   | 方法 | 路径 | 行为 |
@@ -445,14 +457,16 @@ npm run serve:ui    # 真实数据服务，默认 http://127.0.0.1:5174/
   | GET | `/api/kb` | `{ root, tree }`；未配置 `kb/` 时返回 `{ root: null, tree: [] }` |
   | GET | `/api/device` | 当前恒为 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` |
   | POST | `/api/actions` | 发起会话或追加输入，202 `{ sessionId, created }`；错误码见「Web 会话与审批」 |
+  | POST | `/api/abort` | 中止运行中的会话，202 `{ sessionId, aborted }`；会话不在运行时 `aborted:false`（幂等，不报 404） |
   | POST | `/api/approvals` | 回传审批决策，202/200；错误码见「Web 会话与审批」 |
   | GET | `/api/events` | SSE 单会话事件流，见「实时事件流」；非法 id/cursor 400，不存在 404，损坏 500 |
 
-- **诚实边界**：写端点必须带 loopback `Origin`；提交失败在输入栏下方显示错误并保留输入。202 只表示受理/送达，工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准，前端不伪造成功。`VITE_ACTION_URL` / `VITE_APPROVAL_URL` 可覆盖默认端点；实时事件流默认连接 `/api/events`。
-- **空态**：无会话显示「暂无会话」，未配置 `$HARNESS_HOME/kb/` 显示「未配置知识库」；设备字段为 `unknown` 时 StatusBar 显示「—」，TopBar / DeviceMonitor / PortSettings 显示「未接入」。
-- **主题**：`light` / `system` / `dark` 三态，`localStorage` 键 `eam-theme`，默认 `system`；切换不重载页面。所有颜色经 CSS 变量，图标为内联 SVG sprite。
-- **验收**：`npm run verify:ui` 先要求 `dist-web/` 与 `dist/server/serve.js` 已构建，然后创建临时 `HARNESS_HOME`（写入一条真实会话日志与示例知识库目录），启动 `dist/server/serve.js`，用无头 Chromium 经 CDP 实测 V1-V14（三栏几何、无溢出/截断、滚动条配色与占位、三主题解析、无 emoji、焦点可见、减少动效、回放一致性、真实写操作确认文案）；另以空 `HARNESS_HOME` 起第二个服务检查空态文案（V0，附加项不计入 14 项）。结束后关闭服务并清理临时目录，清理失败仅 warning。浏览器探测优先 `CHROME_PATH`，其次 Chrome/Edge 常见安装路径；找不到时以 exit 2 明确失败。
-- **安全边界**：写内存/复位需显式确认，确认后仅进入「执行中，等待工具结果」，不会在前端伪造「已执行」（R2）；工具失败显式展示错误码与文本（R3）。
+- **诚实边界**：写端点必须带 loopback `Origin`；提交失败在转录中显示可读错误，不伪造成功。202 只表示受理/送达，工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准。内核没有的能力（git/PR、终端、worktree、packs、skills/memory/instructions/hooks、subagents、goals、文件树、导出、检查点恢复）在前端隐藏入口，宿主/bridge 收到对应命令时回显式 `notice`，不静默吞掉（R3）。
+- **审批**：内核按单次请求审批，没有「始终允许」的持久规则；该按钮不渲染。审批超时/中止时由 `permission_decision` 触发 `permission_closed`，审批条自动收起。
+- **空态**：无会话显示「暂无会话」；设备字段为 `unknown` 时显示「未接入」。
+- **主题**：`light` / `system` / `dark` 三态，`localStorage` 键 `prometheus.theme`，默认 `dark`；所有颜色经 CSS 变量，图标为内联 SVG sprite。
+- **验收**：`npm test` 覆盖协议层、bridge 与宿主；浏览器形态可用无头 Chromium 经 CDP 冒烟（`npm run serve:ui` 后打开页面，确认无控制台错误、`window.prometheus.send` 存在、未支持面板不可见）。桌面形态需本机安装 Electron 后手动验证。
+- **安全边界**：写内存/复位需显式确认，确认后仅显示「等待工具结果」，不会在前端伪造「已执行」（R2）；工具失败显式展示错误码与文本（R3）。
 
 ## 实时事件流
 
@@ -473,11 +487,11 @@ Web 工作台通过 SSE 订阅单个会话的日志投影。实时流与回放�
 Web 进程内运行最小会话运行器：`POST /api/actions` 发起会话或追加输入，`ask` 工具产生 `approval_request`，浏览器经 `POST /api/approvals` 回传决策。
 
 ```bash
-npm run build:web && npm run build && npm run serve:ui
+npm run build && npm run serve:ui
 # 打开 http://127.0.0.1:5174/
 ```
 
-开发期用 `npm run dev:web`：Vite 把 `/api` 代理到 `HARNESS_UI_PORT`（默认 5174），并在 `proxyReq` 把 `Origin` 改写为 `http://127.0.0.1:<端口>`，以满足写端点的 Origin 要求；生产同源不需要改写。
+浏览器形态同源加载页面与 `/api`，写端点需要的 `Origin` 由浏览器自动携带；没有单独的开发服务器或代理。
 
 **模型**
 

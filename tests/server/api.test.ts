@@ -62,6 +62,7 @@ function makeRunner(overrides: Partial<SessionRunner> = {}): SessionRunner {
   return {
     start: vi.fn(async () => ({ sessionId: "created-1", created: true })),
     decide: vi.fn(async () => ({ kind: "accepted" as const })),
+    abort: vi.fn(() => true),
     close: vi.fn(async () => {}),
     ...overrides,
   };
@@ -271,9 +272,9 @@ describe("ui api", () => {
 
   it("静态穿越不返回文件内容", async () => {
     const root = mkdtempSync(path.join(tmpdir(), "eam-static-"));
-    const staticRoot = path.join(root, "dist-web");
-    mkdirSync(path.join(staticRoot, "web"), { recursive: true });
-    writeFileSync(path.join(staticRoot, "web", "index.html"), "<html>ok</html>");
+    const staticRoot = path.join(root, "renderer");
+    mkdirSync(staticRoot, { recursive: true });
+    writeFileSync(path.join(staticRoot, "index.html"), "<html>ok</html>");
     writeFileSync(path.join(root, "package.json"), JSON.stringify({ secret: "top-level" }));
     const s = createUiServer({ harnessHome: makeHome(), staticRoot });
     close = s.close;
@@ -281,6 +282,27 @@ describe("ui api", () => {
     expect([400, 404]).toContain(traversal.status);
     expect(traversal.body).not.toContain("top-level");
     expect((await fetch(`http://127.0.0.1:${s.port}/`)).status).toBe(200);
+  });
+
+  it("静态入口是 staticRoot/index.html，兼容旧的 /web/index.html", async () => {
+    const root = mkdtempSync(path.join(tmpdir(), "eam-static-index-"));
+    const staticRoot = path.join(root, "renderer");
+    mkdirSync(staticRoot, { recursive: true });
+    writeFileSync(path.join(staticRoot, "index.html"), "<html>renderer</html>");
+    mkdirSync(path.join(staticRoot, "web"), { recursive: true });
+    writeFileSync(path.join(staticRoot, "web", "index.html"), "<html>legacy</html>");
+    writeFileSync(path.join(staticRoot, "app.js"), "export const a = 1;\n");
+    const s = createUiServer({ harnessHome: makeHome(), staticRoot });
+    close = s.close;
+    const rootPage = await (await fetch(`http://127.0.0.1:${s.port}/`)).text();
+    expect(rootPage).toContain("renderer");
+    const explicit = await (await fetch(`http://127.0.0.1:${s.port}/index.html`)).text();
+    expect(explicit).toContain("renderer");
+    const legacy = await (await fetch(`http://127.0.0.1:${s.port}/web/index.html`)).text();
+    expect(legacy).toContain("legacy");
+    const script = await fetch(`http://127.0.0.1:${s.port}/app.js`);
+    expect(script.status).toBe(200);
+    expect(script.headers.get("content-type")).toContain("text/javascript");
   });
 
   it.skipIf(!SYMLINK_SUPPORTED)("符号链接穿越会话根与静态根均被拒绝", async () => {
@@ -293,8 +315,8 @@ describe("ui api", () => {
     writeFileSync(path.join(outside, "session.v1.jsonl"), "{}\n");
     symlinkSync(outside, path.join(home, "sessions", "leak"), "dir");
     const staticRoot = path.join(home, "static");
-    mkdirSync(path.join(staticRoot, "web"), { recursive: true });
-    writeFileSync(path.join(staticRoot, "web", "index.html"), "<html>ok</html>");
+    mkdirSync(staticRoot, { recursive: true });
+    writeFileSync(path.join(staticRoot, "index.html"), "<html>ok</html>");
     symlinkSync(outside, path.join(staticRoot, "leak"), "dir");
     symlinkSync(path.join(outside, "secret.txt"), path.join(staticRoot, "secret.txt"), "file");
     const s = createUiServer({ harnessHome: home, staticRoot });

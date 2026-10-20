@@ -1440,6 +1440,42 @@
 - **修复建议**: 为写路径引入设备侧事务/回滚;连接重建已在本轮实现(abort 后隔离迟到响应),但不改变“已执行命令无法撤回”的事实;同时补充写操作取消后的设备状态核验。
 - **状态**: 未解决(已知边界,已在 README/spec 说明)。
 
+### D-163 · 桌面形态未实机验证(Electron 依赖需用户安装)
+
+- **发现**: 2026-10-20,前端移植(Prometheus → 当前内核)。
+- **现象**: `desktop/` 的 Electron 主进程、preload 桥与自绘窗口控件已实现,但本机未安装 Electron,`npm --prefix desktop install` 按依赖安装禁令由用户执行,因此窗口、preload/IPC、`ELECTRON_RUN_AS_NODE` 下的宿主运行时都未经真机验证。宿主逻辑本身已用系统 Node 通过 NDJSON 端到端测试(`tests/desktop/host.test.js`)。
+- **影响**: 桌面形态的启动、窗口标题栏与文件对话框未确证;浏览器形态不受影响(已用无头 Chromium 实测)。
+- **触发升级条件**: 用户安装 Electron 后即可验证;或需要把桌面形态作为交付形态。
+- **修复建议**: 执行 `npm --prefix desktop install && npm run build && npm --prefix desktop run desktop`,按 `desktop/MATRIX.md` 的清单逐项核对。
+- **状态**: 未解决。
+
+### D-164 · 内核无 token 级流式事件,回答整段出现
+
+- **发现**: 2026-10-20,前端移植(Prometheus → 当前内核)。
+- **现象**: 内核在模型调用**返回后**才写一条完整 `assistant` 事件(`src/loop/query.ts`),不落盘 token 增量。桌面/浏览器前端的协议层据此合成 `assistant_start` / `assistant_delta` / `assistant_end`,其中 delta 一次带出整段文字。
+- **影响**: 回答不逐字出现,长回答的等待观感与流式不同;内容本身完整,不影响证据与结论。
+- **触发升级条件**: 需要逐字输出;或大回答的等待体验成为主要抱怨。
+- **修复建议**: 在内核的模型适配层加可选的增量事件并落盘,协议层直接映射;需同时确定 `tool_call` 增量与最终消息的关系。
+- **状态**: 未解决(已知边界)。
+
+### D-165 · 内核不提供上下文占用率,前端只显示用量
+
+- **发现**: 2026-10-20,前端移植(Prometheus → 当前内核)。
+- **现象**: 内核 `usage` 事件只有 token 花费(`promptTokens`/`completionTokens`/`cachedTokens`),没有“已占上下文窗口”的比例;前端的上下文百分比因此被隐藏,只显示模型窗口与本会话花费。
+- **影响**: 界面不显示上下文占用率(原 Preact 工作台有此指标);不影响运行与证据。
+- **触发升级条件**: 需要在界面上提示“上下文快满了”;或需要按占用率触发自动压缩。
+- **修复建议**: 内核在写 `usage` 时附带当前消息序列的估算 token 与窗口上限;前端恢复百分比展示。
+- **状态**: 未解决。
+
+### D-166 · 前端未覆盖的能力被隐藏,能力清单以 desktop/MATRIX.md 为准
+
+- **发现**: 2026-10-20,前端移植(Prometheus → 当前内核)。
+- **现象**: Prometheus 前端原有 102 条命令、9 个工作台面板与 14 个设置页;当前内核只支撑其中一部分。移植时按“不伪造”原则隐藏了 git/PR、终端、worktree、packs、browser、skills/memory/instructions/hooks、subagents、goals、文件树、导出、检查点恢复、附件与 @ 补全等入口;宿主与 bridge 收到这些命令时回显式 `notice`。
+- **影响**: 前端功能面小于原版;`docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` 的 §7-§9(回放、导出、设备控制)原设计基于已删除的 `src/ui`,需按新前端重写。
+- **触发升级条件**: 需要上述任一能力;或阶段 4 交互层落地。
+- **修复建议**: 逐项在 `desktop/MATRIX.md` 标记“已支持/隐藏/待接”,新增能力时先补内核后端再放开前端入口。
+- **状态**: 未解决(已知边界,清单见 `desktop/MATRIX.md`)。
+
 ---
 
 ## 变更记录
@@ -1508,3 +1544,4 @@
 | 2026-10-20 | BR-2/BR-3 第一轮独立审查修复:C1/KB 拒答引入技术 token 覆盖度(refusalRate 0.56→0.84,Recall@2 0.46→0.44);I1 OpenOCD 全 0 warning;I2 Renode `available()`;I3 OpenOCD attach 仅 telnet、移除 `openocdConfig`;I4 search 严格 Hit@1 + `goldInTop20`;I5 工具接 AbortSignal 并收紧 `serial_read` 上限;I6 spec 工具数改 14;录入 D-159(拒答未达 100%)、D-160(超时迟到输出竞态)与 D-161(10/20ms 定时器抖动) |
 | 2026-10-20 | M2 阶段3 BR-4/BR-5/端到端:新增权限 `extentKey` 区间跨度、probe 权限模板、`kb_propose`/`kb-review`/`regression-gate` 与 `diagnosis:e2e`;`serial_open` 改为非只读,`diagnose` 下未显式授权默认 deny(安全收紧,配置见 `mcp-servers/probe/permissions.example.json`);KB 未审内容保持不参与检索 |
 | 2026-10-20 | M2 阶段3 最终复核:Renode 外设寄存器改为 4 字节对齐 `ReadDoubleWord`(逐字节 `ReadByte` 对外设不可靠,GPIOA 实测全 0 而字读为 0xA8000000);`pipeline` 失败结果不再标记 `evidence`;legacy inbox id 漂移语义写入 spec;最终复核 APPROVE |
+| 2026-10-20 | 前端移植(Prometheus → 当前内核):删除 Preact 工作台(`src/ui`、`web/`、`tests/ui`、`verify-ui`、`vite.config.ts`),新增 `desktop/`(renderer 纯 ES 模块 + `bridge.js` 浏览器兼容层 + `protocol.js` 协议层 + Electron `main.js`/`preload.cjs` + NDJSON 宿主);新增 `POST /api/abort` 与 `runner.abort`;`serve:ui` 默认静态托管 `desktop/renderer`;录入 D-163(桌面未实机)、D-164(无 token 流式)、D-165(无上下文占用率)、D-166(未覆盖能力清单) |
