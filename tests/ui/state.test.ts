@@ -3,6 +3,7 @@ import type { SessionEvent, SessionEventEnvelope } from "../../src/session/types
 import {
   applyLoadFailure,
   applyLoadSuccess,
+  applyNewSession,
   applySessionEvent,
   applySessionFailure,
   applySessionLoaded,
@@ -262,6 +263,36 @@ describe("workbench state", () => {
     const state = applyStreamError({ ...baseState(), view }, "事件流中断");
     expect(state.view).toBe(view);
     expect(state.streamError).toBe("事件流中断");
+    expect(state.connection).toBe("ready");
+  });
+
+  it("新会话清空会话与设备残留状态，不凭空捏造设备", () => {
+    const state = applyNewSession({
+      ...baseState(),
+      activeSessionId: "s1",
+      view: { ...transcriptFromSession(EVENTS), sessionId: "s1" },
+      events: EVENTS,
+      lastSeq: EVENTS.at(-1)!.seq,
+      mcpStatuses: [{ kind: "connected", server: "echo" }],
+      device: { probe: "OpenOCD", serial: "COM3", cpu: "STM32F407", backend: "Renode" },
+      switching: true,
+      streamError: "事件流中断",
+      detailError: "会话读取失败",
+      failedSessionId: "s1",
+      sendError: "发送失败",
+    });
+    expect(state.activeSessionId).toBeUndefined();
+    expect(state.events).toEqual([]);
+    expect(state.lastSeq).toBe(-1);
+    expect(state.view.events).toEqual([]);
+    expect(state.view.status).toBe("idle");
+    expect(state.mcpStatuses).toEqual([]);
+    expect(state.device).toEqual(UNKNOWN_DEVICE);
+    expect(state.streamError).toBeUndefined();
+    expect(state.detailError).toBeUndefined();
+    expect(state.failedSessionId).toBeUndefined();
+    expect(state.sendError).toBeUndefined();
+    expect(state.switching).toBe(false);
     expect(state.connection).toBe("ready");
   });
 

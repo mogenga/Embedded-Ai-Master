@@ -9,6 +9,7 @@ import { SYMBOL_SPRITE } from "./icons.js";
 import {
   applyLoadFailure,
   applyLoadSuccess,
+  applyNewSession,
   applySessionEvent,
   applySessionFailure,
   applySessionLoaded,
@@ -222,18 +223,12 @@ async function decideApproval(
 
 function newSession(): void {
   controller.close();
-  state = {
-    ...state,
-    activeSessionId: undefined,
-    events: [],
-    view: emptyTranscriptView(),
-    lastSeq: -1,
-    sendError: undefined,
-  };
+  state = applyNewSession(state);
   renderApp();
 }
 
-async function selectSession(id: string): Promise<void> {  const isCurrent = gate.begin();
+async function selectSession(id: string): Promise<void> {
+  const isCurrent = gate.begin();
   state = startSessionSwitch(state);
   renderApp();
   controller.close();

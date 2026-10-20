@@ -2,9 +2,9 @@ import { MCP_STATUS_PAYLOAD_KINDS } from "../session/types.js";
 import type { McpStatusPayload, McpStatusPayloadKind, SessionEvent, SessionEventEnvelope } from "../session/types.js";
 import type { DeviceStatus, KbNode, SessionSummary } from "./api/client.js";
 import type { LoadedSession, LoadedWorkbench } from "./api/load.js";
-import { deviceFromSession } from "./view/device.js";
+import { deviceFromSession, UNKNOWN_DEVICE } from "./view/device.js";
 import type { TranscriptView } from "./view/transcript.js";
-import { transcriptFromSession } from "./view/transcript.js";
+import { emptyTranscriptView, transcriptFromSession } from "./view/transcript.js";
 
 export const MAX_MCP_STATUSES = 20;
 
@@ -186,6 +186,24 @@ export function applySessionFailure(
   message: string,
 ): WorkbenchState {
   return { ...state, switching: false, detailError: message, failedSessionId: id };
+}
+
+export function applyNewSession(state: WorkbenchState): WorkbenchState {
+  return {
+    ...state,
+    connection: "ready",
+    activeSessionId: undefined,
+    view: emptyTranscriptView(),
+    events: [],
+    lastSeq: -1,
+    mcpStatuses: [],
+    device: UNKNOWN_DEVICE,
+    sendError: undefined,
+    streamError: undefined,
+    detailError: undefined,
+    failedSessionId: undefined,
+    switching: false,
+  };
 }
 
 export function applySessionEvent(
