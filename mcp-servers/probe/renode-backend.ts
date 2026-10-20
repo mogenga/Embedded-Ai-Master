@@ -9,9 +9,12 @@ import type {
 } from "./backend.js";
 import { RenodeMonitor } from "./renode.js";
 import type { RenodeMonitorOptions } from "./renode.js";
+import { DEFAULT_SERIAL_HOST, TcpSerial } from "./serial.js";
+import type { SerialReadResult } from "./serial.js";
 
 export const DEFAULT_RENODE_PLATFORM = "platforms/boards/stm32f4_discovery-kit.repl";
 export const ALL_ZERO_WARNING = "renode_all_zero_or_unmapped";
+export const RENODE_UART_WARNING = "renode_uart_uninitialized";
 export const MAX_MEMORY_LENGTH = 256;
 
 const MAX_ADDRESS = 0xffff_ffff;
@@ -23,9 +26,18 @@ export interface RenodeMonitorLike {
   stop(): Promise<void>;
 }
 
+export interface SerialClientLike {
+  open(host: string, port: number): Promise<void>;
+  read(maxBytes: number, timeoutMs: number): Promise<SerialReadResult>;
+  write(data: Buffer): Promise<number>;
+  close(): Promise<void>;
+  status(): SerialStatus;
+}
+
 export interface RenodeBackendEnv {
   renodePath?: string;
   monitorFactory?: (options: RenodeMonitorOptions) => RenodeMonitorLike;
+  serialFactory?: () => SerialClientLike;
 }
 
 function normalizePlatform(platform: string): string {
@@ -87,14 +99,18 @@ export class RenodeBackend implements ProbeBackend {
 
   private readonly renodePath?: string;
   private readonly monitorFactory: (options: RenodeMonitorOptions) => RenodeMonitorLike;
+  private readonly serialFactory: () => SerialClientLike;
 
   private monitor?: RenodeMonitorLike;
+  private serial?: SerialClientLike;
+  private terminalCreated = false;
   private attached = false;
   private cpu: DeviceStatus["cpu"] = "unknown";
 
   constructor(env: RenodeBackendEnv = {}) {
     this.renodePath = env.renodePath;
     this.monitorFactory = env.monitorFactory ?? ((options) => new RenodeMonitor(options));
+    this.serialFactory = env.serialFactory ?? (() => new TcpSerial());
   }
 
   async attach(options: AttachOptions = {}): Promise<DeviceStatus> {
@@ -104,6 +120,7 @@ export class RenodeBackend implements ProbeBackend {
       const stale = this.monitor;
       this.monitor = undefined;
       this.attached = false;
+      await this.closeSerialSilently();
       try {
         await stale.stop();
       } catch {
@@ -144,6 +161,7 @@ export class RenodeBackend implements ProbeBackend {
     this.monitor = undefined;
     this.attached = false;
     this.cpu = "unknown";
+    await this.closeSerialSilently();
     if (!monitor) return;
 
     try {
@@ -230,27 +248,68 @@ export class RenodeBackend implements ProbeBackend {
     return { declaration, verified };
   }
 
-  async serialOpen(_host: string, _port: number): Promise<SerialStatus> {
-    throw new ProbeBackendError("not_implemented", "Renode 串口通道将在 Task 5 实现");
+  async serialOpen(host: string, port: number): Promise<SerialStatus> {
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new ProbeBackendError("invalid_argument", `port 必须是 1..65535 的整数: ${port}`);
+    }
+    const monitor = this.requireAttached();
+
+    if (this.serial?.status().open) return this.serial.status();
+
+    if (!this.terminalCreated) {
+      await monitor.send(`emulation CreateServerSocketTerminal ${port} "cli"`);
+      await monitor.send("connector Connect sysbus.usart2 cli");
+      this.terminalCreated = true;
+    }
+
+    const serial = this.serial ?? this.serialFactory();
+    this.serial = serial;
+    await serial.open(host.trim() || DEFAULT_SERIAL_HOST, port);
+    return serial.status();
   }
 
   async serialRead(
-    _maxBytes: number,
-    _timeoutMs: number,
+    maxBytes: number,
+    timeoutMs: number,
   ): Promise<{ bytes: number[]; hex: string; text: string; timedOut: boolean; warning?: string }> {
-    throw new ProbeBackendError("not_implemented", "Renode 串口通道将在 Task 5 实现");
+    const serial = this.requireSerial();
+    const result = await serial.read(maxBytes, timeoutMs);
+
+    const warnings = [RENODE_UART_WARNING];
+    if (result.warning) warnings.push(result.warning);
+
+    return {
+      bytes: result.bytes,
+      hex: result.bytes.map(toHexByte).join(""),
+      text: Buffer.from(result.bytes).toString("utf8"),
+      timedOut: result.timedOut,
+      warning: warnings.join(";"),
+    };
   }
 
-  async serialWrite(_data: Buffer): Promise<{ declaration: Declaration; bytesWritten: number }> {
-    throw new ProbeBackendError("not_implemented", "Renode 串口通道将在 Task 5 实现");
+  async serialWrite(data: Buffer): Promise<{ declaration: Declaration; bytesWritten: number }> {
+    const serial = this.requireSerial();
+    const bytesWritten = await serial.write(data);
+    return {
+      declaration: {
+        operation: "serial_write",
+        length: data.length,
+        effect: "write bytes to serial peer",
+      },
+      bytesWritten,
+    };
   }
 
   async serialClose(): Promise<SerialStatus> {
-    throw new ProbeBackendError("not_implemented", "Renode 串口通道将在 Task 5 实现");
+    const serial = this.serial;
+
+    if (!serial) return this.serialStatus();
+    await serial.close();
+    return serial.status();
   }
 
   serialStatus(): SerialStatus {
-    throw new ProbeBackendError("not_implemented", "Renode 串口通道将在 Task 5 实现");
+    return this.serial?.status() ?? { open: false, bytesRead: 0, bytesWritten: 0 };
   }
 
   status(): DeviceStatus {
@@ -259,8 +318,27 @@ export class RenodeBackend implements ProbeBackend {
       backend: attached ? this.kind : "none",
       probe: attached ? "attached" : "detached",
       cpu: attached ? this.cpu : "unknown",
-      serial: "closed",
+      serial: this.serial?.status().open === true ? "open" : "closed",
     };
+  }
+
+  private requireSerial(): SerialClientLike {
+    if (!this.serial || !this.serial.status().open) {
+      throw new ProbeBackendError("backend_error", "串口未打开");
+    }
+    return this.serial;
+  }
+
+  private async closeSerialSilently(): Promise<void> {
+    const serial = this.serial;
+    this.serial = undefined;
+    this.terminalCreated = false;
+    if (!serial) return;
+    try {
+      await serial.close();
+    } catch {
+      // 串口清理失败不阻塞 attach/detach。
+    }
   }
 
   private requireAttached(): RenodeMonitorLike {

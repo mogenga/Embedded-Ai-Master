@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
+import { evaluatePolicy } from "../../../src/permissions/policy.js";
+import type { ToolDef } from "../../../src/tools/types.js";
 import { ProbeBackendError } from "../backend.js";
 import type {
   AttachOptions,
@@ -37,6 +40,20 @@ function findTool(tools: ProbeToolSpec[], name: string): ProbeToolSpec {
 
 function errorCode(result: Awaited<ReturnType<ProbeToolSpec["handler"]>>): unknown {
   return (result.structuredContent as { code?: unknown } | undefined)?.code;
+}
+
+function permissionTool(spec: ProbeToolSpec): ToolDef<unknown> {
+  return {
+    name: `mcp__probe__${spec.name}`,
+    description: spec.description,
+    schema: z.unknown(),
+    annotations: {
+      readOnly: spec.annotations?.readOnlyHint === true,
+      destructive: spec.annotations?.destructiveHint === true,
+      evidence: spec.meta?.evidence === true,
+    },
+    execute: spec.handler,
+  } as unknown as ToolDef<unknown>;
 }
 
 class FakeBackend implements ProbeBackend {
@@ -200,7 +217,18 @@ describe("probeTools 工具面", () => {
   it("只读工具标注 readOnlyHint，写工具标注 destructiveHint", () => {
     const tools = probeTools({ renode: new FakeBackend("renode") });
 
-    for (const name of ["device_list", "device_status", "attach", "detach", "halt", "resume"]) {
+    for (const name of [
+      "device_list",
+      "device_status",
+      "attach",
+      "detach",
+      "halt",
+      "resume",
+      "serial_open",
+      "serial_status",
+      "serial_read",
+      "serial_close",
+    ]) {
       expect(findTool(tools, name).annotations?.readOnlyHint, name).toBe(true);
     }
     for (const name of ["reset", "mem_write", "serial_write"]) {
@@ -208,6 +236,30 @@ describe("probeTools 工具面", () => {
     }
     expect(findTool(tools, "mem_read").meta?.evidence).toBe(true);
     expect(findTool(tools, "serial_read").meta?.evidence).toBe(true);
+  });
+
+  it("diagnose 预设下串口通道工具映射为 read/allow，写入映射为 write/ask", () => {
+    const tools = probeTools({ renode: new FakeBackend("renode") });
+
+    for (const name of ["serial_open", "serial_status", "serial_read", "serial_close"]) {
+      const evaluation = evaluatePolicy({
+        preset: "diagnose",
+        rules: [],
+        tool: permissionTool(findTool(tools, name)),
+        args: {},
+      });
+      expect(evaluation.access, name).toBe("read");
+      expect(evaluation.action, name).toBe("allow");
+    }
+
+    const write = evaluatePolicy({
+      preset: "diagnose",
+      rules: [],
+      tool: permissionTool(findTool(tools, "serial_write")),
+      args: {},
+    });
+    expect(write.access).toBe("write");
+    expect(write.action).toBe("ask");
   });
 
   it("device_list 报告 renode 可用、openocd 未配置", async () => {
@@ -382,7 +434,35 @@ describe("probeTools 工具面", () => {
     });
   });
 
-  it("串口工具已注册；后端未实现时返回 not_implemented", async () => {
+  it("串口工具通路：open 默认 host、write 含 declaration、read 带 evidence", async () => {
+    const renode = new FakeBackend("renode");
+    const tools = probeTools({ renode });
+    await findTool(tools, "attach").handler({});
+
+    const opened = await findTool(tools, "serial_open").handler({ port: 4321 });
+    expect(opened.isError).toBeUndefined();
+    expect(renode.calls).toContain("serial_open:127.0.0.1:4321");
+
+    const written = await findTool(tools, "serial_write").handler({ data: "ping" });
+    expect(written.isError).toBeUndefined();
+    expect((written.structuredContent as { declaration: Declaration }).declaration).toEqual({
+      operation: "serial_write",
+      effect: "write serial bytes",
+    });
+    expect((written.structuredContent as { bytesWritten: number }).bytesWritten).toBe(4);
+
+    const read = await findTool(tools, "serial_read").handler({});
+    expect(read.isError).toBeUndefined();
+    expect(findTool(tools, "serial_read").meta?.evidence).toBe(true);
+
+    const closed = await findTool(tools, "serial_close").handler({});
+    expect(closed.isError).toBeUndefined();
+    expect((closed.structuredContent as { serialStatus: SerialStatus }).serialStatus.open).toBe(
+      false,
+    );
+  });
+
+  it("串口后端返回 not_implemented 时工具显式透传错误码", async () => {
     const renode = new FakeBackend("renode");
     const tools = probeTools({ renode });
     await findTool(tools, "attach").handler({});

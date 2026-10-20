@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { ProbeBackendError } from "../backend.js";
+import type { SerialStatus } from "../backend.js";
 import { RenodeBackend } from "../renode-backend.js";
+import type { RenodeMonitorLike, SerialClientLike } from "../renode-backend.js";
 import { RenodeCommandError } from "../renode.js";
 import type { RenodeMonitorOptions } from "../renode.js";
-import type { RenodeMonitorLike } from "../renode-backend.js";
 
 const DEFAULT_PLATFORM_COMMAND =
   "machine LoadPlatformDescription @platforms/boards/stm32f4_discovery-kit.repl";
@@ -40,17 +41,66 @@ class FakeMonitor implements RenodeMonitorLike {
   }
 }
 
+class FakeSerial implements SerialClientLike {
+  readonly openCalls: Array<{ host: string; port: number }> = [];
+  readonly writes: Buffer[] = [];
+  closeCount = 0;
+  readResult: { bytes: number[]; timedOut: boolean; warning?: string } = {
+    bytes: [0x41],
+    timedOut: false,
+  };
+
+  private socketOpen = false;
+  private host?: string;
+  private port?: number;
+
+  async open(host: string, port: number): Promise<void> {
+    this.openCalls.push({ host, port });
+    this.socketOpen = true;
+    this.host = host;
+    this.port = port;
+  }
+
+  async read(): Promise<{ bytes: number[]; timedOut: boolean; warning?: string }> {
+    return this.readResult;
+  }
+
+  async write(data: Buffer): Promise<number> {
+    this.writes.push(Buffer.from(data));
+    return data.length;
+  }
+
+  async close(): Promise<void> {
+    this.closeCount += 1;
+    this.socketOpen = false;
+  }
+
+  status(): SerialStatus {
+    return {
+      open: this.socketOpen,
+      host: this.host,
+      port: this.port,
+      bytesRead: 0,
+      bytesWritten: this.writes.reduce((sum, chunk) => sum + chunk.length, 0),
+    };
+  }
+}
+
 interface Harness {
   backend: RenodeBackend;
   monitors: FakeMonitor[];
   options: RenodeMonitorOptions[];
 }
 
-function createHarness(handler: CommandHandler): Harness {
+function createHarness(
+  handler: CommandHandler,
+  serialFactory?: () => SerialClientLike,
+): Harness {
   const monitors: FakeMonitor[] = [];
   const options: RenodeMonitorOptions[] = [];
   const backend = new RenodeBackend({
     renodePath: "C:/fake/Renode.exe",
+    serialFactory,
     monitorFactory: (monitorOptions) => {
       options.push(monitorOptions);
       const monitor = new FakeMonitor(handler, monitorOptions);
@@ -296,26 +346,128 @@ describe("RenodeBackend", () => {
     expect(harness.monitors[0].stopCount).toBe(1);
   });
 
-  it("串口方法在 Task 5 前返回 not_implemented", async () => {
-    const harness = createHarness(() => "");
+  it("serial_open 先创建 socket 终端并连接，重复 open 幂等", async () => {
+    const serial = new FakeSerial();
+    const harness = createHarness(() => "", () => serial);
+    await harness.backend.attach();
+
+    const status = await harness.backend.serialOpen("127.0.0.1", 4321);
+
+    expect(status.open).toBe(true);
+    expect(harness.monitors[0].commands.slice(2)).toEqual([
+      'emulation CreateServerSocketTerminal 4321 "cli"',
+      "connector Connect sysbus.usart2 cli",
+    ]);
+    expect(serial.openCalls).toEqual([{ host: "127.0.0.1", port: 4321 }]);
+    expect(harness.backend.status().serial).toBe("open");
+
+    const again = await harness.backend.serialOpen("127.0.0.1", 4321);
+    expect(again.open).toBe(true);
+    expect(harness.monitors[0].commands).toHaveLength(4);
+    expect(serial.openCalls).toHaveLength(1);
+  });
+
+  it("serial_open 空 host 回退到 127.0.0.1", async () => {
+    const serial = new FakeSerial();
+    const harness = createHarness(() => "", () => serial);
+    await harness.backend.attach();
+
+    await harness.backend.serialOpen("", 4322);
+
+    expect(serial.openCalls).toEqual([{ host: "127.0.0.1", port: 4322 }]);
+  });
+
+  it("serial_read 保留真实字节与 timedOut，并标注无固件 warning", async () => {
+    const serial = new FakeSerial();
+    serial.readResult = { bytes: [0x48, 0x69], timedOut: true };
+    const harness = createHarness(() => "", () => serial);
+    await harness.backend.attach();
+    await harness.backend.serialOpen("127.0.0.1", 4321);
+
+    const result = await harness.backend.serialRead(16, 50);
+
+    expect(result).toEqual({
+      bytes: [0x48, 0x69],
+      hex: "4869",
+      text: "Hi",
+      timedOut: true,
+      warning: "renode_uart_uninitialized",
+    });
+  });
+
+  it("serial_read 同时保留缓冲区溢出 warning", async () => {
+    const serial = new FakeSerial();
+    serial.readResult = { bytes: [0x01], timedOut: false, warning: "serial_buffer_overflow" };
+    const harness = createHarness(() => "", () => serial);
+    await harness.backend.attach();
+    await harness.backend.serialOpen("127.0.0.1", 4321);
+
+    const result = await harness.backend.serialRead(16, 50);
+
+    expect(result.warning).toBe("renode_uart_uninitialized;serial_buffer_overflow");
+  });
+
+  it("serial_write 返回 declaration 与写入长度", async () => {
+    const serial = new FakeSerial();
+    const harness = createHarness(() => "", () => serial);
+    await harness.backend.attach();
+    await harness.backend.serialOpen("127.0.0.1", 4321);
+
+    const result = await harness.backend.serialWrite(Buffer.from("ping"));
+
+    expect(result.declaration).toEqual({
+      operation: "serial_write",
+      length: 4,
+      effect: "write bytes to serial peer",
+    });
+    expect(result.bytesWritten).toBe(4);
+    expect(serial.writes.map((chunk) => chunk.toString("utf8"))).toEqual(["ping"]);
+  });
+
+  it("serial_close 关闭通道并回到 closed 状态", async () => {
+    const serial = new FakeSerial();
+    const harness = createHarness(() => "", () => serial);
+    await harness.backend.attach();
+    await harness.backend.serialOpen("127.0.0.1", 4321);
+
+    const status = await harness.backend.serialClose();
+
+    expect(status.open).toBe(false);
+    expect(serial.closeCount).toBe(1);
+    expect(harness.backend.status().serial).toBe("closed");
+    expect(harness.backend.serialStatus()).toEqual({
+      open: false,
+      host: "127.0.0.1",
+      port: 4321,
+      bytesRead: 0,
+      bytesWritten: 0,
+    });
+  });
+
+  it("未打开串口时 serial_read/serial_write 显式报错", async () => {
+    const serial = new FakeSerial();
+    const harness = createHarness(() => "", () => serial);
     await harness.backend.attach();
 
     for (const call of [
-      harness.backend.serialOpen("127.0.0.1", 4321),
       harness.backend.serialRead(16, 10),
       harness.backend.serialWrite(Buffer.from("ping")),
-      harness.backend.serialClose(),
     ]) {
       const error = await call.catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(ProbeBackendError);
-      expect((error as ProbeBackendError).code).toBe("not_implemented");
+      expect((error as ProbeBackendError).code).toBe("backend_error");
     }
+  });
 
-    expect(() => harness.backend.serialStatus()).toThrowError(ProbeBackendError);
-    try {
-      harness.backend.serialStatus();
-    } catch (error) {
-      expect((error as ProbeBackendError).code).toBe("not_implemented");
-    }
+  it("detach 关闭串口并重置终端创建标记", async () => {
+    const serial = new FakeSerial();
+    const harness = createHarness(() => "", () => serial);
+    await harness.backend.attach();
+    await harness.backend.serialOpen("127.0.0.1", 4321);
+
+    await harness.backend.detach();
+
+    expect(serial.closeCount).toBe(1);
+    expect(harness.backend.serialStatus().open).toBe(false);
   });
 });

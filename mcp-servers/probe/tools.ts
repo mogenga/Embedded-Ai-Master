@@ -59,7 +59,7 @@ const memWriteSchema = z.object({
 });
 
 const serialOpenSchema = z.object({
-  host: z.string().min(1),
+  host: z.string().min(1).optional().default("127.0.0.1"),
   port: z.number().int().min(1).max(65535),
 });
 
@@ -280,7 +280,7 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
       name: "serial_open",
       description: "打开目标串口通道",
       inputSchema: serialOpenSchema,
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      annotations: { readOnlyHint: true },
       handler: withSchema(serialOpenSchema, async (args) => {
         const serialStatus = await requireActive().serialOpen(args.host, args.port);
         return ok({ serialStatus, deviceStatus: deviceStatus() });
@@ -322,7 +322,7 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
     {
       name: "serial_close",
       description: "关闭串口通道",
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      annotations: { readOnlyHint: true },
       handler: async () => {
         try {
           const serialStatus = await requireActive().serialClose();
