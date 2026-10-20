@@ -41,6 +41,7 @@ export interface AttachOptions {
 export type ProbeErrorCode =
   | "not_attached"
   | "not_implemented"
+  | "not_supported"
   | "invalid_argument"
   | "serial_already_open"
   | "verification_failed"
@@ -59,6 +60,7 @@ export class ProbeBackendError extends Error {
 
 export interface ProbeBackend {
   readonly kind: ProbeBackendKind;
+  available?(): boolean;
   attach(options: AttachOptions): Promise<DeviceStatus>;
   detach(): Promise<void>;
   halt(): Promise<void>;

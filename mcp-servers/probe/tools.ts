@@ -155,7 +155,11 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
           return ok({
             backends: [
               { kind: "renode", available: true },
-              { kind: "openocd", available: backends.openocd !== undefined },
+              {
+                kind: "openocd",
+                available:
+                  backends.openocd !== undefined && (backends.openocd.available?.() ?? true),
+              },
             ],
           });
         } catch (error) {
