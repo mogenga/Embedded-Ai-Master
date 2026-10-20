@@ -133,6 +133,8 @@ function renderEvent(entry: TranscriptEvent, handlers: GuardHandlers): JSX.Eleme
       return <InterruptedNotice key={entry.id} entry={entry} />;
     case "permission":
       return <PermissionNotice key={entry.id} entry={entry} />;
+    case "approval":
+      return <></>;
   }
 }
 
