@@ -9,12 +9,16 @@ results_dir: results
 # T11：导航文件可为方案内部读取，但任何方案都不得把它们作为候选输出。
 # _inbox.md 是 kb_contribute 收件箱（38 条未审阅条目），cases/_about.md 是使用说明；
 # 二者与 _sources.md 一样不属于可检索语料，统一列入导航清单。
+#
+# 必须写**相对 corpus/kb/ 的真实路径**，不是文件名：filter_navigation 做精确匹配，
+# 只写 `_vendor-index.md` / `_about.md` 时 vendor/ 与 cases/ 下的同名文件不会被过滤
+# （2026-10-20 实测：4 条查询把 vendor/_vendor-index.md 留在候选里）。
 navigation_files:
   - index.yaml
-  - _vendor-index.md
+  - vendor/_vendor-index.md
   - _sources.md
   - _inbox.md
-  - _about.md
+  - cases/_about.md
 
 # M4 端点与密钥不在此配置：只存在于本地 config/models.yaml（已 gitignore），
 # 该文件缺失是合法状态。本文件出现 model 段会直接报错，避免两套端点配置并存。

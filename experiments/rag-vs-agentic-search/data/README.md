@@ -12,11 +12,11 @@
 | `splits.json` | **已生成** | seed 20261019，分层 `track × topic × n_gold`，dev 55 / test 25 |
 | `negatives.jsonl` | **已建 25 条** | 覆盖"KB 有相近主题无对应文件""型号外设未覆盖""非 KB 可答"三类 |
 | `perturbations.jsonl` | **未建** | H6 专用；缺失只标记 H6 `BLOCKED`，不阻断主实验 |
-| `annotation_multi_gold.jsonl` | **未建** | 增强项；缺失时 nDCG@5 按单 gold 计并标低置信 |
+| `annotation_multi_gold.jsonl` | **已建 50 条** | 2026-10-21；覆盖全部 50 条 index 查询，38 条为多 gold，平均 1.94 个 gold/条。**单标注者、无一致性系数 → nDCG@5 标低置信**。search 轨按 spec §7.5 未标（精确 token 查询通常单 gold） |
 
 **已知偏差（必须在报告中披露，不得隐藏在汇总里）**
 
-1. **单标注者**：查询与 gold 均由同一人（项目所有者）编写，无一致性系数（spec §6.5）。
+1. **单标注者**：查询、gold 与多 gold 补标均由同一人（项目所有者）编写，无一致性系数（spec §6.5）。多 gold 补标的判定标准是「回答这条查询时，人会实际打开它」——同协议的 `_overview.md`（速查表）不算，因为它是查参数用的不是查症状用的。
 2. **gold 部分不在索引中**：80 条里有 **11 条**的 gold 不在 `index.yaml`（见 `raglab import` 的 warning）。这些查询上方案 C 结构性无法命中，必须按"gold 是否被索引"分层报告，不能直接与 A/B/C′ 的全量成绩比。
 3. **样本量**：80 条低于 spec 功效估算所依据的 274 条；10pp 效应下的检验功效会显著下降，结论更可能落入"未决"。
 

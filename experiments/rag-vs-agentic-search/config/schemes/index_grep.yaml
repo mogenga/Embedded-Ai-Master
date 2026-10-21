@@ -1,13 +1,29 @@
 # 方案 C：现状基线（spec §8.4），忠实复现 kb-mcp。
 # 统一 dispatch：不读轨标签；lookup 有得分则取 top-2，否则走精确 token search。
+#
+# 2026-10-20 与 kb-mcp 源码（`mcp-servers/kb/service.ts`）逐项对齐后的记录：
+#
+# 1. dispatch 读法有三种，差 5–13.75pp，见 STATUS.md「M3 实测出的口径分歧」。
+#    下面的 `dispatch_rule` 必须在冻结前钉死，默认写的是部署形态 (a)。
+# 2. token 提取必须是**单条交替**且十六进制在前：`0x…|[A-Za-z_]…`。
+#    若按列表逐条扫描（标识符在前），`0x271` 会被切成 `0x` + `271` 里的 `x271`。
+# 3. kb_search **不做**最小长度过滤（lookup 侧会丢掉长度 < 2 的 token），
+#    因此 `i.MX` 里的 `i` 会作为搜索词；此处照实复现，不自行加过滤。
 
 scheme: C
 params:
   lookup_top_k: 2
   # Recall@5 的“同排序扩展 top-5”单独标注 extended（T12），不改部署口径。
   extended_recall_k: 5
-  token_patterns:
-    - "[A-Za-z_][A-Za-z0-9_]*"
-    - "0x[0-9A-Fa-f]+"
+  # (a) deployed：lookup.found == false 才回退；见 kb-mcp 无工具描述强制改调 kb_search。
+  # (b) lexical：无条目关键词得分 > 0 才回退（spec §8.4 散文的字面读法，无折减、无闸门）。
+  # (c) lookup_only：永不回退（消融对照）。
+  # 已在 PREREGISTRATION.md §6bis 选定为 deployed 并记入主口径（2026-10-20）。
+  # 三种读法都必须报告；结论方向不一致时写"未决（口径敏感）"。
+  dispatch_rule: deployed
+  # 单条交替正则；顺序有意义，十六进制必须在前。
+  token_pattern: "0x[0-9A-Fa-f]+|[A-Za-z_][A-Za-z0-9_]*"
+  token_min_length: 1
+  search_limit: 20
   ablations:
     - no_index

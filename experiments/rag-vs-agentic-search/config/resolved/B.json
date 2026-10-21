@@ -1,0 +1,9 @@
+{
+  "max_tool_rounds": 6,
+  "selected_by": "grid on PREREGISTRATION §4ter 10-query subsample (rounds 6 vs 12)",
+  "note": "两档在有效条目上 R@2 均为 1.00；选 6 轮因为更快(75s vs 80s/条)且更不易撞限流。12 轮档 10 条中 1 条因网关 429 失败(estimated_wait 34910ms)。",
+  "dev_recall@2": 1.0,
+  "dev_recall@2_on_valid": 1.0,
+  "subsample_size": 10,
+  "sha256": "9b93f517e1100026f4adb94cef828cfbddb0073bd28083bf392d98bf2606f8d4"
+}
