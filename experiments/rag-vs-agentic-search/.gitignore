@@ -12,10 +12,23 @@ corpus/
 # 原始运行 trace（体积大、可重新生成；汇总表与图表进库）
 results/runs/
 
+# 诊断报告的逐条记录：可重新生成，且体积远大于其价值。
+# 留档的是报告正文、汇总 JSON 与图表（见下方"入库"说明）。
+results/diagnostic/**/*.jsonl
+
+# 入库（不忽略）：results/diagnostic/<run_id>/report.md
+#                    results/diagnostic/<run_id>/diagnostic.json
+#                    results/diagnostic/<run_id>/figures/*.png
+
 # 本地模型缓存与临时文件
 .cache/
 .uv-cache/
 *.log
+
+# 向量索引与 embedding 缓存：**内嵌语料正文**，绝不入库。
+# A_index.json 每个 chunk 都带全文，语料明文不进版本库这条对它同样成立。
+# 重建方式：`raglab index --scheme A`（需 RAGLAB_LIVE=1）。
+results/cache/
 
 # 本地模型配置（可能含 API key）。模板见 config/models.example.yaml
 config/models.yaml
