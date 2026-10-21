@@ -467,21 +467,24 @@ npm --prefix desktop run desktop
   | PATCH | `/api/sessions/:id` | 写 `{ title?, pinned?, archived? }`，200 回合并后的摘要；标题等元数据存旁挂 `meta.json`（header 校验会丢弃未知字段），会话被占用时 409 |
   | DELETE | `/api/sessions/:id` | 删除会话目录，200 `{ id, deleted: true }`；被占用 409 |
   | POST | `/api/sessions/:id/fork` | 从日志末尾（或 body 的 `atSeq`）分叉，201 `{ sessionId }` |
-  | GET | `/api/config` | `{ mcpServers, permissions, run, mcpPath, permissionsPath, runPath }`——三份配置文件的当前内容 |
-  | PUT | `/api/config` | 整份写其中一份：`{ mcpServers }` / `{ permissions }` / `{ run }`；400 `invalid_config` 带具体字段原因 |
+  | GET | `/api/config` | `{ mcpServers, permissions, run, providers, mcpPath, permissionsPath, runPath, providersPath, providersError? }`——四份配置文件的当前内容。`providers.json` 读失败时其余三份照常返回，原因放 `providersError`（设置页要靠它把用户带去修文件） |
+  | PUT | `/api/config` | 整份写其中一份：`{ mcpServers }` / `{ permissions }` / `{ run }` / `{ providers }`；400 `invalid_config` 带具体字段原因 |
   | GET | `/api/kb` | `{ root, tree }`；未配置 `kb/` 时返回 `{ root: null, tree: [] }` |
   | GET | `/api/device` | 当前恒为 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` |
-  | GET | `/api/file?path=…` | `{ path, content, truncated, binary }`；只读，256 KiB 上限。只允许读会话目录与会话工作目录内的路径（`realpath` 后判定），越界 400 `invalid_path`、不存在 404、目录/非普通文件 400。含 NUL 字节按二进制返回 `content: ""` |
+  | GET | `/api/file?path=…` | `{ path, content, truncated, binary }`；只读，256 KiB 上限。只允许读会话目录、会话工作目录与已登记工作区内的路径（`realpath` 后判定），越界 400 `invalid_path`、不存在 404、目录/非普通文件 400。含 NUL 字节按二进制返回 `content: ""` |
+  | GET | `/api/tree?path=…` | `{ path, entries: [{ name, path, type }], truncated }`；列一层直接子项，边界同上。目录在前、各自按名排序（大小写不敏感），跳过符号链接，超过 500 项截断并置 `truncated`。缺 `path` 400 `invalid_path` |
+  | POST | `/api/workspace` | `{ path }` → `{ path }`；把一个已存在的目录登记为可浏览的工作区根（进程内，重启失效）。文件或缺失路径 400 `invalid_path`。需写请求头 |
   | GET | `/api/sessions/:id/artifacts` | `{ artifacts: [{ path, name, kind, size }] }`；列 `artifacts/` 下的普通文件，跳过目录与符号链接，目录不存在回空数组 |
-  | POST | `/api/actions` | 发起会话或追加输入，202 `{ sessionId, created }`；错误码见「Web 会话与审批」 |
+  | POST | `/api/actions` | 发起会话或追加输入，202 `{ sessionId, created }`；可选 `mode` / `cwd` / `maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`。错误码见「Web 会话与审批」 |
   | POST | `/api/abort` | 中止运行中的会话，202 `{ sessionId, aborted }`；会话不在运行时 `aborted:false`（幂等，不报 404） |
   | POST | `/api/approvals` | 回传审批决策，202/200；错误码见「Web 会话与审批」 |
   | GET | `/api/events` | SSE 单会话事件流，见「实时事件流」；非法 id/cursor 400，不存在 404，损坏 500 |
 
-- **配置**：设置页有「MCP 服务器」与「行为」两页，前者读写 `$HARNESS_HOME/mcp.json`，后者读写 `permissions.json`（预设 / 审批超时 / 审批规则）与 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`）。运行上限随每次 `POST /api/actions` 下发；桌面宿主同样从 `run.json` 读取。改动在下一回合生效，不手编文件也能接上探针与模型。
+- **配置**：设置页有「模型服务」「MCP 服务器」「行为」三页。模型服务读写 `$HARNESS_HOME/providers.json`（provider / `baseUrl` / `apiKeyEnv` / 模型与 `contextWindow` / 价格），首次启动缺这份文件时会提示去这里填，**不会**因它缺失而拒绝启动。「`apiKeyEnv` 填的是环境变量名，不是密钥」——应用本身不保存密钥，只在调用时从自己的运行环境读该变量。价格留空表示未定价，此时成本显示「未知」而不是 0。MCP 页读写 `mcp.json`；行为页读写 `permissions.json`（预设 / 审批超时 / 审批规则）与 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`）。运行上限随每次 `POST /api/actions` 下发；桌面宿主同样从 `run.json` 读取。改动在下一回合生效，不手编文件也能接上探针与模型。
 - **会话管理**：侧栏右键可改名、置顶、归档、删除、复制为新会话；标题存 `meta.json`，与内核的 `header.json` 分离。列表按 `updatedAt` 倒序，改过名的会话不会被埋在新建会话下面。
 - **导出**：顶栏「⋯」菜单导出当前对话为 Markdown，内容由会话日志渲染（不是抓 DOM），工具输出按 2000 字符截断。
-- **诚实边界**：写端点必须带 loopback `Origin`；提交失败在转录中显示可读错误，不伪造成功。202 只表示受理/送达，工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准。内核没有的能力（git/PR、终端、worktree、packs、skills/memory/instructions/hooks、subagents、goals、文件树、检查点恢复）在前端隐藏入口，宿主/bridge 收到对应命令时回显式 `notice`，不静默吞掉（R3）。
+- **工作区**：顶栏的工作区按钮可切换目录。桌面形态弹系统目录选择框；浏览器形态拿不到目录的绝对路径（`showDirectoryPicker` 只给句柄，没有路径），因此会说明原因并让你直接粘贴路径，而不是静默失败。选中的目录同时被登记为文件树的浏览边界，文件树（顶栏「⋯」→ 浏览工作区文件）只列已登记工作区、会话目录与会话工作目录内的路径。
+- **诚实边界**：写端点必须带 loopback `Origin`；提交失败在转录中显示可读错误，不伪造成功。202 只表示受理/送达，工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准。内核没有的能力（git/PR、终端、worktree、packs、skills/memory/instructions/hooks、subagents、goals、`@` 提及的文件名搜索、检查点恢复）在前端隐藏入口，宿主/bridge 收到对应命令时回显式 `notice`，不静默吞掉（R3）。目录列不出来时会先说明原因再给空树——空树是「渲染器可以收尾了」的信号，不是「这个目录是空的」的断言。
 - **审批**：内核按单次请求审批，没有「始终允许」的持久规则；该按钮不渲染。审批条展示 `approval_request` 携带的 `paramsPreview`（这次调用要写入/执行的参数），并按 `deadlineAt` 显示剩余秒数——批准一次写操作时能看见写的是什么（R2）。审批超时/中止时由 `permission_decision` 触发 `permission_closed`，审批条自动收起。
 - **空态**：无会话显示「暂无会话」；设备字段为 `unknown` 时显示「未接入」。
 - **主题**：`light` / `system` / `dark` 三态，`localStorage` 键 `prometheus.theme`，默认 `dark`；所有颜色经 CSS 变量，图标为内联 SVG sprite。

@@ -439,6 +439,66 @@ describe("ConfigApi 错误映射", () => {
     expect(existsSync(path.join(home, "run.json"))).toBe(false);
   });
 
+  it("putProviders 缺对象 → 400 invalid_config", async () => {
+    const home = makeHome();
+    const api = createConfigApi({ harnessHome: home });
+
+    await expectHttpError(async () => api.putProviders({}), 400, "invalid_config");
+    await expectHttpError(async () => api.putProviders({ providers: [] }), 400, "invalid_config");
+    expect(existsSync(path.join(home, "providers.json"))).toBe(false);
+  });
+
+  it("putProviders 成功后返回写入内容且 readAppConfig 读回一致", async () => {
+    const home = makeHome();
+    const api = createConfigApi({ harnessHome: home });
+    const providers = {
+      "local-gw": {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        apiKeyEnv: "LOCAL_GW_KEY",
+        models: { flash: { contextWindow: 128000, maxOutput: 4096 } },
+        pricePerMillion: { input: 0, output: 0 },
+      },
+    };
+
+    const result = await api.putProviders({ providers });
+
+    expect(result).toEqual({ providers });
+    expect(readAppConfig(home).providers).toEqual(providers);
+    expect(readAppConfig(home).providersPath).toBe(path.join(home, "providers.json"));
+    expect(readJson(path.join(home, "providers.json"))).toEqual(providers);
+  });
+
+  it("putProviders 模型缺 contextWindow → 400 invalid_config 且原文件不变", async () => {
+    const home = makeHome();
+    const before = {
+      "local-gw": {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        models: { flash: { contextWindow: 128000, maxOutput: 4096 } },
+      },
+    };
+    writeJson(path.join(home, "providers.json"), before);
+    const api = createConfigApi({ harnessHome: home });
+
+    const error = await expectHttpError(
+      async () => api.putProviders({
+        providers: {
+          "local-gw": {
+            protocol: "openai-chat-completions",
+            baseUrl: "http://127.0.0.1:8080/v1",
+            models: { flash: { maxOutput: 4096 } },
+          },
+        },
+      }),
+      400,
+      "invalid_config",
+    );
+
+    expect(error.message).toContain("contextWindow");
+    expect(readJson(path.join(home, "providers.json"))).toEqual(before);
+  });
+
   it("putRun 非法 maxTurns → 400 invalid_config 且原文件不变", async () => {
     const home = makeHome();
     const before = { maxTurns: 5, maxCostUsd: null, timeoutMs: null, systemPrompt: "" };

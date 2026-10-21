@@ -7,14 +7,17 @@
  * of optional members the renderer guards — on top of the API the server
  * already exposes:
  *
- *   prompt          POST /api/actions
+ *   prompt          POST /api/actions           (optional `cwd`)
  *   permission      POST /api/approvals
  *   abort           POST /api/abort
  *   listSessions    GET  /api/sessions
  *   loadSession     GET  /api/sessions/:id
+ *   getTree         GET  /api/tree?path=…
+ *   setWorkspace    POST /api/workspace        { path }
  *   getFile         GET  /api/file?path=…
  *   getArtifacts    GET  /api/sessions/:id/artifacts
  *   getArtifact     GET  /api/file?path=…
+ *   saveProviders   PUT  /api/config           { providers }
  *   live events     GET  /api/events (SSE)
  *
  * Everything else answers with a `notice` naming the command. A silent no-op
@@ -446,6 +449,11 @@ export function createBrowserBridge(options = {}) {
           // The permission preset this run executes under. The server refuses
           // unknown values, so a stale client cannot fall back silently.
           mode: stateMode,
+          // The working directory the operator is looking at (the open
+          // session's workdir, or the one just registered as the workspace).
+          // Absent when the bridge does not know one: a made-up path would
+          // start the run in the wrong folder.
+          ...(currentCwd === "" ? {} : { cwd: currentCwd }),
         }),
       });
     } catch (error) {
@@ -601,11 +609,13 @@ export function createBrowserBridge(options = {}) {
     "getSetupChecklist",
     "listCommands",
     "getTree",
+    "setWorkspace",
     "getFile",
     "getArtifacts",
     "getArtifact",
     "searchSessions",
     "saveSettings",
+    "saveProviders",
     "setEffort",
     "saveMcpServer",
     "removeMcpServer",
@@ -740,6 +750,92 @@ export function createBrowserBridge(options = {}) {
   }
 
   /**
+   * One directory listing from `/api/tree`.
+   *
+   * The renderer parks the child container of the folder it just expanded in
+   * `pendingTreeTarget` and only releases it on the next `tree` event. Every
+   * failure therefore answers with a warning *and* an empty tree: the notice
+   * says why, the empty tree lets the row collapse instead of waiting forever.
+   * An empty tree on its own would read as "the folder is empty" (R3).
+   */
+  async function getTree(path) {
+    const label = "文件树读取失败";
+    if (path === "") {
+      // Without a path the request would be answered with a path error the
+      // user cannot act on; the empty tree still releases the expander.
+      emit({ type: "notice", level: "warn", text: `${label}：没有给出路径` });
+      emit({ type: "tree", nodes: [] });
+      return;
+    }
+    let response;
+    try {
+      response = await fetchImpl(`/api/tree?path=${encodeURIComponent(path)}`);
+    } catch (error) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `${label}：${error instanceof Error ? error.message : String(error)}`,
+      });
+      emit({ type: "tree", nodes: [] });
+      return;
+    }
+    if (!response.ok) {
+      emit({ type: "notice", level: "warn", text: `${label}：${await readError(response)}` });
+      emit({ type: "tree", nodes: [] });
+      return;
+    }
+    const body = await response.json().catch(() => undefined);
+    if (!isRecord(body)) {
+      emit({ type: "notice", level: "warn", text: `${label}：服务端返回了无法解析的内容` });
+      emit({ type: "tree", nodes: [] });
+      return;
+    }
+    // The server's shape is already the renderer's (`{name, path, type}`); it
+    // is passed through rather than rebuilt, so a new field is not dropped.
+    const entries = Array.isArray(body.entries) ? body.entries : [];
+    emit({ type: "tree", nodes: entries, truncated: body.truncated === true });
+  }
+
+  /**
+   * Register the folder the operator wants to work in.
+   *
+   * The server refuses `/api/tree` and `/api/file` paths outside a known
+   * workspace, so the root has to be announced before the tree can be read.
+   * Local state is only adopted after the server accepts it: a rejected path
+   * must leave the topbar on the folder that actually works.
+   */
+  async function setWorkspace(path) {
+    if (path === "") {
+      emit({ type: "notice", level: "warn", text: "工作区切换失败：没有给出路径" });
+      return;
+    }
+    let response;
+    try {
+      response = await fetchImpl("/api/workspace", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path }),
+      });
+    } catch (error) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `工作区切换失败：${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    if (!response.ok) {
+      emit({ type: "notice", level: "warn", text: `工作区切换失败：${await readError(response)}` });
+      return;
+    }
+    const body = await response.json().catch(() => undefined);
+    const accepted = textOf(isRecord(body) ? body.path : undefined) || path;
+    currentCwd = accepted;
+    emit(stateEvent());
+    void getTree(accepted);
+  }
+
+  /**
    * Open one file in the workbench.
    *
    * The renderer keys the preview on `file.path` matching `state.selectedFile`,
@@ -848,6 +944,48 @@ export function createBrowserBridge(options = {}) {
     }
   }
 
+  /**
+   * Ask the browser for a folder, knowing it cannot answer with a path.
+   *
+   * `showDirectoryPicker` exists in Chromium, but it hands back a
+   * `FileSystemDirectoryHandle` whose `name` is a bare folder name — never the
+   * absolute path the kernel needs for `/api/tree` and `/api/file`. Returning
+   * that name would make the next read fail against a path that does not
+   * exist, so the answer is always `null` plus a notice saying why and what
+   * to do instead. The silent `null` this replaces left the click looking
+   * like nothing happened at all (R3).
+   */
+  async function pickDirectory() {
+    const picker = globalThis.showDirectoryPicker;
+    if (typeof picker !== "function") {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: "浏览器形态无法打开本地文件夹：没有原生目录选择器，也拿不到目录的绝对路径；请直接在顶栏输入路径",
+      });
+      return null;
+    }
+    try {
+      await picker.call(globalThis);
+    } catch (error) {
+      // Chromium throws `AbortError` when the operator closes the dialog.
+      // That is still a click that produced nothing, and it must say so.
+      const reason = error instanceof Error && error.name === "AbortError" ? "目录选择已取消" : "目录选择失败";
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `${reason}；浏览器形态无法获得目录的绝对路径，请直接在顶栏输入路径`,
+      });
+      return null;
+    }
+    emit({
+      type: "notice",
+      level: "warn",
+      text: "浏览器形态无法获得目录的绝对路径（只能拿到文件夹名），已放弃该选择；请直接在顶栏输入路径",
+    });
+    return null;
+  }
+
   function unsupported(command) {
     emit({
       type: "notice",
@@ -935,6 +1073,11 @@ export function createBrowserBridge(options = {}) {
         return;
       case "saveRunLimits":
         void putConfig("run", isRecord(payload.run) ? payload.run : {});
+        return;
+      case "saveProviders":
+        // Same writer as the other sections: one error path, one settings
+        // reply. A second copy would drift the moment the shape changes.
+        void putConfig("providers", isRecord(payload.providers) ? payload.providers : {});
         return;
       case "sessionFlags": {
         const id = textOf(payload.id);
@@ -1080,7 +1223,10 @@ export function createBrowserBridge(options = {}) {
         emit({ type: "commands", commands: [] });
         return;
       case "getTree":
-        emit({ type: "tree", nodes: [] });
+        void getTree(textOf(payload.path));
+        return;
+      case "setWorkspace":
+        void setWorkspace(textOf(payload.path));
         return;
       case "searchSessions": {
         // The list the bridge already holds is all it can search: the HTTP API
@@ -1126,6 +1272,9 @@ export function createBrowserBridge(options = {}) {
     void refreshSessions();
     emit({ type: "commands", commands: [] });
     emit({ type: "setup_checklist", checks: [] });
+    // Initial value, not a "not supported" answer: at boot there is no session
+    // and no workspace yet, so the sidebar starts blank. Real listings come
+    // from the `getTree` command.
     emit({ type: "tree", nodes: [] });
     emit({ type: "locale", locale });
   }
@@ -1138,9 +1287,7 @@ export function createBrowserBridge(options = {}) {
       openExternal: (url) => {
         globalThis.open?.(url, "_blank", "noopener");
       },
-      // No filesystem pickers in a browser. Returning the empty answer keeps
-      // the guarded call sites working; their buttons are hidden anyway.
-      pickDirectory: async () => null,
+      pickDirectory,
       pickFile: async (options) =>
         isRecord(options) && options.multiple === true ? [] : null,
       // Downloads are the browser-native equivalent of Save As.

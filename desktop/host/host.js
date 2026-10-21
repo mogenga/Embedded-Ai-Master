@@ -60,8 +60,16 @@ try {
     { readSessionHeader },
     { isValidSessionId },
     { readSessionMeta },
-    { readAppConfig, writeMcpServers, writePermissionConfig, writeRunLimits },
+    {
+      readAppConfig,
+      readProviders,
+      writeMcpServers,
+      writePermissionConfig,
+      writeProviders,
+      writeRunLimits,
+    },
     { createSessionAdmin },
+    filesApi,
     protocol,
   ] = await Promise.all([
     import(dist("server/runner.js")),
@@ -74,6 +82,10 @@ try {
     import(dist("session/metadata.js")),
     import(dist("config/app-config.js")),
     import(dist("server/session-admin.js")),
+    // Namespace, not destructured names: `listDirectory` / `registerWorkspaceRoot`
+    // are newer exports, and a stale `dist/` must not take the whole host down
+    // at import time — the handlers report the gap instead.
+    import(dist("server/files-api.js")),
     import("../renderer/protocol.js"),
   ]);
   kernel = {
@@ -88,10 +100,13 @@ try {
     isValidSessionId,
     readSessionMeta,
     readAppConfig,
+    readProviders,
     writeMcpServers,
     writePermissionConfig,
+    writeProviders,
     writeRunLimits,
     createSessionAdmin,
+    filesApi,
     protocol,
   };
 } catch (error) {
@@ -115,6 +130,14 @@ const sessionsRoot = path.join(harnessHome, "sessions");
 let runner;
 let eventSource;
 let providers = {};
+/**
+ * Where `providers.json` lives, and why it could not be read.
+ *
+ * Kept beside the loaded object so the settings page can show the path even
+ * when the file is missing or broken — that is exactly when the user needs it.
+ */
+let providersPath = path.join(harnessHome, "providers.json");
+let providersError = "";
 let modelRef = "";
 let modelList = [];
 let cwd = process.cwd();
@@ -279,16 +302,26 @@ function configEvent() {
     type: "settings",
     settings: {
       locale,
+      // The picker's list: one row per provider, with the URL it points at.
       providers: Object.keys(providers).map((name) => ({
         id: name,
         baseUrl: providers[name]?.baseUrl ?? "",
       })),
+      // The raw file, editable on the settings page. Named `providerConfig`
+      // because `providers` above is already the picker's flat list: the two
+      // shapes are different and one must not overwrite the other.
+      providerConfig: config?.providers ?? providers,
+      providersError: config?.providersError ?? (providersError === "" ? undefined : providersError),
       models: modelList,
       model: modelRef,
     },
   };
   if (config === undefined) {
-    send({ ...base, settingsError: error });
+    send({
+      ...base,
+      settingsError: error,
+      settings: { ...base.settings, configPaths: { providers: providersPath } },
+    });
     return;
   }
   send({
@@ -298,7 +331,12 @@ function configEvent() {
       mcpServers: config.mcpServers,
       permissions: config.permissions,
       run: config.run,
-      configPaths: { mcp: config.mcpPath, permissions: config.permissionsPath, run: config.runPath },
+      configPaths: {
+        mcp: config.mcpPath,
+        permissions: config.permissionsPath,
+        run: config.runPath,
+        providers: config.providersPath ?? providersPath,
+      },
     },
   });
 }
@@ -364,6 +402,39 @@ function createRunner() {
     cwd,
     permissions: { preset: mode },
   });
+}
+
+/**
+ * Make one folder browsable by the file tree.
+ *
+ * Registration widens the read boundary, so a failure has to be reportable;
+ * the boot call site ignores the outcome because the tree request itself
+ * will carry the reason, and there is no click to answer at launch.
+ */
+async function registerRoot(target) {
+  const register = kernel.filesApi?.registerWorkspaceRoot;
+  if (typeof register !== "function") {
+    throw new Error("内核未导出 registerWorkspaceRoot，请重新执行 npm run build");
+  }
+  return register(target);
+}
+
+/**
+ * The boot workspace's registration, until the first command that needs it.
+ *
+ * `init` cannot await without delaying `ready`; a `getTree` that arrives
+ * before the registration lands would be refused for the folder the window
+ * opened in. Awaiting the same promise here closes that gap without making the
+ * handshake wait on the filesystem.
+ */
+let pendingRoot = Promise.resolve(false);
+
+async function settleRoot() {
+  try {
+    await pendingRoot;
+  } catch {
+    // A failed registration is reported by the listing itself.
+  }
 }
 
 /**
@@ -760,6 +831,11 @@ async function handlePrompt(text) {
     outcome = await runner.start({
       text,
       ...(sessionId === "" ? {} : { sessionId }),
+      // A new session records this as its workdir. A resumed one keeps the
+      // header's own, so the value is harmless there — the kernel ignores it
+      // when `sessionId` is set. An empty cwd is omitted rather than sent as
+      // "": the runner would resolve it against the host's own directory.
+      ...(cwd === "" ? {} : { cwd }),
       ...runLimitOptions(),
     });
   } catch (error) {
@@ -884,11 +960,29 @@ const handlers = {
     if (payload.locale === "en" || payload.locale === "zh") locale = payload.locale;
     if (typeof payload.mode === "string") mode = payload.mode;
 
+    // A broken or missing providers file must not kill the boot sequence: the
+    // operator fixes it on the settings page, and that page needs `state`,
+    // `ready` and the rest of the handshake to come up at all. Boot with an
+    // empty model list, say so, and keep going.
+    providers = {};
+    modelList = [];
+    providersError = "";
+    let missing = false;
     try {
       providers = kernel.loadProviders(harnessHome);
     } catch (error) {
-      fatal(`providers 不可用：${error instanceof Error ? error.message : String(error)}`);
-      return;
+      providersError = messageOf(error);
+      // `providers_not_found` is "not configured yet", not a fault: it gets a
+      // dim pointer to the settings page instead of a fatal banner.
+      missing = error instanceof Error && error.code === "providers_not_found";
+      if (!missing) fatal(`providers 不可用：${providersError}`);
+    }
+    if (typeof kernel.readProviders === "function") {
+      try {
+        providersPath = kernel.readProviders(harnessHome).providersPath;
+      } catch {
+        // The path is display-only; the default beside `harnessHome` stands.
+      }
     }
     modelList = buildModelList(providers);
     const first = modelList[0]?.id;
@@ -906,12 +1000,37 @@ const handlers = {
     // defaults in place and surfaces on the settings page instead.
     const { config } = readConfigSnapshot();
     if (config !== undefined) runLimits = config.run;
+    // The workspace this host opened with is browsable from the first tree
+    // request, exactly like one the operator picks later. Without this the
+    // files pane greeted every launch with a "refused" notice for the folder
+    // the window had just opened in. `init` stays synchronous — the handshake
+    // must not wait on the filesystem — so the promise is parked and `getTree`
+    // awaits it before listing.
+    pendingRoot = cwd === "" ? Promise.resolve(false) : registerRoot(cwd).catch(() => false);
+    // Same reason as `providers` above: a config file the app cannot parse is
+    // an error the settings page shows, not a reason to refuse to boot.
+    if (config?.providersError !== undefined) providersError = config.providersError;
     send(stateEvent());
     send({ type: "ready" });
     send(sessionsEvent());
     send({ type: "commands", commands: [] });
     send({ type: "setup_checklist", checks: [] });
     send({ type: "locale", locale });
+    if (missing) {
+      send({
+        type: "notice",
+        level: "dim",
+        text: "尚未配置模型服务，请在设置 → 模型服务中填写",
+      });
+    } else if (providersError !== "") {
+      // Already announced through `fatal` above; the settings page repeats it
+      // with the path so the user can go and fix the file.
+      send({
+        type: "notice",
+        level: "dim",
+        text: `模型服务配置有误：${providersError}。可在设置 → 模型服务中修改`,
+      });
+    }
   },
 
   prompt(payload) {
@@ -1083,7 +1202,7 @@ const handlers = {
    * created — the renderer calls it from the sidebar's "new session in this
    * project" control.
    */
-  setCwd(payload) {
+  async setCwd(payload) {
     const next = typeof payload.cwd === "string" ? payload.cwd : "";
     if (next === "" || !existsSync(next)) {
       send({ type: "notice", level: "warn", text: `目录不存在：${next}` });
@@ -1105,7 +1224,50 @@ const handlers = {
     ctx = kernel.protocol.createContext({ cwd });
     void runner?.close();
     runner = createRunner();
+    // Whatever this host runs in is also what the files pane may browse; kept
+    // here so `setCwd` and `setWorkspace` cannot disagree about the boundary.
+    // A failure is not fatal — the tree request will carry the reason.
+    pendingRoot = registerRoot(cwd).catch(() => false);
+    await settleRoot();
     send(stateEvent());
+  },
+
+  /**
+   * Open a folder as the workspace: register it for browsing, then adopt it.
+   *
+   * Registration and the cwd switch are two different things and both are
+   * needed — a folder the tree may list is not necessarily where the next
+   * session runs. Delegating the second half to `setCwd` keeps one set of
+   * rules (refuse while running, only affects a new session) instead of a
+   * second copy that could drift from it.
+   */
+  async setWorkspace(payload = {}) {
+    const wanted = typeof payload.path === "string" ? payload.path.trim() : "";
+    if (wanted === "") {
+      send({ type: "notice", level: "warn", text: "目录路径为空" });
+      return;
+    }
+    // Refuse before registering: registering a folder the switch will then
+    // refuse would widen what the tree can read for no effect.
+    if (ctx.running) {
+      send({ type: "notice", level: "warn", text: "运行中不能切换工作目录" });
+      return;
+    }
+    let registered;
+    try {
+      registered = await registerRoot(wanted);
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `工作区切换失败：${messageOf(error)}` });
+      return;
+    }
+    // Full `setCwd` semantics, including the "new sessions only" notice and
+    // the `state` that carries the new `cwd`. The resolved path the kernel
+    // returned is used, not the raw string: `setCwd` resolves again and the
+    // two spellings must agree, or the tree would open somewhere the session
+    // does not run.
+    return handlers.setCwd({
+      cwd: typeof registered === "string" && registered !== "" ? registered : wanted,
+    });
   },
 
   setLocale(payload) {
@@ -1223,6 +1385,62 @@ const handlers = {
     if (ctx.running) {
       send({ type: "notice", level: "dim", text: "运行参数将在下一回合生效" });
     }
+    configEvent();
+  },
+
+  /**
+   * Write the whole `providers.json`.
+   *
+   * The renderer's settings page edits the file as one object, so this takes
+   * the object whole rather than a patch. `writeProviders` validates before it
+   * touches disk, which is what keeps an invalid edit from destroying the file
+   * the user was trying to fix — the same reason the other writers re-read
+   * from disk afterwards instead of trusting what was passed in.
+   */
+  async saveProviders(payload = {}) {
+    const wanted = payload.providers;
+    if (typeof wanted !== "object" || wanted === null || Array.isArray(wanted)) {
+      send({ type: "notice", level: "warn", text: "缺少 providers 对象" });
+      return;
+    }
+    try {
+      await kernel.writeProviders(harnessHome, wanted);
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `模型配置未保存：${messageOf(error)}` });
+      return;
+    }
+    // Re-read rather than reuse `wanted`: the file is the source of truth, and
+    // a normalization difference between what was sent and what was written
+    // must not leave the picker disagreeing with the disk.
+    try {
+      const loaded = kernel.loadProviders(harnessHome);
+      providers = loaded;
+      providersError = "";
+    } catch (error) {
+      providers = {};
+      providersError = messageOf(error);
+      modelList = [];
+      modelRef = "";
+      send({ type: "notice", level: "warn", text: `模型配置已写入但无法读回：${providersError}` });
+      configEvent();
+      return;
+    }
+    modelList = buildModelList(providers);
+    const previousModel = modelRef;
+    const stillValid = modelList.some((model) => model.id === modelRef);
+    if (!stillValid) modelRef = modelList[0]?.id ?? "";
+    // Only the model reference is baked into the runner at construction; the
+    // provider itself (`baseUrl`, `apiKeyEnv`) is re-read on every run. So a
+    // rebuild is needed exactly when the selected model changed or vanished.
+    if (modelRef !== previousModel) {
+      void runner?.close();
+      runner = createRunner();
+      if (ctx.running) {
+        send({ type: "notice", level: "dim", text: "模型配置将在下一回合生效" });
+      }
+    }
+    send({ type: "models", models: modelList, model: modelRef, source: "providers.json" });
+    send(stateEvent());
     configEvent();
   },
 
@@ -1438,7 +1656,7 @@ const handlers = {
     const checks = [
       {
         label: "providers.json",
-        detail: path.join(harnessHome, "providers.json"),
+        detail: providersPath,
         ok: Object.keys(providers).length > 0,
       },
       {
@@ -1454,14 +1672,63 @@ const handlers = {
     send({ type: "commands", commands: [] });
   },
 
-  getTree(payload) {
-    // No file-tree API in the kernel. Answering with an empty tree keeps the
-    // workbench from hanging; the pane that would show it is hidden.
-    void payload;
-    send({ type: "tree", nodes: [] });
+  /**
+   * One directory's children for the file tree.
+   *
+   * `listDirectory` is the kernel's own boundary check — it refuses anything
+   * outside the registered workspace and the sessions root — so this handler
+   * does not re-implement containment. `path` defaults to the workspace
+   * because the renderer sends `"."` from the boot call and from the pane
+   * opening, and both mean "the folder I am working in".
+   */
+  async getTree(payload = {}) {
+    const raw =
+      typeof payload.path === "string" && payload.path.trim() !== "" ? payload.path : cwd;
+    // A relative path is taken against the workspace, not the host process's
+    // own directory: the renderer sends `"."` and means "the folder I am
+    // working in". Resolving here also keeps the boundary check meaningful.
+    const requested = path.resolve(cwd === "" ? process.cwd() : cwd, raw);
+    await settleRoot();
+    const list = kernel.filesApi?.listDirectory;
+    if (typeof list !== "function") {
+      // A `dist/` built before the file API landed. Say so instead of drawing
+      // an empty folder, and release the renderer's pending tree target.
+      send({
+        type: "notice",
+        level: "warn",
+        text: "文件树不可用：内核未导出 listDirectory，请重新执行 npm run build",
+      });
+      send({ type: "tree", nodes: [] });
+      return;
+    }
+    let listing;
+    try {
+      listing = await list(harnessHome, requested);
+    } catch (error) {
+      // R3: an unreadable or out-of-bounds directory says why. The empty
+      // `tree` is the renderer's release signal, not a claim that the folder
+      // is empty — `pendingTreeTarget` would otherwise wait forever.
+      send({ type: "notice", level: "warn", text: `目录读取失败：${messageOf(error)}` });
+      send({ type: "tree", nodes: [] });
+      return;
+    }
+    const entries = Array.isArray(listing?.entries) ? listing.entries : [];
+    send({
+      type: "tree",
+      nodes: entries.map((entry) => ({
+        name: entry.name,
+        path: entry.path,
+        type: entry.type,
+      })),
+      truncated: listing?.truncated === true,
+    });
   },
 
   searchFiles(payload) {
+    // The kernel has no file-name search API (no index, no walker): probing
+    // `listDirectory` recursively here would be this host inventing one, and
+    // the results would disagree with the browser form's `/api` surface. The
+    // mention popup therefore answers "no matches" rather than hanging.
     send({ type: "file_matches", query: String(payload.query ?? ""), files: [] });
   },
 

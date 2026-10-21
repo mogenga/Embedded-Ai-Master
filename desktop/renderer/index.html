@@ -129,6 +129,13 @@
               <svg class="icon" aria-hidden="true"><use href="#i-keyboard"></use></svg>
               <span data-i18n="menuShortcuts">Keyboard shortcuts</span>
             </button>
+            <!-- The Files pane is reached from here rather than from a top-bar
+                 button: the overflow menu already holds the entries that open
+                 a view, and one row costs no top-bar width. -->
+            <button class="menu-row" id="menu-browse-files" role="menuitem">
+              <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
+              <span data-i18n="menuBrowseFiles">Browse workspace files</span>
+            </button>
             <div class="menu-separator"></div>
             <div class="menu-setting" role="group" aria-label="Theme">
               <span class="menu-setting-label" data-i18n="settingsTheme">Theme</span>
@@ -375,6 +382,7 @@
                      click), not by browsing. -->
                 <button role="tab" aria-selected="true" tabindex="0" data-pane="board" class="active" data-i18n="paneBoard">Board</button>
                 <button role="tab" aria-selected="false" tabindex="-1" data-pane="file" data-i18n="paneFile" hidden>File</button>
+                <button role="tab" aria-selected="false" tabindex="-1" data-pane="files" data-i18n="paneFiles" hidden>Files</button>
                 <button role="tab" aria-selected="false" tabindex="-1" data-pane="artifact" data-i18n="paneArtifact" hidden>Artifact</button>
               </div>
               <div class="workbench-meta" id="workbench-meta"></div>

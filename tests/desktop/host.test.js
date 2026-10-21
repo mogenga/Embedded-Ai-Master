@@ -128,17 +128,52 @@ describe("desktop host", () => {
     });
   }, HOST_TIMEOUT_MS);
 
-  it("providers 缺失时发 fatal 而不是崩溃", async () => {
+  it("providers 缺失时仍走完 init 并提示去设置页", async () => {
     const home = await mkdtemp(path.join(tmpdir(), "eam-host-empty-"));
     tempDirs.push(home);
     const events = await runHost(home, [{ cmd: "init", cwd: home }], {
-      until: (all) => all.some((event) => event.type === "fatal"),
+      until: (all) => all.some((event) => event.type === "ready"),
+    });
+    // Regression: `loadProviders` throwing used to `fatal()` and `return`, so
+    // no `state` and no `ready` were ever sent and the window stayed dead —
+    // the settings page that would fix the file was unreachable.
+    const types = events.map((event) => event.type);
+    expect(types).toContain("state");
+    expect(types).toContain("ready");
+    expect(types).toContain("sessions");
+    expect(types).toContain("commands");
+    expect(types).toContain("setup_checklist");
+    expect(types).toContain("locale");
+    // A missing file is "not configured yet", not a corrupt one.
+    expect(events.some((event) => event.type === "fatal")).toBe(false);
+
+    const state = events.find((event) => event.type === "state");
+    expect(state.model).toBe("");
+    expect(state.models).toStrictEqual([]);
+    const notice = events.find(
+      (event) => event.type === "notice" && event.text.includes("设置"),
+    );
+    expect(notice).toStrictEqual({
+      type: "notice",
+      level: "dim",
+      text: "尚未配置模型服务，请在设置 → 模型服务中填写",
+    });
+  }, HOST_TIMEOUT_MS);
+
+  it("providers 文件损坏时发 fatal，但 init 仍然走完", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "eam-host-broken-"));
+    tempDirs.push(home);
+    await writeFile(path.join(home, "providers.json"), "{ not json", "utf8");
+    const events = await runHost(home, [{ cmd: "init", cwd: home }], {
+      until: (all) => all.some((event) => event.type === "ready"),
     });
     const fatal = events.find((event) => event.type === "fatal");
     expect(fatal).toBeDefined();
     expect(fatal.message).toContain("providers");
-    // fatal 之后进程仍在：renderer 要能显示设置入口。
-    expect(events.some((event) => event.type === "ready")).toBe(false);
+    // The fatal banner tells the user what is wrong; `ready` is what makes the
+    // page that fixes it usable.
+    expect(events.some((event) => event.type === "ready")).toBe(true);
+    expect(events.some((event) => event.type === "state")).toBe(true);
   }, HOST_TIMEOUT_MS);
 
   it("不支持的命令显式 warn（R3，不静默）", async () => {
@@ -219,6 +254,31 @@ describe("desktop host", () => {
     const sessionsDir = path.join(home, "sessions");
     const dirs = await readdir(sessionsDir);
     expect(dirs).toHaveLength(1);
+  }, HOST_TIMEOUT_MS);
+
+  it("prompt 把工作区 cwd 写进会话 header", async () => {
+    const home = await tempHome();
+    const workspace = await mkdtemp(path.join(tmpdir(), "eam-cwd-"));
+    tempDirs.push(workspace);
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "setWorkspace", path: workspace },
+        { cmd: "prompt", text: "看下这个工程" },
+      ],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+    expect(events.some((event) => event.type === "run_end")).toBe(true);
+
+    const [sessionId] = await readdir(path.join(home, "sessions"));
+    const header = JSON.parse(
+      await readFile(path.join(home, "sessions", sessionId, "header.json"), "utf8"),
+    );
+    // The kernel records the run's cwd as the session's workdir; if the host
+    // did not pass it, the run would have happened in the host's own folder
+    // and the sidebar would group the session under the wrong project.
+    expect(header.workdir).toBe(path.resolve(workspace));
   }, HOST_TIMEOUT_MS);
 
   it("loadSession 回放历史消息并设置游标", async () => {
@@ -303,6 +363,90 @@ describe("desktop host", () => {
     const states = events.filter((event) => event.type === "state");
     expect(states.at(-1).model).toBe("gw/flash");
     expect(states.at(-1).models).toHaveLength(1);
+  }, HOST_TIMEOUT_MS);
+
+  it("saveProviders 写盘后可读回，并回带 providerConfig 的 settings", async () => {
+    const home = await tempHome();
+    const baseUrl = await failingGateway();
+    const providers = {
+      gw: {
+        protocol: "openai-chat-completions",
+        baseUrl,
+        models: { flash: { contextWindow: 8192, maxOutput: 512 } },
+      },
+    };
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        {
+          cmd: "saveProviders",
+          providers: {
+            gw: providers.gw,
+            backup: {
+              protocol: "openai-chat-completions",
+              baseUrl,
+              models: { slow: { contextWindow: 4096, maxOutput: 256 } },
+            },
+          },
+        },
+      ],
+      {
+        until: (all) =>
+          all.some(
+            (event) =>
+              event.type === "settings"
+              && Object.keys(event.settings.providerConfig ?? {}).length === 2,
+          ),
+      },
+    );
+
+    // The file is the contract: a save that only updated memory would be lost
+    // on the next boot.
+    const onDisk = JSON.parse(await readFile(path.join(home, "providers.json"), "utf8"));
+    expect(Object.keys(onDisk)).toStrictEqual(["gw", "backup"]);
+    expect(onDisk.backup.models.slow.contextWindow).toBe(4096);
+
+    const settings = events
+      .filter((event) => event.type === "settings")
+      .find((event) => Object.keys(event.settings.providerConfig ?? {}).length === 2);
+    expect(settings.settings.providerConfig).toStrictEqual(onDisk);
+    // `providers` stays the picker's flat list: `providerConfig` is the raw
+    // object and the two must not collide.
+    expect(settings.settings.providers.map((entry) => entry.id)).toStrictEqual(["gw", "backup"]);
+    expect(settings.settings.configPaths.providers).toContain("providers.json");
+
+    // The new model reaches the picker without a separate refreshModels.
+    const models = events.filter((event) => event.type === "models").at(-1);
+    expect(models.models.map((model) => model.id)).toContain("backup/slow");
+  }, HOST_TIMEOUT_MS);
+
+  it("saveProviders 收到非法对象时回 warn，磁盘原文件不变", async () => {
+    const home = await tempHome();
+    const before = await readFile(path.join(home, "providers.json"), "utf8");
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        // `protocol` is required and must be the one the adapter speaks.
+        {
+          cmd: "saveProviders",
+          providers: { gw: { baseUrl: "not-a-url", models: {} } },
+        },
+        { cmd: "listSessions" },
+      ],
+      { until: (all) => all.some((event) => event.type === "sessions") },
+    );
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("模型配置未保存");
+    // Writing an invalid object over a working file would leave the user with
+    // no model at all and no way back through the UI.
+    expect(await readFile(path.join(home, "providers.json"), "utf8")).toBe(before);
+    // A failed save does not claim success with a fresh settings snapshot.
+    expect(
+      events.filter((event) => event.type === "settings").length,
+    ).toBe(0);
   }, HOST_TIMEOUT_MS);
 
   it("refreshModels 重读 providers.json 并广播 models", async () => {
@@ -514,21 +658,134 @@ describe("desktop host", () => {
     expect(checklist.checks.every((check) => check.ok)).toBe(true);
   }, HOST_TIMEOUT_MS);
 
-  it("getTree 返回空树而不是挂起", async () => {
+  it("getTree 在临时目录上返回真实子项，目录在前", async () => {
     const home = await tempHome();
     await mkdir(path.join(home, "sessions"), { recursive: true });
+    await mkdir(path.join(home, "src"), { recursive: true });
+    await writeFile(path.join(home, "readme.md"), "# hi\n", "utf8");
+
     const events = await runHost(
       home,
       [
         { cmd: "init", cwd: home },
+        // `.` means "the workspace", which is what the renderer sends on boot
+        // and when the files pane opens.
         { cmd: "getTree", path: "." },
       ],
       { until: (all) => all.some((event) => event.type === "tree") },
     );
-    expect(events.find((event) => event.type === "tree")).toStrictEqual({
-      type: "tree",
-      nodes: [],
+    const tree = events.find((event) => event.type === "tree");
+    expect(tree.truncated).toBe(false);
+    const names = tree.nodes.map((node) => node.name);
+    expect(names).toContain("src");
+    expect(names).toContain("readme.md");
+    // Directories first: a flat list buried the folders the operator was
+    // drilling into below every file in the folder.
+    const types = tree.nodes.map((node) => node.type);
+    expect(types.indexOf("file")).toBeGreaterThan(types.lastIndexOf("dir"));
+    expect(tree.nodes.find((node) => node.name === "src")).toStrictEqual({
+      name: "src",
+      path: path.join(home, "src"),
+      type: "dir",
     });
+  }, HOST_TIMEOUT_MS);
+
+  it("getTree 越界时既发 warn 又发 tree 事件（不假装空目录）", async () => {
+    const home = await tempHome();
+    const outside = await mkdtemp(path.join(tmpdir(), "eam-tree-outside-"));
+    tempDirs.push(outside);
+    await mkdir(path.join(outside, "secret"), { recursive: true });
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "getTree", path: outside },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "notice" && event.text.includes("目录读取失败"))
+          && all.some((event) => event.type === "tree"),
+      },
+    );
+    // R3: the notice carries the reason. The empty tree alone would read as
+    // "this folder is empty" rather than "this folder was refused".
+    const notice = events.find((event) => event.type === "notice");
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("目录读取失败");
+    const tree = events.find((event) => event.type === "tree");
+    // The empty tree is still required: the renderer parks `pendingTreeTarget`
+    // until one arrives, so the expanded node would spin forever without it.
+    expect(tree.nodes).toStrictEqual([]);
+    expect(
+      events.some((event) => event.type === "tree" && event.nodes.length > 0),
+    ).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  it("setWorkspace 登记目录后 getTree 能列出它", async () => {
+    const home = await tempHome();
+    const workspace = await mkdtemp(path.join(tmpdir(), "eam-workspace-"));
+    tempDirs.push(workspace);
+    await mkdir(path.join(workspace, "drivers"), { recursive: true });
+    await writeFile(path.join(workspace, "main.c"), "int main(void){}\n", "utf8");
+
+    // Before registration the folder is not browsable.
+    const before = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "getTree", path: workspace },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "notice" && event.text.includes("目录读取失败")),
+      },
+    );
+    expect(before.find((event) => event.type === "tree").nodes).toStrictEqual([]);
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "setWorkspace", path: workspace },
+        { cmd: "getTree", path: workspace },
+      ],
+      {
+        until: (all) => all.some((event) => event.type === "tree" && event.nodes.length > 0),
+      },
+    );
+    const state = events.filter((event) => event.type === "state").at(-1);
+    // The registered folder is also where the next session runs: the workspace
+    // and the cwd must not be two different places.
+    expect(state.cwd).toBe(path.resolve(workspace));
+
+    const tree = events.filter((event) => event.type === "tree").at(-1);
+    expect(tree.nodes).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "drivers", type: "dir" }),
+        expect.objectContaining({ name: "main.c", type: "file" }),
+      ]),
+    );
+  }, HOST_TIMEOUT_MS);
+
+  it("setWorkspace 对不存在的目录回 warn 且不改 cwd", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "setWorkspace", path: path.join(home, "no-such-folder") },
+        { cmd: "listSessions" },
+      ],
+      { until: (all) => all.some((event) => event.type === "sessions") },
+    );
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("工作区切换失败");
+    // Only the boot state: a refused switch must not move the topbar.
+    const states = events.filter((event) => event.type === "state");
+    expect(states).toHaveLength(1);
+    expect(states[0].cwd).toBe(path.resolve(home));
   }, HOST_TIMEOUT_MS);
 
   it("listSessions 的 includeArchived:false 过滤掉归档会话", async () => {

@@ -6,9 +6,11 @@ import { loadPermissionConfig, parseInlinePermissionConfig } from "../permission
 import { PermissionConfigError } from "../permissions/errors.js";
 import type { InlinePermissionConfig } from "../permissions/config.js";
 import type { PermissionConfig, PermissionPreset, PermissionRule } from "../permissions/types.js";
+import { ConfigValidationError, parseProviders } from "./providers.js";
+import type { ProvidersConfig } from "./providers.js";
 
 /**
- * 应用层配置（`$HARNESS_HOME` 下的 mcp.json / permissions.json / run.json）的读写。
+ * 应用层配置（`$HARNESS_HOME` 下的 mcp.json / permissions.json / run.json / providers.json）的读写。
  *
  * 这一层只做「文件 <-> 普通对象」的校验与原子落盘，不含任何领域能力：MCP server
  * 由内核的 MCP 客户端挂载，权限规则由权限门求值。读写都要求显式失败（R3）：
@@ -52,7 +54,18 @@ export interface AppConfigSnapshot {
   mcpPath: string;
   run: AppRunLimits;
   runPath: string;
+  providers: ProvidersConfig;
+  providersPath: string;
+  /** providers.json 读失败时的原因；正常时该字段不存在。 */
+  providersError?: string;
 }
+
+/**
+ * providers.json 的原始对象（provider → 配置），与 src/config/providers.ts 的
+ * ProvidersConfig 同型。单独起别名是因为这个名字描述的是「应用配置里的一份文件」，
+ * 而 ProvidersConfig 描述的是「内核消费的配置」——两者同型但用途不同。
+ */
+export type AppProvidersFile = ProvidersConfig;
 
 export type AppConfigErrorCode = "invalid_config" | "config_unreadable" | "config_write_failed";
 
@@ -373,6 +386,61 @@ function readRunLimits(runPath: string): AppRunLimits {
   }
 }
 
+export function readProviders(home: string): {
+  providers: ProvidersConfig;
+  providersPath: string;
+} {
+  const providersPath = path.join(home, "providers.json");
+  let text: string;
+  try {
+    text = readFileSync(providersPath, "utf8");
+  } catch (error) {
+    // 文件不存在 = 用户还没配模型，按空配置处理；其他 fs 错误（权限、IO）必须显式报错。
+    if (isFileNotFound(error)) return { providers: {}, providersPath };
+    throw unreadable(`providers 配置读取失败: ${providersPath}（${errorMessage(error)}）`, error);
+  }
+  try {
+    // schema 只在 providers.ts 维护一份，这里复用，避免两处校验漂移。
+    return { providers: parseProviders(stripBom(text)), providersPath };
+  } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      // JSON 坏 → config_unreadable；schema 坏 → invalid_config。
+      const code = error.code === "providers_invalid_json" ? "config_unreadable" : "invalid_config";
+      throw new AppConfigError(code, `${error.message}（${providersPath}）`, error);
+    }
+    throw error;
+  }
+}
+
+export async function writeProviders(home: string, input: unknown): Promise<ProvidersConfig> {
+  // 借 parseProviders 做校验：先序列化再解析，保证「写进去的一定读得回来」。
+  // 序列化失败（循环引用、BigInt、undefined/函数）也在这里被收敛成 invalid_config。
+  let text: string | undefined;
+  try {
+    text = JSON.stringify(input);
+  } catch (error) {
+    throw invalidConfig(
+      `providers 配置无法序列化为 JSON（<inline>）: ${errorMessage(error)}`,
+      error,
+    );
+  }
+  if (text === undefined) {
+    throw invalidConfig("providers 配置不能是 undefined 或函数（<inline>）");
+  }
+  let providers: ProvidersConfig;
+  try {
+    providers = parseProviders(text);
+  } catch (error) {
+    if (error instanceof ConfigValidationError) {
+      throw invalidConfig(`${error.message}（<inline>）`, error);
+    }
+    throw error;
+  }
+  // 校验通过才落盘：非法输入不会碰到原文件（writeJsonAtomic 是最后一步）。
+  await writeJsonAtomic(path.join(home, "providers.json"), providers);
+  return providers;
+}
+
 export function readAppConfig(home: string): AppConfigSnapshot {
   const mcpPath = path.join(home, "mcp.json");
   const permissionsPath = path.join(home, "permissions.json");
@@ -381,7 +449,29 @@ export function readAppConfig(home: string): AppConfigSnapshot {
   const mcpServers = readMcpServers(mcpPath, warnings);
   const permissions = readPermissions(home, permissionsPath);
   const run = readRunLimits(runPath);
-  return { mcpServers, warnings, permissions, permissionsPath, mcpPath, run, runPath };
+  // providers 走降级读取：模型配置坏掉不能把设置页整页打挂，否则用户没地方修。
+  // 其余三份仍按显式失败（R3），只有 providers 带 providersError 继续返回。
+  const providersPath = path.join(home, "providers.json");
+  let providers: ProvidersConfig = {};
+  let providersError: string | undefined;
+  try {
+    providers = readProviders(home).providers;
+  } catch (error) {
+    if (!(error instanceof AppConfigError)) throw error;
+    providersError = error.message;
+  }
+  return {
+    mcpServers,
+    warnings,
+    permissions,
+    permissionsPath,
+    mcpPath,
+    run,
+    runPath,
+    providers,
+    providersPath,
+    ...(providersError === undefined ? {} : { providersError }),
+  };
 }
 
 export async function writeMcpServers(home: string, input: unknown): Promise<AppMcpServer[]> {

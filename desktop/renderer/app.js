@@ -120,10 +120,16 @@ const state = {
   sessionFilter: "all",
   comments: [],
   attachments: [],
-  /** Paths picked with @ whose content should travel with the next message. */
+  /**
+   * Paths picked by folder/file dialogs and drops. They are not uploaded: the
+   * next message carries them as a path list (see submit()), then the list is
+   * cleared. @-mentions typed into the text are already in the text itself.
+   */
   mentionFiles: [],
   /** Sub-agent records for the Tasks pane. */
   subagents: [],
+  /** Absolute root the Files pane last asked for; "" means no workspace yet. */
+  treePath: "",
   pr: null,
   commands: [],
   diffScope: "session",
@@ -1325,10 +1331,9 @@ function applyMention(path) {
   input.value = `${before}${inserted}${after}`;
   const position = before.length + inserted.length;
   input.setSelectionRange(position, position);
-  // A mention used to be only a path: the model had to spend a tool call
-  // reading a file the user had already picked. The picked path travels with
-  // the message so its content arrives with it.
-  if (!state.mentionFiles.includes(path)) state.mentionFiles.push(path);
+  // The path is already in the text the user is writing, so it needs no entry
+  // in `mentionFiles`: submit() appends that list as a separate path block,
+  // and adding the path twice would list the same file twice.
   closeMention();
   autoSize();
   input.focus();
@@ -1870,6 +1875,12 @@ function handleEvent(message) {
       }
       state.cwd = message.cwd;
       renderTopbarLocation();
+      // A different workspace is a different tree. Only when the pane is on
+      // screen: asking at every state event would refetch the list each time
+      // a mode changes, and the reply would paint over a closed pane.
+      if (!workbench.hidden && state.pane === "files" && state.treePath !== (state.cwd ?? "")) {
+        requestTree(state.cwd);
+      }
       // A state event carries session-level totals: replace, never add. It
       // may also carry spend and occupancy (the host attaches them when it
       // opens a stored session); a state event without them is the same
@@ -1981,7 +1992,16 @@ function handleEvent(message) {
       const target = pendingTreeTarget ?? fileTree;
       pendingTreeTarget = null;
       target.innerHTML = "";
-      for (const node of message.nodes ?? []) target.appendChild(treeRow(node));
+      const nodes = message.nodes ?? [];
+      // An empty reply ends the "loading" state either way. It is not worded
+      // as "this folder is empty": the host answers a refusal with a warning
+      // notice and then an empty tree, so an empty reply can mean "empty" or
+      // "not allowed to read it", and the notice above it says which.
+      if (nodes.length === 0) {
+        target.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeEmpty)}</div>`;
+        break;
+      }
+      for (const node of nodes) target.appendChild(treeRow(node));
       break;
     }
 
@@ -2713,7 +2733,9 @@ function handleEvent(message) {
       if (message.cwd) {
         state.cwd = message.cwd;
         renderTopbarLocation();
-        api.send({ cmd: "getTree", path: "." });
+        // Absolute, like every other tree request: "." is resolved against the
+        // host process and refused by its boundary.
+        requestTree(state.cwd);
         api.send({ cmd: "listSessions", includeArchived: state.showArchived });
       }
       scrollToBottom(true);
@@ -2857,8 +2879,35 @@ function renderSubagents() {
  * have no host implementation, so the tab was removed rather than left as a
  * pane whose Start button answers "unsupported". The probe's serial state is
  * visible as a field in the board pane's Device section.
+ *
+ * `files` is the workspace tree: `getTree` is real in the host and the bridge,
+ * and a directory row expands through the same `getTree` the pane's root uses.
  */
-const SUPPORTED_PANES = new Set(["board", "file", "artifact"]);
+const SUPPORTED_PANES = new Set(["board", "file", "files", "artifact"]);
+
+/**
+ * Fill the tree pane from `path`.
+ *
+ * An absolute path is required: the host decides access by comparing the
+ * resolved path against the session workspace, and "." resolves against
+ * whatever the host's process happened to have as its cwd — it gets refused.
+ * With no workspace open there is nothing to ask for, so the pane says so
+ * instead of leaving an empty list that looks like an empty folder.
+ */
+function requestTree(path) {
+  const root = typeof path === "string" ? path.trim() : "";
+  state.treePath = root;
+  // A root request owns the next reply. Without this an expansion that never
+  // answered (the host replies to a refusal with an empty tree, but a dropped
+  // request leaves it set) would capture the root's answer into one row.
+  pendingTreeTarget = null;
+  if (root === "") {
+    fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeNoWorkspace)}</div>`;
+    return;
+  }
+  fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeLoading)}</div>`;
+  api.send({ cmd: "getTree", path: root });
+}
 
 function openWorkbench(pane) {
   if (pane !== undefined && !SUPPORTED_PANES.has(pane)) {
@@ -2919,7 +2968,7 @@ function openWorkbench(pane) {
   $("board-root").hidden = !showBoard;
   $("serial-root").hidden = !showSerial;
   if (showDiff) renderDiff();
-  if (showFiles) api.send({ cmd: "getTree", path: "." });
+  if (showFiles) requestTree(state.cwd);
   if (showHistory) api.send({ cmd: "getCheckpoints" });
   if (showArtifact) api.send({ cmd: "getArtifacts" });
   if (showTerminal) {
@@ -4038,7 +4087,10 @@ function renderTree() {
   fileTree.innerHTML = "";
   const nodes = state.tree ?? [];
   if (nodes.length === 0) {
-    fileTree.innerHTML = `<div class="sidebar-empty">…</div>`;
+    // The pane is only drawn when something asks for it; a blank list with no
+    // text reads as "still loading" forever.
+    const reason = state.treePath ? t.treeEmpty : t.treeNoWorkspace;
+    fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(reason)}</div>`;
     return;
   }
   for (const node of nodes) fileTree.appendChild(treeRow(node));
@@ -4066,8 +4118,11 @@ function treeRow(node) {
     container.className = "tree-children";
     row.after(container);
     setIcon(row.querySelector(".twisty svg"), "chevron-down");
-    api.send({ cmd: "getTree", path: node.path });
+    // The target is recorded before the request goes out. The browser bridge
+    // answers a supported command synchronously, so setting this afterwards
+    // delivered the reply into the root of the tree instead of under the row.
     pendingTreeTarget = container;
+    api.send({ cmd: "getTree", path: node.path });
   });
   return row;
 }
@@ -4698,15 +4753,27 @@ function rememberInHistory(text) {
 
 function submit() {
   const text = input.value.trim();
-  // Attachments and @-mentions have no upload path or file-search API in this
-  // kernel; the composer controls for them are hidden, so `text` is the whole
-  // message and nothing is silently dropped.
-  if (!text) return;
+  // Attachments and @-mentions have no upload path in this kernel. An image
+  // stays in the strip and is not sent; a picked path is not uploaded either,
+  // but it costs nothing to tell the model which paths the user meant: the
+  // path list is appended to the text, so the promise made when the path was
+  // added ("this is part of your message") is kept without a kernel change.
+  const mentions = state.mentionFiles.filter((path) => typeof path === "string" && path !== "");
+  if (!text && mentions.length === 0) return;
+  const withMentions =
+    mentions.length === 0
+      ? text
+      : `${text}\n\n${t.mentionPathsHeader}\n${mentions.map((path) => `- ${path}`).join("\n")}`.trim();
   input.value = "";
   autoSize();
   rememberInHistory(text);
-  addUserTurn(text, 0);
-  api.send({ cmd: "prompt", text });
+  // The bubble shows exactly what went to the host, path block included: a
+  // transcript that hides part of the message cannot be used to explain what
+  // the model answered.
+  addUserTurn(withMentions, 0);
+  api.send({ cmd: "prompt", text: withMentions });
+  // Delivered. Keeping them would append the same paths to the next message.
+  state.mentionFiles = [];
   input.focus();
 }
 
@@ -4946,7 +5013,7 @@ function handleImageFiles(files) {
       continue;
     }
     if (!state.mentionFiles.includes(path)) state.mentionFiles.push(path);
-    addNotice("dim", t.attachmentAdded(file.name));
+    addNotice("dim", t.mentionAdded(file.name));
   }
 }
 
@@ -5544,7 +5611,10 @@ function addPathsAsAttachments(paths) {
 function addMentionPath(path) {
   if (!state.mentionFiles.includes(path)) state.mentionFiles.push(path);
   input.focus();
-  addNotice("dim", t.attachmentAdded(path.split(/[\\/]/).pop() || path));
+  // The notice says "will be sent", not "added": the path is not uploaded,
+  // only appended to the next message as a path list. Wording that implied a
+  // file was attached would be the same lie the missing path used to be.
+  addNotice("dim", t.mentionAdded(path.split(/[\\/]/).pop() || path));
 }
 
 const effortPicker = $("effort-picker");
@@ -5582,9 +5652,44 @@ modelPicker.addEventListener("click", (event) => {
   else closeModelMenu();
 });
 
+/**
+ * Register a local folder as the workspace root and switch to it.
+ *
+ * `setCwd` only moved the directory the next session would start in; it did
+ * not register the folder as a workspace root, so every later `getTree` and
+ * `getFile` under it was refused by the host's boundary check. `setWorkspace`
+ * does both, which is why the top bar sends it instead.
+ */
+function setWorkspace(path) {
+  const dir = typeof path === "string" ? path.trim() : "";
+  if (dir === "") return;
+  api.send({ cmd: "setWorkspace", path: dir });
+}
+
 $("topbar-cwd").addEventListener("click", async () => {
-  const dir = await api.pickDirectory();
-  if (dir) api.send({ cmd: "setCwd", cwd: dir });
+  let picked = null;
+  let pickerFailed = false;
+  try {
+    picked = await api.pickDirectory();
+  } catch {
+    // A picker that throws is not an answer; fall through to typing.
+    pickerFailed = true;
+  }
+  if (picked) {
+    setWorkspace(picked);
+    return;
+  }
+  // `api.platform` exists only when an Electron preload is in front. There a
+  // null means the user closed the native dialog, and re-asking with a text
+  // box would punish them for cancelling; here the click has already done
+  // something (a dialog opened and closed).
+  if (api.platform && !pickerFailed) return;
+  // The browser bridge has no native picker and returns null, so the path is
+  // typed instead. `askText`, not `window.prompt`: Electron does not implement
+  // prompt and returns null without drawing anything (see the note on
+  // askText), which would put a dead click back in the desktop window.
+  const typed = await askText(t.workspacePathPrompt, state.cwd ?? "");
+  if (typed) setWorkspace(typed);
 });
 
 /* ---------- isolated worktree ---------- */
@@ -6095,6 +6200,7 @@ topbarMenu.addEventListener("click", (event) => {
   setTopbarMenu(false);
   if (row.id === "menu-export") api.send({ cmd: "exportSession" });
   else if (row.id === "menu-shortcuts") openShortcuts();
+  else if (row.id === "menu-browse-files") openWorkbench("files");
   else if (row.id === "menu-clear") clearConversation();
 });
 
@@ -6185,6 +6291,8 @@ if (state.workbenchOpen) {
   state.workbenchOpen = false;
   localStorage.setItem("prometheus.workbench", "0");
 }
-api.send({ cmd: "getTree", path: "." });
+// No tree request here: the Files pane asks for its own root with an absolute
+// path when it is opened. A "." sent at boot was refused by the host boundary
+// and its empty reply would have painted over a tree the pane had loaded.
 api.send({ cmd: "setLocale", locale: state.locale });
 input.focus();

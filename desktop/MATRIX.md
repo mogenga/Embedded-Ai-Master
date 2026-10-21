@@ -18,6 +18,7 @@
 | `loadSession` | ✅ | ✅ | 读整篇日志重建转录 |
 | `listSessions` | ✅ | ✅ | 标题取首条 user 事件（缓存，最多扫 30 条）。支持 `includeArchived` / `cwd` / `limit`：归档行默认隐藏，`total` 是过滤后的总数（`slice` 前算），分页按 `updatedAt` 倒序稳定切片。`status` 筛选在桌面侧只认 `working`，浏览器侧回一条 dim notice 说明不可用 |
 | `getSettings` | ✅ | ✅ | UI 偏好 + provider 列表 + 三份配置文件（`mcpServers` / `permissions` / `run`）及其路径 |
+| `saveProviders` | ✅ | ✅ | 整份写 `providers.json`；桌面直写（写完从磁盘重新 `loadProviders`，不信任入参），浏览器走 `PUT /api/config`。模型引用失效时自动回退到首个可用引用并重建 runner |
 | `saveMcpServer` | ✅ | ✅ | 合并同名项后整份写 `mcp.json`；桌面直写，浏览器走 `PUT /api/config` |
 | `removeMcpServer` | ✅ | ✅ | 按 name 删除 |
 | `savePermissions` | ✅ | ✅ | 整份写 `permissions.json`（`preset` / `approvalTimeoutMs` / `rules`） |
@@ -40,9 +41,10 @@
 | `getArtifacts` | ✅ | ✅ | 列当前会话 `artifacts/` 下的普通文件（跳过目录与符号链接）；目录不存在或没有打开的会话 → 空列表 |
 | `getArtifact` | ✅ | ✅ | 读一个产物文件；只允许当前会话 artifacts 目录内的路径 |
 | `setEffort` | ✅（如实拒绝） | ✅（如实拒绝） | 内核模型适配层不发 reasoning effort 参数。回 warn notice，**不发 `state`** —— 假装生效比不支持更糟 |
-| `saveSettings` | ✅（窄） | ✅（窄） | 只接 `settings.locale`（en/zh），转调 `setLocale`；其他字段回 warn。不提供万能写配置入口——配置写入口是 `saveMcpServer`/`savePermissions`/`saveRunLimits` |
-| `getTree` | ✅（空树） | ✅（空树） | 内核无文件树 API |
-| `searchFiles` | ✅（空匹配） | ✅（空匹配） | 同上；不每键刷警告 |
+| `saveSettings` | ✅（窄） | ✅（窄） | 只接 `settings.locale`（en/zh），转调 `setLocale`；其他字段回 warn。不提供万能写配置入口——配置写入口是 `saveProviders`/`saveMcpServer`/`savePermissions`/`saveRunLimits` |
+| `getTree` | ✅ | ✅ | 列一层子项（`listDirectory` / `GET /api/tree`）。边界＝已登记工作区 ∪ 会话目录 ∪ 会话工作目录，`realpath` 后判定；目录在前、按名排序、跳过符号链接、超 500 项截断。失败先发 warn notice **再**发空 `tree`——空树是释放 `pendingTreeTarget` 的信号，不是「目录是空的」 |
+| `setWorkspace` | ✅ | ✅ | 发 `POST /api/workspace` 登记，再委托给 `setCwd` 的全部语义（运行中拒绝、仅新建会话生效）。登记是进程内的，重启失效 |
+| `searchFiles` | ✅（空匹配） | ✅（空匹配） | 内核没有文件名搜索 API（无索引、无 walker）；不每键刷警告，理由写在宿主代码里 |
 | `searchSessions` | ✅ | ✅（已加载的列表） | 桌面按标题/工作目录/id 搜索；浏览器只过滤已加载的行（HTTP API 无查询参数） |
 | `shutdown` | ✅ | — | 桌面宿主退出 |
 
@@ -80,3 +82,5 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 ## 阶段 4 交互层
 
 `docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` 的 §7（回放）、§8（导出）、§9（设备控制）原设计基于已删除的 `src/ui`，需按本前端重写。三项在当前内核上都是可做的：回放只需按事件下标截断后重建消息列表；导出读 `GET /api/sessions/:id`；设备控制把预置指令发进会话、仍经权限与审批。详见 D-166。
+
+> 2026-10-21 第四轮（用户「模型配置没有、无法打开本地文件夹」）：新增 `saveProviders`（整份写 `providers.json`）、`setWorkspace`（登记目录后委托 `setCwd`）、真实 `getTree`（接 `listDirectory` / `GET /api/tree`）；`searchFiles` 仍是空匹配，原因改为写在代码里。设置页恢复「模型服务」页，`apiKeyEnv` 明确标注为环境变量名、未定价时成本显示「未知」。浏览器形态的 `pickDirectory` 不再静默返回 `null`，改为说明拿不到绝对路径并提示手输。

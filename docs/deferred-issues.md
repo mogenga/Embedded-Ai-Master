@@ -1530,12 +1530,31 @@
 - **仍未修**:
   1. **项目权限配置恒被跳过**:runner 不传 `trustProjectConfig`,每个 run 都写 `permissions_project_config_skipped`。
   2. **分屏/多窗口**:`desktop/main.js` 单实例单窗口（preload 无 `newWindow`/`splitWindow`，入口已删）。
-  3. **文件树与 `@` 提及**:`getTree` / `searchFiles` 仍是空实现；本次只做了单文件预览。
-  4. **浏览器形态的配置页**：`settings.js` 的「连接」页仍会发 `saveSettings` 带 `provider`/`model`/`apiKey`,浏览器侧一律落到「该设置没有后端」。控件没有在该形态下隐藏。
+  3. ~~**文件树与 `@` 提及**:`getTree` / `searchFiles` 仍是空实现；本次只做了单文件预览。~~ **部分解决**(2026-10-21 第四轮)：`getTree` 接 `listDirectory`，文件树与 `files` 面板可用；`searchFiles`（`@` 提及的文件名搜索）仍为空，已注明内核无文件名搜索 API。
+  4. ~~**浏览器形态的配置页**：`settings.js` 的「连接」页仍会发 `saveSettings` 带 `provider`/`model`/`apiKey`,浏览器侧一律落到「该设置没有后端」。~~ **已解决**(2026-10-21 第四轮)：改为整份写 `providers.json`（`saveProviders` → `PUT /api/config`），不再走 `saveSettings`。
 - **影响**: 1 是安全边界上的一个静默跳过（会以 `notice` 显示）；2-4 是体验缺口。
 - **触发升级条件**: 要求项目级权限配置生效；要求分屏；要求文件树。
 - **修复建议**: 1 让 runner 透传 `trustProjectConfig`（默认仍为 false，由设置页显式开启，因为项目配置是仓库内容）；2 需要 `main.js` 支持第二个窗口并处理会话锁；4 在 bridge 形态下隐藏连接页（或把它做成只读展示）。
-- **状态**: 部分解决（三轮接线已完成，剩余 4 项均为内核/外壳能力缺口）。
+- **状态**: 大部分解决（2026-10-21 第四轮后，第 3 项仅剩 `@` 提及的文件名搜索，第 4 项已完成；第 1、2 项仍是内核/外壳能力缺口）。
+
+### D-170 · 配置写入曾落到真实 `~/.harness`（D-125 的配置文件版本）
+
+- **发现**: 2026-10-21，第七轮排查「模型配置没有」时，在真实 home 中发现两份从未被用户创建的配置文件。
+- **现象**: `~/.harness/mcp.json`（`probe` / `node` / `["probe.js"]`）与 `~/.harness/run.json`（`maxTurns: 3`），写入时间相隔 13ms，内容是 `tests/server/api.test.ts:628` 与 `:649` 的 fixture 逐字一致。两个文件都是 `writeJsonAtomic` 的正常产物（2 空格缩进 + 末尾换行），不是手工粘贴。
+- **影响**: 测试 fixture 进入了用户的真实配置目录。`mcp.json` 会让下一次真实运行尝试拉起一个不存在的 `probe.js`；`run.json` 的 `maxTurns: 3` 会把用户的默认轮数从 10 静默降到 3。这与 D-125（会话目录）是同一类问题，但后果更重：会话目录只是噪音，配置会改变运行行为。
+- **与既有用例的关系**: `tests/server/api.test.ts` 的配置用例都显式传了 `harnessHome: makeHome()`，`tests/desktop/host.test.js` 都传了 `HARNESS_HOME: home`。经实测（`USERPROFILE` 重定向到空目录跑全量，75 files / 2029 passed），**当前测试套件不再写入默认 home**。因此这两个文件最可能来自本轮某次未设 `HARNESS_HOME` 的手工冒烟（直接向 `desktop/host/host.js` 管道喂 `saveMcpServer` / `saveRunLimits`），而非 `npm test` 本身。**无法从产物反推确切来源，这一点如实记录为不确定。**
+- **触发升级条件**: 再次在真实 home 出现非用户创建的配置；CI 与开发者共用 home。
+- **修复建议**: ①`resolveHarnessHome()` 在 `NODE_ENV === "test"` 或检测到 vitest（`process.env.VITEST`）时拒绝返回默认 home 并抛错——让「忘了隔离」变成硬失败而不是静默写穿；②给 `writeMcpServers`/`writeRunLimits`/`writeProviders` 加一条「路径必须在 `$HARNESS_HOME` 之内」的自检；③手工冒烟一律带 `HARNESS_HOME`（本轮三个配置写命令都是在宿主进程里执行的，宿主默认用真实 home）。
+- **状态**: 已清理（2026-10-21，两个文件在核对内容后删除）；根因未修复，建议 ① 优先做。
+
+### D-171 · `createUiServer` 绑定失败会崩溃，且 43 个测试调用点硬编码 5174
+
+- **发现**: 2026-10-21，第七轮；由子代理在跑 `tests/server/api.test.ts` 时触发（EADDRINUSE），主控实测确认机制。
+- **现象**: `createUiServer`（`src/server/api.ts:825`）在 `server.listen(port, host)` 后**同步返回**，且**不挂 `error` 监听**。端口被占时 `listen()` 不抛错，EADDRINUSE 以异步 `error` 事件送达；无监听者的 `error` 事件在 Node 里是未捕获异常，**进程直接退出（实测退出码 1）**。`serve.ts` 自己挂了 `on("error")` 所以生产路径有兜底，但测试路径没有：改动前该文件 43 个 `createUiServer({...})` 调用点全部不传 `port`，一律落 5174。本机有一个 17:13 启动的 `node dist/server/serve.js` 占着 5174，于是整份测试文件在跑到任何断言前就崩了。
+- **影响**: 只要本机开着 `npm run serve:ui`，`npm test` 就会整份 `api.test.ts` 崩溃；失败原因（端口冲突）与代码无关，容易被误判成被测逻辑有问题。
+- **触发升级条件**: 已有修改（子代理改为 `freePort()` + `startUi()`，与 `approvals-api.test.ts`、`api-unreadable.test.ts` 的既有做法一致）。
+- **修复建议**: ①让 `createUiServer` 暴露绑定结果（返回一个 `listening: Promise<void>`，或在函数内部挂 `error` 并转成 reject），调用方不必猜；②`createApiHandler` 之外再加一层「端口被占」的显式错误码，而不是让进程崩。当前只做了测试侧的规避。
+- **状态**: 部分解决（2026-10-21，`tests/server/api.test.ts` 改用临时端口；`createUiServer` 的崩溃行为未改，因为 `serve.ts` 已自带处理）。
 
 ---
 
@@ -1611,3 +1630,4 @@
 | 2026-10-21 | 前后端联调核查与第一批修复:审批条改用内核 `paramsPreview` 并加超时倒计时(R2);`POST /api/actions` 接受 `mode`,runner 用它覆盖本次运行预设(新增 `invalid_mode`),bridge 的 `setMode` 随 prompt 下发;bridge 补 `seq` 缺口检测+整量重拉(≤3 次)与 `stream_error` 续接上限(≤3 次),追问不再 `since=-1` 重放;`device_status` 改为独立事件并渲染到板卡面板「设备」段;桌面对话搜索按标题/工作dir/id;桌面 host 用 `readSessionSnapshot(allowTrailingPartial)` 容忍崩溃半行尾;新增宿主 `setModel`/`refreshModels`/`setCwd`;桌面 `getSettings` 不再回占位值,「跟随系统」主题不再被固化;usage 事件按会话累计;压缩不再把 seq 当 token;拒绝原因翻成中文。录入 D-169(剩余内核侧缺口),D-167 前两项标记已解决 |
 | 2026-10-21 | 功能闭环第二批:新增 `src/config/app-config.ts` + `src/server/config-api.ts`,`GET/PUT /api/config` 读写 `mcp.json`/`permissions.json`/`run.json`(原子写,非法输入 400 且原文件不变);设置页恢复「MCP 服务器」与「行为(权限/运行上限)」两页;`ActionInput` 与 `POST /api/actions` 新增 `maxTurns`/`maxCostUsd`/`timeoutMs`/`systemPrompt`(400 `invalid_run_limits`);新增 `src/session/metadata.ts`(旁挂 `meta.json`)与 `src/server/session-admin.ts`,HTTP 侧 `PATCH`/`DELETE /api/sessions/:id` 与 `POST /api/sessions/:id/fork`,前端改名/置顶/归档/删除/分叉全部接上;`usage` 事件带 `context{tokens,percent,window}` 与 `costUsd`(D-165 标记已解决);产物入口与 Markdown 导出(宿主 `exportSession`、bridge 读日志渲染);宿主命令改为串行执行(修 `loadSession → exportSession` 竞态);顶栏「⋯」菜单改为可见并删掉无外壳支持的新窗口/分屏两行;D-169 更新为部分解决 |
 | 2026-10-21 | 功能闭环第三轮:工具注解写入 `tool_started` 并在工具行画徽标(只转发 true 键);新增 `src/server/files-api.ts` + `GET /api/file`(只读预览,256 KiB / 二进制判定 / realpath 边界)与 `GET /api/sessions/:id/artifacts`,宿主补 `getFile`/`getArtifacts`/`getArtifact`,工作台恢复 File 与 Artifact 两个 tab;`listSessions` 的 `includeArchived`/`cwd`/`limit` 真正生效且 `total` 改为过滤后总数,宿主记住筛选条件供推送复用,`searchSessions` 同步过滤归档;`setEffort` 两端改为如实拒绝(不发 `state`);`saveSettings` 收窄为只认 `locale`;`D-167` 第 5 条与 `D-169` 第 2/3 项标记已解决 |
+| 2026-10-21 | 功能闭环第四轮(用户「模型配置没有、无法打开本地文件夹」):新增 `readProviders`/`writeProviders`(`src/config/app-config.ts`),`AppConfigSnapshot` 带 `providers`/`providersPath`/`providersError`,providers 读失败时降级而非中断整份快照;`PUT /api/config` 加第四段 `providers`;`src/server/files-api.ts` 加 `listDirectory`(目录在前、大小写不敏感排序、500 项截断、跳过符号链接)与 `registerWorkspaceRoot`(进程内登记,并入 `allowedRoots`);`ActionInput.cwd` + `RunnerError("invalid_cwd")`,校验先于会话创建;`GET /api/tree`、`POST /api/workspace`,`POST /api/actions` 接受 `cwd`;宿主 `saveProviders`/`setWorkspace`/真实 `getTree`,**init 的致命路径改为不短路**(providers 缺失只发 dim 提示并继续握手,否则设置页永远打不开);bridge 的 `pickDirectory` 不再静默返回 null 而是说明原因,补 `getTree`/`setWorkspace`/`saveProviders`;设置页恢复「模型服务」页并接 `saveProviders`(显式说明 `apiKeyEnv` 是环境变量名而应用不存密钥、未定价时成本显示「未知」而非 0);渲染器把 mention 路径真正拼进消息文本(此前弹「已添加」却丢弃,违反 R3)、顶栏工作区改发 `setWorkspace` 并支持手输路径、`SUPPORTED_PANES` 加入 `files` 且 `#more-button` 提供入口、修 `treeRow` 在浏览器形态下先发后设 `pendingTreeTarget` 导致子目录画进根部的 bug。录入 D-170(配置曾落到真实 home,已清理)与 D-171(`createUiServer` 绑定失败崩溃 + 43 个测试调用点硬编码 5174) |

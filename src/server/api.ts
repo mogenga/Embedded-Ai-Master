@@ -20,7 +20,12 @@ import type { SessionEvent, SessionHeader } from "../session/types.js";
 import { readJsonBody } from "./body.js";
 import { createConfigApi } from "./config-api.js";
 import { createEventStreamHandler } from "./event-stream.js";
-import { listSessionArtifacts, readFilePreview } from "./files-api.js";
+import {
+  listDirectory,
+  listSessionArtifacts,
+  readFilePreview,
+  registerWorkspaceRoot,
+} from "./files-api.js";
 import { HttpError, sendError, sendJson } from "./http.js";
 import { createSessionAdmin } from "./session-admin.js";
 import type { PermissionPreset } from "../permissions/types.js";
@@ -197,6 +202,7 @@ function mapRunnerError(error: RunnerError): HttpError {
     case "invalid_session_id":
     case "invalid_mode":
     case "invalid_run_limits":
+    case "invalid_cwd":
       return new HttpError(400, error.code, error.message);
     case "unknown_session":
       return new HttpError(404, error.code, error.message);
@@ -227,8 +233,14 @@ async function handleAction(
   if (body.mode !== undefined && typeof body.mode !== "string") {
     throw new HttpError(400, "invalid_mode", "mode 必须是字符串");
   }
+  // 只判类型；「目录存不存在、是不是目录」由 runner 判定并抛 invalid_cwd，
+  // 因为它同时服务桌面宿主，规则只能有一份。
+  if (body.cwd !== undefined && typeof body.cwd !== "string") {
+    throw new HttpError(400, "invalid_cwd", "cwd 必须是字符串");
+  }
   const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
   const mode = typeof body.mode === "string" ? body.mode : undefined;
+  const cwd = typeof body.cwd === "string" ? body.cwd : undefined;
   const limits = readRunLimitsBody(body);
   let outcome: Awaited<ReturnType<SessionRunner["start"]>>;
   try {
@@ -236,6 +248,7 @@ async function handleAction(
       text: body.text,
       ...(sessionId === undefined ? {} : { sessionId }),
       ...(mode === undefined ? {} : { mode: mode as PermissionPreset }),
+      ...(cwd === undefined ? {} : { cwd }),
       ...limits,
     });
   } catch (error) {
@@ -699,10 +712,15 @@ export function createApiHandler(
             sendJson(res, 200, { ...config.get(), ...outcome });
             return;
           }
+          if (typeof body.providers !== "undefined") {
+            const outcome = await config.putProviders({ providers: body.providers });
+            sendJson(res, 200, { ...config.get(), ...outcome });
+            return;
+          }
           throw new HttpError(
             400,
             "invalid_body",
-            "PUT /api/config 需要 mcpServers、permissions 或 run",
+            "PUT /api/config 需要 mcpServers、permissions、run 或 providers",
           );
         }
         throw new HttpError(405, "method_not_allowed", "不支持的请求方法");
@@ -716,6 +734,29 @@ export function createApiHandler(
         requireMethod(method, "GET");
         const preview = await readFilePreview(harnessHome, url.searchParams.get("path"));
         sendJson(res, 200, preview);
+        return;
+      }
+      if (pathname === "/api/tree") {
+        requireMethod(method, "GET");
+        const rawPath = url.searchParams.get("path");
+        if (rawPath === null || rawPath.trim() === "") {
+          throw new HttpError(400, "invalid_path", "path 必须是非空字符串");
+        }
+        const listing = await listDirectory(harnessHome, rawPath);
+        sendJson(res, 200, listing);
+        return;
+      }
+      if (pathname === "/api/workspace") {
+        requireMethod(method, "POST");
+        requireWriteRequest(req, opts.port);
+        const body = await readJsonBody(req);
+        // 登记的是「操作者刚打开的目录」；它随后成为 /api/tree 与 /api/file
+        // 的可见边界，所以这里必须是目录，不能是任意一个存在的路径。
+        if (typeof body.path !== "string") {
+          throw new HttpError(400, "invalid_path", "path 必须是字符串");
+        }
+        const registered = await registerWorkspaceRoot(body.path);
+        sendJson(res, 200, { path: registered });
         return;
       }
       const artifactMatch = /^\/api\/sessions\/([^/]+)\/artifacts$/.exec(pathname);

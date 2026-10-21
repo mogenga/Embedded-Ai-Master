@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createBrowserBridge } from "../../desktop/renderer/bridge.js";
 
 /** Minimal EventSource stand-in: records URLs and lets a test push frames. */
@@ -57,6 +57,12 @@ function collect(events) {
 
 beforeEach(() => {
   FakeEventSource.instances = [];
+});
+
+afterEach(() => {
+  // `pickDirectory` probes the real global; a stub must not leak into the next
+  // test (Node has no `showDirectoryPicker`, the "unsupported" branch).
+  vi.unstubAllGlobals();
 });
 
 describe("bridge: boot", () => {
@@ -155,6 +161,9 @@ describe("bridge: prompt", () => {
     expect(JSON.parse(posted.body)).toStrictEqual({
       text: "继续",
       sessionId: "sess-1",
+      // The loaded session's workdir is the only cwd the bridge knows; the run
+      // has to execute there, not wherever the UI happened to open.
+      cwd: "E:/p",
       mode: "diagnose",
     });
     // The stream resumes after what the loaded transcript already showed. At
@@ -1086,5 +1095,292 @@ describe("bridge: 导出", () => {
     const notice = events.filter((event) => event.type === "notice").at(-1);
     expect(notice.level).toBe("warn");
     expect(notice.text).toContain("没有可导出");
+  });
+});
+
+describe("bridge: 目录选择", () => {
+  function pickerBridge() {
+    const fetchImpl = fakeFetch([["/api/sessions", () => jsonResponse({ sessions: [] })]]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    return { bridge, events };
+  }
+
+  it("浏览器没有目录选择器时返回 null 并发出 warn 说明替代方式", async () => {
+    // Node has no `showDirectoryPicker`; the bridge must not answer with a
+    // silent `null` — the click would look like it did nothing (R3).
+    const { bridge, events } = pickerBridge();
+    const picked = await bridge.api.pickDirectory();
+    expect(picked).toBeNull();
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice).toMatchObject({ type: "notice", level: "warn" });
+    expect(notice.text).toContain("无法打开");
+    expect(notice.text).toContain("绝对路径");
+    expect(notice.text).toContain("输入路径");
+  });
+
+  it("即使 showDirectoryPicker 可用也只发 warn，绝不用 handle.name 冒充路径", async () => {
+    const showDirectoryPicker = vi.fn(async () => ({ name: "work", kind: "directory" }));
+    vi.stubGlobal("showDirectoryPicker", showDirectoryPicker);
+    const { bridge, events } = pickerBridge();
+
+    const picked = await bridge.api.pickDirectory();
+    // `handle.name` is a bare folder name, not an absolute path: handing it to
+    // `getFile` would send the server a path it cannot resolve.
+    expect(picked).toBeNull();
+    expect(showDirectoryPicker).toHaveBeenCalledTimes(1);
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice).toMatchObject({ type: "notice", level: "warn" });
+    expect(notice.text).toContain("绝对路径");
+    expect(notice.text).toContain("输入路径");
+  });
+
+  it("用户在选择器里取消时也给出 warn，而不是静默 null", async () => {
+    // A cancel throws `AbortError` in Chromium; that is still a click that must
+    // not look like a server failure or a silent no-op.
+    vi.stubGlobal(
+      "showDirectoryPicker",
+      vi.fn(async () => {
+        throw Object.assign(new Error("cancelled"), { name: "AbortError" });
+      }),
+    );
+    const { bridge, events } = pickerBridge();
+    const picked = await bridge.api.pickDirectory();
+    expect(picked).toBeNull();
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice).toMatchObject({ type: "notice", level: "warn" });
+    expect(notice.text).toContain("绝对路径");
+  });
+});
+
+describe("bridge: 文件树与工作区", () => {
+  function treeBridge(routes) {
+    const fetchImpl = fakeFetch([...routes, ["/api/sessions", () => jsonResponse({ sessions: [] })]]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    return { bridge, events, fetchImpl };
+  }
+
+  it("getTree 请求 /api/tree 并把 entries 原样交给 tree 事件", async () => {
+    const entries = [
+      { name: "src", path: "E:/p/src", type: "dir" },
+      { name: "main.c", path: "E:/p/main.c", type: "file" },
+    ];
+    const { bridge, events, fetchImpl } = treeBridge([
+      ["/api/tree", () => jsonResponse({ path: "E:/p", entries, truncated: false })],
+    ]);
+    // Boot already emitted one empty tree; wait for the reply, not for "a
+    // tree event exists" — the latter is true before the request even lands.
+    bridge.api.send({ cmd: "getTree", path: "E:/p" });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "tree").at(-1).nodes).toStrictEqual(entries);
+    });
+
+    const call = fetchImpl.calls.find((entry) => entry.url.startsWith("/api/tree"));
+    expect(call.method).toBe("GET");
+    // `:` and `\` inside a hand-built query split the URL at the first one.
+    expect(call.url).toBe(`/api/tree?path=${encodeURIComponent("E:/p")}`);
+    const tree = events.filter((event) => event.type === "tree").at(-1);
+    expect(tree.nodes).toStrictEqual(entries);
+    expect(tree.truncated).toBe(false);
+  });
+
+  it("getTree 失败时同时发 warn 与空树，不让展开的节点一直等", async () => {
+    const { bridge, events } = treeBridge([
+      ["/api/tree", () => jsonResponse({ error: { code: "invalid_path", message: "只能查看工作区内的文件" } }, 400)],
+    ]);
+    bridge.api.send({ cmd: "getTree", path: "C:/Windows" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "notice")).toBe(true);
+    });
+
+    const notice = events.find((event) => event.type === "notice");
+    expect(notice).toMatchObject({ type: "notice", level: "warn" });
+    expect(notice.text).toContain("文件树读取失败");
+    expect(notice.text).toContain("只能查看工作区内的文件");
+    // The renderer parks `pendingTreeTarget` until a `tree` event arrives; an
+    // empty tree is the release signal. R3 applies to the notice, not to an
+    // empty tree on its own: both have to be there, and the notice must come
+    // first so the reason is on screen when the branch collapses.
+    const lastTree = events.filter((event) => event.type === "tree").at(-1);
+    expect(lastTree.nodes).toStrictEqual([]);
+    expect(events.indexOf(notice)).toBeLessThan(events.lastIndexOf(lastTree));
+  });
+
+  it("getTree 网络异常时同样 warn + 空树", async () => {
+    const fetchImpl = async () => {
+      throw new Error("network down");
+    };
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "getTree", path: "E:/p" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "tree")).toBe(true);
+    });
+    // The boot session list fails too in this fake, so the assertion names the
+    // tree's own notice: any warn would pass for the wrong reason.
+    const notice = events.find(
+      (event) => event.type === "notice" && event.text.includes("文件树读取失败"),
+    );
+    expect(notice).toBeDefined();
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("network down");
+    expect(events.filter((event) => event.type === "tree").at(-1).nodes).toStrictEqual([]);
+  });
+
+  it("setWorkspace 先 POST /api/workspace，成功后刷新 state 并取树", async () => {
+    const { bridge, events, fetchImpl } = treeBridge([
+      ["/api/workspace", () => jsonResponse({ path: "E:/p" })],
+      ["/api/tree", () => jsonResponse({ path: "E:/p", entries: [], truncated: false })],
+    ]);
+    bridge.api.send({ cmd: "setWorkspace", path: "E:/p" });
+    // The topbar is refreshed only after the server accepted the folder; boot
+    // already emitted a state with an empty cwd, so the wait is on the value.
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "state").at(-1).cwd).toBe("E:/p");
+    });
+
+    const post = fetchImpl.calls.find((call) => call.url === "/api/workspace");
+    expect(post.method).toBe("POST");
+    expect(JSON.parse(post.body)).toStrictEqual({ path: "E:/p" });
+    // The workspace has to be registered before the tree is readable: the
+    // server refuses paths outside a known workspace.
+    const postIndex = fetchImpl.calls.indexOf(post);
+    const treeIndex = fetchImpl.calls.findIndex((call) => call.url.startsWith("/api/tree"));
+    expect(treeIndex).toBeGreaterThan(postIndex);
+  });
+
+  it("setWorkspace 失败时只发 warn，不发成功态也不去取树", async () => {
+    const { bridge, events, fetchImpl } = treeBridge([
+      [
+        "/api/workspace",
+        () => jsonResponse({ error: { code: "invalid_path", message: "目录不存在" } }, 400),
+      ],
+    ]);
+    bridge.api.send({ cmd: "setWorkspace", path: "E:/nope" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "notice")).toBe(true);
+    });
+
+    const notice = events.find((event) => event.type === "notice");
+    expect(notice).toMatchObject({ type: "notice", level: "warn" });
+    expect(notice.text).toContain("工作区切换失败");
+    expect(notice.text).toContain("目录不存在");
+    // Boot already emitted one state; a rejected switch must not add another,
+    // and the topbar must not move to a folder the server refused.
+    expect(events.filter((event) => event.type === "state" && event.cwd === "E:/nope")).toHaveLength(0);
+    expect(fetchImpl.calls.some((call) => call.url.startsWith("/api/tree"))).toBe(false);
+  });
+
+  it("设置工作区后 prompt 带上新 cwd", async () => {
+    const { bridge, fetchImpl } = treeBridge([
+      ["/api/workspace", () => jsonResponse({ path: "E:/p" })],
+      ["/api/tree", () => jsonResponse({ path: "E:/p", entries: [], truncated: false })],
+      ["/api/actions", () => jsonResponse({ sessionId: "sess-1", created: true }, 202)],
+    ]);
+    bridge.api.send({ cmd: "setWorkspace", path: "E:/p" });
+    await vi.waitFor(() => {
+      expect(fetchImpl.calls.some((call) => call.url === "/api/workspace")).toBe(true);
+    });
+    // The tree request is issued only after the server accepted the workspace,
+    // so waiting on it means the bridge has adopted the new cwd.
+    await vi.waitFor(() => {
+      expect(fetchImpl.calls.some((call) => call.url.startsWith("/api/tree"))).toBe(true);
+    });
+
+    bridge.api.send({ cmd: "prompt", text: "看下目录" });
+    await vi.waitFor(() => {
+      expect(fetchImpl.calls.some((call) => call.url === "/api/actions")).toBe(true);
+    });
+    const posted = fetchImpl.calls.find((call) => call.url === "/api/actions");
+    expect(JSON.parse(posted.body)).toMatchObject({ text: "看下目录", cwd: "E:/p" });
+  });
+});
+
+describe("bridge: providers 保存", () => {
+  it("saveProviders → PUT /api/config，body 为 { providers }", async () => {
+    const providers = {
+      gw: { baseUrl: "https://gw.example/v1", apiKeyEnv: "GW_KEY", models: { flash: {} } },
+    };
+    const fetchImpl = fakeFetch([
+      [
+        "/api/config",
+        (_url, init) => {
+          if (init.method === "PUT") {
+            return jsonResponse({ ...JSON.parse(init.body), mcpPath: "", permissionsPath: "", runPath: "" });
+          }
+          return jsonResponse({});
+        },
+      ],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "saveProviders", providers });
+    await vi.waitFor(() => {
+      expect(fetchImpl.calls.some((call) => call.method === "PUT")).toBe(true);
+    });
+
+    const put = fetchImpl.calls.find((call) => call.method === "PUT");
+    expect(put.url).toBe("/api/config");
+    expect(JSON.parse(put.body)).toStrictEqual({ providers });
+    // A successful save emits the refreshed settings, same as the other
+    // config writers: the settings page has one reply shape.
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "settings")).toBe(true);
+    });
+  });
+
+  it("saveProviders 失败时回 warn，不伪造 settings", async () => {
+    const fetchImpl = fakeFetch([
+      [
+        "/api/config",
+        (_url, init) =>
+          init.method === "PUT"
+            ? jsonResponse({ error: { code: "config_unwritable", message: "配置写入失败" } }, 500)
+            : jsonResponse({}),
+      ],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "saveProviders", providers: {} });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "notice")).toBe(true);
+    });
+    const notice = events.find((event) => event.type === "notice");
+    expect(notice).toMatchObject({ type: "notice", level: "warn" });
+    expect(notice.text).toContain("配置未保存");
+    expect(events.some((event) => event.type === "settings")).toBe(false);
   });
 });

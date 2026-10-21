@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { stat } from "node:fs/promises";
 import path from "node:path";
 import { loadProviders, parseProviders, resolveModelRef } from "../config/providers.js";
 import type { ProvidersConfig } from "../config/providers.js";
@@ -32,6 +33,9 @@ export interface ActionInput {
   timeoutMs?: number;
   /** Replaces the built-in system prompt for this run. */
   systemPrompt?: string;
+  /** 本次运行的工作目录（新会话写入 header.workdir；续聊时内核以 header 为准）。
+   *  必须是已存在的绝对路径目录，否则 RunnerError("invalid_cwd")。 */
+  cwd?: string;
 }
 
 /** The subset of `ActionInput` that has to survive validation. */
@@ -73,6 +77,47 @@ function readRunLimits(input: ActionInput): RunLimits {
   return limits;
 }
 
+/**
+ * 校验单次运行的 `cwd`，返回可交给 `runSession` 的绝对路径。
+ *
+ * 校验必须在创建会话之前完成：否则一个拼错的目录会留下一个 header
+ * 已经写入错误 workdir 的空会话。只接受已存在的绝对路径目录；相对路径
+ * 会被解析成「服务进程自己的 cwd」，那几乎不是调用方想要的。
+ */
+async function resolveRunCwd(cwd: unknown): Promise<string | undefined> {
+  if (cwd === undefined) return undefined;
+  if (typeof cwd !== "string") {
+    throw new RunnerError("invalid_cwd", "cwd 必须是字符串");
+  }
+  const trimmed = cwd.trim();
+  if (trimmed === "") {
+    throw new RunnerError("invalid_cwd", "cwd 不能为空");
+  }
+  if (trimmed.includes("\0")) {
+    throw new RunnerError("invalid_cwd", `cwd 非法: ${cwd}`);
+  }
+  if (!path.isAbsolute(trimmed)) {
+    throw new RunnerError("invalid_cwd", `cwd 必须是绝对路径: ${cwd}`);
+  }
+  let info: Awaited<ReturnType<typeof stat>>;
+  try {
+    info = await stat(trimmed);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") {
+      throw new RunnerError("invalid_cwd", `cwd 不存在: ${cwd}`);
+    }
+    if (code === "EACCES" || code === "EPERM") {
+      throw new RunnerError("invalid_cwd", `cwd 不可访问: ${cwd}`);
+    }
+    throw error;
+  }
+  if (!info.isDirectory()) {
+    throw new RunnerError("invalid_cwd", `cwd 不是目录: ${cwd}`);
+  }
+  return path.resolve(trimmed);
+}
+
 const PERMISSION_PRESETS: readonly PermissionPreset[] = [
   "read-only",
   "workspace-write",
@@ -91,6 +136,7 @@ export type RunnerErrorCode =
   | "invalid_session_id"
   | "invalid_mode"
   | "invalid_run_limits"
+  | "invalid_cwd"
   | "unknown_session"
   | "session_busy"
   | "session_corrupt"
@@ -258,6 +304,8 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
       throw new RunnerError("invalid_mode", `非法的权限预设: ${String(input.mode)}`);
     }
     const limits = readRunLimits(input);
+    // 先于会话创建：拼错的目录不能留下一个 workdir 已经写错的会话。
+    const runCwd = await resolveRunCwd(input?.cwd);
 
     const requestedId = input?.sessionId;
     if (requestedId !== undefined) {
@@ -299,9 +347,11 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
       input: input.text,
       model: modelRef,
       sessionId,
+      // 新建会话：单次 cwd 优先于 runner 的默认 cwd。续聊不传 cwd，让内核按
+      // header.workdir 恢复——传了反而可能触发 workdir_mismatch。
       ...(resumeDir === undefined
         ? {
-            ...(opts.cwd === undefined ? {} : { cwd: opts.cwd }),
+            ...(runCwd === undefined && opts.cwd === undefined ? {} : { cwd: runCwd ?? opts.cwd }),
           }
         : { sessionDir: resumeDir, resume: true }),
       home: opts.harnessHome,

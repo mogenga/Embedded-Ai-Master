@@ -3,6 +3,7 @@ import {
   readAppConfig,
   writeMcpServers,
   writePermissionConfig,
+  writeProviders,
   writeRunLimits,
 } from "../config/app-config.js";
 import type {
@@ -11,6 +12,7 @@ import type {
   AppPermissionSettings,
   AppRunLimits,
 } from "../config/app-config.js";
+import type { ProvidersConfig } from "../config/providers.js";
 import { HttpError } from "./http.js";
 
 /**
@@ -29,6 +31,7 @@ export interface ConfigApi {
   }>;
   putPermissions(body: unknown): Promise<{ permissions: AppPermissionSettings }>;
   putRun(body: unknown): Promise<{ run: AppRunLimits }>;
+  putProviders(body: unknown): Promise<{ providers: ProvidersConfig }>;
 }
 
 export interface ConfigApiOptions {
@@ -124,6 +127,21 @@ export function createConfigApi(opts: ConfigApiOptions): ConfigApi {
         throw mapWriteError(error, "invalid_config");
       }
       return { run };
+    },
+
+    async putProviders(body) {
+      // 这里只判「是不是对象」，字段级校验全部交给内核的 zod schema：
+      // 在协议层重写一遍 provider 规则，两边迟早会漂移。
+      if (!isRecord(body) || !isRecord(body.providers)) {
+        throw new HttpError(400, "invalid_config", "providers 必须是对象");
+      }
+      let providers: ProvidersConfig;
+      try {
+        providers = await writeProviders(harnessHome, body.providers);
+      } catch (error) {
+        throw mapWriteError(error, "invalid_config");
+      }
+      return { providers };
     },
   };
 }

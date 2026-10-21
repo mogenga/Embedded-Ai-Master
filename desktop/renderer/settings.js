@@ -57,6 +57,27 @@ state.packNotice = null;
 state.packRemoveArmed = null;
 state.settingsQuery = "";
 
+/**
+ * Draft bookkeeping for the Connection page.
+ *
+ * That page is the only one with a Save step (it edits `providers.json` whole),
+ * so it is the only one that can lose work when the host pushes a fresh
+ * snapshot and `fillSettings` rebuilds the pane. `connectionDirty` says a draft
+ * exists; while it does, `fillSettings` leaves the pane alone.
+ */
+let connectionDirty = false;
+/** Bumped by every edit, so a save can tell whether the form moved on while it
+ *  was in flight — those keystrokes are newer than the file and must survive. */
+let connectionEditSeq = 0;
+/** The edit count at the moment the in-flight save was sent. */
+let connectionSavedSeq = -1;
+/** A save is in flight; the next settings payload is its answer. */
+let connectionSavePending = false;
+/** The last save was accepted — shown until the draft is edited again. */
+let connectionShowSaved = false;
+/** Raised by `openSetup`; cleared when the user leaves the page. */
+let connectionSetupHint = false;
+
 const S = () => settingsStrings[state.locale] ?? settingsStrings.en;
 
 /** Rail glyphs, named from the shared sprite so the rail and the toolbar
@@ -86,12 +107,17 @@ function settingsPages() {
   // four config surfaces — UI preferences, the provider catalogue, MCP servers,
   // and the permissions/run limits files — so those are the four families of
   // form that can actually save something.
-  // The rest of the builders (usage, connection, skills, memory, instructions,
-  // hooks, packs, system, sessions) stay in this file so restoring a page is a
+  // `connection` edits `providers.json` whole through `saveProviders`, which is
+  // what makes it one of them: the first-run prompt and the host's own warning
+  // ("设置 → 模型服务") both point here, so leaving it unlisted sent users to a
+  // page that could not exist.
+  // The rest of the builders (usage, skills, memory, instructions, hooks,
+  // packs, system, sessions) stay in this file so restoring a page is a
   // one-line change, but listing them would produce forms whose save button
   // cannot work.
   return [
     { id: "general", group: s.groupSettings, title: s.pageGeneral, build: buildGeneralPage },
+    { id: "connection", group: s.groupSettings, title: s.pageConnection, build: buildConnectionPage },
     { id: "appearance", group: s.groupSettings, title: s.pageAppearance, build: buildAppearancePage },
     { id: "behavior", group: s.groupSettings, title: s.pageBehavior, build: buildBehaviorPage },
     { id: "mcp", group: s.groupSettings, title: s.pageMcp, build: buildMcpPage },
@@ -669,119 +695,429 @@ function formatMoney(dollars) {
   return `$${dollars.toFixed(2)}`;
 }
 
+/** Only an http(s) endpoint can be called, so a URL of any other scheme is
+ *  refused here rather than written and discovered on the first turn. */
+function isFetchableUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+/** A positive whole number, or null when the text is not one (empty included). */
+function positiveIntOrNull(text) {
+  const trimmed = String(text ?? "").trim();
+  if (trimmed === "") return null;
+  const value = Number(trimmed);
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/**
+ * Connection: the model services every turn talks to.
+ *
+ * This page edits `providers.json` as one document, because the host writes it
+ * that way (`saveProviders` → `writeProviders` validates the whole file before
+ * touching disk). That is why, alone among the pages, it has a Save step: a
+ * per-control write would carry only one field and silently drop its siblings.
+ *
+ * Two shapes come from the host and are not interchangeable: `providers` is the
+ * flat list behind the model picker, `providerConfig` is the file itself.
+ */
 function buildConnectionPage() {
   const s = S();
   const pane = sPage(s.pageConnection, s.pageConnectionDesc);
   pane.classList.add("page-wide");
-  const settings = state.settings ?? {};
 
-  const providerSelect = sSelect({
-    id: "setting-provider",
-    value: settings.provider ?? "custom",
-    options: [],
-    onChange: (value) => {
-      const provider = (settings.providers ?? []).find((entry) => entry.id === value);
-      if (provider) $("setting-base-url").value = provider.baseUrl;
-      applyConfig({ provider: value, baseUrl: provider?.baseUrl ?? "" });
-    },
-  });
-  for (const provider of settings.providers ?? []) {
-    const option = document.createElement("option");
-    option.value = provider.id;
-    option.textContent = provider.configured ? provider.label : `${provider.label} · ${t.providerNoKey}`;
-    providerSelect.appendChild(option);
-  }
-  if (![...providerSelect.options].some((option) => option.value === settings.provider)) {
-    const option = document.createElement("option");
-    option.value = settings.provider ?? "custom";
-    option.textContent = t.providerCustom;
-    providerSelect.appendChild(option);
-  }
-  providerSelect.value = settings.provider ?? "custom";
+  // A fresh build starts from the host's snapshot; whatever the user had typed
+  // belonged to the DOM that is being replaced. `fillSettings` does not rebuild
+  // while a draft is dirty, so reaching here means there is no draft to lose.
+  connectionDirty = false;
 
-  const modelSelect = sSelect({
-    id: "setting-model",
-    value: settings.model ?? "",
-    options: [],
-    onChange: (value) => applyConfig({ model: value }),
-  });
-  for (const model of settings.models ?? []) {
-    const option = document.createElement("option");
-    option.value = model.id;
-    option.textContent = model.id;
-    modelSelect.appendChild(option);
+  const config = state.settings?.providerConfig;
+  // Nothing safe to edit: `state.settings` is null until the host answers, and
+  // a host that omits `providerConfig` cannot be written back — an empty form
+  // saved in either state would replace a file nobody read with `{}`.
+  if (config === undefined || config === null || typeof config !== "object" || Array.isArray(config)) {
+    pane.appendChild(sHint(state.settings ? s.connUnsupported : s.connLoading));
+    return pane;
   }
-  if (settings.model && ![...modelSelect.options].some((option) => option.value === settings.model)) {
-    const option = document.createElement("option");
-    option.value = settings.model;
-    option.textContent = settings.model;
-    modelSelect.appendChild(option);
-  }
-  modelSelect.value = settings.model ?? "";
 
-  const keyInput = sText({
-    id: "setting-api-key",
-    type: "password",
-    value: settings.apiKeyMasked ?? "",
-    onChange: (value) => {
-      if (!value.includes("•")) applyConfig({ apiKey: value });
-    },
-  });
-  keyInput.dataset.masked = "1";
-  keyInput.addEventListener("focus", () => {
-    if (keyInput.dataset.masked === "1") {
-      keyInput.value = "";
-      keyInput.dataset.masked = "";
+  // A read failure is stated, not hidden: the form below starts empty because
+  // the file could not be parsed, and saving replaces it. Disabling the form
+  // would leave the user with no way to repair the file from here.
+  const readError = typeof state.settings.providersError === "string" ? state.settings.providersError : "";
+  if (readError !== "") {
+    pane.appendChild(el("p", "setting-note pack-problem", s.connReadFailed.replace("{error}", readError)));
+  }
+
+  // `openSetup` asks for this by setting the flag before it opens the page.
+  // The hint has to be part of the build: the pane is rebuilt whenever the host
+  // answers, and a hint written into the old node would vanish with it.
+  const setupHint = el("p", "setting-note", connectionSetupHint ? t.setupHint : "");
+  setupHint.id = "models-hint";
+  setupHint.hidden = !connectionSetupHint;
+  pane.appendChild(setupHint);
+
+  const list = el("div");
+  const emptyCard = el("div", "settings-empty-card");
+  emptyCard.appendChild(el("h3", "", s.connEmptyTitle));
+  emptyCard.appendChild(el("p", "", s.connEmptyBody));
+
+  // "Saved" is a success colour, so it gets its own node: painting "unsaved"
+  // green would say the opposite of what it means.
+  const savedNote = el("span", "setting-inline-status", connectionShowSaved ? s.saved : "");
+  const unsavedNote = el("span", "setting-desc", "");
+  const drawStatus = () => {
+    savedNote.textContent = connectionShowSaved ? s.saved : "";
+    unsavedNote.textContent = connectionDirty ? s.connUnsaved : "";
+  };
+
+  /** Any edit makes the draft the truth on screen and the file stale. */
+  const markDirty = () => {
+    connectionEditSeq += 1;
+    connectionShowSaved = false;
+    if (connectionDirty) {
+      drawStatus();
+      return;
     }
+    connectionDirty = true;
+    drawStatus();
+  };
+
+  const cards = [];
+  const syncEmpty = () => {
+    emptyCard.hidden = cards.length > 0;
+  };
+  /** `openSetup` focuses `#setting-base-url`, so the id has to follow
+   *  whichever card is first — including after the first one is removed. */
+  const refreshIds = () => {
+    for (const card of cards) card.baseUrlInput.removeAttribute("id");
+    cards[0]?.baseUrlInput.setAttribute("id", "setting-base-url");
+  };
+
+  /** The first free default name; `provider1` unless that one is taken. */
+  const nextName = () => {
+    const taken = new Set(cards.map((card) => card.nameInput.value.trim()));
+    let index = 1;
+    while (taken.has(`provider${index}`)) index += 1;
+    return `provider${index}`;
+  };
+
+  // The only protocol the kernel has (`ProviderConfigSchema` in
+  // src/config/providers.ts). A new entry carries it so the card states what
+  // it will be saved as, rather than leaving the field to be guessed at.
+  const DEFAULT_PROTOCOL = "openai-chat-completions";
+  const blankEntry = () => ({
+    name: nextName(),
+    protocol: DEFAULT_PROTOCOL,
+    baseUrl: "",
+    apiKeyEnv: "",
+    models: [{ id: "", contextWindow: "", maxOutput: "" }],
+    price: { input: "", output: "", cachedInput: "" },
+    extra: {},
   });
 
-  pane.appendChild(
-    sGroup(s.groupProvider, [
-      sRow({ id: "setting-provider", label: s.provider, desc: s.providerDesc, control: providerSelect }),
-      sRow({
-        id: "setting-base-url",
-        label: s.baseUrl,
-        desc: s.baseUrlDesc,
-        control: sText({
-          id: "setting-base-url",
-          value: settings.baseUrl ?? "",
-          mono: true,
-          placeholder: "https://api.example.com/v1",
-          onChange: (value) => applyConfig({ baseUrl: value }),
-        }),
-      }),
-      sRow({ id: "setting-api-key", label: s.apiKey, desc: s.apiKeyDesc, control: keyInput }),
-      sRow({ id: "setting-model", label: s.defaultModel, desc: s.defaultModelDesc, control: modelSelect }),
-    ]),
+  /** One saved provider, copied field by field. `extra` holds the keys the
+   *  schema allows but this page does not edit (`requestTimeoutMs`,
+   *  `maxResponseBytes`); they are carried through so saving does not erase
+   *  a setting the user made elsewhere. */
+  const entryFrom = (name, provider) => ({
+    name,
+    protocol: typeof provider?.protocol === "string" ? provider.protocol : DEFAULT_PROTOCOL,
+    baseUrl: typeof provider?.baseUrl === "string" ? provider.baseUrl : "",
+    apiKeyEnv: typeof provider?.apiKeyEnv === "string" ? provider.apiKeyEnv : "",
+    models: Object.entries(provider?.models ?? {}).map(([id, model]) => ({
+      id,
+      contextWindow: model?.contextWindow ?? "",
+      maxOutput: model?.maxOutput ?? "",
+    })),
+    price: {
+      input: provider?.pricePerMillion?.input ?? "",
+      output: provider?.pricePerMillion?.output ?? "",
+      cachedInput: provider?.pricePerMillion?.cachedInput ?? "",
+    },
+    extra: {
+      ...(provider?.requestTimeoutMs !== undefined ? { requestTimeoutMs: provider.requestTimeoutMs } : {}),
+      ...(provider?.maxResponseBytes !== undefined ? { maxResponseBytes: provider.maxResponseBytes } : {}),
+    },
+  });
+
+  /** One card. Values are read from the live inputs at save time, so adding or
+   *  removing a card never has to re-read the DOM first. */
+  const makeCard = (entry) => {
+    const node = el("section", "settings-form-card");
+
+    const head = el("div", "about-row");
+    const title = el("h3", "", entry.name || s.connNewProvider);
+    head.append(
+      title,
+      el("code", "setting-code", entry.protocol),
+      sButton(
+        s.remove,
+        () => {
+          const at = cards.findIndex((item) => item.node === node);
+          if (at >= 0) cards.splice(at, 1);
+          node.remove();
+          markDirty();
+          refreshIds();
+          syncEmpty();
+        },
+        { quiet: true, danger: true },
+      ),
+    );
+
+    const nameInput = sText({ value: entry.name, placeholder: "provider1", mono: true });
+    nameInput.addEventListener("input", () => {
+      title.textContent = nameInput.value.trim() || s.connNewProvider;
+    });
+    const baseUrlInput = sText({
+      value: entry.baseUrl,
+      placeholder: "https://api.example.com/v1",
+      mono: true,
+    });
+    const apiKeyEnvInput = sText({
+      value: entry.apiKeyEnv,
+      placeholder: "DEEPSEEK_API_KEY",
+      mono: true,
+    });
+
+    const modelList = el("div", "mcp-list");
+    const modelHandles = [];
+    const addModelRow = (model) => {
+      const row = el("div", "rules-row");
+      const idInput = sText({ value: model.id, placeholder: "model-name", mono: true });
+      idInput.setAttribute("aria-label", s.connModelName);
+      const contextInput = sText({ value: model.contextWindow, placeholder: "contextWindow", mono: true });
+      contextInput.setAttribute("aria-label", s.connContextWindow);
+      const maxOutputInput = sText({ value: model.maxOutput, placeholder: "maxOutput", mono: true });
+      maxOutputInput.setAttribute("aria-label", s.connMaxOutput);
+      const remove = sButton(
+        s.remove,
+        () => {
+          const at = modelHandles.findIndex((handle) => handle.row === row);
+          if (at >= 0) modelHandles.splice(at, 1);
+          row.remove();
+          markDirty();
+        },
+        { quiet: true, danger: true },
+      );
+      modelHandles.push({ row, idInput, contextInput, maxOutputInput });
+      row.append(idInput, contextInput, maxOutputInput, remove);
+      modelList.appendChild(row);
+    };
+    // A service with no models yet still gets one empty row: a card that only
+    // holds "add" would hide what a model entry looks like.
+    for (const model of entry.models.length > 0 ? entry.models : [{ id: "", contextWindow: "", maxOutput: "" }]) {
+      addModelRow(model);
+    }
+    const addModel = sButton(
+      s.connAddModel,
+      () => {
+        addModelRow({ id: "", contextWindow: "", maxOutput: "" });
+        markDirty();
+      },
+      { quiet: true },
+    );
+    const modelFoot = el("div", "settings-list-foot");
+    modelFoot.appendChild(addModel);
+
+    const modelsGroup = el("section", "setting-group");
+    modelsGroup.append(
+      el("h3", "setting-group-title", s.connModels),
+      el("p", "setting-desc", s.connModelsDesc),
+      modelList,
+      modelFoot,
+    );
+
+    const priceRow = el("div", "mcp-actions");
+    const priceInput = sText({ value: entry.price.input, placeholder: `${s.connPriceInput} $/M`, mono: true });
+    priceInput.setAttribute("aria-label", `${s.connPrice} · ${s.connPriceInput}`);
+    const priceOutputInput = sText({
+      value: entry.price.output,
+      placeholder: `${s.connPriceOutput} $/M`,
+      mono: true,
+    });
+    priceOutputInput.setAttribute("aria-label", `${s.connPrice} · ${s.connPriceOutput}`);
+    const priceCachedInput = sText({
+      value: entry.price.cachedInput,
+      placeholder: `${s.connPriceCached} $/M`,
+      mono: true,
+    });
+    priceCachedInput.setAttribute("aria-label", `${s.connPrice} · ${s.connPriceCached}`);
+    priceRow.append(priceInput, priceOutputInput, priceCachedInput);
+
+    const priceGroup = el("section", "setting-group");
+    priceGroup.append(
+      el("h3", "setting-group-title", s.connPrice),
+      el("p", "setting-desc", s.connPriceDesc),
+      priceRow,
+    );
+
+    // A rejected value has to say so where the field is, not in a notice that
+    // scrolls away from the control at fault.
+    const problem = el("p", "setting-note pack-problem", "");
+    problem.hidden = true;
+
+    node.append(
+      head,
+      sRow({ label: s.name, desc: s.connNameDesc, control: nameInput }),
+      sRow({ label: s.baseUrl, desc: s.baseUrlDesc, control: baseUrlInput }),
+      sRow({ label: s.connApiKeyEnv, desc: s.connApiKeyEnvDesc, control: apiKeyEnvInput }),
+      modelsGroup,
+      priceGroup,
+      problem,
+    );
+
+    /** Everything the file needs from this card, checked before it is sent: a
+     *  round-trip that comes back rejected would leave the form describing a
+     *  file that does not exist (R3). */
+    const read = () => {
+      const name = nameInput.value.trim();
+      if (name === "") return { problem: s.connNameRequired, field: nameInput };
+      if (name.includes("/")) return { problem: s.connNameSlash, field: nameInput };
+
+      const baseUrl = baseUrlInput.value.trim();
+      if (baseUrl === "") return { problem: s.connBaseUrlRequired, field: baseUrlInput };
+      if (!isFetchableUrl(baseUrl)) return { problem: s.connBaseUrlInvalid, field: baseUrlInput };
+
+      if (modelHandles.length === 0) return { problem: s.connModelRequired, field: addModel };
+      const models = {};
+      for (const handle of modelHandles) {
+        const id = handle.idInput.value.trim();
+        if (id === "") return { problem: s.connModelNameRequired, field: handle.idInput };
+        // `resolveModelRef` splits a reference on the first `/`, so a slash in
+        // either half would make `provider/model` point somewhere else.
+        if (id.includes("/")) return { problem: s.connModelSlash, field: handle.idInput };
+        if (Object.hasOwn(models, id)) return { problem: s.connModelDuplicate, field: handle.idInput };
+        const contextWindow = positiveIntOrNull(handle.contextInput.value);
+        if (contextWindow === null) return { problem: s.connCountInvalid, field: handle.contextInput };
+        const maxOutput = positiveIntOrNull(handle.maxOutputInput.value);
+        if (maxOutput === null) return { problem: s.connCountInvalid, field: handle.maxOutputInput };
+        models[id] = { contextWindow, maxOutput };
+      }
+
+      const price = {};
+      for (const [key, input] of [
+        ["input", priceInput],
+        ["output", priceOutputInput],
+        ["cachedInput", priceCachedInput],
+      ]) {
+        const text = input.value.trim();
+        if (text === "") continue;
+        const value = Number(text);
+        if (!Number.isFinite(value) || value < 0) return { problem: s.connPriceInvalid, field: input };
+        price[key] = value;
+      }
+      // The schema requires input and output together; a lone cachedInput or a
+      // lone output would be dropped by the parser, so it is refused here.
+      if (Object.keys(price).length > 0 && (price.input === undefined || price.output === undefined)) {
+        return { problem: s.connPriceIncomplete, field: price.input === undefined ? priceInput : priceOutputInput };
+      }
+
+      const apiKeyEnv = apiKeyEnvInput.value.trim();
+      return {
+        name,
+        value: {
+          protocol: entry.protocol,
+          baseUrl,
+          ...(apiKeyEnv === "" ? {} : { apiKeyEnv }),
+          models,
+          ...entry.extra,
+          ...(price.input === undefined
+            ? {}
+            : {
+                pricePerMillion: {
+                  input: price.input,
+                  output: price.output,
+                  ...(price.cachedInput === undefined ? {} : { cachedInput: price.cachedInput }),
+                },
+              }),
+        },
+      };
+    };
+
+    return {
+      node,
+      nameInput,
+      baseUrlInput,
+      read,
+      clearProblem: () => {
+        problem.hidden = true;
+        problem.textContent = "";
+      },
+      showProblem: (message, field) => {
+        problem.textContent = message;
+        problem.hidden = false;
+        field?.focus();
+      },
+    };
+  };
+
+  const addCard = (entry) => {
+    const card = makeCard(entry);
+    cards.push(card);
+    list.appendChild(card.node);
+    refreshIds();
+    syncEmpty();
+    return card;
+  };
+
+  const save = () => {
+    for (const card of cards) card.clearProblem();
+    // `Object.create(null)` rather than `{}`: the file is a map keyed by names
+    // the user chooses, and `__proto__` as a provider name must be a key, not
+    // a prototype assignment that drops the provider.
+    const next = Object.create(null);
+    for (const card of cards) {
+      const result = card.read();
+      if (result.problem !== undefined) {
+        card.showProblem(result.problem, result.field);
+        return;
+      }
+      if (result.name in next) {
+        card.showProblem(s.connNameDuplicate, card.nameInput);
+        return;
+      }
+      next[result.name] = result.value;
+    }
+    // The draft stays dirty until the host answers with a fresh snapshot; a
+    // save that fails sends a notice and no snapshot, so the draft survives.
+    connectionSavePending = true;
+    connectionSavedSeq = connectionEditSeq;
+    api.send({ cmd: "saveProviders", providers: next });
+  };
+
+  for (const [name, provider] of Object.entries(config)) addCard(entryFrom(name, provider));
+
+  const foot = el("div", "settings-form-actions");
+  foot.append(
+    savedNote,
+    unsavedNote,
+    sButton(
+      s.connAddProvider,
+      () => {
+        const card = addCard(blankEntry());
+        markDirty();
+        card.nameInput.focus();
+      },
+      { quiet: true },
+    ),
+    sButton(s.save, save, { primary: true }),
   );
 
-  const hint = el("div", "setting-note", "");
-  hint.id = "models-hint";
-  pane.appendChild(hint);
+  pane.append(emptyCard, list, foot);
 
-  pane.appendChild(
-    sGroup(s.groupModels, [
-      sRow({
-        id: "setting-fallback",
-        label: s.fallback,
-        desc: s.fallbackDesc,
-        control: sText({
-          id: "setting-fallback",
-          value: (settings.fallbackModels ?? []).join(", "),
-          mono: true,
-          placeholder: "deepseek-v4.1-flash",
-          onChange: (value) => applyConfig({ fallbackModels: value }),
-        }),
-      }),
-      sRow({
-        label: s.refreshModels,
-        desc: s.refreshModelsDesc,
-        control: sButton(s.refreshNow, () => {
-          api.send({ cmd: "refreshModels" });
-        }),
-      }),
-    ]),
-  );
+  const file = state.configPaths?.providers;
+  if (file) pane.appendChild(el("p", "setting-note", s.connConfigPath.replace("{path}", file)));
+
+  // Typing or stepping any control makes the draft the truth on screen.
+  pane.addEventListener("input", markDirty);
+  pane.addEventListener("change", markDirty);
+
+  drawStatus();
+  syncEmpty();
   return pane;
 }
 
@@ -2152,6 +2488,13 @@ function applyLocaleChange() {
 }
 
 function openSettings(tab = "general") {
+  // Opening Settings starts from the file: `selectSettingsTab` below rebuilds
+  // the Connection pane, so a draft from a previous visit is already gone from
+  // the screen and must not linger in the flags either.
+  connectionDirty = false;
+  connectionShowSaved = false;
+  connectionSavePending = false;
+  connectionSavedSeq = -1;
   renderChrome();
   selectSettingsTab(tab);
   openModal(settingsDialog);
@@ -2170,6 +2513,15 @@ function openSettings(tab = "general") {
 function selectSettingsTab(tab) {
   const pages = settingsPages();
   const page = pages.find((entry) => entry.id === tab) ?? pages[0];
+  // Leaving the Connection page abandons its draft (that page has a Save step,
+  // so a draft left behind would be work the user can no longer see or reach),
+  // and the first-run hint belongs to that visit, not to the next.
+  if (page.id !== "connection") {
+    connectionSetupHint = false;
+    connectionDirty = false;
+    connectionShowSaved = false;
+    connectionSavedSeq = -1;
+  }
   document.querySelectorAll("[data-settings-tab]").forEach((button) => {
     const active = button.dataset.settingsTab === page.id;
     button.classList.toggle("active", active);
@@ -2272,6 +2624,10 @@ function applySettingsSearch() {
 
 /** First-run path: open Settings on the connection fields with a short prompt. */
 function openSetup() {
+  // The flag is what makes the hint survive the rebuild that follows the
+  // host's answer — the pane this call builds is usually replaced by the one
+  // `fillSettings` builds a moment later, taking any hint written into it.
+  connectionSetupHint = true;
   openSettings("connection");
   setTimeout(() => {
     const hint = $("models-hint");
@@ -2333,7 +2689,28 @@ function fillSettings(settings) {
   // effect.
   state.kernelSandbox = settings.kernelSandboxState ?? state.kernelSandbox ?? null;
   setMode(state.mode);
-  if (!settingsDialog.hidden) rerenderSettingsPage(state.settingsTab);
+  // The Connection page holds a draft, and every other page saves on change —
+  // so a rebuild costs nothing there but would discard what the user typed
+  // here. A payload that answers a save is the one case where the file really
+  // changed: the draft becomes the saved state and the pane is rebuilt from
+  // the file. A rejected save answers with a read error, and the draft stays
+  // so the user can correct it instead of retyping it.
+  const providersFailed = typeof settings.providersError === "string" && settings.providersError !== "";
+  if (connectionSavePending) {
+    connectionSavePending = false;
+    // The pane is about to be rebuilt from the file, so the draft is no longer
+    // the only copy of those edits — unless the form was typed into while the
+    // save was in flight, in which case those newer keystrokes stay a draft.
+    // A rejected save answers with a read error instead, and the draft stays
+    // so the user can correct it rather than retype it.
+    if (!providersFailed) {
+      connectionShowSaved = true;
+      connectionDirty = connectionEditSeq !== connectionSavedSeq;
+    }
+  }
+  if (settingsDialog.hidden) return;
+  if (state.settingsTab === "connection" && connectionDirty) return;
+  rerenderSettingsPage(state.settingsTab);
 }
 
 /* ---------- about / update check ---------- */
