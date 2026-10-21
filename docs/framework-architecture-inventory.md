@@ -85,7 +85,7 @@
 ## 3. 待调研决策点(进入设计前必须回答)
 
 1. **语言栈与复用边界**: ~~TS(贴近 CLI / UI 同构生态,七工具调研 5/7 为 TS)vs Python(贴近取证工具与科学计算);MCP SDK 等协议库可复用,harness 本体自研的边界画在哪。~~ **已关闭(2026-10-16)**: TypeScript + **Node 24**(ESM-only,本机 24.14.1 已具备);复用边界 = 协议层复用(MCP 官方 TS SDK v2 / Zod v4),内核(主循环/会话/工具/上下文/MCP 生命周期)自研,模型适配层自研极简适配器(仅 complete/countTokens,语法借鉴 dsh llm-pi-ai,不整体引第三方),测试用 vitest。依据: 七工具调研 5/7 TS + Context7 查证 MCP SDK v2 官方支持 Node 20+(开发环境要求 Node 24.x + npm 11.x,与本机相符)。详见 [p0-kernel-design.md §0](p0-kernel-design.md)。
-2. **KB 渐进加载的载体**: Skills 机制 vs 独立检索工具 vs 两者并存——决定知识层接口形态。
+2. **KB 渐进加载的载体**: Skills 机制 vs 独立检索工具 vs 两者并存——决定知识层接口形态。 **实测方向(2026-10-21,尚未关闭)**: 对照实验已跑完一轮(80 条查询 × A/B/C/C′ 四方案)。BM25+grep(C′)显著优于现状基线 C(+35.0pp, p_adj=9.9e−07),且是唯一能进交互链路的方案(0.62ms);agentic 检索(B)召回最强(R@2=0.9250,显著优于向量 RAG 的 0.8000,+12.5pp, p_adj=0.039),但 P95 101.5 秒只能做夜批。**方向是「维持无 RAG,检索层走稀疏召回」,且不该为它引入向量召回层**——若要给检索层加投入,方向是 agentic 而非向量。**但决策点不因此关闭**:预注册未冻结、全部结果为 exploratory,且 B 的拒答能力无法评估、运行间波动未量化。详见 `experiments/rag-vs-agentic-search/docs/experiment-report.md`。
 3. **内置工具集最小范围**: fs / shell / edit / glob / grep 哪些进内核,哪些挂插件。
 4. **会话存储与回放协议**: transcript 格式,UI 如何从日志重建工具结果状态(设备面板依赖)。
 5. **权限粒度**: 工具级 vs 参数级(如 mem_write 地址范围、serial_write 目标白名单)。

@@ -1,0 +1,32 @@
+# 预注册模型候选模板（spec §6.3 / T4）。
+#
+# 用法：复制为同目录下的 models.yaml，填入端点、模型名与密钥。
+#   cp config/models.example.yaml config/models.yaml
+# models.yaml 已被 .gitignore 忽略，密钥不会进版本库。
+#
+# 选择规则写死（不可在 test 上改）：dev Recall@2 最高。
+#
+# 当前只保留 OpenAI 兼容候选：本地候选（local-flash / local-bge-m3）在 2026-10-20
+# 实测中均不可运行（缺 model、缺可选依赖组），已按"用不到就删"移除。
+
+llm:
+  candidates:
+    - id: remote-llm-1
+      kind: openai_compatible
+      # 远程 OpenAI 兼容端点，例如 https://api.example.com/v1
+      base_url: null
+      model: null
+      # 密钥只放在本地 models.yaml 里；此处留空表示端点无需鉴权
+      api_key: null
+      temperature: 0.0
+      # 网关不支持 seed 时按 spec §6.4 每查询重复 3 次
+      repeat: 3
+      supports_seed: false
+
+embedding:
+  candidates:
+    - id: api-embed-1
+      kind: openai_compatible
+      base_url: null
+      model: null
+      api_key: null

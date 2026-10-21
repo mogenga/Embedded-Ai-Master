@@ -1,0 +1,20 @@
+{"id": "blind-001", "track": "index", "text": "板子跑起来后调试串口一点动静都没有，示波器上 TX 脚是死的", "gold": ["protocols/uart/no-output.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-002", "track": "index", "text": "接收端收到的字符全是问号方块，换了几种波特率都没用", "gold": ["protocols/uart/garbled-data.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-003", "track": "index", "text": "跑了一整夜，早上看日志少了十几行，白天短时间测试又正常", "gold": ["protocols/uart/dropped-bytes.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-004", "track": "index", "text": "485 总线上主机发完命令，从机回过来的数据前半截正常后半截不对劲", "gold": ["protocols/uart/framing-errors.md", "cases/case-s4-rs485-compound.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-005", "track": "index", "text": "加速度计读出来的三轴数值一直是同一个数字，晃板子也不变", "gold": ["protocols/sensor/bring-up.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-006", "track": "index", "text": "片外 Flash 读制造商编号返回全 F，SPI 时钟和数据线用逻辑分析仪看过波形", "gold": ["protocols/spi/all-zero-or-ff.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-007", "track": "index", "text": "每次断电重启后，RTC 时间都会往回跳几个小时", "gold": ["system/clock-tree/timebase-drift.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "blind-008", "track": "index", "text": "主机连续读某个从机寄存器，读到第几十次之后总线就卡住了", "gold": ["protocols/i2c/bus-stuck.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-009", "track": "index", "text": "上电后扫描 I2C 地址，一个设备都扫不到", "gold": ["protocols/i2c/nack.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-010", "track": "index", "text": "逻辑分析仪抓到的时序和芯片手册对不上，数据建立时间明显不够", "gold": ["protocols/spi/mode-mismatch.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-011", "track": "index", "text": "CAN 分析仪上看不到任何报文，终端电阻量过是 120 欧", "gold": ["protocols/can/no-communication.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-012", "track": "index", "text": "网口灯不亮，电脑上抓不到 DHCP 请求", "gold": ["protocols/ethernet/bring-up.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-013", "track": "index", "text": "插上 USB 线电脑完全没识别到设备，设备管理器里也没有未知设备", "gold": ["protocols/usb/enumeration-fail.md"], "topic": "protocols", "lang": "zh", "source": "manual"}
+{"id": "blind-014", "track": "index", "text": "FreeRTOS 里两个任务用同一个队列，偶尔有消息丢失", "gold": ["system/races/races-shared-data.md"], "topic": "rtos", "lang": "zh", "source": "manual"}
+{"id": "blind-015", "track": "index", "text": "低功耗唤醒之后，第一个字节总是丢的", "gold": ["system/low-power/uart-loss-on-wake.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "blind-016", "track": "index", "text": "ADC 采同一个基准电压，每次转换结果的末几位都在跳", "gold": ["system/adc-dac/adc-noisy-or-wrong.md", "reference/adc-precision.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "blind-017", "track": "index", "text": "中断服务函数里调用了一个耗时函数，主循环有时候会卡一下", "gold": ["system/interrupts/nvic-priority-latency.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "blind-018", "track": "index", "text": "DMA 搬运串口数据，CPU 读到的缓冲区内容始终是初始化值", "gold": ["system/dma/dma-data-not-appearing.md"], "topic": "system", "lang": "zh", "source": "manual"}
+{"id": "blind-019", "track": "index", "text": "用 J-Link 连接芯片，提示 target voltage 异常，但板子供电正常", "gold": ["debug/swd/no-connect.md"], "topic": "debug", "lang": "zh", "source": "manual"}
+{"id": "blind-020", "track": "index", "text": "代码从 O0 改成 O2 之后，原本正常的逻辑出现异常，加打印又好了", "gold": ["system/toolchain/c-level-optimization-bugs.md"], "topic": "system", "lang": "zh", "source": "manual"}

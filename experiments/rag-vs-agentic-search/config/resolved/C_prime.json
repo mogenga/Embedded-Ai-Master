@@ -1,0 +1,9 @@
+{
+  "chunking": "whole_file",
+  "tokenizer": "jieba",
+  "k1": 0.9,
+  "b": 0.75,
+  "selected_by": "grid grid1 on dev",
+  "dev_recall@2": 0.8181818181818182,
+  "sha256": "76252098901bbd439013e8c5fd33e7160de72d788c61baf232e28e7f67eccf03"
+}

@@ -1,0 +1,6 @@
+{
+  "chunking": "whole_file",
+  "selected_by": "grid agrid on dev",
+  "dev_recall@2": 0.7818181818181819,
+  "sha256": "1184bddc4ac19417d1bbdb150194787e17b1d233a69f782f1175c2c488112128"
+}

@@ -1,0 +1,14 @@
+# 方案 D：混合（spec §8.6），只在 H5 有信号时运行；不得事后凑判据。
+
+scheme: D
+variants:
+  D1:
+    description: "C′ top-3 → B 精读（工具轮数预算减半）→ submit"
+    seed_scheme: C_prime
+    seed_top_k: 3
+    tool_rounds: 3
+  D2:
+    description: "A 与 C′ 各取 top-5 → 合并去重 → B 按同预算重排 → submit"
+    seed_schemes: [A, C_prime]
+    seed_top_k: 5
+    tool_rounds: 12

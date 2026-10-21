@@ -1,0 +1,20 @@
+# 方案 B：Agentic search（spec §8.3）。
+# 工具面固定为 glob / grep / read / submit；提示词全文入预注册（T10）。
+
+scheme: B
+prompt_path: prompts/agentic_system.txt
+params:
+  # 预注册网格（PREREGISTRATION.md §4 / §4bis），**仅用于 10 条分层 dev 子样本**（§4ter）。
+  # 原网格 {6, 12, 20} 因网关限流（约 4 次/分钟）不可行：全 dev 55 条 × 三档 ≈ 8.7 小时。
+  max_tool_rounds: [6, 12]
+  max_candidates: 5
+  read_max_lines: 2000
+  read_max_bytes: 262144
+  grep_max_results: 100
+  temperature: 0.0
+  # 正文重复 1 次（原 3 次 ≈ 5–8 小时）。波动用独立的 10 条 × 3 次稳定性跑测量，
+  # 报告须给出该区间并声明正文数字来自单次运行（§4bis）。
+  repeat: 1
+  stability_subsample_size: 10
+  stability_repeats: 3
+  tools: [glob, grep, read, submit]

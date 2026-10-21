@@ -1,0 +1,11 @@
+# 方案 A：向量 RAG（spec §8.2）。参数与提示词只在 dev 上选择（T2）。
+
+scheme: A
+params:
+  # 预注册二选一，由 dev 决定（§6.3）。
+  chunking: [whole_file, section]
+  chunk_max_chars: 1200
+  chunk_overlap_chars: 100
+  top_k: 5
+  similarity: cosine
+  normalize_vectors: true

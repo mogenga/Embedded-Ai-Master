@@ -1,0 +1,38 @@
+[project]
+name = "raglab"
+version = "0.1.0"
+description = "RAG vs Agentic Search 对照实验（独立实验项目，不参与主仓库构建）"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "matplotlib>=3.8",
+    "PyYAML>=6.0",
+    "jieba>=0.42",
+    "httpx>=0.27",
+]
+
+# 可选组：本地 embedding。API embedding 只需核心依赖 httpx。
+[project.optional-dependencies]
+local-embed = ["sentence-transformers>=3.0"]
+
+# PEP 735 依赖组；uv 默认同步 dev 组。
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+raglab = "raglab.__main__:main"
+
+[build-system]
+# 用 hatchling 而非 uv_build：避免 uv CLI 版本与 uv_build 版本耦合。
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/raglab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"

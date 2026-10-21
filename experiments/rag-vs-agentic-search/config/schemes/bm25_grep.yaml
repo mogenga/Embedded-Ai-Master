@@ -1,0 +1,13 @@
+# 方案 C′：BM25 + grep（spec §8.5）。BM25 自实现，不引入第三方库。
+
+scheme: C_prime
+params:
+  chunking: [whole_file, section]
+  tokenizer: [cjk_bigram, jieba]
+  k1: [0.9, 1.5]
+  b: [0.5, 0.75]
+  top_k: 5
+  grep_review_top_n: 20
+  grep_bonus: 0.05
+  ablations:
+    - no_grep_review

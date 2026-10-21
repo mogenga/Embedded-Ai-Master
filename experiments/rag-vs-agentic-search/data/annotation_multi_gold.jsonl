@@ -1,0 +1,50 @@
+{"query_id": "idx-001", "gold": ["protocols/uart/no-output.md", "system/boot-flash/bootloader-jump-fails.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-002", "gold": ["protocols/uart/garbled-data.md", "cases/case-s2-hse-mismatch.md", "system/clock-tree/hse-not-starting.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-003", "gold": ["protocols/uart/dropped-bytes.md", "cases/case-s3-intermittent-overrun.md", "system/interrupts/nvic-priority-latency.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-004", "gold": ["protocols/uart/framing-errors.md", "cases/case-s4-rs485-compound.md", "protocols/modbus/rtu-timing.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-005", "gold": ["protocols/spi/mode-mismatch.md", "protocols/sensor/bring-up.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-006", "gold": ["protocols/spi/all-zero-or-ff.md", "protocols/spi/mode-mismatch.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-007", "gold": ["protocols/spi/intermittent-corruption.md", "protocols/spi/mode-mismatch.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-008", "gold": ["protocols/i2c/bus-stuck.md", "protocols/i2c/nack.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-009", "gold": ["protocols/i2c/nack.md", "protocols/i2c/bus-stuck.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-010", "gold": ["protocols/i2c/rise-time.md", "protocols/i2c/nack.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-011", "gold": ["protocols/can/no-communication.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-012", "gold": ["protocols/ethernet/bring-up.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-013", "gold": ["protocols/usb/enumeration-fail.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-014", "gold": ["protocols/modbus/rtu-timing.md", "protocols/uart/framing-errors.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-015", "gold": ["protocols/lin-1wire/timing.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-016", "gold": ["protocols/sensor/bring-up.md", "protocols/spi/mode-mismatch.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-017", "gold": ["system/clock-tree/hse-not-starting.md", "system/clock-tree/timebase-drift.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-018", "gold": ["system/clock-tree/timebase-drift.md", "system/clock-tree/hse-not-starting.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-019", "gold": ["system/dma/dma-data-not-appearing.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-020", "gold": ["system/watchdog/reset-loop.md", "system/power-reset/brownout-unexpected-reset.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-021", "gold": ["system/power-reset/brownout-unexpected-reset.md", "system/watchdog/reset-loop.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-022", "gold": ["system/boot-flash/bootloader-jump-fails.md", "system/toolchain/firmware-static-check.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-023", "gold": ["system/interrupts/nvic-priority-latency.md", "system/races/races-shared-data.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-024", "gold": ["system/low-power/uart-loss-on-wake.md", "protocols/uart/dropped-bytes.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-025", "gold": ["system/adc-dac/adc-noisy-or-wrong.md", "reference/adc-precision.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-026", "gold": ["system/motor/pwm-deadtime-encoder.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-027", "gold": ["system/races/races-shared-data.md", "system/interrupts/nvic-priority-latency.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-028", "gold": ["system/storage/sd-card-fatfs-init.md", "reference/sd-spi-commands.md", "protocols/spi/mode-mismatch.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-029", "gold": ["system/toolchain/c-level-optimization-bugs.md", "system/toolchain/overlap-copy-direction.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-030", "gold": ["system/toolchain/overlap-copy-direction.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-031", "gold": ["system/emi-si/emi-signal-integrity.md", "reference/emi-troubleshooting.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-032", "gold": ["system/toolchain/firmware-static-check.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-033", "gold": ["debug/hardfault/cortex-m-decode.md", "reference/scb-fault-registers.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-034", "gold": ["debug/hardfault/invstate-thumbbit.md", "cases/case-h1-thumbbit-hardware.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-035", "gold": ["debug/swd/no-connect.md", "vendor/raspberrypi/rp2040-boot-debug.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-036", "gold": ["debug/swd/symbol-lookup.md", "debug/hardfault/cortex-m-decode.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-037", "gold": ["debug/swd/openocd-tcl-cheatsheet.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-038", "gold": ["method/compound-fault-decoupling.md", "method/intermittent-fault-method.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-039", "gold": ["method/intermittent-fault-method.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-040", "gold": ["vendor/espressif/esp32-devflow.md", "reference/esp32-strapping-registers.md", "vendor/espressif/esp8266-boot-flash.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-041", "gold": ["vendor/espressif/esp8266-boot-flash.md", "reference/esp32-strapping-registers.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-042", "gold": ["vendor/espressif/panic-backtrace.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-043", "gold": ["vendor/nordic/nrf-debug.md", "reference/nrf-ble-svc-errors.md", "reference/nrf-memory-map.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-044", "gold": ["vendor/nxp/kinetis-imxrt.md", "reference/kinetis-fsec-fopt-wdog.md", "reference/imxrt-flexspi-boot.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-045", "gold": ["vendor/raspberrypi/rp2040-boot-debug.md", "reference/rp2040-pio-usb.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-046", "gold": ["vendor/ti/msp430-debug.md", "reference/msp430-pmm-fram-registers.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-047", "gold": ["vendor/ti/simplelink-wireless.md", "reference/cc13xx26xx-rf-cmds.md", "reference/cc13xx26xx-ccfg.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-048", "gold": ["vendor/cn/gd32-ch32-debug-diffs.md", "reference/gd32-ch32-diffs.md", "vendor/misc/cn-mcu-extra.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-049", "gold": ["rtos/stack-overflow.md", "system/races/races-shared-data.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}
+{"query_id": "idx-050", "gold": ["rtos/zephyr-devicetree-west.md"], "annotator": "owner", "annotated_at": "2026-10-21T04:30:00+08:00", "blind": true}

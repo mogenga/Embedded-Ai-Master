@@ -1,0 +1,76 @@
+{
+  "run_id": "c-diag",
+  "mode": "exploratory",
+  "schemes_available": 1,
+  "queries": 80,
+  "negatives": 25,
+  "primary_rule": "deployed",
+  "variants": [
+    {
+      "rule": "deployed",
+      "primary": true,
+      "scheme": "C",
+      "n": 80,
+      "recall@2": 0.45,
+      "recall@5": 0.45,
+      "hit@1": 0.35,
+      "mrr": 0.4,
+      "ndcg@5": 0.4130929753571458,
+      "p50_latency_ms": 1.7258000043511856,
+      "p95_latency_ms": 99.05577499484932,
+      "failure_rate": 0.15
+    },
+    {
+      "rule": "lexical",
+      "primary": false,
+      "scheme": "C",
+      "n": 80,
+      "recall@2": 0.5375,
+      "recall@5": 0.5375,
+      "hit@1": 0.3375,
+      "mrr": 0.4375,
+      "ndcg@5": 0.46368595071429153,
+      "p50_latency_ms": 4.358800000773044,
+      "p95_latency_ms": 6.907694997789804,
+      "failure_rate": 0.1375
+    },
+    {
+      "rule": "lookup_only",
+      "primary": false,
+      "scheme": "C",
+      "n": 80,
+      "recall@2": 0.4,
+      "recall@5": 0.4,
+      "hit@1": 0.325,
+      "mrr": 0.3625,
+      "ndcg@5": 0.37231973151785935,
+      "p50_latency_ms": 5.335249999916414,
+      "p95_latency_ms": 6.797310002366429,
+      "failure_rate": 0.375
+    }
+  ],
+  "negatives_by_rule": [
+    {
+      "rule": "deployed",
+      "total": 25,
+      "correct_refusal_rate": 0.08,
+      "false_candidate_rate": 0.92
+    },
+    {
+      "rule": "lexical",
+      "total": 25,
+      "correct_refusal_rate": 0.08,
+      "false_candidate_rate": 0.92
+    },
+    {
+      "rule": "lookup_only",
+      "total": 25,
+      "correct_refusal_rate": 0.84,
+      "false_candidate_rate": 0.16
+    }
+  ],
+  "warnings": [
+    "延迟在索引预加载后测量；不含 `index.yaml` 解析成本（该成本每进程只付一次）",
+    "deployed 读法下 30/80 条查询回退到 search；该读法隐含「agent 见 found=false 就换工具」的假设（预注册 §6bis）"
+  ]
+}
