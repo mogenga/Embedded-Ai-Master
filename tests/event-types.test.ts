@@ -36,7 +36,11 @@ describe("新事件类型", () => {
   it("桌面协议层把 device_status 与 mcp_status 转成状态事件", () => {
     const ctx = createContext({ sessionId: "s" });
     const out = events.flatMap((event) => sessionEventToHostEvents(event, ctx));
-    expect(out.map((message) => message.type)).toStrictEqual(["tool_start", "notice", "board_state"]);
+    expect(out.map((message) => message.type)).toStrictEqual(["tool_start", "notice", "device_status"]);
     expect(out.filter((message) => message.type === "notice")[0].level).toBe("dim");
+    // The probe's own fields travel under `device`, not as a whole board
+    // state: the board pane's fields (target, ports, scan) do not exist here.
+    expect(out[2].device).toStrictEqual({ probe: "attached" });
+    expect(out[2].tool).toBe("mcp__probe__attach");
   });
 });

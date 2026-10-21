@@ -1493,7 +1493,8 @@
 - **影响**: (1) 事件流出现缺口时 UI 可能静默拼接错误;(2) 浏览器形态的权限模式选择是**假控件**,用户以为生效了其实没有 —— 涉及安全边界,比前一项更重;(3) 主题体验退化但不丢数据;(4) 键盘/读屏用户的可访问名缺失。
 - **触发升级条件**: (1) 长会话或频繁断线;(2) 浏览器形态需要按界面选择调整权限(而非改服务端配置);(3) 用户在设置里选「跟随系统」后抱怨主题不跟随;(4) 无障碍审查。
 - **修复建议**: (1) 在 `bridge.js` 补 `seq > lastSeq + 1` 检测 + 整量重拉(≤3 次) + 建流失败上限(≤3 次),与 `src/events/log-tail.ts` 的补播语义对齐;(2) 让 `POST /api/actions` 接受权限预设,或新增 `POST /api/permissions` 端点,bridge 据此下发;(3) boot 阶段不要用 `setTheme` 写回 localStorage,或让 `state.theme` 与存储的原始选择解耦;(4) 补 `aria-label`,与 i18n 键一起补。
-- **状态**: 未解决。`README.md:481` 与「前端工作台」已知限制段已按实际实现改写措辞,避免继续承诺不存在的机制;`docs/frontend-design.md` v2.0 §15 登记了完整清单(含另 4 项非安全边界的小偏差与 `vite` 死依赖)。
+- **状态**: **前两项已解决(2026-10-21)**。① bridge 补了 `seq > lastSeq + 1` 缺口检测:命中即关闭旧流、整量重拉会话并重建转录,上限 3 次;`stream_error` 从实际游标续接,上限 3 次后停止并明说。② `POST /api/actions` 接受 `mode`,runner 用它覆盖本次运行的权限预设(未知值在启动前拒绝),bridge 的 `setMode` 随下一条 prompt 下发,运行中拒绝切换。③④ 未修:主题固化已随「boot 不写回推导值」修正;`title` 仍需补 `aria-label`。
+- **注**: `README.md:481` 与「前端工作台」已知限制段此前按实际实现改写措辞,现已成立;`docs/frontend-design.md` v2.0 §15 第 1-3 条同步失效。
 
 ### D-168 · 阶段 4 交互层 spec 的 §7-§9 依赖已删除的 `src/ui`,需按新前端重写
 
@@ -1503,6 +1504,26 @@
 - **触发升级条件**: 阶段 4 交互层落地(即 D-166 中「回放/导出/设备控制」三项被需要时)。
 - **修复建议**: 按 `docs/frontend-design.md` v2.0 与 `desktop/MATRIX.md` 重写 spec 的 §7-§9:回放改为按 `seq` 截断后重放 `sessionEventToHostEvents`;导出改用已有的 `GET /api/sessions/:id` 与 `saveFile`;设备指令改为经 `api.send({cmd:"prompt"})` 下发预置文本(浏览器形态走 `POST /api/actions`);验收脚本重写为 §12 的 V1–V15。
 - **状态**: 未解决(已知边界,spec 顶部已标注失效与重写方向)。
+
+### D-169 · 前后端联调核查:内核已有但前端未接的能力(2026-10-21 修复第一批)
+
+- **发现**: 2026-10-21,按用户要求逐项核查「内核存在但未与前后端联调的功能」,只列不改;随后用户指示按优先级直接修。
+- **本轮已修**(均有离线测试):① 审批条读的是 diff 形状,而内核 `approval_request` 带的是 `paramsPreview`,导致批准写操作时看不到任何参数(R2 在 UI 上不成立);② 浏览器形态 `setMode` 只改本地状态,内核预设不变(假控件,涉及安全边界);③ bridge 每次追问都 `since=-1` 重放整段历史;④ bridge 无缺口检测与重连上限(README 曾承诺);⑤ 桌面 `getSettings` 回占位值,打开设置即重置主题/密度/字号;⑥ 「跟随系统」主题一次启动后被固化;⑦ `device_status` 被塞进 `board_state`,板卡面板永远停在「正在扫描」;⑧ usage 事件是每次模型调用一条,前端覆盖式赋值却标「本次会话累计」;⑨ 会话搜索只按 UUID 匹配;⑩ 桌面 host 严格解析日志,崩溃半行尾的会话在浏览器能开、桌面打不开;⑪ `setModel`/`refreshModels`/`setCwd` 无宿主实现而控件可见;⑫ 压缩摘要把 seq 当 token 数显示;⑬ 拒绝原因显示英文码。
+- **仍未修**(内核侧缺口,不是接线问题):
+  1. **MCP 配置无 UI**:probe/kb 两个 server 只能手编 `~/.harness/mcp.json`;`settings.js` 的 `buildMcpPage` 存在但不在 `settingsPages()` 里。
+  2. **权限规则无 UI**:`permissions.json` 的 rules / `approvalTimeoutMs` 无编辑入口;审批条会显示倒计时,但超时值只能改文件。
+  3. **项目权限配置恒被跳过**:runner 不传 `trustProjectConfig`,每个 run 都写 `permissions_project_config_skipped`。
+  4. **系统提示词 / maxTurns / maxCostUsd / timeoutMs 无入口**:`RunOptions` 支持,`src/server/runner.ts` 从不透传。
+  5. **fork 无入口**:`src/session/persistence.ts:forkSession` 完整实现,无 CLI/HTTP/host 接线。
+  6. **会话重命名/删除/置顶/归档无内核支持**:header 无 `title`,无删除 API。
+  7. **上下文占用率**:内核不产出(见 D-165)。
+  8. **成本**:内核算了 `computeCostUsd`,前端零消费。
+  9. **工具注解** `readOnly`/`destructive`/`evidence` 未被 UI 消费(frontend-design §15 第 5 条)。
+  10. **产物路径**:`artifactPath` 只出现在工具输出文本里,无打开入口。
+- **影响**: 1-4 让「开箱配置」不成立——不手编两个 JSON 就既接不上模型也接不上探针;5-6 是会话管理能力缺口;7-10 是体验缺口。
+- **触发升级条件**: 要求「不改配置文件即可用」;要求 fork / 重命名;成本或上下文计量进入验收。
+- **修复建议**: 1-2 优先——把 `buildMcpPage` / rules 页接回 `settingsPages()`,并给内核补 `GET/PUT /api/config` 之类的读写端点;3 让 runner 透传 `trustProjectConfig`;4 在 `RunOptions` 之上加一层 `POST /api/actions` 的可选字段。
+- **状态**: 未解决(第一批接线已修,剩余为内核侧缺口)。
 
 ---
 
@@ -1575,3 +1596,4 @@
 | 2026-10-20 | 前端移植(Prometheus → 当前内核):删除 Preact 工作台(`src/ui`、`web/`、`tests/ui`、`verify-ui`、`vite.config.ts`),新增 `desktop/`(renderer 纯 ES 模块 + `bridge.js` 浏览器兼容层 + `protocol.js` 协议层 + Electron `main.js`/`preload.cjs` + NDJSON 宿主);新增 `POST /api/abort` 与 `runner.abort`;`serve:ui` 默认静态托管 `desktop/renderer`;录入 D-163(桌面未实机)、D-164(无 token 流式)、D-165(无上下文占用率)、D-166(未覆盖能力清单) |
 | 2026-10-20 | D-164 修复:模型适配层支持 OpenAI 流式响应(SSE `delta.content` / `delta.tool_calls`,网关拒绝时自动降级为一次性响应),新增 `assistant_delta` 会话事件并批量落盘,前端按增量实时显示;D-164 标记已解决 |
 | 2026-10-20 | 前端文档重写:`docs/frontend-design.md` v1.4 → v2.0,整体改为以 `desktop/renderer/` 实现为准(原 v1.4 基于已删除的 Preact 工作台,§2/§3/§4/§5/§6/§7/§11/§12 作废);`README.md` 修正断线续传的过度承诺与「前端工作台」已知限制段,设计文档索引改指 `desktop/MATRIX.md`;阶段 4 spec 顶部加失效声明(§7-§9 依赖已删除的 `src/ui`);`ui-workbench` spec/plan 加作废标注;录入 D-167(前端 4 处文档-实现偏差)与 D-168(阶段 4 spec §7-§9 需重写) |
+| 2026-10-21 | 前后端联调核查与第一批修复:审批条改用内核 `paramsPreview` 并加超时倒计时(R2);`POST /api/actions` 接受 `mode`,runner 用它覆盖本次运行预设(新增 `invalid_mode`),bridge 的 `setMode` 随 prompt 下发;bridge 补 `seq` 缺口检测+整量重拉(≤3 次)与 `stream_error` 续接上限(≤3 次),追问不再 `since=-1` 重放;`device_status` 改为独立事件并渲染到板卡面板「设备」段;桌面对话搜索按标题/工作dir/id;桌面 host 用 `readSessionSnapshot(allowTrailingPartial)` 容忍崩溃半行尾;新增宿主 `setModel`/`refreshModels`/`setCwd`;桌面 `getSettings` 不再回占位值,「跟随系统」主题不再被固化;usage 事件按会话累计;压缩不再把 seq 当 token;拒绝原因翻成中文。录入 D-169(剩余内核侧缺口),D-167 前两项标记已解决 |

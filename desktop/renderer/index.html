@@ -215,6 +215,7 @@
                 <div class="pending-body">
                   <div class="pending-question" id="pending-question"></div>
                   <div class="pending-diff" id="pending-diff" hidden></div>
+                  <div class="pending-deadline" id="pending-deadline" hidden></div>
                 </div>
                 <div class="pending-actions">
                   <button class="btn btn-primary" data-permission="yes" data-i18n="allow">Allow</button>
@@ -357,12 +358,14 @@
           <section class="workbench" id="workbench" hidden>
             <div class="workbench-head">
               <div class="workbench-tabs" id="workbench-tabs" role="tablist">
-                <!-- Only the panes with a backend are listed: files/diff/
+                <!-- Only the pane with a backend is listed: files/diff/
                      history/tasks/artifact/terminal/browser have no kernel
-                     counterpart yet, and an empty tab that can never fill is
-                     not a placeholder — it is a dead end. -->
+                     counterpart, and the serial monitor needs commands
+                     (`serialOpen`/`serialRead`/…) this host does not provide —
+                     the kernel only exposes the probe through MCP tools the
+                     model calls. An empty tab that can never fill is not a
+                     placeholder, it is a dead end. -->
                 <button role="tab" aria-selected="true" tabindex="0" data-pane="board" class="active" data-i18n="paneBoard">Board</button>
-                <button role="tab" aria-selected="false" tabindex="-1" data-pane="serial" data-i18n="paneSerial">Serial</button>
               </div>
               <div class="workbench-meta" id="workbench-meta"></div>
               <button class="icon-button small" id="close-workbench" data-i18n-title="closePane">

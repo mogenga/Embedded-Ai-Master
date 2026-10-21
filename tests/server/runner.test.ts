@@ -147,6 +147,27 @@ describe("createSessionRunner", () => {
     expect(call?.signal).toBeDefined();
   });
 
+  it("单次 mode 覆盖预设，未知值在启动前拒绝", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, {
+      runSessionImpl: fake.impl,
+      permissions: { preset: "diagnose" },
+    });
+
+    await runner.start({ text: "hi", mode: "read-only" });
+    expect(fake.calls[0]?.permissions?.preset).toBe("read-only");
+
+    // Without a mode the runner's own preset stands.
+    await runner.start({ text: "again" });
+    expect(fake.calls[1]?.permissions?.preset).toBe("diagnose");
+
+    const error = await startError(runner, { text: "x", mode: "bypassPermissions" as never });
+    expect(error.code).toBe("invalid_mode");
+    // The rejected call never reached runSession.
+    expect(fake.calls).toHaveLength(2);
+  });
+
   it("等待 onSession 后才 resolve", async () => {
     const home = makeHome();
     const fake = createFakeRunSession({ delayMs: 50 });

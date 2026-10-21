@@ -210,12 +210,28 @@ describe("审批与权限", () => {
       ev(0, "permission_decision", { callId: "c1", tool: "shell", effective: "deny", reason: "未授权" }),
     ]);
     expect(denied.out).toStrictEqual([
-      { type: "notice", level: "warn", text: "已拒绝 shell: 未授权" },
+      { type: "notice", level: "warn", text: "已拒绝 shell：未授权" },
     ]);
     const allowed = translate([
       ev(0, "permission_decision", { callId: "c1", tool: "shell", effective: "allow", reason: "ok" }),
     ]);
     expect(allowed.out).toStrictEqual([]);
+  });
+
+  it("内核的原因码翻成人话，策略码不重复", () => {
+    const { out } = translate([
+      ev(0, "permission_decision", {
+        callId: "c1",
+        tool: "fs",
+        effective: "deny",
+        reason: "preset:diagnose:write;approval_timeout",
+      }),
+    ]);
+    // `preset:…` is what the question already said; the useful half is why
+    // the operator's answer never arrived.
+    expect(out).toStrictEqual([
+      { type: "notice", level: "warn", text: "已拒绝 fs：审批超时" },
+    ]);
   });
 
   it("审批超时由 permission_decision 关闭审批条", () => {
@@ -233,7 +249,7 @@ describe("审批与权限", () => {
     );
     expect(decided.out).toStrictEqual([
       { type: "permission_closed", id: "req-1" },
-      { type: "notice", level: "warn", text: "已拒绝 shell: approval_timeout" },
+      { type: "notice", level: "warn", text: "已拒绝 shell：审批超时" },
     ]);
     expect(ctx.pendingApprovals.size).toBe(0);
   });
@@ -268,7 +284,7 @@ describe("运行状态", () => {
 });
 
 describe("其他事件", () => {
-  it("device_status → board_state 携带原始 state", () => {
+  it("device_status → device_status 携带原始 state", () => {
     const { out } = translate([
       ev(0, "device_status", {
         callId: "c1",
@@ -278,9 +294,13 @@ describe("其他事件", () => {
       }),
     ]);
     expect(out).toHaveLength(1);
-    expect(out[0].type).toBe("board_state");
-    expect(out[0].state.device).toStrictEqual({ probe: "attached", cpu: "halted" });
-    expect(out[0].state.tool).toBe("mcp__probe__attach");
+    // A separate event, not a `board_state`: the probe reports four fields and
+    // the board pane reads a different set (target, ports, scan), so folding
+    // one into the other blanked the pane.
+    expect(out[0].type).toBe("device_status");
+    expect(out[0].device).toStrictEqual({ probe: "attached", cpu: "halted" });
+    expect(out[0].tool).toBe("mcp__probe__attach");
+    expect(out[0].server).toBe("probe");
   });
 
   it("mcp_status 成功为 dim、失败为 warn", () => {
@@ -296,8 +316,10 @@ describe("其他事件", () => {
     const { out } = translate([
       ev(0, "compaction", { kind: "summary", summary: "s", coversUpToSeq: 4 }),
     ]);
+    // `coversUpToSeq` is an event number, not a token count: it is reported
+    // as-is and the before/after figures stay 0 so the renderer omits them.
     expect(out).toStrictEqual([
-      { type: "compacted", removed: 0, level: "summary", before: 5, after: 0 },
+      { type: "compacted", removed: 0, level: "summary", before: 0, after: 0, coversUpToSeq: 4 },
     ]);
   });
 
@@ -399,17 +421,23 @@ describe("state / sessions / session_loaded", () => {
     expect(event.total).toBe(1);
   });
 
-  it("sessionLoadedEvent 携带消息与模式", () => {
-    const event = sessionLoadedEvent([ev(0, "user", { content: "hi" })], {
-      cwd: "E:/p",
-      mode: "read-only",
-    });
+  it("sessionLoadedEvent 携带消息、模式与本次会话用量", () => {
+    const event = sessionLoadedEvent(
+      [
+        ev(0, "user", { content: "hi" }),
+        ev(1, "usage", { promptTokens: 10, completionTokens: 2, cachedTokens: 3 }),
+        ev(2, "usage", { promptTokens: 4 }),
+      ],
+      { cwd: "E:/p", mode: "read-only" },
+    );
     expect(event).toStrictEqual({
       type: "session_loaded",
       messages: [{ role: "user", text: "hi", index: 0, images: 0 }],
       cwd: "E:/p",
       mode: "read-only",
       effort: "auto",
+      // usage events are per model call; the popover says "this session".
+      usage: { inputTokens: 14, outputTokens: 2, cachedTokens: 3 },
     });
   });
 });

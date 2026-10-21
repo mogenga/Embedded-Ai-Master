@@ -373,6 +373,46 @@ describe("ui api", () => {
     expect(body).toContain("event: stream_end");
   });
 
+  it("POST /api/actions 透传权限预设，非字符串或内核拒绝时 400", async () => {
+    const runner = makeRunner();
+    const s = createUiServer({ harnessHome: makeHome(), runner });
+    close = s.close;
+    const ok = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      writeHeaders(s.port),
+      JSON.stringify({ text: "hi", mode: "read-only" }),
+    );
+    expect(ok.status).toBe(202);
+    expect(vi.mocked(runner.start)).toHaveBeenCalledWith({ text: "hi", mode: "read-only" });
+
+    const wrongType = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      writeHeaders(s.port),
+      JSON.stringify({ text: "hi", mode: 3 }),
+    );
+    expect(wrongType.status).toBe(400);
+    expect(errorCode(wrongType.body)).toBe("invalid_mode");
+
+    // A preset the kernel refuses must surface as a client error, not as a
+    // 500 or as a run under a different mode.
+    runner.start = vi.fn(async () => {
+      throw new RunnerError("invalid_mode", "非法的权限预设: nope");
+    });
+    const rejected = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      writeHeaders(s.port),
+      JSON.stringify({ text: "hi", mode: "nope" }),
+    );
+    expect(rejected.status).toBe(400);
+    expect(errorCode(rejected.body)).toBe("invalid_mode");
+  });
+
   it("写端点缺少 Origin 返回 403 forbidden_origin", async () => {
     const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
     close = s.close;
@@ -507,6 +547,7 @@ describe("ui api", () => {
   it.each<[RunnerErrorCode, number]>([
     ["invalid_text", 400],
     ["invalid_session_id", 400],
+    ["invalid_mode", 400],
     ["unknown_session", 404],
     ["session_busy", 409],
     ["session_corrupt", 500],

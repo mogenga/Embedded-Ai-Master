@@ -462,7 +462,7 @@ npm --prefix desktop run desktop
   | GET | `/api/events` | SSE 单会话事件流，见「实时事件流」；非法 id/cursor 400，不存在 404，损坏 500 |
 
 - **诚实边界**：写端点必须带 loopback `Origin`；提交失败在转录中显示可读错误，不伪造成功。202 只表示受理/送达，工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准。内核没有的能力（git/PR、终端、worktree、packs、skills/memory/instructions/hooks、subagents、goals、文件树、导出、检查点恢复）在前端隐藏入口，宿主/bridge 收到对应命令时回显式 `notice`，不静默吞掉（R3）。
-- **审批**：内核按单次请求审批，没有「始终允许」的持久规则；该按钮不渲染。审批超时/中止时由 `permission_decision` 触发 `permission_closed`，审批条自动收起。
+- **审批**：内核按单次请求审批，没有「始终允许」的持久规则；该按钮不渲染。审批条展示 `approval_request` 携带的 `paramsPreview`（这次调用要写入/执行的参数），并按 `deadlineAt` 显示剩余秒数——批准一次写操作时能看见写的是什么（R2）。审批超时/中止时由 `permission_decision` 触发 `permission_closed`，审批条自动收起。
 - **空态**：无会话显示「暂无会话」；设备字段为 `unknown` 时显示「未接入」。
 - **主题**：`light` / `system` / `dark` 三态，`localStorage` 键 `prometheus.theme`，默认 `dark`；所有颜色经 CSS 变量，图标为内联 SVG sprite。
 - **验收**：`npm test` 覆盖协议层、bridge 与宿主；浏览器形态可用无头 Chromium 经 CDP 冒烟（`npm run serve:ui` 后打开页面，确认无控制台错误、`window.prometheus.send` 存在、未支持面板不可见）。桌面形态需本机安装 Electron 后手动验证。
@@ -478,7 +478,7 @@ Web 工作台通过 SSE 订阅单个会话的日志投影。实时流与回放�
 - **事件类型**：`approval_request`（参数摘要与截止时间，不含参数原文）、`tool_started`（`{callId,tool,access?}`）、`tool_result`、`permission_decision`、`mcp_status`、`device_status`，以及既有 `system/user/assistant/usage/checkpoint/status/interrupted/compaction`。`tool_call` 仅用于旧日志回放，新代码不再产生。`permission_decision` 中 `action=ask,effective=deny` 表示最终未获批准且工具未执行（原因可能是 `approval_unavailable` / `approval_denied` / `approval_timeout` / `approval_aborted`，需看 `reason`）；`mcp_status` 的 `kind` 覆盖 `connected/connect_failed/tools_changed/tools_refresh_failed/tool_invalid_schema/listener_failed/call_failed/config_failed/config_warning/project_config_skipped/tool_name_renamed`。
 - **流式回答**：模型适配层默认请求 OpenAI 流式响应（`stream:true` + `stream_options.include_usage`），按 SSE 帧解析 `delta.content` 与 `delta.tool_calls`；网关拒绝流式时自动降级为一次性响应，该 provider 后续不再试探。内核把增量写进 `assistant_delta` 事件（`{text}`，按批落盘：默认 60ms 或 400 字符），`assistant` 事件仍承载这一轮的完整内容，投影层忽略 delta、只用 `assistant` 重建模型上下文。
 - **设备状态契约**：MCP 工具在**成功**结果（`isError !== true`）的 `structuredContent.deviceStatus` 返回普通 JSON 对象；序列化后 ≤ 8 KiB、深度 ≤ 4。内核校验后写 `device_status`，payload 为 `{callId, server, tool, state}`。`state` 的键与值完全由 MCP server 决定，内核与 UI 不解释、不补全、不推断；UI 只 patch 已知字符串字段 `probe/serial/cpu/backend`，未知键与非字符串值忽略。失败、权限拒绝、超时/取消不产生 `device_status`；`deviceStatus` 存在但解析失败（非普通对象、超限、访问器/循环等）时写 `status {status:"device_status_invalid", tool, message}` 显式审计；`structuredContent` 非对象或缺少 `deviceStatus` 键时静默跳过，不猜测状态。
-- **断线续传**：客户端独占游标 `lastSeq`，按 `seq` 去重（协议层丢弃 `seq <= lastSeq` 的事件）。服务端 `retry: 3000`，浏览器 `EventSource` 自行重连；`stream_end` 停止重连。**缺口检测（`seq > lastSeq + 1` → 整量重拉）与建流失败上限尚未实现**（`bridge.js` 无主动重连逻辑，重连时 `since` 仍为建流时的固定值，重复事件由去重兜住）；见 `docs/frontend-design.md` §15。
+- **断线续传**：客户端独占游标 `lastSeq`，按 `seq` 去重（协议层丢弃 `seq <= lastSeq` 的事件）。服务端 `retry: 3000`；`stream_end` 表示本轮结束，不再重连。浏览器 bridge 另有两层恢复：**缺口检测**（新事件 `seq > lastSeq + 1` → 关闭旧流、整量重拉 `GET /api/sessions/:id` 重建转录，最多 3 次）与 **`stream_error` 续接**（从实际到达的游标重开流，最多 3 次，用尽后显式提示「已停止重试」）。桌面宿主没有缺口检测——它按 `headSeq` 游标跟随本地日志。
 - **慢客户端**：服务端实时队列上限 500 条；实时阶段单帧写超时（默认同补播超时，30s）到期即视为慢客户端，或队列溢出时同样处理：发 `stream_error {code:"slow_consumer", lastSeq}` 并关闭连接，客户端凭游标重连续传。补播阶段每帧也有写超时，完全不读响应体的连接会被关闭；大日志 / 长断线补播的性能上限未压测（D-136）。
 - **延迟与证据**：当前由 200ms 日志轮询跟随，实际延迟还受文件读取与事件循环调度影响，无硬上限，也未压测；进程内低延迟适配器未实现（D-134）。证据由 `tool_result.payload` 的 `evidence/artifactPath/detail` 承载，没有独立 `evidence` 事件（D-135）。
 - **审批事件**：`approval_request` 由审批桥在等待前写入日志，再由 SSE 投影为待审批卡片；决策与执行结果见「Web 会话与审批」。
@@ -511,10 +511,10 @@ npm run build && npm run serve:ui
 请求：
 
 ```json
-{ "text": "读取 0x20000000 的 4 字节", "sessionId": "可选" }
+{ "text": "读取 0x20000000 的 4 字节", "sessionId": "可选", "mode": "可选" }
 ```
 
-缺省 `sessionId` 新建会话；带 `sessionId` 时向该会话追加输入（使用 `header.model` 与 `header.workdir`）。
+缺省 `sessionId` 新建会话；带 `sessionId` 时向该会话追加输入（使用 `header.model` 与 `header.workdir`）。`mode` 是本次运行的权限预设（`read-only` / `workspace-write` / `diagnose` / `danger-full-access`），覆盖运行器构造时的预设，仅对这一次 run 生效——浏览器形态的权限模式菜单就是靠它下发的。
 
 202 响应：
 
@@ -527,6 +527,7 @@ npm run build && npm run serve:ui
 | 400 | `invalid_body` | 非 JSON 对象、缺 `text`、`text` 非字符串 |
 | 400 | `invalid_text` | `text` 为空/纯空白、超过 8000 字符 |
 | 400 | `invalid_session_id` | `sessionId` 非法 |
+| 400 | `invalid_mode` | `mode` 非字符串，或不是四个预设之一 |
 | 404 | `unknown_session` | 指定会话不存在 |
 | 409 | `session_busy` | 同会话正在运行 |
 | 500 | `session_corrupt` | 追加会话的 header 损坏 |
@@ -684,9 +685,9 @@ MCP：
 
 - SSE 实时事件流已实现（单会话、`since`/`Last-Event-ID` 续传）；写操作与审批已落地，见「Web 会话与审批」（D-137/D-139 已解决；D-051 的 action 契约已收敛为 `text` + 可选 `sessionId`）。
 - 实时总线只做日志投影：延迟约 200-250ms，无进程内低延迟适配器（D-134）；只支持单会话流（D-133）。
-- 客户端缺口检测与整量重拉尚未实现（详见「实时事件流」的断线续传一条与 `docs/frontend-design.md` §15）。
-- 设备面板只消费 MCP 显式发布的 `device_status`，无该事件时 `/api/device` 仍恒为 `unknown`，缺少显式连接状态枚举（D-052、D-058）。
-- 浏览器形态的权限模式选择只改前端状态，不改变内核的权限预设（`bridge.js` 的 `setMode` 无网络请求）；桌面形态则真实生效。
+- 浏览器形态的缺口重拉是整篇重建（`session_loaded`），期间转录会被替换一次；桌面宿主没有对应的缺口检测。
+- 设备面板只消费 MCP 显式发布的 `device_status`（板卡面板的「设备」段）；无该事件时 `/api/device` 仍恒为 `unknown`，缺少显式连接状态枚举（D-052、D-058）。
+- 内核不支持的能力仍无前端入口：MCP 配置、权限规则、系统提示词、fork、会话改名/删除等需手编配置文件或直接调用内核；见 `docs/deferred-issues.md` D-169。
 - 前端未覆盖的能力（git/PR、终端、worktree、导出、回放等）在 UI 隐藏入口，宿主/bridge 回显式 `notice`；清单见 `desktop/MATRIX.md`（D-166）。
 - 会话列表的坏目录进 `errors`，界面在会话面板底部显示「N 个会话目录不可读」（D-065 已解决）。
 - 知识库扫描深度上限 8、条目上限 2000，超出会静默截断（D-064）。

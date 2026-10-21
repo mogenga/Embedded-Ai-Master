@@ -175,6 +175,41 @@ function toolNameFor(ctx, callId, fallback) {
 }
 
 /**
+ * Human text for a permission decision's `reason`.
+ *
+ * The kernel writes stable codes (`approval_timeout`, `preset:…`); showing the
+ * raw code left operators reading "已拒绝 fs: approval_timeout" — the one
+ * moment the reason matters most. Unknown codes fall through unchanged rather
+ * than being replaced by a guess.
+ */
+const PERMISSION_REASON_TEXT = {
+  approval_unavailable: "没有可用的审批通道",
+  approval_aborted: "审批被中止",
+  approval_denied: "审批被拒绝",
+  approval_timeout: "审批超时",
+  approval_granted: "已批准",
+};
+
+export function permissionReasonText(reason) {
+  const text = textOf(reason);
+  if (text === "") return "";
+  const labels = [];
+  for (const code of text.split(";")) {
+    if (code === "") continue;
+    // A policy reason (`preset:…` / `rule:…`) is what the gate already used to
+    // decide, and it is shown in the approval question. Repeating it as the
+    // denial reason reads like an error message.
+    if (code.startsWith("preset:") || code.startsWith("rule:")) continue;
+    if (code.startsWith("approval_error:")) {
+      labels.push(`审批通道出错：${code.slice("approval_error:".length).trim()}`);
+      continue;
+    }
+    labels.push(PERMISSION_REASON_TEXT[code] ?? code);
+  }
+  return labels.join("；");
+}
+
+/**
  * Translate one kernel event into zero or more host events.
  *
  * `ctx` is mutated: the cursor advances, pending calls are remembered, and
@@ -324,29 +359,31 @@ export function sessionEventToHostEvents(event, ctx) {
       }
       if (payload.effective === "deny") {
         const tool = textOf(payload.tool);
-        const reason = textOf(payload.reason);
+        const reason = permissionReasonText(payload.reason);
         out.push({
           type: "notice",
           level: "warn",
-          text: reason === "" ? `已拒绝 ${tool}` : `已拒绝 ${tool}: ${reason}`,
+          text: reason === "" ? `已拒绝 ${tool}` : `已拒绝 ${tool}：${reason}`,
         });
       }
       break;
     }
 
     case "device_status": {
-      // The board chip reads `state.selection` / `state.projectKind`; the probe
-      // MCP reports its own `state`, so it is passed through as-is.
+      // The probe MCP reports `{ backend, probe, cpu, serial }` and nothing
+      // else — it does not know about targets, ports or the workspace scan.
+      // Passing it through as a whole `board_state` replaced the board pane's
+      // state with an object none of its fields exist on, so the pane fell back
+      // to "scanning…" and the chip stayed hidden. The device fields travel
+      // under their own key instead; the renderer draws them as their own
+      // section.
       const device = isRecord(payload.state) ? payload.state : {};
       out.push({
-        type: "board_state",
-        state: {
-          selection: {},
-          projectKind: "unknown",
-          device,
-          tool: textOf(payload.tool),
-          updatedAt: textOf(event.ts),
-        },
+        type: "device_status",
+        device,
+        server: textOf(payload.server),
+        tool: textOf(payload.tool),
+        updatedAt: textOf(event.ts),
       });
       break;
     }
@@ -424,12 +461,17 @@ export function sessionEventToHostEvents(event, ctx) {
         const removed = Array.isArray(payload.elidedSeqs) ? payload.elidedSeqs.length : 0;
         out.push({ type: "compacted", removed, level: "micro", before: 0, after: 0 });
       } else if (kind === "summary") {
+        // `coversUpToSeq` is a sequence number, not a token count. The kernel
+        // reports no token figures for a summary compaction, so `before`/`after`
+        // stay 0 and the renderer omits the title rather than printing a number
+        // that means nothing (the old code added 1 and passed it off as tokens).
         out.push({
           type: "compacted",
           removed: 0,
           level: "summary",
-          before: Number(payload.coversUpToSeq) + 1 || 0,
+          before: 0,
           after: 0,
+          coversUpToSeq: Number(payload.coversUpToSeq) || 0,
         });
       } else if (kind === "failed") {
         out.push({
@@ -510,6 +552,25 @@ export function sessionsEvent(summaries) {
   return { type: "sessions", sessions, total: sessions.length, all: sessions.length, limit: sessions.length };
 }
 
+/**
+ * Session-level token totals from a full log.
+ *
+ * `usage` events are written once per model call; the popover labels its
+ * figures "this session", so the sum is the number it means.
+ */
+export function usageTotals(events) {
+  const totals = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  if (!Array.isArray(events)) return totals;
+  for (const event of events) {
+    if (!isRecord(event) || event.type !== "usage") continue;
+    const payload = isRecord(event.payload) ? event.payload : {};
+    totals.inputTokens += Number(payload.promptTokens) || 0;
+    totals.outputTokens += Number(payload.completionTokens) || 0;
+    totals.cachedTokens += Number(payload.cachedTokens) || 0;
+  }
+  return totals;
+}
+
 /** `session_loaded` event for a freshly opened or created conversation. */
 export function sessionLoadedEvent(events, options = {}) {
   return {
@@ -518,6 +579,7 @@ export function sessionLoadedEvent(events, options = {}) {
     cwd: textOf(options.cwd),
     mode: textOf(options.mode) || "diagnose",
     effort: "auto",
+    usage: usageTotals(events),
   };
 }
 

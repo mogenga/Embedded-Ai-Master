@@ -42,7 +42,7 @@ try {
   const [
     { createSessionRunner },
     { createLogTailEventSource },
-    { readSessionDir },
+    { readSessionDir, readSessionSnapshot },
     { resolveHarnessHome },
     { loadProviders, resolveModelRef },
     { readSessionHeader },
@@ -62,6 +62,7 @@ try {
     createSessionRunner,
     createLogTailEventSource,
     readSessionDir,
+    readSessionSnapshot,
     resolveHarnessHome,
     loadProviders,
     resolveModelRef,
@@ -136,6 +137,20 @@ const sessions = (() => {
     },
     detail(id) {
       return kernel.readSessionDir(path.join(sessionsRoot, id));
+    },
+    /**
+     * Read a session whose log may end mid-line.
+     *
+     * A run killed between `write` and `fsync` leaves a partial last line. The
+     * HTTP API tolerates it for open sessions (`allowTrailingPartial`); the
+     * desktop host used the strict reader, so the same session opened in the
+     * browser and refused to open here.
+     */
+    async detailTolerant(id) {
+      const dir = path.join(sessionsRoot, id);
+      const header = kernel.readSessionHeader(dir);
+      const snapshot = await kernel.readSessionSnapshot(dir, { allowTrailingPartial: true });
+      return { header, events: snapshot.events };
     },
     titleOf(id) {
       try {
@@ -388,7 +403,7 @@ function handleNewSession() {
   send(sessionsEvent());
 }
 
-function handleLoadSession(id) {
+async function handleLoadSession(id) {
   if (ctx.running) {
     send({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
     return;
@@ -400,7 +415,7 @@ function handleLoadSession(id) {
   stopFollow();
   let detail;
   try {
-    detail = sessions.detail(id);
+    detail = await sessions.detailTolerant(id);
   } catch (error) {
     send({ type: "error", message: `会话打开失败：${error instanceof Error ? error.message : String(error)}` });
     return;
@@ -508,7 +523,7 @@ const handlers = {
 
   loadSession(payload) {
     if (runner === undefined) return;
-    handleLoadSession(payload.id);
+    return handleLoadSession(payload.id);
   },
 
   listSessions() {
@@ -530,6 +545,100 @@ const handlers = {
     send(stateEvent());
   },
 
+  /**
+   * Pick the model for the next run.
+   *
+   * Only references that exist in `providers.json` are accepted: the runner
+   * resolves the reference itself and a typo would surface as a failed turn
+   * rather than a rejected choice. The current session keeps its model (the
+   * kernel refuses to resume under a different one), so this takes effect on
+   * the next new conversation and the notice says so.
+   */
+  setModel(payload) {
+    const wanted = typeof payload.model === "string" ? payload.model : "";
+    try {
+      kernel.resolveModelRef(providers, wanted);
+    } catch {
+      send({ type: "notice", level: "warn", text: `模型不在 providers.json 中：${wanted}` });
+      return;
+    }
+    if (ctx.running) {
+      send({ type: "notice", level: "warn", text: "运行中不能切换模型" });
+      return;
+    }
+    modelRef = wanted;
+    void runner?.close();
+    runner = createRunner();
+    send(stateEvent());
+    if (sessionId !== "") {
+      send({
+        type: "notice",
+        level: "dim",
+        text: "模型仅对新建会话生效；当前会话沿用启动时的模型",
+      });
+    }
+  },
+
+  /**
+   * Re-read `providers.json`.
+   *
+   * The file is the source of truth and is edited by hand, so a reload is the
+   * only way an edited model list reaches the picker. A broken file leaves the
+   * loaded list alone rather than emptying the picker.
+   */
+  refreshModels() {
+    let next;
+    try {
+      next = kernel.loadProviders(harnessHome);
+    } catch (error) {
+      send({
+        type: "notice",
+        level: "warn",
+        text: `providers.json 读取失败：${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    providers = next;
+    modelList = buildModelList(providers);
+    const stillValid = modelList.some((model) => model.id === modelRef);
+    if (!stillValid) modelRef = modelList[0]?.id ?? "";
+    send({ type: "models", models: modelList, model: modelRef, source: "providers.json" });
+    send(stateEvent());
+  },
+
+  /**
+   * Change the working directory for the next conversation.
+   *
+   * The kernel fixes a session's workdir in its header and refuses to resume
+   * under another one, so this only affects a session that is about to be
+   * created — the renderer calls it from the sidebar's "new session in this
+   * project" control.
+   */
+  setCwd(payload) {
+    const next = typeof payload.cwd === "string" ? payload.cwd : "";
+    if (next === "" || !existsSync(next)) {
+      send({ type: "notice", level: "warn", text: `目录不存在：${next}` });
+      return;
+    }
+    if (ctx.running) {
+      send({ type: "notice", level: "warn", text: "运行中不能切换工作目录" });
+      return;
+    }
+    if (sessionId !== "") {
+      send({
+        type: "notice",
+        level: "dim",
+        text: "工作目录仅对新建会话生效；先新建会话再继续",
+      });
+      return;
+    }
+    cwd = path.resolve(next);
+    ctx = kernel.protocol.createContext({ cwd });
+    void runner?.close();
+    runner = createRunner();
+    send(stateEvent());
+  },
+
   setLocale(payload) {
     if (payload.locale !== "en" && payload.locale !== "zh") return;
     locale = payload.locale;
@@ -541,23 +650,20 @@ const handlers = {
     send({ type: "ui_preference", key: payload.key, value: payload.value });
   },
 
+  /**
+   * The values this host owns.
+   *
+   * Display preferences are the renderer's: it keeps them in localStorage and
+   * has no way to push them here. Sending placeholders for them (`theme:
+   * "dark"`, `fontScale: 1`) made opening Settings reset whatever the user had
+   * chosen, so the fields are simply absent — the renderer only applies what it
+   * receives.
+   */
   getSettings() {
     send({
       type: "settings",
       settings: {
         locale,
-        theme: "dark",
-        density: "balanced",
-        fontScale: 1,
-        transcriptWidth: "standard",
-        transcriptView: "normal",
-        reduceMotion: false,
-        codeFont: "",
-        outputStyle: "default",
-        restartSession: true,
-        suggestions: true,
-        updateCheck: false,
-        isolateByDefault: false,
         providers: Object.keys(providers).map((name) => ({
           id: name,
           baseUrl: providers[name]?.baseUrl ?? "",
@@ -622,13 +728,32 @@ const handlers = {
     send({ type: "file_matches", query: String(payload.query ?? ""), files: [] });
   },
 
+  /**
+   * Search saved conversations by what the sidebar shows.
+   *
+   * Matching the UUID alone made this useless: session ids are generated, so a
+   * title the user remembers could never match. Title, workdir and id are all
+   * searched, and the reply uses the same row shape as `sessions` so the
+   * renderer can draw results with the component it already has.
+   */
   searchSessions(payload) {
     const query = String(payload.query ?? "").trim().toLowerCase();
-    send({
-      type: "session_matches",
-      query,
-      sessions: query === "" ? [] : sessions.list().filter((entry) => entry.id.includes(query)),
-    });
+    const matches =
+      query === ""
+        ? []
+        : sessions.list().filter((entry) => {
+            const title = titleFor(entry);
+            return (
+              entry.id.toLowerCase().includes(query)
+              || (title !== "" && title.toLowerCase().includes(query))
+              || String(entry.workdir ?? "").toLowerCase().includes(query)
+            );
+          });
+    const event = kernel.protocol.sessionsEvent(
+      matches.map((entry) => ({ ...entry, title: titleFor(entry) })),
+    );
+    event.query = query;
+    send({ ...event, type: "session_matches" });
   },
 
   shutdown() {

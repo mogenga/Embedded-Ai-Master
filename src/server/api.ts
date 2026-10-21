@@ -19,6 +19,7 @@ import type { SessionEvent, SessionHeader } from "../session/types.js";
 import { readJsonBody } from "./body.js";
 import { createEventStreamHandler } from "./event-stream.js";
 import { HttpError, sendError, sendJson } from "./http.js";
+import type { PermissionPreset } from "../permissions/types.js";
 import { createSessionRunner, RunnerError } from "./runner.js";
 import type { SessionRunner } from "./runner.js";
 
@@ -179,6 +180,7 @@ function mapRunnerError(error: RunnerError): HttpError {
   switch (error.code) {
     case "invalid_text":
     case "invalid_session_id":
+    case "invalid_mode":
       return new HttpError(400, error.code, error.message);
     case "unknown_session":
       return new HttpError(404, error.code, error.message);
@@ -206,12 +208,17 @@ async function handleAction(
   if (body.sessionId !== undefined && typeof body.sessionId !== "string") {
     throw new HttpError(400, "invalid_session_id", "sessionId 必须是字符串");
   }
+  if (body.mode !== undefined && typeof body.mode !== "string") {
+    throw new HttpError(400, "invalid_mode", "mode 必须是字符串");
+  }
   const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
+  const mode = typeof body.mode === "string" ? body.mode : undefined;
   let outcome: Awaited<ReturnType<SessionRunner["start"]>>;
   try {
     outcome = await runner.start({
       text: body.text,
       ...(sessionId === undefined ? {} : { sessionId }),
+      ...(mode === undefined ? {} : { mode: mode as PermissionPreset }),
     });
   } catch (error) {
     if (error instanceof RunnerError) throw mapRunnerError(error);

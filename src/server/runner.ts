@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { loadProviders, parseProviders, resolveModelRef } from "../config/providers.js";
 import type { ProvidersConfig } from "../config/providers.js";
+import type { PermissionPreset } from "../permissions/types.js";
 import { runSession } from "../index.js";
 import type { RunOptions, RunPermissionOptions } from "../index.js";
 import { SessionCorruptionError } from "../session/errors.js";
@@ -17,6 +18,25 @@ const CLOSE_TIMEOUT_MS = 5_000;
 export interface ActionInput {
   text: string;
   sessionId?: string;
+  /**
+   * Permission preset for this run only.
+   *
+   * The runner's constructor preset is the default; a caller that lets the
+   * operator pick a mode (the web UI's mode menu) passes it here. Ignored when
+   * the runner was built without permissions and the value is absent.
+   */
+  mode?: PermissionPreset;
+}
+
+const PERMISSION_PRESETS: readonly PermissionPreset[] = [
+  "read-only",
+  "workspace-write",
+  "diagnose",
+  "danger-full-access",
+];
+
+function isPermissionPreset(value: unknown): value is PermissionPreset {
+  return typeof value === "string" && (PERMISSION_PRESETS as readonly string[]).includes(value);
 }
 
 export type ActionOutcome = { sessionId: string; created: boolean };
@@ -24,6 +44,7 @@ export type ActionOutcome = { sessionId: string; created: boolean };
 export type RunnerErrorCode =
   | "invalid_text"
   | "invalid_session_id"
+  | "invalid_mode"
   | "unknown_session"
   | "session_busy"
   | "session_corrupt"
@@ -185,6 +206,11 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
   async function start(input: ActionInput): Promise<ActionOutcome> {
     if (closed) throw new RunnerError("runner_unavailable", "runner 已关闭");
     assertText(input?.text);
+    if (input?.mode !== undefined && !isPermissionPreset(input.mode)) {
+      // A typo must not silently run under the constructor's preset: the
+      // operator believes they selected something else.
+      throw new RunnerError("invalid_mode", `非法的权限预设: ${String(input.mode)}`);
+    }
 
     const requestedId = input?.sessionId;
     if (requestedId !== undefined) {
@@ -234,7 +260,13 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
       home: opts.harnessHome,
       providersText: JSON.stringify(providers),
       signal: controller.signal,
-      permissions: { ...(opts.permissions ?? {}), prompter: bridge },
+      // A per-run mode wins over the constructor preset; everything else
+      // (rules, timeout, config paths) still comes from the runner.
+      permissions: {
+        ...(opts.permissions ?? {}),
+        ...(input.mode === undefined ? {} : { preset: input.mode }),
+        prompter: bridge,
+      },
       onSession: (session) => {
         bridge.bindSession(session);
         if (readySettled) return;

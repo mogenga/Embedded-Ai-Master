@@ -753,14 +753,16 @@ interface ToolAnnotations {
 
 | # | 项 | 位置 | 建议 |
 |---|---|---|---|
-| 1 | bridge 无缺口检测与重连上限，README:481 的承诺不成立 | `desktop/renderer/bridge.js` | 补 `seq > lastSeq + 1` 缺口检测 + 整量重拉（≤3 次）+ 建流失败上限（≤3 次）；或修正 README 措辞 |
-| 2 | 浏览器形态的 `setMode` 只改本地状态，内核权限预设不变 | `bridge.js` `setMode` | 让 `POST /api/actions` 接受权限预设，或加 `POST /api/permissions` |
-| 3 | 用户选的 `system` 主题在一次启动后被固化为 light/dark | `app.js:5809,4449` | boot 阶段不写回 localStorage，或让 `state.theme` 与存储值解耦 |
+| 1 | ~~bridge 无缺口检测与重连上限~~ **已修（2026-10-21）** | `bridge.js` | `seq > lastSeq + 1` 触发整量重拉（≤3 次）；`stream_error` 从实际游标续接（≤3 次）后明说停止 |
+| 2 | ~~浏览器形态的 `setMode` 只改本地状态~~ **已修（2026-10-21）** | `bridge.js` + `POST /api/actions` | 预设随 prompt 下发，runner 覆盖本次运行；未知值 400 `invalid_mode` |
+| 3 | ~~`system` 主题一次启动后被固化~~ **已修（2026-10-21）** | `app.js` `setTheme` / boot | `setTheme(theme, {remember:false})`：推导值不写回存储 |
 | 4 | 图标按钮用 `title` 而非 `aria-label` 承载可访问名 | `index.html` 大量 `data-i18n-title` | 补 `aria-label`，与 i18n 键一起补 |
 | 5 | 工具注解 `readOnly` / `evidence` / `destructive` 未被 UI 消费 | `app.js` `addToolRow` | 按 §8.7 落实语义标记 |
 | 6 | 视觉验收无自动化守护 | —— | 旧 `scripts/verify-ui.mjs` 已随 `src/ui` 删除；按 §12 新清单重写 |
 | 7 | `vite` 是死依赖 | `package.json` devDependencies | 移除（`vitest` 自带所需版本） |
 | 8 | 阶段 4 交互层（回放 / 导出 / 设备控制）未落地 | `docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` §7-§9 | 该 spec 的 §7-§9 依赖已删除的 `src/ui`（12 文件、约 30 个导出符号），需按本前端重写；详见 D-166 |
+| 9 | MCP / 权限规则 / 运行参数（systemPrompt、maxTurns、maxCostUsd、timeoutMs）无前端入口，只能手编配置文件 | 内核 + settings | 见 `docs/deferred-issues.md` D-169；这是「开箱可用」的主要缺口 |
+| 10 | 串口监视器已从工作台移除（只剩 Board tab） | `index.html` 工作台 | `serialOpen`/`serialStatus`/`serialRead` 无宿主实现，内核只经 MCP 工具暴露串口；探针的串口状态在板卡面板「设备」段显示。恢复需要先给内核补串口命令 |
 
 ---
 

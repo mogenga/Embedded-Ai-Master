@@ -2876,6 +2876,18 @@ mark.find-hit.current {
   overflow-wrap: anywhere;
 }
 
+/* How long is left to answer. The kernel denies on its own when the deadline
+   passes, so a bar with no clock looks like it waits forever. */
+.pending-deadline {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.pending-deadline.expiring {
+  color: var(--warn);
+}
+
 /* The change an approval is about. Same governed lines as the diff pane,
    capped so the question and its buttons stay on screen. */
 .pending-diff {
@@ -2913,6 +2925,25 @@ mark.find-hit.current {
   padding: 2px 8px;
   color: var(--text-faint);
   font-size: var(--text-xs);
+}
+
+/* Kernel approval requests carry the call's arguments, not a computed diff.
+   One row per argument, value column aligned so addresses line up. */
+.pending-param {
+  display: grid;
+  grid-template-columns: minmax(80px, auto) 1fr;
+  gap: 8px;
+  padding: 1px 8px;
+}
+
+.pending-param-key {
+  color: var(--text-faint);
+}
+
+.pending-param-value {
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .pending-actions {

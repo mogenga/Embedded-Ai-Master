@@ -116,7 +116,12 @@ describe("bridge: prompt", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const posted = fetchImpl.calls.find((call) => call.url === "/api/actions");
-    expect(JSON.parse(posted.body)).toStrictEqual({ text: "串口没输出" });
+    // The permission preset travels with the prompt: the server applies it to
+    // this run, so the mode menu is not a label-only control.
+    expect(JSON.parse(posted.body)).toStrictEqual({
+      text: "串口没输出",
+      mode: "diagnose",
+    });
     expect(events.some((event) => event.type === "run_start")).toBe(true);
     // 提交时 renderer 已经画过用户消息；这里若再发 session_loaded 会把它清空。
     expect(events.some((event) => event.type === "session_loaded")).toBe(false);
@@ -147,7 +152,43 @@ describe("bridge: prompt", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     const posted = fetchImpl.calls.find((call) => call.url === "/api/actions");
-    expect(JSON.parse(posted.body)).toStrictEqual({ text: "继续", sessionId: "sess-1" });
+    expect(JSON.parse(posted.body)).toStrictEqual({
+      text: "继续",
+      sessionId: "sess-1",
+      mode: "diagnose",
+    });
+    // The stream resumes after what the loaded transcript already showed. At
+    // -1 the server would replay the whole log into a transcript the user was
+    // already reading, so every follow-up redrew the conversation.
+    expect(FakeEventSource.instances.at(-1).url).toBe("/api/events?sessionId=sess-1&since=0");
+  });
+
+  it("setMode 随下一条 prompt 下发内核，运行中拒绝切换", async () => {
+    const fetchImpl = fakeFetch([
+      ["/api/actions", () => jsonResponse({ sessionId: "sess-1", created: true }, 202)],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "setMode", mode: "read-only" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    bridge.api.send({ cmd: "prompt", text: "读一下" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const posted = fetchImpl.calls.find((call) => call.url === "/api/actions");
+    expect(JSON.parse(posted.body)).toStrictEqual({ text: "读一下", mode: "read-only" });
+
+    // A second message while the first is still running must not change the
+    // preset the operator already approved.
+    bridge.api.send({ cmd: "setMode", mode: "danger-full-access" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(events.some((event) => event.type === "notice" && event.text.includes("运行中"))).toBe(true);
   });
 
   it("POST 失败时上报 error + run_end，不留下忙碌状态", async () => {
@@ -259,6 +300,78 @@ describe("bridge: SSE 折返", () => {
       sessionId: "sess-2",
     });
     expect(events).toHaveLength(before);
+  });
+
+  it("序号出现缺口时整量重拉，不把两段状态接在一起", async () => {
+    const fetchImpl = fakeFetch([
+      ["/api/actions", () => jsonResponse({ sessionId: "sess-1", created: true }, 202)],
+      ["/api/sessions/sess-1", () =>
+        jsonResponse({
+          header: { id: "sess-1", workdir: "E:/w", status: "open" },
+          events: [
+            { seq: 0, ts: "t", type: "user", payload: { content: "hi" } },
+            { seq: 1, ts: "t", type: "assistant", payload: { content: "a", toolCalls: [] } },
+            { seq: 2, ts: "t", type: "assistant", payload: { content: "b", toolCalls: [] } },
+          ],
+        })],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "prompt", text: "hi" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const source = FakeEventSource.instances[0];
+    source.dispatch("message", { seq: 0, ts: "t", type: "assistant", payload: { content: "a", toolCalls: [] }, sessionId: "sess-1" });
+    // seq 1 is missing: appending seq 2 would splice two non-adjacent states.
+    source.dispatch("message", { seq: 2, ts: "t", type: "assistant", payload: { content: "b", toolCalls: [] }, sessionId: "sess-1" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const notice = events.find((event) => event.type === "notice" && event.text.includes("缺口"));
+    expect(notice).toBeDefined();
+    const reloaded = events.filter((event) => event.type === "session_loaded").at(-1);
+    expect(reloaded).toBeDefined();
+    expect(reloaded.messages.map((message) => message.text)).toStrictEqual(["hi", "a", "b"]);
+    // The stale stream is gone and the cursor restarts after the reloaded log.
+    expect(source.closed).toBe(true);
+    expect(FakeEventSource.instances.at(-1).url).toBe("/api/events?sessionId=sess-1&since=2");
+  });
+
+  it("stream_error 从当前游标续接，次数用尽后明确报错", async () => {
+    const fetchImpl = fakeFetch([
+      ["/api/actions", () => jsonResponse({ sessionId: "sess-1", created: true }, 202)],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "prompt", text: "hi" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    FakeEventSource.instances[0].dispatch("message", { seq: 0, ts: "t", type: "assistant", payload: { content: "a", toolCalls: [] }, sessionId: "sess-1" });
+    FakeEventSource.instances[0].dispatch("stream_error", { code: "slow_consumer", lastSeq: 0 });
+    // Re-opened from the cursor the client actually reached.
+    expect(FakeEventSource.instances).toHaveLength(2);
+    expect(FakeEventSource.instances[1].url).toBe("/api/events?sessionId=sess-1&since=0");
+
+    // Three reopens, then the fourth failure stops and says so.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      FakeEventSource.instances.at(-1).dispatch("stream_error", { code: "internal_error", lastSeq: 0 });
+    }
+    expect(FakeEventSource.instances).toHaveLength(4);
+    expect(events.some((event) => event.type === "notice" && event.text.includes("已停止重试"))).toBe(true);
+    expect(events.filter((event) => event.type === "run_end")).toHaveLength(1);
   });
 });
 

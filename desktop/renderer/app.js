@@ -98,7 +98,7 @@ const state = {
   // Only board and serial have a kernel backend. The other panes' markup is
   // still in the document (their tabs are not), so an old saved pane must not
   // be restored into a view nothing can fill.
-  pane: ["board", "serial"].includes(savedPane) ? savedPane : "board",
+  pane: ["board"].includes(savedPane) ? savedPane : "board",
   git: null,
   worktree: null,
   worktreeDiffText: "",
@@ -123,6 +123,9 @@ const state = {
   board: { selection: {}, projectKind: "unknown" },
   /** The last assembled board state (project, then inventory). */
   boardState: null,
+  /** The probe's own report from the last `device_status` event. */
+  device: null,
+  deviceTool: "",
   /** Whether the target table has been loaded, and the status that follows. */
   boardTargetStatus: { kind: "unloaded", candidates: [], total: 0 },
   boardSuggested: [],
@@ -594,7 +597,7 @@ function addToolRow(name, summary) {
   const paneForTool = EMBED_TOOL_PANES[name];
   if (paneForTool) {
     row.classList.add("openable");
-    row.title = paneForTool === "board" ? t.boardOpenPane : t.paneSerial;
+    row.title = t.boardOpenPane;
     row.addEventListener("click", (event) => {
       if (event.target.closest(".tool-expand")) return;
       openWorkbench(paneForTool);
@@ -664,9 +667,11 @@ function attachInlineDiff(row, change) {
 const FILE_TOOLS = new Set(["fs", "read_file", "write_file", "edit_file"]);
 /** Rows that lead somewhere: the pane showing the same facts, in full. */
 const EMBED_TOOL_PANES = {
-  mcp__probe__serial_read: "serial",
-  mcp__probe__serial_status: "serial",
-  mcp__probe__serial_open: "serial",
+  // Serial tools report state the board pane's Device section shows; they do
+  // not open a serial console (there is none).
+  mcp__probe__serial_read: "board",
+  mcp__probe__serial_status: "board",
+  mcp__probe__serial_open: "board",
   mcp__probe__device_status: "board",
   mcp__probe__attach: "board",
   mcp__probe__device_list: "board",
@@ -1279,18 +1284,29 @@ function formatTokens(n) {
  * The composer meter is the session's token accounting: how full the context
  * window is, and what the conversation has spent so far. Clicking it opens the
  * breakdown instead of hiding the numbers in a tooltip.
+ *
+ * `usage` events are per model call, not per session — a tool-using turn writes
+ * several. The popover's label says "this session", so a state event's running
+ * total replaces the numbers while a live `usage` event adds to them.
  */
-function updateMeter(context, usage) {
+function updateMeter(context, usage, { replace = false } = {}) {
   if (context) {
     state.context = { tokens: context.tokens ?? 0, percent: Math.min(100, Math.round(context.percent ?? 0)) };
     contextLabel.textContent = `${state.context.percent}%`;
   }
   if (usage) {
-    state.usage = {
-      inputTokens: usage.inputTokens ?? 0,
-      outputTokens: usage.outputTokens ?? 0,
-      cachedTokens: usage.cachedTokens ?? 0,
+    const add = {
+      inputTokens: Number(usage.inputTokens) || 0,
+      outputTokens: Number(usage.outputTokens) || 0,
+      cachedTokens: Number(usage.cachedTokens) || 0,
     };
+    state.usage = replace
+      ? add
+      : {
+          inputTokens: state.usage.inputTokens + add.inputTokens,
+          outputTokens: state.usage.outputTokens + add.outputTokens,
+          cachedTokens: state.usage.cachedTokens + add.cachedTokens,
+        };
     // The bar under the composer used to carry the running spend; the bottom
     // row now shows the model and its context window instead, and the spend
     // lives in the popover this chip opens.
@@ -1702,11 +1718,24 @@ function handleEvent(message) {
       }
       state.cwd = message.cwd;
       renderTopbarLocation();
-      updateMeter(message.context, message.usage);
+      // A state event carries session-level totals: replace, never add.
+      updateMeter(message.context, message.usage, { replace: true });
       break;
 
     case "board_state":
       setBoardState(message);
+      break;
+
+    case "device_status":
+      // The probe's report. Kept apart from `board` so a device answer never
+      // erases the (empty, but present) board shape the pane renders.
+      state.device = message.device ?? null;
+      state.deviceTool = message.tool ?? "";
+      if (state.device) {
+        $("board-control").hidden = false;
+        renderBoardChip();
+        if (state.pane === "board" && !workbench.hidden) renderBoard();
+      }
       break;
 
     case "board_targets": {
@@ -2236,6 +2265,7 @@ function handleEvent(message) {
       // The allow/always/deny buttons belong to a permission prompt; a
       // question has its own options and no "allow" to give.
       pendingPermission.querySelectorAll("[data-permission]").forEach((button) => (button.hidden = true));
+      stopPendingDeadline();
       choices.querySelector("button")?.focus();
       notifyIfAway(t.notifyNeedsInput, message.question);
       break;
@@ -2259,6 +2289,7 @@ function handleEvent(message) {
       choices.hidden = false;
       pendingPermission.hidden = false;
       pendingPermission.querySelectorAll("[data-permission]").forEach((button) => (button.hidden = true));
+      stopPendingDeadline();
       choices.querySelector("button")?.focus();
       break;
     }
@@ -2267,6 +2298,7 @@ function handleEvent(message) {
       state.pendingPermissionId = message.id;
       pendingQuestion.textContent = message.question;
       renderPendingDiff(message.detail);
+      startPendingDeadline(message.detail?.deadlineAt);
       $("pending-choices").hidden = true;
       $("pending-choices").innerHTML = "";
       // "Always allow" stays hidden: the kernel approves one request at a time
@@ -2287,6 +2319,7 @@ function handleEvent(message) {
         state.pendingPermissionId = null;
         pendingPermission.hidden = true;
         $("pending-choices").hidden = true;
+        stopPendingDeadline();
       }
       break;
 
@@ -2303,13 +2336,16 @@ function handleEvent(message) {
 
     case "compacted":
       // A visible seam in the transcript: earlier turns were summarised here.
-      // The kernel does not report token counts for compaction, so the title
-      // is only built when both figures exist rather than printing NaN.
+      // The kernel reports no token counts for a summary compaction, so the
+      // title falls back to the last event the summary covers — a real number
+      // — instead of pretending the sequence number is a token count.
       addNode(
         `<div class="compact-marker"${
-          Number.isFinite(message.before) && Number.isFinite(message.after)
+          message.before > 0 && message.after > 0
             ? ` title="${escapeHtml(t.compactedDetail(message.before, message.after))}"`
-            : ""
+            : message.coversUpToSeq !== undefined
+              ? ` title="${escapeHtml(t.compactedSummary(message.coversUpToSeq))}"`
+              : ""
         }>` +
           `<span class="compact-line"></span>` +
           `<span class="compact-label">${escapeHtml(t.compactedLabel(message.removed, message.level))}</span>` +
@@ -2470,6 +2506,8 @@ function handleEvent(message) {
       if (message.effort && message.effort !== state.effort) {
         setEffort(message.effort);
       }
+      // The transcript was replaced with this session's; so was its spend.
+      if (message.usage) updateMeter(null, message.usage, { replace: true });
       target
         .querySelectorAll(".turn, .tool-row, .tool-group, .tool-item, .tool-output, .notice, .plan, .thinking, .subagent, .compact-marker")
         .forEach((node) => node.remove());
@@ -2647,8 +2685,15 @@ function renderSubagents() {
 
 /* ---------- workbench: diff, file, tree, checkpoints ---------- */
 
-/** Panes with a backend in this kernel. Everything else is unreachable. */
-const SUPPORTED_PANES = new Set(["board", "serial"]);
+/**
+ * Panes with a backend in this kernel. Everything else is unreachable.
+ *
+ * The serial monitor is not here: its commands (`serialOpen`/`serialRead`/…)
+ * have no host implementation, so the tab was removed rather than left as a
+ * pane whose Start button answers "unsupported". The probe's serial state is
+ * visible as a field in the board pane's Device section.
+ */
+const SUPPORTED_PANES = new Set(["board"]);
 
 function openWorkbench(pane) {
   if (pane !== undefined && !SUPPORTED_PANES.has(pane)) {
@@ -2960,7 +3005,11 @@ function renderBoard() {
   const body = $("board-body");
   const board = state.boardState;
   if (!board) {
-    body.innerHTML = `<div class="board-empty">${escapeHtml(t.boardLoading)}</div>`;
+    // No workspace scanner in this kernel. "Reading the workspace…" would
+    // never finish; what is true is whether a probe has reported at all.
+    body.innerHTML = state.device
+      ? deviceSectionHtml()
+      : `<div class="board-empty">${escapeHtml(t.boardNoDevice)}</div>`;
     return;
   }
 
@@ -3090,6 +3139,7 @@ function renderBoard() {
     parts.push(`</div>`);
   }
 
+  if (state.device) parts.unshift(deviceSectionHtml());
   body.innerHTML = parts.join("");
   body.querySelectorAll("[data-target]").forEach((button) => {
     button.addEventListener("click", () => saveBoardSelection({ target: button.dataset.target }));
@@ -3158,6 +3208,43 @@ function setBoardState(message) {
   renderBoardChip();
 }
 
+/**
+ * The probe's own report, as a section.
+ *
+ * This kernel has no workspace scanner: the only device facts come from the
+ * probe MCP, which answers `{ backend, probe, cpu, serial }` after a tool call.
+ * Rendering them under their own heading keeps them distinct from the target
+ * and port fields no tool fills in.
+ */
+function deviceSectionHtml() {
+  const device = state.device;
+  if (!device) return "";
+  const rows = [];
+  const labels = {
+    backend: t.boardDeviceBackend,
+    probe: t.boardDeviceProbe,
+    cpu: t.boardDeviceCpu,
+    serial: t.boardDeviceSerial,
+  };
+  for (const [key, label] of Object.entries(labels)) {
+    const value = device[key];
+    if (value === undefined) continue;
+    const bad = value === "detached" || value === "unknown" || value === "none";
+    rows.push(
+      `<div class="board-row"><span class="board-label">${escapeHtml(label)}</span>` +
+        `<span class="board-value${bad ? " warn" : ""}">${escapeHtml(String(value))}</span></div>`,
+    );
+  }
+  if (rows.length === 0) return "";
+  const source = state.deviceTool ? `<div class="board-note">${escapeHtml(t.boardDeviceFrom(state.deviceTool))}</div>` : "";
+  return (
+    `<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardDevice)}</div>` +
+    rows.join("") +
+    source +
+    `</div>`
+  );
+}
+
 /* ---------- board chip in the composer ---------- */
 
 /** Hidden until there is something to say: a web project gets no extra chip. */
@@ -3171,13 +3258,23 @@ function renderBoardChip() {
   const target = effective.target;
   const projectKind = state.board.projectKind ?? "unknown";
   const hasPorts = (state.boardState?.ports ?? []).length > 0;
-  const relevant = Boolean(effective.port || target) || projectKind !== "unknown" || hasPorts;
+  // The probe's answer is also something to say: with no scanner in this
+  // kernel, `device` is the only live reading the chip can carry.
+  const device = state.device;
+  const relevant =
+    Boolean(effective.port || target) || projectKind !== "unknown" || hasPorts || Boolean(device);
   control.hidden = !relevant;
   if (!relevant) return;
 
   const parts = [];
   if (target) parts.push(target);
   if (effective.port) parts.push(effective.port);
+  // Nothing named yet, but the probe answered: show its state rather than an
+  // empty "not set" chip next to a visible device report.
+  if (parts.length === 0 && device) {
+    if (typeof device.backend === "string" && device.backend !== "none") parts.push(device.backend);
+    if (typeof device.probe === "string") parts.push(device.probe);
+  }
   // This node carries no data-i18n on purpose: the locale sweep would overwrite
   // it with placeholder text. Same reason as the model id label.
   $("board-chip-value").textContent = parts.join(" · ") || t.boardChipNone;
@@ -4442,11 +4539,19 @@ function applyCodeFont(font) {
   localStorage.setItem("prometheus.codeFont", String(font ?? ""));
 }
 
-function setTheme(theme) {
+/**
+ * Apply a theme choice.
+ *
+ * `remember: false` is for values that were *derived*, not chosen: boot
+ * resolves "follow the system" to light/dark for the first paint, and writing
+ * that resolution back to storage turned the choice into a fixed theme after
+ * one launch.
+ */
+function setTheme(theme, { remember = true } = {}) {
   state.theme = theme;
   syncMenuControls();
   document.documentElement.dataset.theme = resolvedTheme(theme);
-  localStorage.setItem("prometheus.theme", theme);
+  if (remember) localStorage.setItem("prometheus.theme", theme);
 }
 
 /* ---------- composer ---------- */
@@ -4920,7 +5025,6 @@ function paletteEntries() {
     { label: t.shortcutShortcuts, run: openShortcuts },
     { label: t.toggleSidebar, run: toggleSidebar },
     { label: t.paneBoard, run: () => openWorkbench("board") },
-    { label: t.paneSerial, run: () => openWorkbench("serial") },
     { label: t.shortcutFind, run: openFind },
     ...MODES.map((mode) => ({
       label: modeCopy(mode).label,
@@ -5026,18 +5130,27 @@ transcriptScroll.addEventListener("scroll", updateScrollButton);
 $("scroll-bottom").addEventListener("click", () => scrollToBottom(true));
 
 /**
- * The change a permission prompt is about.
+ * What a permission prompt is about.
  *
  * Approving `edit_file: src/app.ts` while seeing only the path is a rubber
- * stamp. The host sends the before/after it computed from the same matching
- * the edit will run, and this renders the changed lines with a little context,
- * capped so the question and its buttons stay visible.
+ * stamp. Two shapes reach here:
+ *
+ *   - a host that computed the change sends `before`/`after`; those lines are
+ *     rendered as a diff;
+ *   - the kernel's own approval request carries `paramsPreview` — the call's
+ *     arguments, already summarised and truncated. Without it the bar showed
+ *     an empty box, and the operator approved a write they could not read
+ *     (R2: declare before writing).
  */
 function renderPendingDiff(detail) {
   const box = $("pending-diff");
   box.innerHTML = "";
   if (!detail || typeof detail !== "object") {
     box.hidden = true;
+    return;
+  }
+  if (detail.before === undefined && detail.after === undefined) {
+    renderPendingParams(box, detail);
     return;
   }
   const older = String(detail.before ?? "").split("\n");
@@ -5091,11 +5204,113 @@ function renderPendingDiff(detail) {
   box.hidden = rows.length === 0;
 }
 
+/** Readable text for one argument value; objects are JSON, never `[object]`. */
+function previewValue(value) {
+  if (value === null || value === undefined) return "—";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "object") {
+    const shape = value;
+    if (typeof shape.type === "string" && typeof shape.size === "number") {
+      // The kernel summarises arrays/objects by shape rather than content.
+      return `${shape.type}(${shape.size})`;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
+/**
+ * The arguments a kernel approval request carries.
+ *
+ * Rendered as `key = value` rows so the operator can see the address and the
+ * value about to be written — the declaration R2 asks for.
+ */
+function renderPendingParams(box, detail) {
+  const preview = detail.paramsPreview;
+  const rows = [];
+  if (preview && typeof preview === "object" && !Array.isArray(preview)) {
+    for (const [key, value] of Object.entries(preview)) {
+      if (key === "previewTruncated") continue;
+      rows.push({ key, value: previewValue(value) });
+    }
+  }
+  if (rows.length === 0) {
+    box.hidden = true;
+    return;
+  }
+  const truncated = preview.previewTruncated === true;
+  for (const row of rows) {
+    const node = document.createElement("div");
+    node.className = "pending-param";
+    const key = document.createElement("span");
+    key.className = "pending-param-key";
+    key.textContent = row.key;
+    const value = document.createElement("span");
+    value.className = "pending-param-value";
+    value.textContent = row.value;
+    node.append(key, value);
+    box.appendChild(node);
+  }
+  if (truncated) {
+    const more = document.createElement("div");
+    more.className = "pending-diff-more";
+    more.textContent = t.pendingParamsTruncated;
+    box.appendChild(more);
+  }
+  box.hidden = false;
+}
+
+/**
+ * The clock on the approval bar.
+ *
+ * The kernel denies the request when its deadline passes and writes the
+ * decision to the log; without a visible countdown the bar looks like it will
+ * wait for as long as the operator takes, and the request silently dies.
+ */
+let pendingDeadlineTimer = null;
+
+function stopPendingDeadline() {
+  if (pendingDeadlineTimer !== null) {
+    clearInterval(pendingDeadlineTimer);
+    pendingDeadlineTimer = null;
+  }
+  const node = $("pending-deadline");
+  if (node) node.hidden = true;
+}
+
+function startPendingDeadline(deadlineAt) {
+  stopPendingDeadline();
+  const node = $("pending-deadline");
+  if (!node) return;
+  const deadline = Date.parse(String(deadlineAt ?? ""));
+  if (!Number.isFinite(deadline)) return;
+  const tick = () => {
+    const left = Math.ceil((deadline - Date.now()) / 1000);
+    if (left <= 0) {
+      // The decision event closes the bar; until it lands, say what is true.
+      node.textContent = t.pendingExpires(0);
+      node.classList.add("expiring");
+      return;
+    }
+    node.textContent = t.pendingExpires(left);
+    node.classList.toggle("expiring", left <= 10);
+  };
+  tick();
+  node.hidden = false;
+  pendingDeadlineTimer = setInterval(tick, 1000);
+}
+
 function answerPermission(answer) {  if (state.pendingPermissionId == null) return;
   api.send({ cmd: "permission", id: state.pendingPermissionId, answer });
   state.pendingPermissionId = null;
   pendingPermission.hidden = true;
   $("pending-choices").hidden = true;
+  stopPendingDeadline();
   input.focus();
 }
 
@@ -5806,10 +6021,11 @@ bootStep("locale", () => applyLocale(state.locale));
 bootStep("mode", () => setMode(state.mode));
 // Preferences are restored from localStorage so the first paint is already
 // correct; the host's copy is authoritative once it answers getSettings.
-if (localStorage.getItem("prometheus.theme") === "system" || !localStorage.getItem("prometheus.theme")) {
-  state.theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
-}
-bootStep("theme", () => setTheme(state.theme));
+// No stored choice means "follow the system". The choice itself is kept, not
+// its resolution: `setTheme` resolves at paint time and re-resolves when the OS
+// flips, so writing light/dark here would freeze the preference on first launch.
+if (!localStorage.getItem("prometheus.theme")) state.theme = "system";
+bootStep("theme", () => setTheme(state.theme, { remember: false }));
 bootStep("density", () => setDensity(state.density));
 bootStep("width", () => {
   document.documentElement.dataset.width = localStorage.getItem("prometheus.width") || "standard";

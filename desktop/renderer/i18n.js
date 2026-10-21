@@ -75,6 +75,11 @@ export const dictionaries = {
     rewindHere: "Rewind to here",
     compactedLabel: (removed, level) => `context compacted · ${removed} earlier message${removed === 1 ? "" : "s"} (${level})`,
     compactedDetail: (before, after) => `About ${before} tokens summarized into ${after}`,
+    compactedSummary: (seq) => `Earlier context compacted (through event ${seq})`,
+
+    /** Approval bar: the call's arguments, and how long is left to answer. */
+    pendingParamsTruncated: "more arguments not shown",
+    pendingExpires: (seconds) => `expires in ${seconds}s`,
 
     rewindTitle: "Undo this turn and every turn after it, restoring the files it changed",
     rewindConfirm: "Rewind to this message? Later turns are dropped and the files they changed are restored.",
@@ -235,6 +240,13 @@ export const dictionaries = {
     boardBuildOk: "succeeded",
     boardBuildFailed: "failed",
     boardFromBuild: "From the most recent embed_build in this session",
+    boardDevice: "Device",
+    boardDeviceBackend: "Backend",
+    boardDeviceProbe: "Probe",
+    boardDeviceCpu: "CPU",
+    boardDeviceSerial: "Serial",
+    boardDeviceFrom: (tool) => `Reported by ${tool}`,
+    boardNoDevice: "No device has reported yet",
     boardChipLabel: "Board",
     boardChipNone: "select a port",
     boardOpenPane: "Open Board pane",
@@ -535,6 +547,11 @@ export const dictionaries = {
     rewindHere: "回退到这里",
     compactedLabel: (removed, level) => `上下文已压缩 · 早先 ${removed} 条消息（${level}）`,
     compactedDetail: (before, after) => `约 ${before} tokens 被总结为 ${after}`,
+    compactedSummary: (seq) => `早先上下文已压缩（截至事件 ${seq}）`,
+
+    /** 审批条：这次调用的参数，以及还剩多久。 */
+    pendingParamsTruncated: "其余参数未显示",
+    pendingExpires: (seconds) => `${seconds} 秒后超时`,
 
     rewindTitle: "撤销这一轮及其之后的所有轮次，并恢复被改动的文件",
     rewindConfirm: "回退到这条消息？之后的对话会被删除，相关文件改动会恢复。",
@@ -694,6 +711,13 @@ export const dictionaries = {
     boardBuildOk: "成功",
     boardBuildFailed: "失败",
     boardFromBuild: "来自本会话最近一次 embed_build",
+    boardDevice: "设备",
+    boardDeviceBackend: "后端",
+    boardDeviceProbe: "探针",
+    boardDeviceCpu: "CPU",
+    boardDeviceSerial: "串口",
+    boardDeviceFrom: (tool) => `由 ${tool} 报告`,
+    boardNoDevice: "还没有设备上报",
     boardChipLabel: "目标板",
     boardChipNone: "选择串口",
     boardOpenPane: "打开目标板面板",

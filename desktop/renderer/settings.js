@@ -2019,27 +2019,39 @@ function renderRules(rules) {
   }
 }
 
-/** The host answered getSettings; refill the open page. */
+/**
+ * The host answered getSettings; refill the open page.
+ *
+ * Only the keys the host actually sent are applied. The kernel has no
+ * preference store — a host that does not keep UI state used to answer with
+ * placeholder values (`theme: "dark"`, `fontScale: 1`), and applying those
+ * turned "open Settings" into "reset every display preference".
+ */
 function fillSettings(settings) {
   state.settings = settings;
   state.providers = settings.providers || [];
   state.provider = settings.provider || "custom";
   if (settings.locale) state.locale = settings.locale;
-  // The host's copy is authoritative: apply it so a preference edited in
-  // another window (or before a restart) lands here too.
-  applyUiPreference("theme", settings.theme ?? "dark");
-  applyUiPreference("density", settings.density ?? "balanced");
-  applyUiPreference("fontScale", settings.fontScale ?? 1);
-  applyUiPreference("transcriptWidth", settings.transcriptWidth ?? "standard");
-  applyUiPreference("transcriptView", settings.transcriptView ?? "normal");
-  applyUiPreference("reduceMotion", Boolean(settings.reduceMotion));
-  applyUiPreference("codeFont", settings.codeFont ?? "");
-  state.notifications = settings.notifications !== false;
-  state.keepAwake = Boolean(settings.keepAwake);
-  state.branchPrefix = settings.branchPrefix ?? "prometheus/";
-  state.outputStyle = settings.outputStyle ?? "default";
-  state.archiveAfterDays = settings.archiveAfterDays ?? 0;
-  state.sandbox = settings.sandbox === "off" ? "off" : "enforce";
+  const prefs = [
+    ["theme", "theme"],
+    ["density", "density"],
+    ["fontScale", "fontScale"],
+    ["transcriptWidth", "transcriptWidth"],
+    ["transcriptView", "transcriptView"],
+    ["reduceMotion", "reduceMotion"],
+    ["codeFont", "codeFont"],
+  ];
+  for (const [key, field] of prefs) {
+    const value = settings[field];
+    if (value === undefined || value === null) continue;
+    applyUiPreference(key, value);
+  }
+  if (settings.notifications !== undefined) state.notifications = settings.notifications !== false;
+  if (settings.keepAwake !== undefined) state.keepAwake = Boolean(settings.keepAwake);
+  if (settings.branchPrefix !== undefined) state.branchPrefix = settings.branchPrefix;
+  if (settings.outputStyle !== undefined) state.outputStyle = settings.outputStyle;
+  if (settings.archiveAfterDays !== undefined) state.archiveAfterDays = settings.archiveAfterDays;
+  if (settings.sandbox !== undefined) state.sandbox = settings.sandbox === "off" ? "off" : "enforce";
   // The WSL answer arrives with the settings payload so the row can state the
   // truth ("Ubuntu is available") instead of offering a switch with no visible
   // effect.

@@ -88,6 +88,8 @@ export function createBrowserBridge(options = {}) {
   let locale = "zh";
   /** id → title, filled from session headers when the list is built. */
   const titles = new Map();
+  /** The rows last sent to the sidebar; `searchSessions` filters over these. */
+  let lastSessions = [];
   let ctx = createContext();
 
   function emit(message) {
@@ -136,6 +138,14 @@ export function createBrowserBridge(options = {}) {
 
   let stateMode = "diagnose";
 
+  /**
+   * Switch the open session and start its translation cursor after `events`.
+   *
+   * `lastSeq` is the bridge's own bookmark of what it has already handed to
+   * the renderer. For a session that was just loaded from disk it is the last
+   * event in the log — starting at -1 there would replay the whole transcript
+   * the next time the stream opened.
+   */
   function adoptSession(id, events) {
     currentSessionId = id;
     lastSeq = -1;
@@ -143,7 +153,12 @@ export function createBrowserBridge(options = {}) {
       if (isRecord(event) && typeof event.seq === "number" && event.seq > lastSeq) lastSeq = event.seq;
     }
     ctx = createContext({ sessionId: id });
+    ctx.lastSeq = lastSeq;
   }
+
+  /** How many times one run may re-open the stream or rebuild from disk. */
+  const MAX_STREAM_REOPENS = 3;
+  const MAX_RELOADS = 3;
 
   function openStream(since) {
     if (currentSessionId === "") return;
@@ -169,7 +184,16 @@ export function createBrowserBridge(options = {}) {
         return;
       }
       if (!isRecord(parsed) || parsed.sessionId !== id) return;
+      // A gap means events between our cursor and this one never reached the
+      // renderer; appending what follows would splice two non-adjacent states
+      // together. Rebuild the transcript from the log instead of guessing.
+      const seq = typeof parsed.seq === "number" ? parsed.seq : undefined;
+      if (seq !== undefined && seq > ctx.lastSeq + 1 && ctx.lastSeq >= 0) {
+        void reloadAfterGap(id);
+        return;
+      }
       emitAll(sessionEventToHostEvents(parsed, ctx));
+      lastSeq = ctx.lastSeq;
     });
     source.addEventListener("stream_end", () => {
       if (stream !== source) return;
@@ -190,17 +214,80 @@ export function createBrowserBridge(options = {}) {
       } catch {
         // The frame is advisory; the notice below still says what happened.
       }
+      // `slow_consumer` is the server telling us to reload; anything else is a
+      // broken read. Both are recoverable up to a bounded number of attempts.
+      closeStream();
+      if (attemptReopen(code)) return;
       emit({
         type: "notice",
         level: "warn",
-        text: code === "" ? "实时事件流中断" : `实时事件流中断（${code}）`,
+        text: code === "" ? "实时事件流中断" : `实时事件流中断（${code}），已停止重试`,
       });
-      closeStream();
       if (ctx.running) {
         ctx.running = false;
         emit({ type: "run_end" });
       }
     });
+  }
+
+  let streamReopens = 0;
+  let gapReloads = 0;
+
+  /** Re-open the stream from the current cursor. False when out of attempts. */
+  function attemptReopen(code) {
+    if (typeof EventSourceCtor !== "function") return false;
+    if (streamReopens >= MAX_STREAM_REOPENS) return false;
+    streamReopens += 1;
+    emit({
+      type: "notice",
+      level: "dim",
+      text: `实时事件流中断（${code === "" ? "连接断开" : code}），正在从第 ${lastSeq + 1} 条续接`,
+    });
+    openStream(lastSeq);
+    return true;
+  }
+
+  /**
+   * Rebuild the open conversation from the log after a gap.
+   *
+   * The renderer replaces its transcript with `session_loaded`, so the result
+   * is a coherent view of what actually happened rather than a splice. Bounded:
+   * a session that keeps gapping is reported instead of retried forever.
+   */
+  async function reloadAfterGap(id) {
+    if (gapReloads >= MAX_RELOADS) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `事件流出现缺口，已重试 ${MAX_RELOADS} 次仍未补齐`,
+      });
+      return;
+    }
+    gapReloads += 1;
+    closeStream();
+    emit({ type: "notice", level: "dim", text: "事件流出现缺口，正在重新读取会话" });
+    const wasRunning = ctx.running;
+    try {
+      const response = await fetchImpl(`/api/sessions/${encodeURIComponent(id)}`);
+      if (!response.ok) throw new Error(await readError(response));
+      const body = await response.json();
+      const events = isRecord(body) && Array.isArray(body.events) ? body.events : [];
+      const header = isRecord(body) && isRecord(body.header) ? body.header : {};
+      adoptSession(id, events);
+      // `adoptSession` builds a fresh context; the turn is still in flight.
+      ctx.running = wasRunning;
+      emit(sessionLoadedEvent(events, { cwd: textOf(header.workdir), mode: stateMode }));
+      emit(stateEvent());
+    } catch (error) {
+      ctx.running = wasRunning;
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `缺口重读失败：${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    if (wasRunning) openStream(lastSeq);
   }
 
   async function refreshSessions() {
@@ -254,6 +341,7 @@ export function createBrowserBridge(options = {}) {
         ...session,
         status: session.id === runningSessionId ? "working" : "ready",
       }));
+      lastSessions = event.sessions;
       emit(event);
     } catch (error) {
       emit({
@@ -269,7 +357,16 @@ export function createBrowserBridge(options = {}) {
       emit({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
       return;
     }
+    // The cursor this turn starts from: everything the renderer already shows.
+    // A brand-new conversation has nothing yet (-1); continuing one resumes
+    // after its last event. Opening the stream at -1 for a continued session
+    // re-translated the whole log into a transcript the user was already
+    // reading, so every follow-up redrew the conversation from the top.
+    const since = lastSeq;
+    streamReopens = 0;
+    gapReloads = 0;
     ctx = createContext({ sessionId: currentSessionId });
+    ctx.lastSeq = since;
     ctx.running = true;
     emit({ type: "run_start" });
     let response;
@@ -280,6 +377,9 @@ export function createBrowserBridge(options = {}) {
         body: JSON.stringify({
           text,
           ...(currentSessionId === "" ? {} : { sessionId: currentSessionId }),
+          // The permission preset this run executes under. The server refuses
+          // unknown values, so a stale client cannot fall back silently.
+          mode: stateMode,
         }),
       });
     } catch (error) {
@@ -314,13 +414,16 @@ export function createBrowserBridge(options = {}) {
       adoptSession(sessionId, []);
       emit(stateEvent());
     }
-    // adoptSession replaces the protocol context, so the running flag set
-    // before the POST has to be restored — otherwise stream_end would not
-    // know a turn was in flight and would never emit run_end.
+    // `adoptSession` resets the cursor to the log's head; this turn's events
+    // start after `since`, so both the bookmarked seq and the translation
+    // cursor have to be put back. Same for `running`: without it `stream_end`
+    // would not know a turn was in flight and would never emit run_end.
+    lastSeq = since;
+    ctx.lastSeq = since;
     ctx.running = true;
     currentSessionId = sessionId;
     runningSessionId = sessionId;
-    openStream(-1);
+    openStream(since);
     void refreshSessions();
   }
 
@@ -480,32 +583,27 @@ export function createBrowserBridge(options = {}) {
       case "loadSession":
         void loadSession(textOf(payload.id));
         return;
-      case "getSettings":
-        emit({
-          type: "settings",
-          settings: {
-            locale,
-            theme: storage?.getItem("prometheus.theme") ?? "dark",
-            density: storage?.getItem("prometheus.density") ?? "balanced",
-            fontScale: Number(storage?.getItem("prometheus.fontScale") ?? 1),
-            transcriptWidth: storage?.getItem("prometheus.width") ?? "standard",
-            transcriptView: storage?.getItem("prometheus.view") ?? "normal",
-            reduceMotion: storage?.getItem("prometheus.motion") === "reduced",
-            codeFont: storage?.getItem("prometheus.codeFont") ?? "",
-            outputStyle: "default",
-            restartSession: storage?.getItem("prometheus.restartSession") !== "0",
-            suggestions: storage?.getItem("prometheus.suggestions") !== "0",
-            updateCheck: false,
-            isolateByDefault: false,
-            providers: [],
-            models: [],
-            model: lastModel,
-          },
-        });
-        return;
+      case "getSettings": {
+        // Only fields with a real source. Absent keys are left alone by the
+        // renderer; inventing values here reset the user's own preferences.
+        const settings = { locale, providers: [], models: [], model: lastModel };
+        const stored = storage?.getItem("prometheus.theme");
+        if (stored !== null && stored !== undefined) settings.theme = stored;
+        return emit({ type: "settings", settings });
+      }
       case "setMode": {
         const mode = textOf(payload.mode);
         if (["read-only", "workspace-write", "diagnose", "danger-full-access"].includes(mode)) {
+          if (ctx.running) {
+            // Changing the preset mid-run would change what the operator has
+            // already approved for this turn.
+            emit({ type: "notice", level: "warn", text: "运行中不能切换权限模式" });
+            return;
+          }
+          // The mode travels with the next prompt (`POST /api/actions` takes
+          // it), so the kernel's gate runs under the preset the user picked.
+          // Tracking it locally only would leave the menu a control that
+          // changes a label and nothing else.
           stateMode = mode;
           emit(stateEvent());
         }
@@ -535,9 +633,22 @@ export function createBrowserBridge(options = {}) {
       case "getTree":
         emit({ type: "tree", nodes: [] });
         return;
-      case "searchSessions":
-        emit({ type: "session_matches", query: textOf(payload.query), sessions: [] });
+      case "searchSessions": {
+        // The list the bridge already holds is all it can search: the HTTP API
+        // has no query parameter. Filtering here at least matches what the
+        // sidebar shows; answering with `[]` reported "no such conversation"
+        // for a row the user was looking at.
+        const query = textOf(payload.query).trim().toLowerCase();
+        const matches =
+          query === ""
+            ? []
+            : lastSessions.filter((entry) => {
+                const haystack = `${entry.title ?? ""} ${entry.summary ?? ""} ${entry.cwd ?? ""}`;
+                return haystack.toLowerCase().includes(query);
+              });
+        emit({ type: "session_matches", query, sessions: matches });
         return;
+      }
     }
   }
 

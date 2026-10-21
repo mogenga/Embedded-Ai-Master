@@ -247,6 +247,105 @@ describe("desktop host", () => {
     expect(loaded.mode).toBe("diagnose");
   }, HOST_TIMEOUT_MS);
 
+  it("loadSession 容忍日志尾部的半行（崩溃留下的写断点）", async () => {
+    const home = await tempHome();
+    const created = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "prompt", text: "症状" },
+      ],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+    expect(created.some((event) => event.type === "run_end")).toBe(true);
+    const [sessionId] = await readdir(path.join(home, "sessions"));
+    const { appendFile, readFile, writeFile } = await import("node:fs/promises");
+    // Reproduce a crash: the header is still `open` and the last line was cut
+    // mid-write. A closed session with a partial line is real corruption and
+    // must still be refused.
+    const headerPath = path.join(home, "sessions", sessionId, "header.json");
+    const header = JSON.parse(await readFile(headerPath, "utf8"));
+    await writeFile(headerPath, JSON.stringify({ ...header, status: "open" }), "utf8");
+    const log = path.join(home, "sessions", sessionId, "session.v1.jsonl");
+    await appendFile(log, '{"seq":99,"ts":"t","type":"assistant","payl', "utf8");
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "loadSession", id: sessionId },
+      ],
+      { until: (all) => all.some((event) => event.type === "session_loaded") },
+    );
+    const loaded = events.find((event) => event.type === "session_loaded");
+    expect(loaded).toBeDefined();
+    expect(loaded.messages[0]).toMatchObject({ role: "user", text: "症状" });
+  }, HOST_TIMEOUT_MS);
+
+  it("setModel 只接受 providers.json 里的引用", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "setModel", model: "gw/nope" },
+        { cmd: "setModel", model: "gw/flash" },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "notice" && event.text.includes("gw/nope"))
+          && all.filter((event) => event.type === "state").length >= 2,
+      },
+    );
+    const notices = events.filter((event) => event.type === "notice");
+    expect(notices.map((notice) => notice.text)).toStrictEqual(["模型不在 providers.json 中：gw/nope"]);
+    // 合法引用只更新 state，不重建出一个空列表。
+    const states = events.filter((event) => event.type === "state");
+    expect(states.at(-1).model).toBe("gw/flash");
+    expect(states.at(-1).models).toHaveLength(1);
+  }, HOST_TIMEOUT_MS);
+
+  it("refreshModels 重读 providers.json 并广播 models", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "refreshModels" },
+      ],
+      { until: (all) => all.some((event) => event.type === "models") },
+    );
+    const models = events.find((event) => event.type === "models");
+    expect(models.models.map((model) => model.id)).toStrictEqual(["gw/flash"]);
+    expect(models.source).toBe("providers.json");
+  }, HOST_TIMEOUT_MS);
+
+  it("searchSessions 按标题命中，不只按 id", async () => {
+    const home = await tempHome();
+    const created = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "prompt", text: "串口没输出" },
+      ],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+    expect(created.some((event) => event.type === "run_end")).toBe(true);
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "searchSessions", query: "串口" },
+      ],
+      { until: (all) => all.some((event) => event.type === "session_matches") },
+    );
+    const matches = events.find((event) => event.type === "session_matches");
+    // Session ids are generated, so id-only matching made this useless.
+    expect(matches.sessions).toHaveLength(1);
+    expect(matches.sessions[0].title).toBe("串口没输出");
+  }, HOST_TIMEOUT_MS);
+
   it("loadSession 拒绝非法 id", async () => {
     const home = await tempHome();
     const events = await runHost(
