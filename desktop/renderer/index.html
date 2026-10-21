@@ -16,7 +16,7 @@
   </head>
   <body>
     <div class="shell">
-      <!-- Sidebar: sessions, workspace, settings -->
+      <!-- Sidebar: workspaces, then the sessions inside them -->
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
           <div class="brand">
@@ -30,21 +30,17 @@
             <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
             <span data-i18n="newSession">New chat</span>
           </button>
-          <!-- The workspace entry repeats the top-bar folder button here
-               because the sidebar is where a session is started and the
-               folder is chosen before that, not after. Both call the same
-               `chooseWorkspace()`; neither is a decoration. -->
-          <button class="sidebar-workspace" id="sidebar-workspace" data-i18n-title="changeFolderTitle">
-            <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
-            <span class="sidebar-workspace-text">
-              <span class="sidebar-workspace-label" data-i18n="workspaceLabel">Workspace</span>
-              <span class="sidebar-workspace-name" id="sidebar-workspace-name">No folder open</span>
-            </span>
-          </button>
         </div>
 
+        <!-- The first level of the list is the workspace, so choosing a folder
+             is an action of this section, not a row that imitates a workspace
+             entry. It calls the same `chooseWorkspace()` as the top bar, and
+             keeps the id the renderer binds to. -->
         <div class="sidebar-section-head">
-          <span data-i18n="sessions">Sessions</span>
+          <span class="sidebar-section-label" id="sidebar-workspaces-label" data-i18n="workspaces">Workspaces</span>
+          <button class="icon-button small sidebar-workspace" id="sidebar-workspace" data-i18n-title="changeFolderTitle">
+            <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
+          </button>
           <button class="icon-button small" id="session-filter" data-i18n-title="sessionFilterAll" aria-haspopup="menu" aria-expanded="false">
             <svg class="icon" aria-hidden="true"><use href="#i-sliders"></use></svg>
           </button>
@@ -59,7 +55,9 @@
           <svg class="icon" aria-hidden="true"><use href="#i-search"></use></svg>
           <input id="session-search" type="search" spellcheck="false" autocomplete="off" />
         </div>
-        <nav class="session-list" id="session-list" aria-label="Sessions"></nav>
+        <!-- The section heading names this landmark, so it follows the locale
+             instead of freezing one language into an aria-label. -->
+        <nav class="session-list" id="session-list" aria-labelledby="sidebar-workspaces-label"></nav>
         <!-- Drag handle on the sidebar's right edge. It is a focusable
              separator so the width can also be changed with the keyboard
              (arrow keys), not only with a mouse. -->
@@ -80,7 +78,7 @@
             <svg class="icon" aria-hidden="true"><use href="#i-panel-left"></use></svg>
           </button>
           <button class="topbar-cwd" id="topbar-cwd" data-i18n-title="changeFolderTitle">
-            <span class="topbar-cwd-name" id="topbar-cwd-name">Prometheus</span>
+            <span class="topbar-cwd-name" id="topbar-cwd-name">Embedded AI Master</span>
             <span class="topbar-cwd-branch" id="topbar-cwd-branch" hidden></span>
           </button>
           <button class="icon-button small worktree-toggle" id="worktree-button" data-i18n-title="worktreeLabel" aria-haspopup="menu" aria-expanded="false">
@@ -204,7 +202,7 @@
                 <section class="empty-state" id="empty-state">
                   <svg class="empty-mark" aria-hidden="true"><use href="#i-mark"></use></svg>
                   <h1 data-i18n="emptyTitle">What should we build?</h1>
-                  <p data-i18n="emptyBody">Prometheus reads, edits, and runs your code. It asks before changing files unless you switch the mode.</p>
+                  <p data-i18n="emptyBody">The agent reads, edits, and runs your code. It asks before changing files unless you switch the mode.</p>
                   <div class="suggestions">
                     <button class="suggestion" id="setup-button" data-i18n="setupTitle" hidden>
                       Set up a connection
@@ -215,7 +213,7 @@
                     <button class="suggestion" data-prompt-key="suggestionFailingTestsPrompt" data-i18n="suggestionFailingTests" data-prompt="Find failing tests and fix them. Verify with the project's test command.">
                       Fix the failing tests
                     </button>
-                    <button class="suggestion" data-prompt-key="suggestionDocumentPrompt" data-i18n="suggestionDocument" data-prompt="Create a PROMETHEUS.md describing how this project is built, tested, and organized.">
+                    <button class="suggestion" data-prompt-key="suggestionDocumentPrompt" data-i18n="suggestionDocument" data-prompt="Create an AGENTS.md describing how this project is built, tested, and organized.">
                       Document the repo
                     </button>
                   </div>
@@ -260,7 +258,7 @@
                     id="input"
                     rows="1"
                     data-i18n-placeholder="composerPlaceholder"
-                    placeholder="Ask Prometheus to change, explain, or build something…"
+                    placeholder="Ask the agent to change, explain, or build something…"
                     spellcheck="false"
                   ></textarea>
                   <div class="composer-actions">
@@ -557,8 +555,15 @@
           </div>
           <nav class="settings-nav" id="settings-nav" role="tablist" aria-orientation="vertical"></nav>
           <div class="settings-rail-foot">
-            <button type="button" class="settings-profile" id="settings-profile" title="Change the working folder">
-              <span class="settings-avatar" aria-hidden="true">P</span>
+            <!-- A folder glyph, not an initial: the avatar used to carry the
+                 first letter of the project this renderer was ported from, and
+                 every settings screen showed that letter as if it were the
+                 user's. The row names a working directory; the icon should
+                 say so. -->
+            <button type="button" class="settings-profile" id="settings-profile" data-i18n-title="profileOpenWorkspace">
+              <span class="settings-avatar" aria-hidden="true">
+                <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
+              </span>
               <span class="settings-profile-copy">
                 <span class="settings-profile-name" id="settings-profile-name">Local workspace</span>
                 <span class="settings-profile-sub" id="settings-profile-sub">Local workspace</span>

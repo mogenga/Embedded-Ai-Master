@@ -161,8 +161,15 @@
   border-radius: 50%;
   background: var(--accent-soft);
   color: var(--accent-text);
+  /* The glyph is sized by the circle, not by the type ramp: it carried a
+     letter before, and `font-size` no longer has anything to size. */
   font-size: var(--text-sm);
   font-weight: 600;
+}
+
+.settings-avatar .icon {
+  width: 14px;
+  height: 14px;
 }
 
 .settings-profile-copy {
@@ -828,6 +835,103 @@
   margin: 0 0 6px;
   font-size: var(--text-base);
   font-weight: 600;
+}
+
+/* A model-service card: one header line, and a body that opens under it.
+   The header is its own class rather than `.about-row`, which is a group
+   heading with a rule under it — reusing it here would draw a separator
+   between the header and the fields it belongs to. */
+.settings-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The header itself is the click target, so the name and the model line are
+   both part of it. The padding is negative-margined away: the hover surface
+   needs room, but the text still has to start on the card's own edge. */
+.settings-card-toggle {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 4px 6px;
+  margin: -4px -6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--fast) var(--ease);
+}
+
+.settings-card-toggle:hover {
+  background: var(--surface-hover);
+}
+
+.settings-card-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.settings-card-chevron {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  transition: color var(--fast) var(--ease);
+}
+
+.settings-card-toggle:hover .settings-card-chevron,
+.settings-card-toggle[aria-expanded="true"] .settings-card-chevron {
+  color: var(--text-secondary);
+}
+
+.settings-card-name {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+/* The one thing a collapsed card is for: what this service offers. It takes
+   the remaining width and truncates rather than wraps, so the header stays a
+   single line whatever the models are called. */
+.settings-card-models {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+/* No models is a state, not a value: saying it in the same colour as a model
+   name would make an empty service look configured. */
+.settings-card-models.empty {
+  font-style: italic;
+  color: var(--text-faint);
+}
+
+/* The body is a plain container: it exists so `hidden` has one element to
+   switch and `aria-controls` has one id to name. */
+.settings-form-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 6px;
+}
+
+/* The protocol chip sits above the fields, on its own line: it is a fact
+   about the card, not a control. */
+.settings-card-protocol {
+  display: flex;
+  padding: 2px 2px 4px;
 }
 
 .settings-form-actions {

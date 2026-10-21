@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -24,6 +24,32 @@ const REPO_ROOT = path.join(import.meta.dirname, "..", "..");
 const PROBE_SOURCE = path.join(REPO_ROOT, "src", "model", "probe.ts");
 const DIST_BUILT = existsSync(path.join(REPO_ROOT, "dist", "model", "openai.js"));
 const PROBE_BUILT = existsSync(path.join(REPO_ROOT, "dist", "model", "probe.js"));
+const PROBE_DIST = path.join(REPO_ROOT, "dist", "model", "probe.js");
+/**
+ * Whether the compiled probe already accepts a directly-typed `apiKey`.
+ *
+ * The host forwards `payload.apiKey` unconditionally — it is the caller side of
+ * a contract whose kernel half (`ProviderProbeOptions.apiKey`) lands in
+ * `src/model/probe.ts` separately. A `dist/` compiled before that lands drops
+ * the option, the probe sends no Authorization header, and the `Bearer <key>`
+ * assertion below would fail for a reason that is a pending build, not a
+ * regression. Match `options.apiKey` as a property access — `options.apiKeyEnv`
+ * contains the same substring and must not count.
+ */
+const PROBE_FORWARDS_API_KEY = PROBE_BUILT
+  && /options\.apiKey(?!\w)/.test(readFileSync(PROBE_DIST, "utf8"));
+const PROVIDERS_DIST = path.join(REPO_ROOT, "dist", "config", "providers.js");
+/**
+ * Whether the compiled providers schema already knows the `apiKey` field.
+ *
+ * `saveProviders` validates with that schema before writing, so a `dist/` from
+ * before the field landed silently drops it — the round-trip test would then
+ * wait forever for a `settings` event that can never carry the key. Same
+ * pending-build window as `PROBE_FORWARDS_API_KEY`, different module.
+ */
+const CONFIG_ACCEPTS_API_KEY = DIST_BUILT
+  && existsSync(PROVIDERS_DIST)
+  && /apiKey:/.test(readFileSync(PROVIDERS_DIST, "utf8"));
 // 每个用例都要起一个 Node 宿主进程；满负载下会超过 vitest 的 5s 默认超时。
 const HOST_TIMEOUT_MS = 30_000;
 const tempDirs = [];
@@ -54,10 +80,25 @@ async function failingGateway() {
  * `testProvider` probes this endpoint; the same server also accepts chat
  * completions so a probe that falls back to a completion still gets an answer.
  * Nothing leaves the machine.
+ *
+ * `requests` records what the gateway actually received (method, path,
+ * headers and body): the Authorization header is the only place a key is
+ * allowed to appear, so a test that wants to prove the key arrived — and that
+ * nothing else did — has to see the wire, not the host's own event.
  */
 async function healthyGateway() {
+  const requests = [];
   const server = createServer((req, res) => {
-    req.resume();
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      requests.push({
+        method: req.method ?? "",
+        url: req.url ?? "",
+        headers: req.headers,
+        body: Buffer.concat(chunks).toString("utf8"),
+      });
+    });
     if (req.url?.includes("/models")) {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ object: "list", data: [{ id: "flash" }, { id: "pro" }] }));
@@ -69,7 +110,7 @@ async function healthyGateway() {
   servers.push(server);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
-  return `http://127.0.0.1:${port}/v1`;
+  return { baseUrl: `http://127.0.0.1:${port}/v1`, requests };
 }
 
 /**
@@ -1030,7 +1071,7 @@ describe("desktop host", () => {
 
   it.skipIf(!PROBE_BUILT)("testProvider 打到本地假网关，回 provider_test 且带模型列表", async () => {
     const home = await tempHome();
-    const baseUrl = await healthyGateway();
+    const { baseUrl } = await healthyGateway();
     const events = await runHost(
       home,
       [
@@ -1050,6 +1091,112 @@ describe("desktop host", () => {
     expect(event.models).toContain("flash");
     expect(event.models).toContain("pro");
     expect(typeof event.latencyMs).toBe("number");
+  }, HOST_TIMEOUT_MS);
+
+  it.skipIf(!PROBE_FORWARDS_API_KEY)("testProvider 把 apiKey 送进 Authorization 头，事件里不回显", async () => {
+    const key = "sk-host-probe-0123456789abcdef";
+    const home = await tempHome();
+    const { baseUrl, requests } = await healthyGateway();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "testProvider", baseUrl, apiKey: key },
+      ],
+      {
+        until: (all) => all.some((event) => event.type === "provider_test"),
+        timeoutMs: 30_000,
+      },
+    );
+
+    // The wire is the evidence: the fake gateway has to have received exactly
+    // this header, or the key never left the host.
+    expect(requests.length).toBeGreaterThan(0);
+    expect(requests[0].headers.authorization).toBe(`Bearer ${key}`);
+
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event.ok).toBe(true);
+    expect(event.baseUrl).toBe(baseUrl);
+    // Write-only: no event, on any path, carries the key back.
+    expect(JSON.stringify(events)).not.toContain(key);
+  }, HOST_TIMEOUT_MS);
+
+  it.skipIf(!PROBE_FORWARDS_API_KEY)("apiKey 被网关拒绝时，失败原因里没有密钥原文", async () => {
+    // A 401 on a directly-typed key is the case where a careless error path
+    // would echo the credential into the event stream; the host must report
+    // the reason without it.
+    const key = "sk-rejected-0123456789abcdef";
+    const rejected = createServer((req, res) => {
+      req.resume();
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "invalid api key" } }));
+    });
+    servers.push(rejected);
+    await new Promise((resolve) => rejected.listen(0, "127.0.0.1", resolve));
+    const { port } = rejected.address();
+    const baseUrl = `http://127.0.0.1:${port}/v1`;
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "testProvider", baseUrl, apiKey: key },
+      ],
+      {
+        until: (all) => all.some((event) => event.type === "provider_test"),
+        timeoutMs: 30_000,
+      },
+    );
+
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event.ok).toBe(false);
+    expect(event.code).toBe("unauthorized");
+    expect(typeof event.error).toBe("string");
+    expect(event.error).toContain("401");
+    expect(JSON.stringify(events)).not.toContain(key);
+  }, HOST_TIMEOUT_MS);
+
+  it.skipIf(!CONFIG_ACCEPTS_API_KEY)("apiKey 保存在 providers.json 时，saveProviders 读回与 settings 都原样带上", async () => {
+    // The key is part of the file, not a side channel: the settings page saves
+    // it with `saveProviders` and must read it back from `providerConfig`, or
+    // the operator retypes a key the app already has. This does not probe.
+    const key = "sk-file-backed-0123456789";
+    const home = await tempHome();
+    const baseUrl = await failingGateway();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        {
+          cmd: "saveProviders",
+          providers: {
+            gw: {
+              protocol: "openai-chat-completions",
+              baseUrl,
+              apiKey: key,
+              models: { flash: { contextWindow: 8192, maxOutput: 512 } },
+            },
+          },
+        },
+      ],
+      {
+        until: (all) =>
+          all.some(
+            (event) =>
+              event.type === "settings"
+              && event.settings?.providerConfig?.gw?.apiKey === key,
+          ),
+      },
+    );
+
+    const onDisk = JSON.parse(await readFile(path.join(home, "providers.json"), "utf8"));
+    expect(onDisk.gw.apiKey).toBe(key);
+    const settings = events.find(
+      (event) => event.type === "settings" && event.settings?.providerConfig?.gw?.apiKey === key,
+    );
+    expect(settings).toBeDefined();
+    // The picker's flat list stays flat: it carries the address, not the key.
+    expect(settings.settings.providers).toStrictEqual([{ id: "gw", baseUrl }]);
   }, HOST_TIMEOUT_MS);
 
   it.skipIf(!PROBE_BUILT)("testProvider 指向不可达地址时回 ok:false 且 error 非空", async () => {

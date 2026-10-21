@@ -7,18 +7,20 @@
  * of optional members the renderer guards — on top of the API the server
  * already exposes:
  *
- *   prompt          POST /api/actions           (optional `cwd`)
+ *   prompt          POST /api/actions           (optional `cwd`, `model`)
  *   permission      POST /api/approvals
  *   abort           POST /api/abort
  *   listSessions    GET  /api/sessions
  *   loadSession     GET  /api/sessions/:id
  *   getTree         GET  /api/tree?path=…
+ *   setModel        local choice, sent as `model` by the next new session
+ *   refreshModels   GET  /api/config
  *   setWorkspace    POST /api/workspace        { path }
  *   getFile         GET  /api/file?path=…
  *   getArtifacts    GET  /api/sessions/:id/artifacts
  *   getArtifact     GET  /api/file?path=…
  *   saveProviders   PUT  /api/config           { providers }
- *   testProvider    POST /api/providers/test   { baseUrl, apiKeyEnv?, model? }
+ *   testProvider    POST /api/providers/test   { baseUrl, apiKey?, apiKeyEnv?, model? }
  *   live events     GET  /api/events (SSE)
  *
  * Everything else answers with a `notice` naming the command. A silent no-op
@@ -95,6 +97,13 @@ export function createBrowserBridge(options = {}) {
   const EventSourceCtor = options.EventSourceImpl ?? globalThis.EventSource;
   const storage = options.storage ?? globalThis.localStorage;
   const notify = typeof options.notify === "function" ? options.notify : undefined;
+  /**
+   * Chooser for several same-named folders: `(candidates, name) => path|null`.
+   *
+   * Injected so tests can answer without a DOM; `pickDirectory` falls back to
+   * the built-in dialog when this is absent.
+   */
+  const chooseCandidate = typeof options.chooseCandidate === "function" ? options.chooseCandidate : undefined;
   const handlers = new Set();
   /** Events produced before the renderer subscribed (hello/ready/state). */
   const pending = [];
@@ -104,7 +113,19 @@ export function createBrowserBridge(options = {}) {
   let runningSessionId = "";
   let currentSessionId = "";
   let lastSeq = -1;
+  /**
+   * The model the next *new* conversation is created with.
+   *
+   * It is deliberately not overwritten when an old session is opened: the
+   * kernel pins a session's model in its header and refuses to resume under a
+   * different one, so a pick made here can only ever apply to the next new
+   * conversation. Letting a header write this value meant that merely reading
+   * an old conversation silently redefined what "new session" would run on,
+   * discarding a pick the operator had just made.
+   */
   let lastModel = "";
+  /** The open session's own model from its header; display only. */
+  let sessionModel = "";
   /** The open session's working directory; unknown until a session loads. */
   let currentCwd = "";
   let locale = "zh";
@@ -155,7 +176,7 @@ export function createBrowserBridge(options = {}) {
       // The picker reads the catalogue from here. Sending `[]` left it stuck
       // on "loading models…" for the whole session, and the chip reported no
       // model while `providers.json` named one.
-      model: lastModel,
+      model: shownModel(),
       models: modelsOf(isRecord(lastConfig) ? lastConfig.providers : undefined),
       modelsSource: "providers.json",
     });
@@ -299,6 +320,7 @@ export function createBrowserBridge(options = {}) {
       const events = isRecord(body) && Array.isArray(body.events) ? body.events : [];
       const header = isRecord(body) && isRecord(body.header) ? body.header : {};
       adoptSession(id, events);
+      sessionModel = textOf(header.model) || sessionModel;
       // `adoptSession` builds a fresh context; the turn is still in flight.
       ctx.running = wasRunning;
       emit(sessionLoadedEvent(events, { cwd: textOf(header.workdir), mode: stateMode }));
@@ -460,6 +482,12 @@ export function createBrowserBridge(options = {}) {
           // Absent when the bridge does not know one: a made-up path would
           // start the run in the wrong folder.
           ...(currentCwd === "" ? {} : { cwd: currentCwd }),
+          // The picker's choice, only when this prompt creates the session.
+          // A resumed run keeps the model in its header, and sending another
+          // one would only earn a `model_mismatch` from the kernel.
+          ...(currentSessionId === ""
+            ? { ...(lastModel === "" ? {} : { model: lastModel }) }
+            : {}),
         }),
       });
     } catch (error) {
@@ -492,6 +520,10 @@ export function createBrowserBridge(options = {}) {
       // message list would erase it. A session switch is the only thing that
       // rebuilds the transcript.
       adoptSession(sessionId, []);
+      // A session just created is pinned to the model this prompt sent, which
+      // is what its header now says; the chip must name that, not a later pick
+      // that only applies to the *next* new conversation.
+      if (created && lastModel !== "") sessionModel = lastModel;
       emit(stateEvent());
     }
     // `adoptSession` resets the cursor to the log's head; this turn's events
@@ -531,7 +563,10 @@ export function createBrowserBridge(options = {}) {
     const events = isRecord(body) && Array.isArray(body.events) ? body.events : [];
     const header = isRecord(body) && isRecord(body.header) ? body.header : {};
     adoptSession(id, events);
-    lastModel = textOf(header.model) || lastModel;
+    // Display only: this is the model the opened conversation is pinned to.
+    // `lastModel` stays whatever the operator picked for the next new session
+    // — see its declaration for why the two must not be the same variable.
+    sessionModel = textOf(header.model) || sessionModel;
     currentCwd = textOf(header.workdir) || currentCwd;
     titles.set(id, titleOf(events));
     emit(sessionLoadedEvent(events, { cwd: textOf(header.workdir), mode: stateMode }));
@@ -609,6 +644,8 @@ export function createBrowserBridge(options = {}) {
     "loadSession",
     "getSettings",
     "setMode",
+    "setModel",
+    "refreshModels",
     "setLocale",
     "setUiPreference",
     "getUsage",
@@ -669,12 +706,61 @@ export function createBrowserBridge(options = {}) {
     const models = modelsOf(isRecord(lastConfig) ? lastConfig.providers : undefined);
     if (models.length === 0) return;
     // The kernel falls back to the file's first reference when none is
-    // configured, so the chip must name the same one the run will use.
+    // configured, so the chip must name the same one the run will use. Only a
+    // reference the file no longer offers is replaced: an existing pick
+    // survives a reload, otherwise every settings visit would silently undo it.
     if (lastModel === "" || !models.some((model) => model.id === lastModel)) {
       lastModel = models[0].id;
     }
-    emit({ type: "models", models, model: lastModel, source: "providers.json" });
+    if (sessionModel !== "" && !models.some((model) => model.id === sessionModel)) {
+      sessionModel = "";
+    }
+    emit({ type: "models", models, model: shownModel(), source: "providers.json" });
     emit(stateEvent());
+  }
+
+  /** The model the chip names: the open session's, else the next new one's. */
+  function shownModel() {
+    return currentSessionId === "" ? lastModel : sessionModel || lastModel;
+  }
+
+  /**
+   * Pick the model for the next new conversation.
+   *
+   * Only a reference the provider file lists is accepted: `POST /api/actions`
+   * resolves it again and a typo would surface as a failed turn instead of a
+   * rejected choice. The open session keeps its own model — the kernel pins it
+   * in the header and refuses to resume under another one — so a pick made
+   * here can only ever apply to the next new session, and the notice says so.
+   */
+  function setModel(model) {
+    // An empty or non-string model is a renderer bug, not a choice. Returning
+    // silently is right here: `renderModelMenu` only ever sends an id from the
+    // catalogue it was given.
+    if (model === "") return;
+    if (ctx.running) {
+      // Rebuilding the run under a different model mid-turn is not something
+      // the kernel supports; pretending the click worked would be worse.
+      emit({ type: "notice", level: "warn", text: "运行中不能切换模型" });
+      return;
+    }
+    const models = modelsOf(isRecord(lastConfig) ? lastConfig.providers : undefined);
+    if (!models.some((entry) => entry.id === model)) {
+      emit({ type: "notice", level: "warn", text: `模型不在 providers.json 中：${model}` });
+      return;
+    }
+    lastModel = model;
+    emit({ type: "models", models, model: shownModel(), source: "providers.json" });
+    emit(stateEvent());
+    if (currentSessionId !== "") {
+      // The chip keeps naming the open session's model, so without this line
+      // the click would look like it did nothing at all.
+      emit({
+        type: "notice",
+        level: "dim",
+        text: "模型仅对新建会话生效；当前会话沿用启动时的模型",
+      });
+    }
   }
 
   function emitSettings() {
@@ -738,7 +824,8 @@ export function createBrowserBridge(options = {}) {
    * Probe one model gateway for the settings page.
    *
    * The server owns the probe: it resolves `apiKeyEnv` against its own
-   * environment and talks to the gateway, so the bridge never reads a key and
+   * environment, forwards a directly-typed `apiKey` only into the outbound
+   * request, and talks to the gateway. The bridge never reads the key and
    * never guesses that a gateway is up. Every outcome — a refusal, a network
    * error, a non-200 — comes back as a `provider_test` event carrying the
    * address the operator typed: that is the string the page keys its card on,
@@ -747,9 +834,18 @@ export function createBrowserBridge(options = {}) {
    * `ok: true` is only ever forwarded from the server's own explicit `true`.
    * A 200 whose body never said so is not evidence the gateway answered, and a
    * green card on an untested address is the silent success R3 forbids.
+   *
+   * The key itself must never leave in an event: `provider_test` carries only
+   * the address and the reason, and every error string is passed through
+   * `redact` first so a transport error that happens to quote the request
+   * cannot echo it into the renderer's event stream.
    */
-  async function testProvider(baseUrl, apiKeyEnv, model) {
+  async function testProvider(baseUrl, apiKeyEnv, model, apiKey) {
     const address = textOf(baseUrl).trim();
+    const key = textOf(apiKey).trim();
+    // Defense in depth: nothing below is supposed to put the key in a message,
+    // but a `fetch` rejection text is not ours to control.
+    const redact = (text) => (key === "" ? text : text.split(key).join("***"));
     if (address === "") {
       emit({
         type: "provider_test",
@@ -765,6 +861,7 @@ export function createBrowserBridge(options = {}) {
       baseUrl: address,
       ...(textOf(apiKeyEnv).trim() === "" ? {} : { apiKeyEnv: textOf(apiKeyEnv).trim() }),
       ...(textOf(model).trim() === "" ? {} : { model: textOf(model).trim() }),
+      ...(key === "" ? {} : { apiKey: key }),
     };
     let response;
     try {
@@ -778,7 +875,7 @@ export function createBrowserBridge(options = {}) {
         type: "provider_test",
         ok: false,
         baseUrl: address,
-        error: `连接测试失败：${error instanceof Error ? error.message : String(error)}`,
+        error: redact(`连接测试失败：${error instanceof Error ? error.message : String(error)}`),
       });
       return;
     }
@@ -803,7 +900,7 @@ export function createBrowserBridge(options = {}) {
         type: "provider_test",
         ok: false,
         baseUrl: address,
-        error: `连接测试失败：${reason === "" ? `HTTP ${response.status}` : reason}`,
+        error: redact(`连接测试失败：${reason === "" ? `HTTP ${response.status}` : reason}`),
       });
       return;
     }
@@ -823,7 +920,7 @@ export function createBrowserBridge(options = {}) {
         type: "provider_test",
         ok: false,
         baseUrl: address,
-        error: reason === "" ? "连接测试失败：服务端未给出原因" : reason,
+        error: redact(reason === "" ? "连接测试失败：服务端未给出原因" : reason),
         ...(textOf(payload.code) === "" ? {} : { code: textOf(payload.code) }),
         // A failed probe has no latency to report; `0` would read as "instant".
         ...(typeof payload.latencyMs === "number" ? { latencyMs: payload.latencyMs } : {}),
@@ -1098,45 +1195,223 @@ export function createBrowserBridge(options = {}) {
   }
 
   /**
-   * Ask the browser for a folder, knowing it cannot answer with a path.
+   * Ask the server which absolute paths carry the folder name the picker gave.
    *
-   * `showDirectoryPicker` exists in Chromium, but it hands back a
-   * `FileSystemDirectoryHandle` whose `name` is a bare folder name — never the
-   * absolute path the kernel needs for `/api/tree` and `/api/file`. Returning
-   * that name would make the next read fail against a path that does not
-   * exist, so the answer is always `null` plus a notice saying why and what
-   * to do instead. The silent `null` this replaces left the click looking
-   * like nothing happened at all (R3).
+   * `showDirectoryPicker` hands back a `FileSystemDirectoryHandle` whose
+   * `name` is a bare folder name — never the absolute path `/api/tree` and
+   * `/api/file` need. The server and the page usually run on the same machine,
+   * so the server can look the name up within a bounded set of places it
+   * already knows about. The result is only a list of candidates: it grants
+   * nothing by itself, the accepted path is still registered through
+   * `POST /api/workspace`.
+   *
+   * `undefined` means the lookup itself failed and a notice already said why;
+   * an empty `candidates` is a real answer ("no such folder here").
+   */
+  async function resolveWorkspaceName(name) {
+    let response;
+    try {
+      response = await fetchImpl("/api/workspace/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+    } catch (error) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `定位文件夹失败：${error instanceof Error ? error.message : String(error)}；请直接输入绝对路径`,
+      });
+      return undefined;
+    }
+    if (!response.ok) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `定位文件夹失败：${await readError(response)}；请直接输入绝对路径`,
+      });
+      return undefined;
+    }
+    const body = await response.json().catch(() => undefined);
+    if (!isRecord(body) || !Array.isArray(body.candidates)) {
+      emit({ type: "notice", level: "warn", text: "定位文件夹失败：服务端返回了无法解析的内容；请直接输入绝对路径" });
+      return undefined;
+    }
+    const candidates = [];
+    for (const entry of body.candidates) {
+      if (!isRecord(entry)) continue;
+      const candidatePath = textOf(entry.path).trim();
+      if (candidatePath === "") continue;
+      candidates.push({ path: candidatePath, name: textOf(entry.name) || name });
+    }
+    return { candidates, truncated: body.truncated === true };
+  }
+
+  /**
+   * Draw a chooser for several same-named folders. `undefined` = cannot draw.
+   *
+   * Plain DOM: the renderer has no framework and no bundler, and this is the
+   * only place the bridge itself needs a widget. `null` is an explicit cancel.
+   */
+  function drawCandidateChooser(candidates, folderName) {
+    const doc = globalThis.document;
+    if (doc === undefined || typeof doc.createElement !== "function") return undefined;
+    const dialog = doc.createElement("dialog");
+    if (typeof dialog.showModal !== "function") return undefined;
+    dialog.className = "bridge-candidate-dialog";
+    const heading = doc.createElement("p");
+    // The bridge already tracks the UI locale; `i18n.js` is the renderer's own
+    // table and this widget lives here, so these two strings are kept local.
+    heading.textContent =
+      locale === "en"
+        ? `Found ${candidates.length} folders named ${folderName}. Choose one to open:`
+        : `找到 ${candidates.length} 个名为 ${folderName} 的文件夹，请选择要打开的一个：`;
+    dialog.appendChild(heading);
+    const list = doc.createElement("div");
+    dialog.appendChild(list);
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        try {
+          dialog.close();
+        } catch {
+          // Closing a dialog that never opened is not worth reporting.
+        }
+        if (dialog.parentNode) dialog.parentNode.removeChild(dialog);
+        resolve(value);
+      };
+      for (const candidate of candidates) {
+        const button = doc.createElement("button");
+        button.type = "button";
+        button.textContent = candidate.path;
+        button.title = candidate.path;
+        button.addEventListener("click", () => finish(candidate.path));
+        list.appendChild(button);
+      }
+      const cancel = doc.createElement("button");
+      cancel.type = "button";
+      cancel.textContent = locale === "en" ? "Cancel" : "取消";
+      cancel.addEventListener("click", () => finish(null));
+      dialog.appendChild(cancel);
+      // Esc closes with an empty return value; treat it as the same cancel.
+      dialog.addEventListener("cancel", (event) => {
+        event.preventDefault();
+        finish(null);
+      });
+      doc.body.appendChild(dialog);
+      try {
+        dialog.showModal();
+      } catch {
+        // A document that refuses `showModal` cannot present a choice either.
+        finish(undefined);
+      }
+    });
+  }
+
+  /**
+   * Ask the browser for a folder and turn its bare name into a real path.
+   *
+   * `showDirectoryPicker` exists in Chromium but never reveals an absolute
+   * path — only `handle.name`. The name is not useless: the server is usually
+   * on the same machine and can resolve it within a bounded search. So the
+   * click now leads somewhere: one candidate is used directly, several are
+   * offered for the operator to choose, none falls back to typing with the
+   * reason spelled out.
+   *
+   * Returning `null` is always "nothing was picked" and the renderer follows
+   * up with a path prompt; what differs is what was already said. A cancelled
+   * dialog is a normal cancel and stays quiet. A picker that failed, or a name
+   * that could not be found, gets a notice saying which it was (R3).
    */
   async function pickDirectory() {
     const picker = globalThis.showDirectoryPicker;
     if (typeof picker !== "function") {
+      // The capability is genuinely absent (Firefox / Safari). Say which part
+      // is missing and leave it at that: the caller already answers a `null`
+      // with its path field, so a "go type it somewhere" directive here would
+      // be a second instruction for a step that is already happening.
       emit({
         type: "notice",
         level: "warn",
-        text: "浏览器形态无法打开本地文件夹：没有原生目录选择器，也拿不到目录的绝对路径；请直接在顶栏输入路径",
+        text: "浏览器形态没有原生目录选择器（showDirectoryPicker 不可用），拿不到本地文件夹的绝对路径",
       });
       return null;
     }
+    let handle;
     try {
-      await picker.call(globalThis);
+      handle = await picker.call(globalThis);
     } catch (error) {
       // Chromium throws `AbortError` when the operator closes the dialog.
-      // That is still a click that produced nothing, and it must say so.
-      const reason = error instanceof Error && error.name === "AbortError" ? "目录选择已取消" : "目录选择失败";
+      // Closing a dialog is a decision, not a failure: stay quiet.
+      if (error instanceof Error && error.name === "AbortError") return null;
+      const reason =
+        error instanceof Error && error.message !== "" ? error.message : String(error ?? "未知错误");
       emit({
         type: "notice",
         level: "warn",
-        text: `${reason}；浏览器形态无法获得目录的绝对路径，请直接在顶栏输入路径`,
+        text: `打开文件夹选择器失败：${reason}；请直接输入绝对路径`,
       });
       return null;
     }
-    emit({
-      type: "notice",
-      level: "warn",
-      text: "浏览器形态无法获得目录的绝对路径（只能拿到文件夹名），已放弃该选择；请直接在顶栏输入路径",
-    });
-    return null;
+    const name = textOf(handle?.name).trim();
+    if (name === "") {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: "文件夹选择器没有返回文件夹名，无法定位路径；请直接输入绝对路径",
+      });
+      return null;
+    }
+    const resolved = await resolveWorkspaceName(name);
+    if (resolved === undefined) return null;
+    if (resolved.candidates.length === 0) {
+      // Saying "not found" is not the same as saying "it does not exist": the
+      // search is bounded, and `truncated` means it ran out of budget first.
+      emit({
+        type: "notice",
+        level: "warn",
+        text: resolved.truncated
+          ? `在常见位置搜索名为 ${name} 的文件夹时超出预算，可能没有找全；请直接输入绝对路径`
+          : `没在常见位置找到名为 ${name} 的文件夹，请直接输入绝对路径`,
+      });
+      return null;
+    }
+    if (resolved.candidates.length === 1) {
+      const only = resolved.candidates[0];
+      emit({
+        type: "notice",
+        level: "dim",
+        text: `已按文件夹名定位到 ${only.path}${resolved.truncated ? "（搜索可能不全）" : ""}`,
+      });
+      return only.path;
+    }
+    const chooser = typeof chooseCandidate === "function" ? chooseCandidate : drawCandidateChooser;
+    let chosen;
+    try {
+      chosen = await chooser(resolved.candidates, name);
+    } catch {
+      chosen = undefined;
+    }
+    // `null` is the operator cancelling the chooser — quiet, like any cancel.
+    if (chosen === null) return null;
+    const chosenText = textOf(chosen).trim();
+    const match = resolved.candidates.find((entry) => pathKey(entry.path) === pathKey(chosenText));
+    if (match === undefined) {
+      // Nothing was drawn, or the answer was not one of the candidates. Never
+      // widen the boundary by handing back an unverified path: list them so the
+      // operator can copy the right one.
+      emit({
+        type: "notice",
+        level: "warn",
+        text:
+          `找到 ${resolved.candidates.length} 个名为 ${name} 的文件夹但没能选定，请直接输入绝对路径：`
+          + resolved.candidates.map((entry) => entry.path).join("、"),
+      });
+      return null;
+    }
+    return match.path;
   }
 
   function unsupported(command) {
@@ -1174,6 +1449,9 @@ export function createBrowserBridge(options = {}) {
         closeStream();
         currentSessionId = "";
         runningSessionId = "";
+        // Nothing is pinned any more: the chip goes back to naming the model
+        // the next run is created with.
+        sessionModel = "";
         adoptSession("", []);
         emit({ type: "session_loaded", messages: [], cwd: "", mode: stateMode, effort: "auto" });
         emit(stateEvent());
@@ -1236,7 +1514,7 @@ export function createBrowserBridge(options = {}) {
         // Not awaited: the probe can take the server's full timeout (10 s by
         // default), and the command queue must stay free for a stop or a
         // session switch while the operator waits for the answer.
-        void testProvider(payload.baseUrl, payload.apiKeyEnv, payload.model);
+        void testProvider(payload.baseUrl, payload.apiKeyEnv, payload.model, payload.apiKey);
         return;
       case "sessionFlags": {
         const id = textOf(payload.id);
@@ -1316,6 +1594,14 @@ export function createBrowserBridge(options = {}) {
         }
         return;
       }
+      case "setModel":
+        setModel(textOf(payload.model));
+        return;
+      case "refreshModels":
+        // `refreshConfig` already reports a failed read as a warning and keeps
+        // the previous catalogue; a second copy here would drift from it.
+        void refreshConfig();
+        return;
       case "setLocale": {
         const next = textOf(payload.locale);
         if (next === "en" || next === "zh") {

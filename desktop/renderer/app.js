@@ -1,4 +1,4 @@
-/** Prometheus desktop renderer. */
+/** Embedded AI Master desktop renderer. */
 
 import { detectLocale, getDict } from "./i18n.js";
 import { escapeHtml, renderMarkdown, IncrementalRenderer } from "./markdown.js";
@@ -222,10 +222,21 @@ function applyLocale(locale, { announce = false } = {}) {
   // of this function with a TypeError.
   const updateButton = $("check-update");
   if (updateButton) updateButton.textContent = t.checkUpdate;
-  modelPicker.title = t.refreshModels;
+  // The chip's tooltip is the model reference, which no dictionary can supply;
+  // only the fallback text changes with the language. Assigning
+  // `t.refreshModels` unconditionally here used to overwrite the reference
+  // with "Refresh model list" on every locale switch, so redraw through the
+  // same path that set it. Before the catalogue arrives there is nothing to
+  // name — the fallback is then the right answer.
+  if (state.models.length > 0) renderModels(state.models, state.model, state.modelsSource, state.modelsError);
+  else modelPicker.title = t.refreshModels;
   // applyLocale also runs during startup, before the voice state is declared.
   $("voice-button").title = $("voice-button").classList.contains("recording") ? t.voiceStop : t.voiceStart;
-  if (state.sessions.length > 0) renderSessions(state.sessions);
+  // The session list is built from `t` when it renders, so a language change
+  // has to rebuild it. An empty workspace still draws a row (its folder and a
+  // "no conversations yet" hint), which means "sessions exist" is no longer the
+  // same question as "the list has something to relabel".
+  if (state.sessions.length > 0 || state.cwd) renderSessions(state.sessions);
   syncMenuControls();
   setStatus(state.statusKey);
   if (state.models.length > 0) renderModelMenu();
@@ -1711,13 +1722,51 @@ function renderEffortMenu() {
 
 /* ---------- model picker ---------- */
 
+/** How many entries before the menu grows a filter field. Below this the field
+ *  costs more (a row, a tab stop) than it saves. */
+const MODEL_FILTER_THRESHOLD = 8;
+
+/** The part of a `provider/model` reference the picker calls the model. */
+function modelNameOf(model) {
+  if (model.name) return model.name;
+  const slash = model.id.indexOf("/");
+  return slash < 0 ? model.id : model.id.slice(slash + 1);
+}
+
+function providerOf(id) {
+  const slash = id.indexOf("/");
+  return slash < 0 ? "" : id.slice(0, slash);
+}
+
+/**
+ * What the chip says.
+ *
+ * A model name is what the user is choosing; the gateway that serves it is a
+ * detail of where it came from. So the bare name wins whenever it identifies
+ * one entry — and `provider/model` comes back only when two providers offer a
+ * model of the same name, where the short form would be a lie. The full id is
+ * always in the title, so the reference is never lost.
+ */
+function modelChipLabel(id) {
+  const entry = state.models.find((model) => model.id === id) ?? { id };
+  const name = modelNameOf(entry);
+  // Compared against the catalogue, not against the reference: "is this name
+  // ambiguous here" is a fact about the list, not about the string.
+  const sameName = state.models.filter((model) => modelNameOf(model) === name);
+  return sameName.length > 1 ? id : name;
+}
+
 function renderModels(models, current, source, error) {
   state.models = models || [];
   state.model = current;
   state.modelsSource = source || "";
   state.modelsError = error || "";
-  if (current) {
-    modelLabel.textContent = current;
+  // A reference the catalogue does not contain cannot be run: the host would
+  // reject it and the chip would be naming a model the user cannot pick. Say
+  // so instead of printing an id that is not on the list.
+  const known = Boolean(current) && state.models.some((model) => model.id === current);
+  if (known) {
+    modelLabel.textContent = modelChipLabel(current);
     // applyLocale rewrites every [data-i18n] node from the dictionary, so
     // leaving the attribute on would put "loading models…" back the next time
     // the user switches language — after the real model name had been shown.
@@ -1729,49 +1778,283 @@ function renderModels(models, current, source, error) {
     renderContextLength();
   } else {
     // Nothing to show: the label must still leave the loading state, or the
-    // chip spins forever on a misconfigured endpoint.
+    // chip spins forever on a misconfigured endpoint. The key goes *on* here
+    // rather than off: this text is dictionary text, so a later language
+    // switch must rewrite it — and rewinding to `loadingModels` would put the
+    // spinner back on a chip that has already given up.
     modelLabel.textContent = t.modelsUnavailable;
+    modelLabel.setAttribute("data-i18n", "modelsUnavailable");
     modelPicker.classList.add("unavailable");
   }
-  modelPicker.title = state.modelsError || t.refreshModels;
+  modelPicker.title = state.modelsError || (known ? current : t.refreshModels);
   if (!modelMenu.hidden) renderModelMenu();
 }
-function renderModelMenu() {
-  modelMenu.innerHTML = "";
-  if (state.models.length === 0) {
-    modelMenu.innerHTML = `<div class="model-empty">${escapeHtml(t.modelsUnavailable)}</div>`;
+
+/** Rows grouped by provider; a single provider is one unnamed group. */
+function modelGroups() {
+  const groups = new Map();
+  for (const model of state.models) {
+    const provider = providerOf(model.id);
+    if (!groups.has(provider)) groups.set(provider, []);
+    groups.get(provider).push(model);
+  }
+  return [...groups].map(([provider, models]) => ({ provider, models }));
+}
+
+/** Current filter text; empty when the field is not on screen. */
+function modelFilterValue() {
+  const field = modelMenu.querySelector(".model-filter-input");
+  return field ? field.value.trim().toLowerCase() : "";
+}
+
+/**
+ * The listbox inside the popover, or null when the menu has not been drawn.
+ *
+ * `#model-menu` from the document is the positioned box; the listbox has to be
+ * its own element because a `role="listbox"` may only contain options and
+ * groups — the filter field and the refresh button are neither. The wrapper's
+ * own `role="listbox"` (in index.html) is replaced below.
+ */
+function modelListbox() {
+  return modelMenu.querySelector(".model-list");
+}
+
+/**
+ * The element that actually holds focus while the menu is open.
+ *
+ * Only one of them exists at a time: the filter field when there are enough
+ * models to be worth filtering (it is the combobox), otherwise the listbox
+ * itself. Either way `aria-activedescendant` goes on whatever has focus, which
+ * is what makes the highlight audible without a `tabindex` on every row.
+ */
+function modelFocusHolder() {
+  return modelMenu.querySelector(".model-filter-input") ?? modelListbox();
+}
+
+/** The highlighted option's id, or "" when nothing is highlighted. */
+function modelHighlightId() {
+  const holder = modelFocusHolder() ?? modelMenu;
+  return holder.getAttribute("aria-activedescendant") || "";
+}
+
+function setModelHighlight(option) {
+  for (const node of modelMenu.querySelectorAll('.model-option[data-highlight="1"]')) {
+    node.removeAttribute("data-highlight");
+  }
+  const holder = modelFocusHolder();
+  if (!holder) return;
+  holder.removeAttribute("aria-activedescendant");
+  if (!option) return;
+  option.dataset.highlight = "1";
+  holder.setAttribute("aria-activedescendant", option.id);
+  option.scrollIntoView({ block: "nearest" });
+}
+
+/** Visible options, ignoring separators and the footer. */
+function modelOptions() {
+  return [...modelMenu.querySelectorAll(".model-option")];
+}
+
+/** Move the highlight by `step`, clamped: the list is not a ring, so running
+ *  past the end would land the user back where they started. */
+function moveModelHighlight(step) {
+  const options = modelOptions();
+  if (options.length === 0) return;
+  const at = options.findIndex((option) => option.id === modelHighlightId());
+  const next = at < 0 ? (step > 0 ? 0 : options.length - 1) : Math.min(options.length - 1, Math.max(0, at + step));
+  setModelHighlight(options[next]);
+}
+
+/** Put the highlight on the model in use, or the first row when there is none. */
+function focusModelMenuSelection() {
+  const options = modelOptions();
+  if (options.length === 0) {
+    modelMenu.removeAttribute("aria-activedescendant");
     return;
   }
-  for (const model of state.models) {
-    const option = document.createElement("button");
-    option.className = `model-option${model.id === state.model ? " active" : ""}`;
-    option.setAttribute("role", "option");
-    option.setAttribute("aria-selected", String(model.id === state.model));
-    const meta = [
-      model.contextLength ? `${formatContext(model.contextLength)}` : "",
-      model.supportsReasoning ? "reasoning" : "",
-      model.supportsVision ? "vision" : "",
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    option.innerHTML =
-      `<span class="model-id">${escapeHtml(model.id)}</span>` +
-      (model.name && model.name !== model.id ? `<span class="model-name">${escapeHtml(model.name)}</span>` : "") +
-      (meta ? `<span class="model-meta">${escapeHtml(meta)}</span>` : "");
-    option.addEventListener("click", () => {
-      api.send({ cmd: "setModel", model: model.id });
+  const active = options.find((option) => option.dataset.model === state.model);
+  setModelHighlight(active ?? options[0]);
+}
+
+function chooseModel(id) {
+  if (id !== state.model) api.send({ cmd: "setModel", model: id });
+  closeModelMenu({ restoreFocus: true });
+}
+
+function renderModelMenu() {
+  const filter = modelFilterValue();
+  // The highlight is an id pointing at a row about to be discarded; remember
+  // which model it was so a rebuild (a `models` event, a language switch) can
+  // put it back instead of silently dropping the keyboard position.
+  const previous = modelMenu.querySelector('[data-highlight="1"]')?.dataset.model;
+  // Same reason for focus: rebuilding while the filter field is focused
+  // detaches it, and a detached node cannot keep the caret.
+  const hadFocus = !modelMenu.hidden && modelMenu.contains(document.activeElement);
+  modelMenu.innerHTML = "";
+  // The wrapper is a plain box now; the listbox below carries the role.
+  modelMenu.removeAttribute("role");
+  const filterable = state.models.length > MODEL_FILTER_THRESHOLD;
+
+  if (state.models.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "model-empty";
+    empty.textContent = t.modelsUnavailable;
+    modelMenu.appendChild(empty);
+    // An empty list with no way to fill it is a dead end. The model services
+    // live in settings, so offer the step that actually fixes this.
+    const fix = document.createElement("button");
+    fix.type = "button";
+    fix.className = "model-empty-action";
+    fix.textContent = t.modelsOpenSettings;
+    fix.addEventListener("click", () => {
       closeModelMenu();
+      openSettings("connection");
     });
-    modelMenu.appendChild(option);
+    modelMenu.appendChild(fix);
+    modelMenu.appendChild(buildModelFooter());
+    if (hadFocus) fix.focus();
+    return;
   }
+
+  const list = document.createElement("div");
+  list.className = "model-list";
+  // Stable id: the filter field points at it with `aria-controls`.
+  list.id = "model-options";
+  list.setAttribute("role", "listbox");
+  list.setAttribute("aria-label", t.modelPickerLabel);
+  // Without a filter field the listbox holds the focus itself; with one, the
+  // field does and points at the rows through `aria-activedescendant`.
+  if (!filterable) list.tabIndex = 0;
+
+  // One provider is not a grouping, it is a label above every row saying the
+  // same thing; the chip already names where the model came from.
+  const groups = modelGroups();
+  const showGroups = groups.length > 1;
+  let shown = 0;
+  for (const group of groups) {
+    const matches = filter
+      ? group.models.filter((model) => `${model.id} ${modelNameOf(model)}`.toLowerCase().includes(filter))
+      : group.models;
+    if (matches.length === 0) continue;
+    // A `role="group"` with a label, not a heading: a listbox may not contain
+    // arbitrary text, and this is exactly what group labelling is for. The
+    // visible caption is hidden from assistive tech so the provider is not
+    // announced twice for every row.
+    const section = document.createElement("div");
+    if (showGroups) {
+      section.setAttribute("role", "group");
+      section.setAttribute("aria-label", group.provider);
+      const caption = document.createElement("div");
+      caption.className = "model-group-label";
+      caption.setAttribute("aria-hidden", "true");
+      caption.textContent = group.provider;
+      section.appendChild(caption);
+    }
+    for (const model of matches) {
+      shown += 1;
+      section.appendChild(buildModelOption(model));
+    }
+    list.appendChild(section);
+  }
+
+  if (shown === 0) {
+    const empty = document.createElement("div");
+    empty.className = "model-empty";
+    empty.textContent = t.modelsNoMatch;
+    list.appendChild(empty);
+  }
+  modelMenu.appendChild(list);
+
+  if (filterable) {
+    const field = document.createElement("input");
+    field.className = "model-filter-input";
+    field.type = "search";
+    field.spellcheck = false;
+    field.autocomplete = "off";
+    field.placeholder = t.modelsFilterPlaceholder;
+    field.setAttribute("aria-label", t.modelsFilterPlaceholder);
+    // The field drives the listbox, so it is the combobox; the listbox is
+    // named by it and the two are linked rather than nested.
+    field.setAttribute("role", "combobox");
+    field.setAttribute("aria-expanded", "true");
+    field.setAttribute("aria-controls", "model-options");
+    field.setAttribute("aria-autocomplete", "list");
+    field.value = filter;
+    // `renderModelMenu` re-focuses the rebuilt field itself (it remembers
+    // `hadFocus`); doing it here as well would fight that on every keystroke.
+    field.addEventListener("input", () => renderModelMenu());
+    // Above the list on screen, after it in the DOM: the field must own the
+    // focus, and a combobox is expected before the list it controls.
+    modelMenu.insertBefore(field, list);
+  }
+
+  modelMenu.appendChild(buildModelFooter());
+
+  // Put the highlight back where it was. `previous` survives the rebuild only
+  // as a model id, so a filtered-out row correctly leaves nothing highlighted
+  // until the next arrow key rather than pointing at a row that is gone.
+  const restored = previous ? modelOptions().find((option) => option.dataset.model === previous) : undefined;
+  if (restored) setModelHighlight(restored);
+
+  if (hadFocus) {
+    const field = modelMenu.querySelector(".model-filter-input");
+    if (field) {
+      field.focus();
+      field.setSelectionRange(field.value.length, field.value.length);
+    } else {
+      modelListbox()?.focus();
+    }
+  }
+}
+
+function buildModelOption(model) {
+  const selected = model.id === state.model;
+  const option = document.createElement("button");
+  option.type = "button";
+  option.className = `model-option${selected ? " active" : ""}`;
+  // The id is what the highlight points at; models can differ only by the
+  // provider, so the reference itself is the stable key.
+  option.id = `model-option-${model.id.replace(/[^\w-]/g, "-")}`;
+  option.dataset.model = model.id;
+  option.setAttribute("role", "option");
+  option.setAttribute("aria-selected", String(selected));
+  // The reference, not the bare name, is what the user is choosing; keep it on
+  // hover even when the row shows only the short form. Selection reaches a
+  // screen reader through `aria-selected` and the eye through the check mark,
+  // so neither has to rely on the tint alone.
+  option.title = model.id;
+  const provider = providerOf(model.id);
+  const detail = [
+    model.supportsReasoning ? t.modelTagReasoning : "",
+    model.supportsVision ? t.modelTagVision : "",
+    Number.isFinite(model.contextLength) && model.contextLength > 0
+      ? t.modelContextLength(formatContext(model.contextLength))
+      : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  option.innerHTML =
+    `<span class="model-mark" aria-hidden="true">${icon("check")}</span>` +
+    `<span class="model-text">` +
+    `<span class="model-name">${escapeHtml(modelNameOf(model))}</span>` +
+    (provider || detail
+      ? `<span class="model-meta">${escapeHtml([provider, detail].filter(Boolean).join(" · "))}</span>`
+      : "") +
+    `</span>`;
+  option.addEventListener("click", () => chooseModel(model.id));
+  return option;
+}
+
+function buildModelFooter() {
   const footer = document.createElement("button");
+  footer.type = "button";
   footer.className = "model-refresh";
-  footer.textContent = t.refreshModels;
+  footer.innerHTML = `${icon("refresh", "inline")}<span>${escapeHtml(t.refreshModels)}</span>`;
   footer.addEventListener("click", () => {
     modelMenu.innerHTML = `<div class="model-empty">${escapeHtml(t.loadingModels)}</div>`;
     api.send({ cmd: "refreshModels" });
   });
-  modelMenu.appendChild(footer);
+  return footer;
 }
 
 function formatContext(value) {
@@ -1783,14 +2066,88 @@ function formatContext(value) {
 function openModelMenu() {
   renderModelMenu();
   modelMenu.hidden = false;
+  // `aria-expanded` mirrors the popover, not the chip's own state: it is the
+  // chip that claims `aria-haspopup`, so it is the chip that reports open.
   modelPicker.setAttribute("aria-expanded", "true");
-  const active = modelMenu.querySelector(".model-option.active");
-  if (active) active.scrollIntoView({ block: "center" });
+  // Focus goes to the field when filtering is possible (the user opening a
+  // long list is usually looking for one entry) and to the listbox otherwise,
+  // which is where the arrow keys drive `aria-activedescendant` from.
+  const field = modelMenu.querySelector(".model-filter-input");
+  if (field) field.focus();
+  else modelListbox()?.focus();
+  focusModelMenuSelection();
 }
 
-function closeModelMenu() {
+/**
+ * `restoreFocus` puts the caret back on the chip. A selection or Escape does
+ * that; a click elsewhere must not steal focus from wherever the user went.
+ */
+function closeModelMenu({ restoreFocus = false } = {}) {
+  const wasOpen = !modelMenu.hidden;
   modelMenu.hidden = true;
+  // The listbox and its field are rebuilt on every open, so the highlight is
+  // cleared with them; clearing it here as well keeps a closed menu from
+  // keeping a stale reference if something queries it before the next draw.
+  for (const node of modelMenu.querySelectorAll("[aria-activedescendant]")) {
+    node.removeAttribute("aria-activedescendant");
+  }
   modelPicker.setAttribute("aria-expanded", "false");
+  if (restoreFocus && wasOpen) modelPicker.focus();
+}
+
+/**
+ * Keys that arrive while the menu is open. Returns true when consumed.
+ *
+ * Registered before the window's other key handlers, so the innermost surface
+ * wins: Escape must dismiss this menu, not the conversation behind it.
+ */
+function handleModelMenuKey(event) {
+  if (modelMenu.hidden) return false;
+  // Only act on keys aimed at this menu. A global listener would otherwise
+  // swallow arrows typed into the composer while the menu happens to be open.
+  const holder = modelFocusHolder();
+  if (!holder || !(holder === document.activeElement || holder.contains(document.activeElement))) return false;
+  const key = event.key;
+  if (key === "ArrowDown" || key === "ArrowUp") {
+    event.preventDefault();
+    moveModelHighlight(key === "ArrowDown" ? 1 : -1);
+    return true;
+  }
+  // Home/End belong to the caret while the user is typing in the filter;
+  // taking them there would move the list instead of the cursor.
+  const inFilter = holder.classList.contains("model-filter-input");
+  if ((key === "Home" || key === "End") && !inFilter) {
+    event.preventDefault();
+    const options = modelOptions();
+    const target = key === "Home" ? options[0] : options[options.length - 1];
+    if (target) setModelHighlight(target);
+    return true;
+  }
+  if (key === "Enter") {
+    const options = modelOptions();
+    const chosen = options.find((option) => option.id === modelHighlightId());
+    // Nothing highlighted means nothing was chosen; sending the first row
+    // would switch models on a keystroke the user did not aim at a row.
+    if (!chosen) return false;
+    event.preventDefault();
+    chooseModel(chosen.dataset.model);
+    return true;
+  }
+  if (key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeModelMenu({ restoreFocus: true });
+    return true;
+  }
+  if (key === "Tab") {
+    // Tabbing out of a listbox is a dismissal, not a selection. The browser
+    // moves the focus; the menu just gets out of the way.
+    closeModelMenu();
+    return false;
+  }
+  // Typing is not a mis-aimed arrow key: only keys that are real commands are
+  // swallowed, so the filter field keeps receiving ordinary characters.
+  return false;
 }
 
 /* ---------- host events ---------- */
@@ -2732,7 +3089,12 @@ function handleEvent(message) {
           bindCodeCopy(node);
         } else if (item.role === "tool") {
           const row = document.createElement("div");
-          row.className = "tool-row done";
+          // A failed call keeps its failure when the conversation is reopened.
+          // The live `tool_result` path paints `.failed` red, but replaying the
+          // log used to hardcode `done`: the same failure read as a success
+          // after a reload, which is exactly the dishonesty R3 forbids. The
+          // protocol layer already carries `ok`; it was being dropped here.
+          row.className = item.ok === false ? "tool-row failed done" : "tool-row done";
           row.innerHTML =
             `<span class="tool-glyph">${icon(toolGlyph(item.name))}</span>` +
             `<span class="tool-name">${escapeHtml(toolLabel(item.name))}</span>` +
@@ -2787,7 +3149,10 @@ function handleEvent(message) {
             let dot = row.querySelector(".session-state");
             if (state_ && !dot) {
               dot = document.createElement("span");
-              row.prepend(dot);
+              // Inside the flags lane, not at the front of the row: the lane is
+              // fixed-width, and a dot prepended to the row would shove the
+              // title off the edge every other title shares.
+              (row.querySelector(".session-flags") ?? row).prepend(dot);
             }
             if (dot) {
               if (state_) {
@@ -4458,10 +4823,32 @@ function projectLabel(cwd) {
 }
 
 /**
- * Sessions are grouped by workspace, the way every coding agent organizes
- * them: one collapsible project header, its conversations underneath, and the
- * active project expanded. A flat list mixed folders together and made it
- * impossible to tell which project a conversation belonged to.
+ * Start a conversation in `target`: move the workspace there, then open a new
+ * session. Both paths in the workspace row — the "+" and the empty-state
+ * button — go through here so they cannot drift apart.
+ *
+ * A `setCwd` makes the host adopt the folder and reply with a `state` event,
+ * which is also when a fresh session can be created; the host refuses a
+ * workspace switch mid-run, so the new-session command is only sent when the
+ * target is already the open folder. Moving first and creating in the same
+ * breath would create the session in the old folder under a running task.
+ */
+function startSessionIn(target) {
+  if (target && target !== state.cwd) {
+    api.send({ cmd: "setCwd", cwd: target });
+    return;
+  }
+  api.send({ cmd: "newSession" });
+}
+
+/**
+ * Sessions are grouped by workspace, and that grouping is the list's level
+ * structure: the first level is a folder, the second the conversations inside
+ * it. The workspace you are in is always on the list, even before it holds a
+ * conversation — after picking a folder the sidebar has to show that the
+ * switch happened, or the picker looks like it did nothing.
+ *
+ * Fold state is per workspace and remembered across restarts.
  */
 function renderSessions(sessions) {
   state.sessions = sessions || [];
@@ -4480,7 +4867,13 @@ function renderSessions(sessions) {
             session.cwd.toLowerCase().includes(query),
         )
       : state.sessions;
-  if (visible.length === 0) {
+  const activeProject = normalizeCwd(state.cwd);
+  // The open workspace gets a row of its own even with nothing inside it, but
+  // only outside a search: during a search the list answers "what matched",
+  // and an empty workspace row would read as a second, contradictory result.
+  const showActiveOnly =
+    !query && activeProject !== "" && !visible.some((session) => normalizeCwd(session.cwd) === activeProject);
+  if (visible.length === 0 && !showActiveOnly) {
     const empty = document.createElement("div");
     empty.className = "sidebar-empty";
     empty.textContent = state.sessions.length === 0 ? t.noSessions : t.noSessionMatches;
@@ -4493,17 +4886,20 @@ function renderSessions(sessions) {
   // folder with different separators (G:\x vs G:/x), so keys are normalized.
   const groups = new Map();
   const displayPath = new Map();
-  const lastUsed = new Map();
+  if (showActiveOnly) {
+    // Inserted before the loop, so the folder you are in is where the eye
+    // starts even when it is the only row.
+    groups.set(activeProject, []);
+    displayPath.set(activeProject, state.cwd ?? "");
+  }
   for (const session of visible) {
     const key = normalizeCwd(session.cwd);
     if (!groups.has(key)) {
       groups.set(key, []);
       displayPath.set(key, session.cwd || "");
-      lastUsed.set(key, session.updatedAt);
     }
     groups.get(key).push(session);
   }
-  const activeProject = normalizeCwd(state.cwd);
   // A search result should reveal its projects rather than hide them.
   const expandAll = Boolean(query);
 
@@ -4515,31 +4911,37 @@ function renderSessions(sessions) {
     const explicitOpen = state.expandedProjects.has(cwd) && !state.collapsedProjects.has(cwd);
     const explicitClosed = state.collapsedProjects.has(cwd);
     const open = expandAll || explicitOpen || (!explicitClosed && cwd === activeProject);
+    const label = labels.get(cwd) ?? projectLabel(displayPath.get(cwd) || cwd);
+    const target = displayPath.get(cwd) || cwd;
     const head = document.createElement("button");
     head.className = `session-group${cwd === activeProject ? " active" : ""}`;
     head.setAttribute("aria-expanded", open ? "true" : "false");
-    const count = document.createElement("span");
-    count.className = "session-group-count";
-    count.textContent = String(items.length);
-    const name = document.createElement("span");
-    name.className = "session-group-name";
-    name.textContent = labels.get(cwd) ?? projectLabel(displayPath.get(cwd) || cwd);
-    name.title = displayPath.get(cwd) || cwd || t.noProject;
+    // Fold state is the chevron; identity is the folder. A workspace row
+    // without the folder glyph reads as a plain text label, which is why the
+    // old list had no visible levels even though the grouping existed.
     const twisty = document.createElement("span");
     twisty.className = "session-group-twisty";
     twisty.innerHTML = icon(open ? "chevron-down" : "chevron-right");
+    const glyph = document.createElement("span");
+    glyph.className = "session-group-glyph";
+    glyph.innerHTML = icon("folder");
+    const name = document.createElement("span");
+    name.className = "session-group-name";
+    name.textContent = label;
+    name.title = displayPath.get(cwd) || cwd || t.noProject;
+    const count = document.createElement("span");
+    count.className = "session-group-count";
+    count.textContent = String(items.length);
     // New chat inside this project, without leaving the current conversation.
     const add = document.createElement("span");
     add.className = "session-group-add";
-    add.title = t.newSessionIn(projectLabel(cwd));
+    add.title = t.newSessionIn(label);
     add.textContent = "+";
     add.addEventListener("click", (event) => {
       event.stopPropagation();
-      const target = displayPath.get(cwd) || cwd;
-      if (target && target !== state.cwd) api.send({ cmd: "setCwd", cwd: target });
-      else api.send({ cmd: "newSession" });
+      startSessionIn(target);
     });
-    head.append(twisty, name, count, add);
+    head.append(twisty, glyph, name, count, add);
     head.addEventListener("click", () => {
       if (open) {
         state.expandedProjects.delete(cwd);
@@ -4558,6 +4960,23 @@ function renderSessions(sessions) {
     // the group row already says how many are inside.
     const shown = open ? items : [];
 
+    if (open && shown.length === 0) {
+      // The folder you just switched to has nothing in it yet. Saying so is the
+      // point: a workspace row with no children and no explanation is
+      // indistinguishable from a list that failed to load (R3).
+      const empty = document.createElement("div");
+      empty.className = "session-empty";
+      const hint = document.createElement("span");
+      hint.className = "session-empty-hint";
+      hint.textContent = t.noWorkspaceSessions;
+      const start = document.createElement("button");
+      start.className = "session-empty-action";
+      start.textContent = t.newSession;
+      start.addEventListener("click", () => startSessionIn(target));
+      empty.append(hint, start);
+      sessionList.appendChild(empty);
+    }
+
     for (const session of shown) {
       const button = document.createElement("button");
       button.className = `session-item${session.id === state.sessionId ? " active" : ""}${session.pinned ? " pinned" : ""}`;
@@ -4569,16 +4988,22 @@ function renderSessions(sessions) {
       // The timestamp is reference, not navigation: it appears on hover and
       // gives the row back its second line of height.
       const status = session.status && session.status !== "ready" ? session.status : "";
+      // The markers share one fixed-width lane so a row with a run-state dot
+      // or a pin does not push its title right: every conversation title has
+      // to start on the same edge, which is the workspace name above it.
       button.innerHTML =
+        `<span class="session-flags">` +
         (status ? `<span class="session-state ${status}" title="${escapeHtml(t.sessionStatusLabel(status))}"></span>` : "") +
         (session.pinned ? `<span class="session-pin" title="${escapeHtml(t.sessionPinned)}">${icon("pin")}</span>` : "") +
+        `</span>` +
         `<div class="session-title">${escapeHtml(title)}</div>` +
         `<span class="session-meta">${escapeHtml(relativeDate(session.updatedAt))}</span>`;
       button.title = `${title}\n${relativeDate(session.updatedAt)}\n${session.cwd}`;
       button.addEventListener("click", () => {
         api.send({ cmd: "loadSession", id: session.id });
-        // On a narrow window the drawer covers the conversation once opened.
-        if (window.matchMedia("(max-width: 860px)").matches) document.querySelector(".shell").classList.add("collapsed");
+        // On a narrow window the drawer covers the conversation once opened;
+        // `isDrawerWidth` is the same breakpoint the stylesheet uses.
+        if (isDrawerWidth()) document.querySelector(".shell").classList.add("collapsed");
       });
       button.addEventListener("contextmenu", (event) => {
         event.preventDefault();
@@ -4873,6 +5298,13 @@ stopButton.addEventListener("click", () => {
   input.focus();
 });
 
+// The model menu's own keys (arrows, Home/End, Enter, Escape, Tab) are handled
+// first: it is the innermost open surface, and Escape must dismiss it before
+// any outer handler decides the key means something else.
+document.addEventListener("keydown", (event) => {
+  if (handleModelMenuKey(event)) return;
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (paletteState) {
@@ -4893,7 +5325,7 @@ document.addEventListener("keydown", (event) => {
       return;
     }
     if (!modelMenu.hidden) {
-      closeModelMenu();
+      closeModelMenu({ restoreFocus: true });
       return;
     }
     if (!pendingPermission.hidden) {
@@ -5663,6 +6095,8 @@ document.addEventListener("click", (event) => {
 modelPicker.addEventListener("click", (event) => {
   event.stopPropagation();
   if (modelMenu.hidden) openModelMenu();
+  // The click is on the chip, which already has the focus; moving it around
+  // here would scroll the list back to the top for no reason.
   else closeModelMenu();
 });
 
@@ -5870,6 +6304,23 @@ $("session-search").addEventListener("input", (event) => {
   }, 180);
 });
 
+/**
+ * The width at which the sidebar stops sharing the row and becomes a drawer
+ * that covers the conversation. It has to be one number, read by both the
+ * stylesheet (`@media (max-width: 900px)`) and this file: they used to
+ * disagree — CSS switched at 900, the auto-collapse below at 860 — so
+ * between the two, and at exactly the Electron window's `minWidth` of 900,
+ * the drawer opened *over* the transcript and left nothing else visible.
+ *
+ * The drawer is an overlay, so it must start closed. Below this width the
+ * conversation is the only thing on screen until the user asks for the rail.
+ */
+const DRAWER_BREAKPOINT = 900;
+
+function isDrawerWidth() {
+  return window.innerWidth <= DRAWER_BREAKPOINT;
+}
+
 /** Collapse or expand the conversation sidebar; remembered across restarts. */
 function toggleSidebar() {
   const collapsed = document.querySelector(".shell").classList.toggle("collapsed");
@@ -5878,6 +6329,19 @@ function toggleSidebar() {
 if (localStorage.getItem("prometheus.sidebarCollapsed") === "1") {
   document.querySelector(".shell").classList.add("collapsed");
 }
+// A remembered "open" is a preference for the shared row, where an open rail
+// costs width. In the drawer it costs the whole window, so the drawer always
+// starts closed regardless of what was remembered. Resizing across the
+// breakpoint applies the same rule in both directions: entering the drawer
+// folds it, leaving restores the user's remembered preference.
+const sidebarPreference = () => localStorage.getItem("prometheus.sidebarCollapsed") === "1";
+function applyDrawerRule() {
+  const shell = document.querySelector(".shell");
+  if (isDrawerWidth()) shell.classList.add("collapsed");
+  else shell.classList.toggle("collapsed", sidebarPreference());
+}
+if (isDrawerWidth()) document.querySelector(".shell").classList.add("collapsed");
+window.addEventListener("resize", applyDrawerRule);
 
 $("topbar-sidebar-toggle").addEventListener("click", toggleSidebar);
 
@@ -6013,16 +6477,15 @@ function renderTopbarLocation() {
   const name = parts.length > 0 ? parts[parts.length - 1] : "";
   $("topbar-cwd-name").textContent = name || t.appName;
   $("topbar-cwd").title = cwd || t.appName;
-  // The sidebar entry reads the same name, computed once above: a second
-  // basename helper is how the two views would come to disagree.
-  $("sidebar-workspace-name").textContent = name || t.workspaceNone;
+  // The sidebar's folder button is an icon: the current folder is a row in the
+  // list below it (the active workspace), so repeating the name here would
+  // restore the second "workspace" concept the two-level list removed. The
+  // button still needs a name of its own for a screen reader, and it has to
+  // say what the click does — the folder in the list says where you are.
   $("sidebar-workspace").title = cwd ? `${t.changeFolderTitle}: ${cwd}` : t.workspaceChoose;
-  // aria-label replaces the two lines above rather than adding to them, so it
-  // has to name both the current folder and what the click does; otherwise a
-  // screen reader would hear the action and lose the state.
   $("sidebar-workspace").setAttribute(
     "aria-label",
-    `${t.workspaceLabel}: ${name || t.workspaceNone} — ${cwd ? t.changeFolderTitle : t.workspaceChoose}`,
+    cwd ? `${t.changeFolderTitle}: ${cwd}` : t.workspaceChoose,
   );
   $("sidebar-workspace").classList.toggle("empty", name === "");
   const branch = state.git?.available ? state.git.branch : "";

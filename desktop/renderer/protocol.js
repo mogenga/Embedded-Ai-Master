@@ -1,5 +1,5 @@
 /**
- * Kernel session events → Prometheus host events.
+ * Kernel session events → Embedded AI Master host events.
  *
  * Pure functions shared by the desktop host (Node) and the browser bridge
  * (renderer). Nothing here touches the DOM, the filesystem, or the network:
@@ -66,7 +66,7 @@ function truncateUtf8(text, maxBytes) {
 /**
  * One line of argument summary for a tool row.
  *
- * Mirrors the Prometheus host's `summarizeCall`: prefer the argument that
+ * Mirrors the original host's `summarizeCall`: prefer the argument that
  * names what the call touches, fall back to the first string value, and keep
  * it short enough for a single row.
  */

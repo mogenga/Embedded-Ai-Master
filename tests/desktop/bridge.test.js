@@ -1099,51 +1099,62 @@ describe("bridge: 导出", () => {
 });
 
 describe("bridge: 目录选择", () => {
-  function pickerBridge() {
-    const fetchImpl = fakeFetch([["/api/sessions", () => jsonResponse({ sessions: [] })]]);
+  function pickerBridge(routes = [], options = {}) {
+    const fetchImpl = fakeFetch([...routes, ["/api/sessions", () => jsonResponse({ sessions: [] })]]);
     const bridge = createBrowserBridge({
       fetchImpl,
       EventSourceImpl: FakeEventSource,
       storage: storageStub(),
+      ...options,
     });
     const events = [];
     bridge.api.onEvent((event) => events.push(event));
     bridge.boot();
-    return { bridge, events };
+    return { bridge, events, fetchImpl };
   }
 
-  it("浏览器没有目录选择器时返回 null 并发出 warn 说明替代方式", async () => {
+  function resolveRoute(candidates, truncated = false) {
+    return ["/api/workspace/resolve", () => jsonResponse({ candidates, truncated })];
+  }
+
+  it("浏览器没有目录选择器时返回 null 并发出 warn 说明能力缺失", async () => {
     // Node has no `showDirectoryPicker`; the bridge must not answer with a
-    // silent `null` — the click would look like it did nothing (R3).
+    // silent `null` — the click would look like it did nothing (R3). It names
+    // the missing capability; the caller's own fallback handles the "what now".
     const { bridge, events } = pickerBridge();
     const picked = await bridge.api.pickDirectory();
     expect(picked).toBeNull();
     const notice = events.filter((event) => event.type === "notice").at(-1);
     expect(notice).toMatchObject({ type: "notice", level: "warn" });
-    expect(notice.text).toContain("无法打开");
+    expect(notice.text).toContain("showDirectoryPicker");
     expect(notice.text).toContain("绝对路径");
-    expect(notice.text).toContain("输入路径");
   });
 
-  it("即使 showDirectoryPicker 可用也只发 warn，绝不用 handle.name 冒充路径", async () => {
-    const showDirectoryPicker = vi.fn(async () => ({ name: "work", kind: "directory" }));
+  it("handle.name 交给服务端解析，唯一候选直接用作工作区路径", async () => {
+    const showDirectoryPicker = vi.fn(async () => ({ name: "myproject", kind: "directory" }));
     vi.stubGlobal("showDirectoryPicker", showDirectoryPicker);
-    const { bridge, events } = pickerBridge();
+    const { bridge, events, fetchImpl } = pickerBridge([
+      resolveRoute([{ path: "E:/work/myproject", name: "myproject" }]),
+    ]);
 
     const picked = await bridge.api.pickDirectory();
-    // `handle.name` is a bare folder name, not an absolute path: handing it to
-    // `getFile` would send the server a path it cannot resolve.
-    expect(picked).toBeNull();
+    // The picker is actually called — the old code opened it and threw the
+    // answer away.
     expect(showDirectoryPicker).toHaveBeenCalledTimes(1);
+    // The bare name is never returned as if it were a path; the server's
+    // candidate is.
+    expect(picked).toBe("E:/work/myproject");
+    const resolveCall = fetchImpl.calls.find((call) => call.url === "/api/workspace/resolve");
+    expect(resolveCall.method).toBe("POST");
+    expect(JSON.parse(resolveCall.body)).toStrictEqual({ name: "myproject" });
+    // The operator gets told where the folder was taken to be.
     const notice = events.filter((event) => event.type === "notice").at(-1);
-    expect(notice).toMatchObject({ type: "notice", level: "warn" });
-    expect(notice.text).toContain("绝对路径");
-    expect(notice.text).toContain("输入路径");
+    expect(notice.text).toContain("E:/work/myproject");
   });
 
-  it("用户在选择器里取消时也给出 warn，而不是静默 null", async () => {
-    // A cancel throws `AbortError` in Chromium; that is still a click that must
-    // not look like a server failure or a silent no-op.
+  it("用户在选择器里取消时安静返回 null，不发任何提示", async () => {
+    // A cancel is a decision, not a failure. The renderer already follows a
+    // `null` with its path prompt; a warning on top would punish the cancel.
     vi.stubGlobal(
       "showDirectoryPicker",
       vi.fn(async () => {
@@ -1153,8 +1164,139 @@ describe("bridge: 目录选择", () => {
     const { bridge, events } = pickerBridge();
     const picked = await bridge.api.pickDirectory();
     expect(picked).toBeNull();
+    expect(events.filter((event) => event.type === "notice")).toHaveLength(0);
+  });
+
+  it("选择器本身报错时返回 null，并在 warn 里说清原因", async () => {
+    vi.stubGlobal(
+      "showDirectoryPicker",
+      vi.fn(async () => {
+        throw new Error("SecurityError: not allowed in this context");
+      }),
+    );
+    const { bridge, events } = pickerBridge();
+    const picked = await bridge.api.pickDirectory();
+    expect(picked).toBeNull();
     const notice = events.filter((event) => event.type === "notice").at(-1);
     expect(notice).toMatchObject({ type: "notice", level: "warn" });
+    expect(notice.text).toContain("SecurityError");
+    expect(notice.text).toContain("绝对路径");
+  });
+
+  it("多个候选时交给选择器，返回用户选中的那一个", async () => {
+    vi.stubGlobal("showDirectoryPicker", vi.fn(async () => ({ name: "proj" })));
+    const chooseCandidate = vi.fn(async () => "D:/b/proj");
+    const { bridge, fetchImpl } = pickerBridge(
+      [
+        resolveRoute([
+          { path: "E:/a/proj", name: "proj" },
+          { path: "D:/b/proj", name: "proj" },
+        ]),
+      ],
+      { chooseCandidate },
+    );
+
+    const picked = await bridge.api.pickDirectory();
+    expect(picked).toBe("D:/b/proj");
+    expect(chooseCandidate).toHaveBeenCalledWith(
+      [
+        { path: "E:/a/proj", name: "proj" },
+        { path: "D:/b/proj", name: "proj" },
+      ],
+      "proj",
+    );
+    // The choice is used as-is; nothing is registered behind the operator's
+    // back — `setWorkspace` is still the only thing that widens the boundary.
+    expect(fetchImpl.calls.some((call) => call.url === "/api/workspace")).toBe(false);
+  });
+
+  it("候选选择器被取消时安静返回 null", async () => {
+    vi.stubGlobal("showDirectoryPicker", vi.fn(async () => ({ name: "proj" })));
+    const chooseCandidate = vi.fn(async () => null);
+    const { bridge, events } = pickerBridge(
+      [
+        resolveRoute([
+          { path: "E:/a/proj", name: "proj" },
+          { path: "D:/b/proj", name: "proj" },
+        ]),
+      ],
+      { chooseCandidate },
+    );
+    const picked = await bridge.api.pickDirectory();
+    expect(picked).toBeNull();
+    expect(events.filter((event) => event.type === "notice")).toHaveLength(0);
+  });
+
+  it("选择器返回候选之外的路径时拒绝采用，并列出全部候选", async () => {
+    // A chooser is a UI seam; a bad answer must not become a path the server
+    // never proposed. The candidates are listed so the operator can copy one.
+    vi.stubGlobal("showDirectoryPicker", vi.fn(async () => ({ name: "proj" })));
+    const { bridge, events } = pickerBridge(
+      [
+        resolveRoute([
+          { path: "E:/a/proj", name: "proj" },
+          { path: "D:/b/proj", name: "proj" },
+        ]),
+      ],
+      { chooseCandidate: vi.fn(async () => "C:/etc") },
+    );
+    const picked = await bridge.api.pickDirectory();
+    expect(picked).toBeNull();
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("E:/a/proj");
+    expect(notice.text).toContain("D:/b/proj");
+    expect(notice.text).toContain("输入绝对路径");
+  });
+
+  it("没有候选时回落到手输，并说明没在常见位置找到", async () => {
+    vi.stubGlobal("showDirectoryPicker", vi.fn(async () => ({ name: "ghost" })));
+    const { bridge, events } = pickerBridge([resolveRoute([])]);
+    const picked = await bridge.api.pickDirectory();
+    expect(picked).toBeNull();
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("ghost");
+    expect(notice.text).toContain("没在常见位置找到");
+    expect(notice.text).toContain("输入绝对路径");
+  });
+
+  it("搜索被预算截断时说明可能没找全，而不是断言不存在", async () => {
+    vi.stubGlobal("showDirectoryPicker", vi.fn(async () => ({ name: "ghost" })));
+    const { bridge, events } = pickerBridge([resolveRoute([], true)]);
+    const picked = await bridge.api.pickDirectory();
+    expect(picked).toBeNull();
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.text).toContain("ghost");
+    expect(notice.text).toContain("预算");
+    expect(notice.text).not.toContain("没在常见位置找到");
+  });
+
+  it("解析端点失败时返回 null 并说明原因，不静默", async () => {
+    vi.stubGlobal("showDirectoryPicker", vi.fn(async () => ({ name: "proj" })));
+    const { bridge, events } = pickerBridge([
+      [
+        "/api/workspace/resolve",
+        () => jsonResponse({ error: { code: "internal_error", message: "内部错误" } }, 500),
+      ],
+    ]);
+    const picked = await bridge.api.pickDirectory();
+    expect(picked).toBeNull();
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("定位文件夹失败");
+    expect(notice.text).toContain("内部错误");
+  });
+
+  it("handle 没有名字时不猜路径，只说明拿不到文件夹名", async () => {
+    vi.stubGlobal("showDirectoryPicker", vi.fn(async () => ({ kind: "directory" })));
+    const { bridge, events, fetchImpl } = pickerBridge();
+    const picked = await bridge.api.pickDirectory();
+    expect(picked).toBeNull();
+    // No name means nothing to look up: the resolve endpoint is not called.
+    expect(fetchImpl.calls.some((call) => call.url === "/api/workspace/resolve")).toBe(false);
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
     expect(notice.text).toContain("绝对路径");
   });
 });
@@ -1459,6 +1601,91 @@ describe("bridge: 测试连接（testProvider）", () => {
     expect(event.latencyMs).toBeUndefined();
   });
 
+  it("直接填写的 apiKey 随请求发给服务端（trim 后）", async () => {
+    const { bridge, events, fetchImpl } = probeBridge(() =>
+      jsonResponse({ ok: true, models: ["flash"] }),
+    );
+    bridge.api.send({
+      cmd: "testProvider",
+      baseUrl: "https://gw.example/v1",
+      apiKey: "  sk-direct-0123456789abcdef  ",
+    });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+
+    // The key is write-only: it travels in the request body and never comes
+    // back. Trimming matches the kernel's own resolution (`resolveProviderApiKey`),
+    // so the probe sends the same string the run would.
+    expect(JSON.parse(fetchImpl.calls.find((entry) => entry.url === "/api/providers/test").body))
+      .toStrictEqual({ baseUrl: "https://gw.example/v1", apiKey: "sk-direct-0123456789abcdef" });
+    // No event carries it back, in any field.
+    expect(JSON.stringify(events)).not.toContain("sk-direct-0123456789abcdef");
+  });
+
+  it("apiKey 为空串或纯空白时不发该字段", async () => {
+    for (const apiKey of ["", "   "]) {
+      const { bridge, events, fetchImpl } = probeBridge(() =>
+        jsonResponse({ ok: true, models: ["flash"] }),
+      );
+      bridge.api.send({
+        cmd: "testProvider",
+        baseUrl: "https://gw.example/v1",
+        apiKey,
+        apiKeyEnv: "GW_KEY",
+      });
+      await vi.waitFor(() => {
+        expect(events.some((event) => event.type === "provider_test")).toBe(true);
+      });
+
+      // An empty key is "not filled in", not a key: sending it would ask the
+      // server to attach `Bearer ` to the probe request.
+      expect(JSON.parse(fetchImpl.calls.find((entry) => entry.url === "/api/providers/test").body))
+        .toStrictEqual({ baseUrl: "https://gw.example/v1", apiKeyEnv: "GW_KEY" });
+    }
+  });
+
+  it("密钥原样出现在失败原因里时，事件文本把它抹掉（安全要求）", async () => {
+    const key = "sk-leaked-0123456789abcdef";
+    // A downstream bug (server, gateway, or a thrown transport error) that
+    // quotes the request must not turn the event stream into a key leak.
+    const { bridge, events } = probeBridge(() =>
+      jsonResponse({
+        ok: false,
+        baseUrl: "https://gw.example/v1",
+        error: `鉴权失败（HTTP 401）：请求头 Authorization: Bearer ${key} 被拒绝`,
+        code: "unauthorized",
+      }),
+    );
+    bridge.api.send({ cmd: "testProvider", baseUrl: "https://gw.example/v1", apiKey: key });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event.ok).toBe(false);
+    expect(event.code).toBe("unauthorized");
+    expect(event.error).toContain("401");
+    expect(event.error).not.toContain(key);
+    expect(JSON.stringify(events)).not.toContain(key);
+  });
+
+  it("传输层异常文本里带密钥时同样被抹掉", async () => {
+    const key = "sk-transport-0123456789ab";
+    const { bridge, events } = probeBridge(() => {
+      throw new Error(`request failed: Authorization Bearer ${key}`);
+    });
+    bridge.api.send({ cmd: "testProvider", baseUrl: "https://gw.example/v1", apiKey: key });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event.ok).toBe(false);
+    expect(event.error).toContain("request failed");
+    expect(JSON.stringify(events)).not.toContain(key);
+  });
+
   it("服务端回 ok:false 时转成失败事件，带上原因与错误码", async () => {
     const { bridge, events } = probeBridge(() =>
       jsonResponse({
@@ -1551,6 +1778,191 @@ describe("bridge: 测试连接（testProvider）", () => {
     expect(event).toMatchObject({ type: "provider_test", ok: false, baseUrl: "" });
     expect(event.error.trim()).not.toBe("");
     expect(fetchImpl.calls.some((entry) => entry.url === "/api/providers/test")).toBe(false);
+  });
+});
+
+describe("bridge: 模型选择（setModel / refreshModels）", () => {
+  const providers = {
+    gw: {
+      protocol: "openai-chat-completions",
+      baseUrl: "https://gw.example/v1",
+      models: { flash: { contextWindow: 128000, maxOutput: 4096 }, pro: { contextWindow: 256000 } },
+    },
+  };
+
+  /**
+   * A bridge that has already read the provider file into its catalogue.
+   *
+   * Caller routes come first: `fakeFetch` matches on `includes`, so the generic
+   * `/api/sessions` entry below would otherwise swallow `/api/sessions/:id`.
+   */
+  async function modelBridge(routes = []) {
+    const fetchImpl = fakeFetch([
+      ...routes,
+      ["/api/config", () => jsonResponse({ providers, providersPath: "E:/home/providers.json" })],
+      ["/api/actions", () => jsonResponse({ sessionId: "sess-1", created: true }, 202)],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "getSettings" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "models")).toBe(true);
+    });
+    return { bridge, events, fetchImpl };
+  }
+
+  it("setModel 选中的 id 通过 models 与 state 事件回显", async () => {
+    const { bridge, events } = await modelBridge();
+
+    bridge.api.send({ cmd: "setModel", model: "gw/pro" });
+
+    const models = events.filter((event) => event.type === "models").at(-1);
+    expect(models.model).toBe("gw/pro");
+    expect(models.models.map((entry) => entry.id)).toStrictEqual(["gw/flash", "gw/pro"]);
+    const state = events.filter((event) => event.type === "state").at(-1);
+    expect(state.model).toBe("gw/pro");
+    // 没有任何会话打开：这条选择不会被“仅对新建会话生效”的提示干扰。
+    expect(events.some((event) => event.type === "notice")).toBe(false);
+  });
+
+  it("setModel 拒绝 providers.json 里没有的引用，选单不变", async () => {
+    const { bridge, events } = await modelBridge();
+    const before = events.filter((event) => event.type === "models").at(-1).model;
+
+    bridge.api.send({ cmd: "setModel", model: "gw/nope" });
+
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("providers.json");
+    // 回显仍是被接受的那个；谎报一次成功会让下一次运行用上不存在的模型。
+    expect(events.filter((event) => event.type === "models").at(-1).model).toBe(before);
+  });
+
+  it("运行中 setModel 只发警告，状态不变", async () => {
+    const { bridge, events } = await modelBridge();
+    bridge.api.send({ cmd: "prompt", text: "串口没输出" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    bridge.api.send({ cmd: "setModel", model: "gw/pro" });
+
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice).toMatchObject({ level: "warn", text: "运行中不能切换模型" });
+    // 这条命令一条 state 都不该发：改了标签却没换模型就是撒谎。
+    const state = events.filter((event) => event.type === "state").at(-1);
+    expect(state.model).toBe("gw/flash");
+  });
+
+  it("有打开的会话时 setModel 追加一条 dim 提示说明只对新建会话生效", async () => {
+    const routes = [
+      ["/api/sessions/sess-9", () =>
+        jsonResponse({
+          header: { id: "sess-9", workdir: "E:/w", status: "closed", model: "gw/flash" },
+          events: [{ seq: 0, ts: "t", type: "user", payload: { content: "hi" } }],
+        })],
+    ];
+    const { bridge, events } = await modelBridge(routes);
+    bridge.api.send({ cmd: "loadSession", id: "sess-9" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    bridge.api.send({ cmd: "setModel", model: "gw/pro" });
+
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("dim");
+    expect(notice.text).toContain("仅对新建会话生效");
+  });
+
+  it("新建会话时把 model 一起 POST 出去，续聊时不带", async () => {
+    const routes = [
+      ["/api/sessions/sess-1", () =>
+        jsonResponse({
+          header: { id: "sess-1", workdir: "E:/p", status: "closed", model: "gw/flash" },
+          events: [{ seq: 0, ts: "t", type: "user", payload: { content: "hi" } }],
+        })],
+    ];
+    const { bridge, fetchImpl } = await modelBridge(routes);
+    bridge.api.send({ cmd: "setModel", model: "gw/pro" });
+
+    bridge.api.send({ cmd: "prompt", text: "新建的" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const first = JSON.parse(fetchImpl.calls.find((call) => call.url === "/api/actions").body);
+    // 这是这条命令唯一能真正生效的路径：内核只在新会话上接受它。
+    expect(first.model).toBe("gw/pro");
+
+    // End the turn the way the kernel does, or `loadSession` refuses while a
+    // run is still marked in flight.
+    FakeEventSource.instances.at(-1).dispatch("stream_end", { lastSeq: 0 });
+
+    // 续聊一场已有会话：header 里的模型说了算，带一个别的只会换来
+    // model_mismatch，所以这个字段必须缺席。
+    bridge.api.send({ cmd: "loadSession", id: "sess-1" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    bridge.api.send({ cmd: "prompt", text: "继续" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const posts = fetchImpl.calls.filter((call) => call.url === "/api/actions");
+    const second = JSON.parse(posts.at(-1).body);
+    expect(second.sessionId).toBe("sess-1");
+    expect("model" in second).toBe(false);
+  });
+
+  it("读取旧会话不会改写新建会话要用的模型", async () => {
+    const routes = [
+      ["/api/sessions/sess-9", () =>
+        jsonResponse({
+          header: { id: "sess-9", workdir: "E:/w", status: "closed", model: "gw/flash" },
+          events: [{ seq: 0, ts: "t", type: "user", payload: { content: "hi" } }],
+        })],
+    ];
+    const { bridge, events, fetchImpl } = await modelBridge(routes);
+    bridge.api.send({ cmd: "setModel", model: "gw/pro" });
+    bridge.api.send({ cmd: "loadSession", id: "sess-9" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // 打开会话时 chip 显示该会话自己的模型（它就是这么跑的）。
+    expect(events.filter((event) => event.type === "state").at(-1).model).toBe("gw/flash");
+
+    bridge.api.send({ cmd: "newSession" });
+    expect(events.filter((event) => event.type === "state").at(-1).model).toBe("gw/pro");
+
+    bridge.api.send({ cmd: "prompt", text: "新的对话" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const posted = JSON.parse(fetchImpl.calls.find((call) => call.url === "/api/actions").body);
+    // 刚选过的模型不能被“读了一眼旧会话”悄悄换掉。
+    expect(posted.model).toBe("gw/pro");
+  });
+
+  it("refreshModels 重新读 /api/config 并广播 models", async () => {
+    let stored = { models: { flash: { contextWindow: 128000 } } };
+    const fetchImpl = fakeFetch([
+      ["/api/config", () => jsonResponse({ providers: { gw: { ...providers.gw, models: stored.models } } })],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    // A model added to the file by hand must reach the picker without a
+    // restart; that is the only thing this command is for.
+    stored = { models: { flash: { contextWindow: 128000 }, pro: { contextWindow: 256000 } } };
+    bridge.api.send({ cmd: "refreshModels" });
+
+    await vi.waitFor(() => {
+      const models = events.filter((event) => event.type === "models").at(-1);
+      expect(models.models.map((entry) => entry.id)).toStrictEqual(["gw/flash", "gw/pro"]);
+    });
+    expect(fetchImpl.calls.some((call) => call.url === "/api/config")).toBe(true);
   });
 });
 

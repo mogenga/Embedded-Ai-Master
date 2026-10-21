@@ -971,15 +971,24 @@ function handlePermission(id, answer) {
  * Probe one model gateway and answer with a `provider_test` event.
  *
  * The probe itself is the kernel's: it resolves `apiKeyEnv` against this
- * process's environment and talks to the gateway. The host does not read the
- * key and does not decide the outcome — forwarding a `true` nobody measured
- * would put a green card on an address that was never contacted (R3).
+ * process's environment, forwards a directly-typed `apiKey` into the outbound
+ * request, and talks to the gateway. The host does not decide the outcome —
+ * forwarding a `true` nobody measured would put a green card on an address
+ * that was never contacted (R3).
+ *
+ * The key is write-only from here: it goes into `probeProvider` and nowhere
+ * else. Every event text this function sends is passed through `redactKey`
+ * first, because a thrown transport error is not ours to control and could
+ * quote the request it failed on.
  *
  * Every path answers, so the settings page's card always leaves its "testing"
  * state; only a probe that is still in flight has no event yet.
  */
 async function handleTestProvider(payload) {
   const baseUrl = typeof payload.baseUrl === "string" ? payload.baseUrl.trim() : "";
+  const apiKey = typeof payload.apiKey === "string" ? payload.apiKey.trim() : "";
+  // Not the key itself, just a way to keep it out of anything we print.
+  const redactKey = (text) => (apiKey === "" ? text : text.split(apiKey).join("***"));
   if (baseUrl === "") {
     send({
       type: "provider_test",
@@ -1003,6 +1012,7 @@ async function handleTestProvider(payload) {
   }
   const options = {
     baseUrl,
+    ...(apiKey === "" ? {} : { apiKey }),
     ...(typeof payload.apiKeyEnv === "string" && payload.apiKeyEnv.trim() !== ""
       ? { apiKeyEnv: payload.apiKeyEnv.trim() }
       : {}),
@@ -1018,7 +1028,7 @@ async function handleTestProvider(payload) {
       type: "provider_test",
       ok: false,
       baseUrl,
-      error: `连接测试失败：${messageOf(error)}`,
+      error: redactKey(`连接测试失败：${messageOf(error)}`),
     });
     return;
   }
@@ -1029,7 +1039,7 @@ async function handleTestProvider(payload) {
       type: "provider_test",
       ok: false,
       baseUrl,
-      error: reason === "" ? "连接测试失败：内核未给出原因" : reason,
+      error: redactKey(reason === "" ? "连接测试失败：内核未给出原因" : reason),
       ...(typeof record.code === "string" && record.code !== "" ? { code: record.code } : {}),
       ...(typeof record.latencyMs === "number" ? { latencyMs: record.latencyMs } : {}),
     });

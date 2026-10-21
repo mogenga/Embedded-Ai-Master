@@ -1537,6 +1537,58 @@
 - **修复建议**: 1 让 runner 透传 `trustProjectConfig`（默认仍为 false，由设置页显式开启，因为项目配置是仓库内容）；2 需要 `main.js` 支持第二个窗口并处理会话锁；4 在 bridge 形态下隐藏连接页（或把它做成只读展示）。
 - **状态**: 大部分解决（2026-10-21 第四轮后，第 3 项仅剩 `@` 提及的文件名搜索，第 4 项已完成；第 1、2 项仍是内核/外壳能力缺口）。
 
+### D-178 · 窄屏断点曾写了两份（900 / 860），抽屉会盖住整个聊天区
+
+- **发现**: 2026-10-22，第十一轮「视觉对齐」实测（headless Chrome + CDP，1280 / 900 / 861 三个视口）。
+- **现象**: `styles.css` 的 `@media (max-width: 900px)` 把 `.sidebar` 改成 `position: fixed` 的**覆盖式抽屉**；而 `app.js` 只在 `matchMedia("(max-width: 860px)")` 命中时才给 `.shell` 加 `collapsed`。中间这段（861–900px）抽屉已经浮在正文之上却又不折叠，`desktop/main.js` 的 `minWidth` 恰好是 900 —— 也就是窗口拖到最小宽度时**必现**：只剩一条 264px 的侧栏和它盖住的聊天区。900×700 截图可复现。
+- **影响**: 这是本轮四个用户诉求里「视觉对齐」之外的一个真 bug：不是审美问题，是「窗口缩到最小时聊天区消失」。R3 意义上的失败——侧栏开关看起来可用，但初始状态就是错的。
+- **根因**: 同一个阈值在两个文件里各写了一遍。CSS 改的时候没有人会去看 `matchMedia` 里的字面量。
+- **修复**: 在 `app.js` 引入单一常量 `DRAWER_BREAKPOINT = 900` 与 `isDrawerWidth()`，初始化、`resize` 监听、会话点击后收起抽屉三处全部改用它；注释里写明必须与样式表那个数字保持一致。进去抽屉宽度时强制折叠、退出时恢复用户记住的偏好（`prometheus.sidebarCollapsed`），键名未改。
+- **验证**: 900×700 下侧栏 `left = -252`（在屏幕外），聊天区 `x=60 w=780` 完整可见；1280 下侧栏正常参与布局。
+- **状态**: **已解决**（2026-10-22）。仍未从根上消除「两个文件各有一个数字」——真正的修法是用 JS 读一个自定义属性或用 `ResizeObserver` 判断侧栏是否 `position: fixed`，但那需要改样式表结构，超出本轮范围。触发升级条件：再出现一次断点不一致。
+
+### D-177 · 回放历史会话时，失败的工具行伪装成成功（R3）
+
+- **发现**: 2026-10-22，第十一轮视觉审计。三个工具行里第三个是 `ok:false`，实测三条的 `class`、`color`、图标**完全一致**。
+- **现象**: `app.js` 的 `session_loaded` 分支生成工具行时写死 `row.className = "tool-row done"`，没有读 `item.ok`。而协议层是**正确**的：`protocol.sessionEventsToMessages()` 返回 `{ role: "tool", ok: payload.ok !== false, … }` —— 这个 `ok` 在渲染时被丢掉了。实时路径（`tool_result` → `tool_end`）是有 `.failed` 的，`styles.css` 也早就有 `.tool-row.failed .tool-glyph, .tool-row.failed .tool-summary { color: var(--danger) }`。
+- **影响**: **同一次失败，实时看是红的，重开会话后变灰**。违反 R3「工具必须诚实、读失败要显式报错」。而且这是一条冷路径：开发时看不到（实时路径正常），只有在重新打开旧会话时才出现。
+- **修复**: `row.className = item.ok === false ? "tool-row failed done" : "tool-row done"`。另外补了 `.tool-row.failed .tool-name { text-decoration: underline wavy var(--danger) }` —— 失败原来**只靠颜色**表达（图标 + 摘要变红），而无障碍要求状态不得只用颜色承载；波浪下划线让它在高对比模式和色盲视角下仍然读得出来。工具名本身保持原色，红色才读作「这次调用的结果」而不是地址的一部分。
+- **验证**: 同一份 fixture 重测，第三条 `cls = "tool-row failed done"`、`sumColor = rgb(184,56,44)`、`hasFailedClass = true`，前两条不受影响；截图可见红色 + 波浪线。
+- **状态**: **已解决**（2026-10-22）。
+
+### D-176 · 浏览器形态的模型选择器点了没反应（内核无 per-run 模型入口）
+
+- **发现**: 2026-10-22，用户原话「聊天界面的模型选择有问题，优化一下前端」。
+- **现象**: composer 的模型 chip 与菜单都在，点选项**什么都不发生**。`bridge.js` 的 `supportedCommands` 里没有 `setModel` / `refreshModels`，命令落到 `unsupported()` 只回一条 warn notice。
+- **根因不是漏接线**：内核根本没有 per-run 模型选择的入口。`SessionRunner.start()` 的 `ActionInput` 没有 `model` 字段，`POST /api/actions` 也不接受它；runner 的模型只来自构造时的 `opts.model`、会话 header、或 `HARNESS_WEB_MODEL`。所以 bridge 拿到了 `setModel` 也无处可传，只能撒谎 —— 修之前先补内核能力，而不是在 bridge 里假装成功。
+- **修复**：
+  - `ActionInput.model?: string`（`src/server/runner.ts`），优先级为 `sessionModel(header) ?? input.model ?? opts.model ?? (HARNESS_WEB_MODEL || firstReference)`。续聊时 header 仍然最高——那是内核「会话模型固定在 header 里」的既有约束，没有绕过。非字符串 → `RunnerError("invalid_model")`，非法引用仍包成 `model_unavailable`，都**先于会话创建**，不会留下半截会话。
+  - `POST /api/actions` 接受 `model`（类型错 → 400 `invalid_model`），`mapRunnerError` 的穷尽式 switch 补了这一档（漏了会掉进 500）。
+  - `bridge.js`：`setModel` 校验引用存在于 `providers.json`、运行中拒绝、合法则更新并发 `models` + `state`；有打开会话时额外一条 dim notice 说明只对新建会话生效（文案与桌面宿主一致）。`refreshModels` 转调已有的 `refreshConfig()`。
+  - **`lastModel` 与 `sessionModel` 拆成两个变量**：前者是「下一个新建会话用什么」，后者是「当前会话 header 里是什么」，`shownModel()` 按有无会话取值。合并成一个会导致「选好模型 → 点开旧会话 → 新建会话时用了没选过的模型」，或者 chip 显示新模型而当前会话还在跑旧模型。
+- **验证**: 端到端打真服务：`POST /api/actions {model: 42}` → 400 `invalid_model`；`{model: "gw/nope"}` → 503 `model_unavailable`。离线测试：`tests/server/runner.test.ts` 4 条 + `tests/desktop/bridge.test.js` 7 条，RED 阶段分别有 3 条 / 7 条真实失败。
+- **状态**: **已解决**（2026-10-22）。桌面宿主的 `setModel` 仍走「重建 runner + `opts.model`」的老路（行为正确，只是路径不同），本轮未统一。
+
+### D-175 · 模型选择器弹层被祖先的 `overflow: hidden` 整块裁掉
+
+- **发现**: 2026-10-22，第十一轮，读 `styles.css` 时定位、headless Chrome 实测确认。
+- **现象**: 点模型 chip 时菜单不出现。`.model-control { position: relative }`，`.model-menu { position: absolute; bottom: calc(100% + 6px); left: 0; width: 320px }`，而它的祖先 `.composer-bar .controls-right` 带 `overflow: hidden` —— 菜单整块被裁。另有 `left: 0` 在右对齐控件里会让 320px 的菜单向右溢出视口。
+- **影响**: `desktop/MATRIX.md` 把 `setModel` 标为「桌面 ✅」，而实际点不开菜单，等于这个能力在两个形态下都不可用。
+- **修复**: 删掉 `.controls-right` 的 `overflow: hidden`（不换行由 `.composer-bar` 的 `flex-wrap: nowrap` 负责，超宽由各 chip 自己的 `min-width: 0` + ellipsis 负责）；`.model-menu` 改 `right: 0` + `width: min(320px, calc(100vw - 32px))`。
+- **顺带改的**（同一轮、同一诉求）：菜单内容从「id + name + meta」三行（多数情况下前两行是同一个词、meta 常为空）改成两行 + 按 provider 分组 + 单个 provider 不显示组标签；chip 只显示模型名（重名时显示 `provider/model`），`title` 始终给完整 id；补 `aria-activedescendant` 方向键导航（Arrow/Home/End/Enter/Escape，Escape 后焦点回 chip）；模型超过 8 个时出现过滤框；空列表时给「打开模型服务设置」的入口而不是一句死文案。
+- **验证**: 1280×800 与 900×700 两种视口下菜单 `rect` 均在视口内、`clipped` 为空；17 个模型时过滤框出现、菜单仍完整；截图确认分组与选中态。
+- **状态**: **已解决**（2026-10-22）。
+
+### D-174 · `GET /api/config` 会把明文 `apiKey` 回传给调用方
+
+- **发现**: 2026-10-21 第十轮，由实现「直接保存密钥」的子代理主动上报。
+- **现象**: `providers.json` 新增 `apiKey` 字段后，`readAppConfig()` 把它连同整份 `providers` 一起返回，`GET /api/config` 直接 `sendJson` 出去；桌面宿主的 `configEvent()` 也把 `providerConfig` 原样下发给渲染层。设置页需要它来回填表单。
+- **当前边界**: 该端点受 `requireLocalRequest` 保护——`Host` 与 `Origin` 必须都是 loopback 且端口等于监听端口。所以**外部网页拿不到**（跨源请求的 `Origin` 不是 loopback）。风险面是本机上的其它进程：任何本机进程都能直接 `curl http://127.0.0.1:5174/api/config` 读到明文密钥，无需 `Origin`。
+- **为什么不在本轮直接改**: 设置页从 `providerConfig.apiKey` 回填表单，改成一味掩码会让保存时把掩码写回文件（数据损坏）。正确做法需要三处同时改：①服务端回传掩码（例如 `sk-…abcd`）；②渲染层识别掩码、**不把它当真值保存**（留空 = 不改，明确清除另设按钮）；③宿主 `configEvent()` 同步。这是产品交互决策，不是一行改动。
+- **触发升级条件**: 应用要在多用户机器上运行；或出现「本机进程读取密钥」的实际顾虑；或密钥改为由系统凭据管理器托管。
+- **修复建议**: 见上三处；届时 `tests/server/config-api.test.ts` 与 `tests/desktop/host.test.js` 里断言 `providerConfig.gw.apiKey === key` 的用例需同步改成断言掩码形状。
+- **状态**: 已知限制，已记录。当前密钥在**磁盘上本就是明文**（`providers.json`），所以这条不是把明文引入了系统，而是让明文多了一个本机 HTTP 出口。**未修复**。
+
 ### D-173 · `contextWindow` / `maxOutput` 是估算值，不是从服务商读到的真实上限
 
 - **发现**: 2026-10-21，用户原话：「contextWindow和maxOutput不能直接获取吗，这种东西不好让用户来填，尤其是maxOutput」→「直接删掉」。
@@ -1658,3 +1710,5 @@
 | 2026-10-21 | 功能闭环第四轮(用户「模型配置没有、无法打开本地文件夹」):新增 `readProviders`/`writeProviders`(`src/config/app-config.ts`),`AppConfigSnapshot` 带 `providers`/`providersPath`/`providersError`,providers 读失败时降级而非中断整份快照;`PUT /api/config` 加第四段 `providers`;`src/server/files-api.ts` 加 `listDirectory`(目录在前、大小写不敏感排序、500 项截断、跳过符号链接)与 `registerWorkspaceRoot`(进程内登记,并入 `allowedRoots`);`ActionInput.cwd` + `RunnerError("invalid_cwd")`,校验先于会话创建;`GET /api/tree`、`POST /api/workspace`,`POST /api/actions` 接受 `cwd`;宿主 `saveProviders`/`setWorkspace`/真实 `getTree`,**init 的致命路径改为不短路**(providers 缺失只发 dim 提示并继续握手,否则设置页永远打不开);bridge 的 `pickDirectory` 不再静默返回 null 而是说明原因,补 `getTree`/`setWorkspace`/`saveProviders`;设置页恢复「模型服务」页并接 `saveProviders`(显式说明 `apiKeyEnv` 是环境变量名而应用不存密钥、未定价时成本显示「未知」而非 0);渲染器把 mention 路径真正拼进消息文本(此前弹「已添加」却丢弃,违反 R3)、顶栏工作区改发 `setWorkspace` 并支持手输路径、`SUPPORTED_PANES` 加入 `files` 且 `#more-button` 提供入口、修 `treeRow` 在浏览器形态下先发后设 `pendingTreeTarget` 导致子目录画进根部的 bug。录入 D-170(配置曾落到真实 home,已清理)与 D-171(`createUiServer` 绑定失败崩溃 + 43 个测试调用点硬编码 5174) |
 | 2026-10-21 | 功能闭环第五轮(用户「模型配置为什么叫连接？而且也无法进行配置操作」):设置页「连接」统一为「模型服务」(含首启提示与删掉死键 `settingsConnection`);根因是 `bridge.emitSettings()` 只发写死的 `providers: []`、从不下发 `providerConfig`,导致浏览器形态的设置页走 `connUnsupported` 分支只有一行字,而 Electron 未安装、实际能跑的只有浏览器形态。新增 `protocol.providersEvent()`/`modelsOf()`,bridge 据此下发 `providerConfig`+`providersError`+`configPaths.providers` 并广播 `models`(选单不再停在「正在加载模型…」)。录入 D-172 |
 | 2026-10-21 | 功能闭环第九轮(用户「contextWindow和maxOutput直接删掉」「每百万Token价格这个不需要，直接删掉」「缺少测试连接（模型服务）功能」「选择本地文件夹应该在侧边栏也可进行」,并发 5 个子代理):①`ModelConfigSchema` 的 `contextWindow`/`maxOutput` 改可选,新增 `DEFAULT_CONTEXT_WINDOW`/`DEFAULT_MAX_OUTPUT` 与 `resolveContextWindow`/`resolveMaxOutput`,预算/压缩/请求全部走 helper(录入 D-173:这是估算值,协议不提供真实值);②设置页删掉这两个输入框与整个「每百万 token 价格」区,**旧文件里的值保存时原样透传**(模型级 `carried`、provider 级 `extra`);③新增 `src/model/probe.ts`(`probeProvider`)+ `POST /api/providers/test`(失败探测也是 200),`parseProviderBaseUrl` 从 `openai.ts` 提取共用,宿主与 bridge 接 `testProvider` → `provider_test` 事件,设置页每张卡片一个「测试连接」按钮(15s 超时、按 baseUrl 匹配回包、build 快照防写已移除节点);④侧边栏新增工作区入口,与顶栏共用同一个 `chooseWorkspace()`;⑤**D-170 已解决**(`resolveHarnessHome` 在 vitest 下缺 `HARNESS_HOME` 抛错),**D-171 已解决**(`createUiServer` 返回 `listening` promise + 常驻 error 监听)。**主控补接缝**:`app.js` 的 `handleEvent` 原本没有 `provider_test` 分支,事件会被静默丢弃、按钮只能靠超时收场,已补 |
+| 2026-10-21 | 第十轮(用户「鉴权失败…派子代理修复」「浏览器无法打开文件夹」「所有前端不要出现Prometheus这个移植过来的项目名称」):①**根因是设计缺陷不是 bug**:`providers.json` 的 schema 只有 `apiKeyEnv`、没有存密钥本身的字段,用户把密钥填进「环境变量名」后被当作变量名去查 `process.env`,自然查不到。新增 `apiKey` 字段与 `resolveProviderApiKey`(`apiKey` 优先于 `apiKeyEnv`,空值一律视为未配置),设置页新增密码框(带显示/隐藏)、环境变量栏降级为「或者」,`looksLikeSecret` 在误填时**当场**行内警告但不阻止保存;bridge/host 全程 `redact` 密钥,实测网关在 401 响应里回显密钥时事件流仍不含原文。录入 D-174(`GET /api/config` 回传明文密钥,受 loopback 保护但本机进程可读,未修)。②浏览器打开文件夹:新增 `POST /api/workspace/resolve` + `resolveWorkspaceCandidates`,把 `showDirectoryPicker()` 只给的裸文件夹名在本机有界搜索(深度 4 / 条目 20000 / 300ms 三重预算,跳过符号链接与 `.` 开头目录,**永不登记、只返回候选**),1 个候选直接用、多个弹选择、0 个回落手输并说明是「没找到」还是「超出预算」。**浏览器不暴露绝对路径这一限制没有被突破**,主目录外且未登记过的目录仍只能手输。③前端品牌清理:用户可见文案里的 Prometheus 全部清除(改用「Agent / the agent」而非把品牌名塞进每句),同时删掉三条**假路径**(`~/.prometheus/usage.jsonl`、`~/.prometheus/config.json`、`.prometheus/hooks.json` —— 均不存在,内核也没有 hooks 机制);`window.prometheus`、`localStorage` 的 `prometheus.*` 键名、preload 的 `exposeInMainWorld` 属运行时契约,**一律未改** |
+| 2026-10-22 | 第十一轮(用户「模型服务，应该可隐藏完整内容，只显示名称+模型」「侧边栏会话应该这个层级：一级：工作区（文件夹），二级：会话」「聊天界面的模型选择有问题，优化一下前端」「前端没做视觉对齐」,并发 4 个子代理):①设置页「模型服务」的 provider 卡片改为默认折叠,折叠态只有名称 + 模型名 + 测试连接/移除;保存校验失败与测试结果到达时强制展开(R3:错误不能藏在折叠卡里),首启强制展开第一张卡,展开态跨重建按 provider 名保持;②侧栏层级改为「工作区 → 会话」,`#sidebar-workspace` 从两行条目改为节标题行的图标按钮(保留 id),一级用文件夹图标 + 更大的字重、二级缩进到一级名字的左缘(`--group-lead` 单变量推导,不写魔数),当前工作区无会话也占一行并给出新建入口;顺带删掉 `.sidebar-foot`/`.locale-switch` 等死 CSS 与死 i18n 键;③**根因在内核不在 bridge**:`ActionInput` 没有 `model` 字段,`POST /api/actions` 也不接受,模型选择器点了只能落到 `unsupported()`。补 `ActionInput.model`(优先级 `sessionModel ?? input.model ?? opts.model ?? env/first`)、`invalid_model` 错误码、`/api/actions` 透传,`bridge.setModel`/`refreshModels` 接上,并把 `lastModel`(新建会话用)与 `sessionModel`(当前会话 header)拆开;④视觉对齐按实测而不是目测:用 headless Chrome + CDP 量光学左缘/字号/间距越界/裁切/对比度(`.tmp/visual-audit/`),修掉三处实测确认的缺陷——D-175 模型弹层被 `overflow:hidden` 裁掉、D-178 窄屏断点写了两份(900/860)导致抽屉必现遮挡聊天区、D-177 回放历史会话时失败工具行伪装成成功(R3,并补波浪下划线使失败不只靠颜色);另把 composer 三个 chip 的三套内边距统一为 `4px 8px`、品牌图标从别家首字母「P」改为方波、设置页头像的同源「P」改为文件夹图标。**未改** `window.prometheus` / `localStorage` 的 `prometheus.*` 键名(运行时契约) |

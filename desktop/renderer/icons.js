@@ -13,9 +13,14 @@
  */
 
 const ICONS = {
-  /* brand: a monogram tile, not a flame — a fire icon is what every other
-     agent uses, and a letterform survives being drawn at 16px. */
-  mark: '<rect x="1.5" y="1.5" width="21" height="21" rx="6.2" fill="currentColor" stroke="none"/><path d="M8.6 18V6h4.1a3.9 3.9 0 0 1 0 7.8H8.6" fill="none" stroke="var(--on-accent)" stroke-width="2.1"/>',
+  /* brand: one cycle of a digital signal on a tile.
+   *
+   * This was a monogram tile, and the letterform it carried was the previous
+   * project's initial — the mark kept naming the tool this one replaced. A
+   * square wave says what the product is (a probe reading a line that is
+   * either high or low, never "sort of"), stays legible at 16 px, and cannot
+   * be mistaken for a flame, which is what every other agent uses. */
+  mark: '<rect x="1.5" y="1.5" width="21" height="21" rx="6.2" fill="currentColor" stroke="none"/><path d="M5.6 15.2H10V8.8h4v6.4h4.4" fill="none" stroke="var(--on-accent)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>',
 
   /* actions */
   plus: '<path d="M12 5v14M5 12h14"/>',

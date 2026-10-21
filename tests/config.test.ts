@@ -11,6 +11,7 @@ import {
   resolveContextWindow,
   resolveMaxOutput,
   resolveModelRef,
+  resolveProviderApiKey,
 } from "../src/config/providers.js";
 
 const GOOD = JSON.stringify({
@@ -167,6 +168,33 @@ describe("配置加载", () => {
     }))).toThrowError(expect.objectContaining({ code: "providers_invalid" }));
   });
 
+  it("parseProviders 接受直接写在文件里的 apiKey", () => {
+    const parsed = parseProviders(JSON.stringify({
+      p: {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://x/v1",
+        apiKey: "sk-direct-value",
+        models: { m: {} },
+      },
+    }));
+    expect(parsed.p?.apiKey).toBe("sk-direct-value");
+    expect(parsed.p?.apiKeyEnv).toBeUndefined();
+  });
+
+  it("apiKey 与 apiKeyEnv 允许并存（schema 不互斥）", () => {
+    const parsed = parseProviders(JSON.stringify({
+      p: {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://x/v1",
+        apiKey: "sk-direct",
+        apiKeyEnv: "SOME_ENV_NAME",
+        models: { m: {} },
+      },
+    }));
+    expect(parsed.p?.apiKey).toBe("sk-direct");
+    expect(parsed.p?.apiKeyEnv).toBe("SOME_ENV_NAME");
+  });
+
   it("parseProviders 拒绝非法 JSON", () => {
     expect(() => parseProviders("{oops")).toThrowError(expect.objectContaining({
       code: "providers_invalid_json",
@@ -296,5 +324,79 @@ describe("配置加载", () => {
     );
     expect(() => loadProviders("/tmp/home", () => "{oops")).not.toThrowError(ConfigLoadError);
     expect(ConfigValidationError).toBeDefined();
+  });
+});
+
+/**
+ * 密钥解析：桌面应用的用户不可能为了填一个 key 去设系统环境变量，
+ * 所以 providers.json 允许直接存密钥（`apiKey`）。`apiKeyEnv` 仍然支持，
+ * 供「不把密钥落到配置文件」的用户使用。
+ *
+ * 优先级是**显式值覆盖间接值**：同时存在时 `apiKey` 赢。
+ * 空值（""、纯空白）一律等于没配，任何一层都不把空串当有效密钥发出去。
+ */
+describe("resolveProviderApiKey", () => {
+  const env = { PROVIDER_KEY_ENV: "  from-env  " } as NodeJS.ProcessEnv;
+
+  it("只有 apiKey 时直接返回（trim 后）", () => {
+    expect(resolveProviderApiKey({ apiKey: "  sk-direct  " }, env)).toBe("sk-direct");
+  });
+
+  it("apiKey 与 apiKeyEnv 并存时 apiKey 优先", () => {
+    expect(
+      resolveProviderApiKey({ apiKey: "sk-direct", apiKeyEnv: "PROVIDER_KEY_ENV" }, env),
+    ).toBe("sk-direct");
+  });
+
+  it("只有 apiKeyEnv 时取该环境变量的值（trim 后）", () => {
+    expect(resolveProviderApiKey({ apiKeyEnv: "PROVIDER_KEY_ENV" }, env)).toBe("from-env");
+  });
+
+  it("什么都没配时返回 undefined", () => {
+    expect(resolveProviderApiKey({}, env)).toBeUndefined();
+  });
+
+  it("apiKey 为空串等于没配：回落到 apiKeyEnv", () => {
+    expect(
+      resolveProviderApiKey({ apiKey: "", apiKeyEnv: "PROVIDER_KEY_ENV" }, env),
+    ).toBe("from-env");
+    expect(resolveProviderApiKey({ apiKey: "" }, env)).toBeUndefined();
+  });
+
+  it("apiKey 只有空白也等于没配", () => {
+    expect(resolveProviderApiKey({ apiKey: "   " }, env)).toBeUndefined();
+    expect(
+      resolveProviderApiKey({ apiKey: "  ", apiKeyEnv: "PROVIDER_KEY_ENV" }, env),
+    ).toBe("from-env");
+  });
+
+  it("apiKeyEnv 指向不存在的变量时返回 undefined", () => {
+    expect(resolveProviderApiKey({ apiKeyEnv: "NO_SUCH_ENV_VAR_HERE" }, env)).toBeUndefined();
+  });
+
+  it("apiKeyEnv 指向的变量是空串或纯空白时返回 undefined", () => {
+    const blankEnv = { BLANK_KEY: "   ", EMPTY_KEY: "" } as NodeJS.ProcessEnv;
+    expect(resolveProviderApiKey({ apiKeyEnv: "BLANK_KEY" }, blankEnv)).toBeUndefined();
+    expect(resolveProviderApiKey({ apiKeyEnv: "EMPTY_KEY" }, blankEnv)).toBeUndefined();
+  });
+
+  it("apiKeyEnv 本身是空串或纯空白时视为未配置", () => {
+    expect(resolveProviderApiKey({ apiKeyEnv: "" }, env)).toBeUndefined();
+    expect(resolveProviderApiKey({ apiKeyEnv: "   " }, env)).toBeUndefined();
+  });
+
+  it("apiKey 为空但 apiKeyEnv 指向缺失变量时仍返回 undefined", () => {
+    expect(
+      resolveProviderApiKey({ apiKey: "", apiKeyEnv: "NO_SUCH_ENV_VAR_HERE" }, env),
+    ).toBeUndefined();
+  });
+
+  it("默认读 process.env（不显式传 env 时）", () => {
+    // 用当前进程里必然存在的一个变量证明默认参数接的是 process.env。
+    const name = "PATH";
+    const value = process.env.PATH?.trim();
+    expect(resolveProviderApiKey({ apiKeyEnv: name })).toBe(
+      value === undefined || value === "" ? undefined : value,
+    );
   });
 });

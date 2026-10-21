@@ -8,7 +8,44 @@
  */
 
 import { settingsStrings } from "./settings-i18n.js";
-import { iconEl } from "./icons.js";
+import { iconEl, setIcon } from "./icons.js";
+
+/**
+ * Does this value look like an API key rather than the NAME of a variable?
+ *
+ * The rules mirror the kernel's (`looksLikeSecret` in `src/model/probe.ts`), so
+ * the inline warning here and the probe's own failure message agree about what
+ * went wrong:
+ * - 32+ hexadecimal characters (the shape most tokens take);
+ * - an `sk-` prefix;
+ * - longer than 40 characters carrying no environment-variable naming feature
+ *   (no `_`, `.`, `/` or `-`, and not all uppercase).
+ *
+ * A heuristic, and only a warning: it never rewrites the value. Silently
+ * treating a mistyped variable name as a key would put an arbitrary string on
+ * the wire as a credential; a false positive costs one sentence.
+ */
+export function looksLikeSecret(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (text === "") return false;
+  if (/^[0-9a-f]{32,}$/i.test(text)) return true;
+  if (/^sk-/i.test(text)) return true;
+  if (text.length > 40 && !/[_./-]/.test(text) && !/^[A-Z0-9]+$/.test(text)) return true;
+  return false;
+}
+
+/**
+ * The mirror-image mistake: is this "key" actually an environment variable
+ * name? Uppercase words joined by underscores (`DEEPSEEK_API_KEY`) are how
+ * variables are named; the length limit keeps a long uppercase token from
+ * being waved through as a name. Also a warning only — the key is saved as
+ * typed either way.
+ */
+export function looksLikeEnvName(value) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (text === "" || text.length >= 60) return false;
+  return /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/.test(text);
+}
 
 export function createSettings(deps) {
   const { state, $, api, formatTokens, setTheme, setDensity, setMode, applyLocale, openModal, closeModal, getT, applyCodeFont } = deps;
@@ -93,6 +130,30 @@ const connectionTestTimers = new Set();
  *  build that started it: writing its answer into the nodes that build left
  *  behind would be invisible work on a detached tree. */
 let connectionPageBuild = 0;
+
+/**
+ * The cards the user opened, by provider name.
+ *
+ * The page is rebuilt from the host's file on every answer, so expansion
+ * cannot live in the DOM: a card the user opened would snap shut the moment a
+ * save round-trip landed. Keyed by name because that is the only identity a
+ * card has that survives the rebuild — and it is what `save()` keys the file
+ * by. A rename rewrites the entry (`renameExpansion`), or the card would close
+ * itself as a side effect of being renamed.
+ *
+ * Cards not in this set start collapsed, except a brand-new one, which is
+ * added on creation: an empty card has nothing to read in its header.
+ */
+const connectionExpanded = new Set();
+/** Names the `aria-controls` ids, so two cards never point at one body. */
+let connectionCardSeq = 0;
+
+/** Move the "open" mark to the new name. A rename is an edit like any other:
+ *  if it closed the card, the user would lose the form they were typing in. */
+function renameExpansion(from, to) {
+  if (!connectionExpanded.delete(from)) return;
+  connectionExpanded.add(to);
+}
 
 /**
  * Drop every test still waiting on an answer, and cancel their timers.
@@ -875,6 +936,7 @@ function buildConnectionPage() {
     name: nextName(),
     protocol: DEFAULT_PROTOCOL,
     baseUrl: "",
+    apiKey: "",
     apiKeyEnv: "",
     // A model row is a name and nothing else. Its context window and output
     // cap are the kernel's to estimate (`src/config/providers.ts` defaults
@@ -899,6 +961,10 @@ function buildConnectionPage() {
     name,
     protocol: typeof provider?.protocol === "string" ? provider.protocol : DEFAULT_PROTOCOL,
     baseUrl: typeof provider?.baseUrl === "string" ? provider.baseUrl : "",
+    // The key lives in the file in clear text (`ProviderConfigSchema.apiKey`).
+    // It is carried in both directions: a file written by hand must not lose
+    // the key just because the form went through a save.
+    apiKey: typeof provider?.apiKey === "string" ? provider.apiKey : "",
     apiKeyEnv: typeof provider?.apiKeyEnv === "string" ? provider.apiKeyEnv : "",
     models: Object.entries(provider?.models ?? {}).map(([id, model]) => ({
       id,
@@ -918,17 +984,46 @@ function buildConnectionPage() {
    *  removing a card never has to re-read the DOM first. */
   const makeCard = (entry) => {
     const node = el("section", "settings-form-card");
+    /** Open or closed. Kept outside the DOM because the page can be rebuilt
+     *  under it. `lastName` is the name the mark is filed under, tracked
+     *  separately so a rename can move it — trimmed, because `save()` writes
+     *  the trimmed name and the set has to agree with the file. */
+    let expanded = connectionExpanded.has(entry.name.trim());
+    let lastName = entry.name.trim();
 
-    const head = el("div", "about-row");
-    const title = el("h3", "", entry.name || s.connNewProvider);
+    const head = el("div", "settings-card-head");
+    // A real button, so Enter and Space work without a key handler and
+    // `aria-expanded` states what the chevron already shows.
+    const toggle = el("button", "settings-card-toggle");
+    toggle.type = "button";
+    const chevron = iconEl("chevron-right", "settings-card-chevron");
+    const title = el("span", "settings-card-name", entry.name || s.connNewProvider);
+    // What the service offers, readable without opening it: the point of a
+    // collapsed card is that a page of services stays scannable. Nothing else
+    // goes here — the endpoint and the keys are what collapsing is meant to
+    // put away.
+    const modelSummary = el("span", "settings-card-models", "");
+    toggle.append(chevron, title, modelSummary);
+    const body = el("div", "settings-form-card-body");
+    body.id = `settings-card-body-${connectionCardSeq++}`;
+    toggle.setAttribute("aria-controls", body.id);
     // The test button and Remove go here; the button is built below, once the
-    // result area it talks to exists.
+    // result area it talks to exists. They sit outside the toggle so a click
+    // on either is not also a click on the header.
     const headActions = el("div", "mcp-actions");
-    head.append(title, el("code", "setting-code", entry.protocol), headActions);
+    head.append(toggle, headActions);
 
     const nameInput = sText({ value: entry.name, placeholder: "provider1", mono: true });
     nameInput.addEventListener("input", () => {
-      title.textContent = nameInput.value.trim() || s.connNewProvider;
+      const name = nameInput.value.trim();
+      title.textContent = name || s.connNewProvider;
+      drawToggleLabel();
+      // The expansion is filed by name, and this field is what changes it:
+      // without the move, the next rebuild would reopen nothing.
+      if (name !== lastName) {
+        if (expanded) renameExpansion(lastName, name);
+        lastName = name;
+      }
     });
     const baseUrlInput = sText({
       value: entry.baseUrl,
@@ -941,20 +1036,105 @@ function buildConnectionPage() {
       mono: true,
     });
 
+    /**
+     * The key itself, saved in clear text in `providers.json`.
+     *
+     * `password` by default so a shoulder behind the user reads nothing; the
+     * reveal button exists because "did the paste truncate?" is otherwise
+     * unanswerable. The toggle carries its own `aria-label`, which changes with
+     * the state, so it says what the next click will do rather than what the
+     * field is doing now.
+     */
+    const apiKeyInput = document.createElement("input");
+    apiKeyInput.className = "setting-input mono";
+    apiKeyInput.type = "password";
+    apiKeyInput.spellcheck = false;
+    apiKeyInput.placeholder = "sk-…";
+    apiKeyInput.value = entry.apiKey ?? "";
+    apiKeyInput.autocomplete = "off";
+    const apiKeyToggle = el("button", "btn small btn-quiet", s.connApiKeyShow);
+    apiKeyToggle.type = "button";
+    apiKeyToggle.setAttribute("aria-label", s.connApiKeyShow);
+    const setKeyVisibility = (visible) => {
+      apiKeyInput.type = visible ? "text" : "password";
+      const label = visible ? s.connApiKeyHide : s.connApiKeyShow;
+      apiKeyToggle.textContent = label;
+      apiKeyToggle.setAttribute("aria-label", label);
+      apiKeyToggle.setAttribute("aria-pressed", visible ? "true" : "false");
+    };
+    apiKeyToggle.addEventListener("click", () => setKeyVisibility(apiKeyInput.type === "password"));
+    setKeyVisibility(false);
+
+    /** The inline warning under a field: shown, never a reason to refuse a save. */
+    const warningLine = () => {
+      const line = el("p", "setting-note pack-problem", "");
+      line.hidden = true;
+      return line;
+    };
+    const keyWarning = warningLine();
+    const envWarning = warningLine();
+    const setWarning = (line, message) => {
+      line.textContent = message;
+      line.hidden = message === "";
+    };
+
+    /**
+     * One input cell: the field, an optional button beside it, and the warning
+     * that belongs under that field.
+     *
+     * Laid out inline rather than through a stylesheet class, the same way the
+     * test result colours itself: a warning parked in the card's shared problem
+     * line would be a sentence about a field, far from the field.
+     */
+    const fieldCell = (input, button, warning) => {
+      const cell = el("div");
+      cell.style.display = "grid";
+      cell.style.gap = "4px";
+      cell.style.width = "100%";
+      const line = el("div");
+      line.style.display = "flex";
+      line.style.alignItems = "center";
+      line.style.gap = "8px";
+      input.style.flex = "1 1 auto";
+      input.style.minWidth = "0";
+      line.appendChild(input);
+      if (button) line.appendChild(button);
+      cell.append(line, warning);
+      return cell;
+    };
+
     const modelList = el("div", "mcp-list");
     /** One row: a name and Remove. `carried` rides along untouched so a save
      *  does not drop the counters this page no longer asks for. */
     const modelHandles = [];
+    /**
+     * Refill the header's model line from the live rows.
+     *
+     * The header is the only thing a collapsed card shows, so it has to track
+     * the inputs rather than the `entry` it was built from: adding, renaming
+     * or removing a model has to be visible without opening the card. A blank
+     * row is skipped — it is an invitation to type, not a model.
+     */
+    const refreshModelSummary = () => {
+      const names = modelHandles.map((handle) => handle.idInput.value.trim()).filter((id) => id !== "");
+      modelSummary.textContent =
+        names.length > 0 ? names.join(" · ") : s.connNoModelsYet;
+      modelSummary.classList.toggle("empty", names.length === 0);
+    };
     const addModelRow = (model) => {
       const row = el("div", "rules-row");
       const idInput = sText({ value: model.id, placeholder: "model-name", mono: true });
       idInput.setAttribute("aria-label", s.connModelName);
+      // The row is the header's data source, so it has to say when it changes.
+      // A row removed below takes its listener with it.
+      idInput.addEventListener("input", refreshModelSummary);
       const remove = sButton(
         s.remove,
         () => {
           const at = modelHandles.findIndex((handle) => handle.row === row);
           if (at >= 0) modelHandles.splice(at, 1);
           row.remove();
+          refreshModelSummary();
           markDirty();
         },
         { quiet: true, danger: true },
@@ -963,6 +1143,7 @@ function buildConnectionPage() {
       modelHandles.push(handle);
       row.append(idInput, remove);
       modelList.appendChild(row);
+      refreshModelSummary();
       return handle;
     };
     // A service with no models yet still gets one empty row: a card that only
@@ -999,19 +1180,96 @@ function buildConnectionPage() {
     const testResult = el("p", "setting-note", "");
     testResult.hidden = true;
 
-    node.append(
-      head,
+    // The protocol is the one fixed fact about a card (the kernel has exactly
+    // one), so it stays a chip rather than a field. It lives in the body, not
+    // the header: the header is the summary the user asked for — name and
+    // models — and this is a detail of the form under it.
+    const protocolLine = el("div", "settings-card-protocol");
+    protocolLine.appendChild(el("code", "setting-code", entry.protocol));
+
+    // None of the warnings below stops a save: the value is written as typed,
+    // and a wrong guess about a real naming scheme must not cost the user their
+    // configuration (R3 — warn, do not pretend to know).
+    body.append(
+      protocolLine,
       sRow({ label: s.name, desc: s.connNameDesc, control: nameInput }),
       sRow({ label: s.baseUrl, desc: s.baseUrlDesc, control: baseUrlInput }),
-      sRow({ label: s.connApiKeyEnv, desc: s.connApiKeyEnvDesc, control: apiKeyEnvInput }),
+      sRow({
+        label: s.connApiKey,
+        desc: s.connApiKeyDesc,
+        control: fieldCell(apiKeyInput, apiKeyToggle, keyWarning),
+      }),
+      sRow({
+        label: s.connApiKeyOrEnv,
+        desc: s.connApiKeyEnvDesc,
+        control: fieldCell(apiKeyEnvInput, null, envWarning),
+      }),
       modelsGroup,
       testResult,
       problem,
     );
+    node.append(head, body);
 
     /**
-     * The endpoint this card would test, and the key variable and model that
-     * go with it; `problem` is set when the URL cannot be called at all.
+     * What the header announces.
+     *
+     * An `aria-label` replaces the button's own content, so it has to carry
+     * both halves: the action ("Expand") and which service it applies to.
+     * Without the name, every card on the page announces the same word.
+     */
+    const drawToggleLabel = () => {
+      const name = nameInput.value.trim() || title.textContent;
+      toggle.setAttribute("aria-label", (expanded ? s.connCollapseNamed : s.connExpandNamed).replace("{name}", name));
+    };
+
+    /**
+     * Open or close the card, and say so to assistive tech.
+     *
+     * `remember` is false only for the state the card opens in: an untouched
+     * default must not be written into the set, or the next build would read
+     * "this name is open" for a card the user never opened.
+     */
+    const setExpanded = (open, { remember = true } = {}) => {
+      expanded = open;
+      body.hidden = !open;
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      setIcon(chevron, open ? "chevron-down" : "chevron-right");
+      drawToggleLabel();
+      if (!remember) return;
+      // A nameless card cannot be filed: `""` would be a key every blank card
+      // shares, and opening one would open the next.
+      const name = nameInput.value.trim();
+      if (name === "") return;
+      if (open) connectionExpanded.add(name);
+      else connectionExpanded.delete(name);
+    };
+    toggle.addEventListener("click", () => setExpanded(!expanded));
+    setExpanded(expanded, { remember: false });
+    refreshModelSummary();
+
+    /** Re-run both warnings against what is in the fields right now. */
+    const checkFields = () => {
+      // Mirror image of the accident this page is recovering from: a variable
+      // name pasted into the key field would be sent as a Bearer credential.
+      setWarning(
+        keyWarning,
+        looksLikeEnvName(apiKeyInput.value) ? s.connApiKeyLooksLikeName : "",
+      );
+      setWarning(
+        envWarning,
+        looksLikeSecret(apiKeyEnvInput.value) ? s.connApiKeyEnvLooksLikeSecret : "",
+      );
+    };
+    // Live, not on save: the warning has to appear while the user is still
+    // looking at the field they got wrong.
+    apiKeyInput.addEventListener("input", checkFields);
+    apiKeyEnvInput.addEventListener("input", checkFields);
+    checkFields();
+
+    /**
+     * The endpoint this card would test, and the key (direct, or the variable
+     * naming it) and model that go with it; `problem` is set when the URL
+     * cannot be called at all.
      *
      * The test does not save, so it reads the live inputs rather than the file:
      * a user who just typed an endpoint wants to find out whether it answers
@@ -1023,6 +1281,7 @@ function buildConnectionPage() {
       if (!isFetchableUrl(baseUrl)) return { problem: s.connBaseUrlInvalid, field: baseUrlInput };
       return {
         baseUrl,
+        apiKey: apiKeyInput.value.trim(),
         apiKeyEnv: apiKeyEnvInput.value.trim(),
         model: modelHandles[0]?.idInput.value.trim() ?? "",
       };
@@ -1030,11 +1289,18 @@ function buildConnectionPage() {
 
     let testing = false;
 
-    /** One line of outcome. A failed test takes the warn colour (the token the
-     *  transcript's warnings use), not the error red: an endpoint that did not
-     *  answer is a fact about the endpoint, not a crash. The colour is applied
-     *  inline because the settings stylesheet needs no entry for one class. */
+    /**
+     * One line of outcome. A failed test takes the warn colour (the token the
+     * transcript's warnings use), not the error red: an endpoint that did not
+     * answer is a fact about the endpoint, not a crash. The colour is applied
+     * inline because the settings stylesheet needs no entry for one class.
+     *
+     * Every writer opens the card first. `runTest` already does, but the answer
+     * arrives later — a user who collapsed the card while waiting would other-
+     * wise get a result nobody can see, and a test that "did nothing" (R3).
+     */
     const showTestLine = (text, { warn = false } = {}) => {
+      setExpanded(true);
       testResult.textContent = text;
       testResult.style.color = warn ? "var(--warn)" : "";
       testResult.hidden = false;
@@ -1043,6 +1309,7 @@ function buildConnectionPage() {
     /** Model names from a successful test, each one click away from a new row.
      *  A name already on this card is not offered twice. */
     const showTestModels = (models, latencyMs) => {
+      setExpanded(true);
       testResult.hidden = false;
       testResult.textContent = "";
       testResult.style.color = "";
@@ -1091,6 +1358,11 @@ function buildConnectionPage() {
 
     const runTest = () => {
       if (testing) return;
+      // The result line lives in the body, so a test started from a collapsed
+      // card would report to nobody. Opening it is the honest fix: the answer
+      // has to be somewhere the user is looking (R3 — a click that produces no
+      // visible answer is a lie by omission).
+      setExpanded(true);
       const target = testTarget();
       if (target.problem !== undefined) {
         showTestLine(target.problem, { warn: true });
@@ -1105,6 +1377,11 @@ function buildConnectionPage() {
       testResult.hidden = true;
       testResult.textContent = "";
       testResult.style.color = "";
+      // No key of either kind. Leaving both empty is legal — a local endpoint
+      // needs none — so this is not a refusal, but when the test then fails the
+      // reason has to name the likely cause instead of leaving the user to
+      // wonder what the endpoint wants.
+      const keyless = target.apiKey === "" && target.apiKeyEnv === "";
       const pending = { build, baseUrl: target.baseUrl, timer: undefined };
       // The endpoint is the identity the answer comes back with; two cards may
       // be testing at once, so matching on it is what keeps an answer on the
@@ -1113,7 +1390,7 @@ function buildConnectionPage() {
         endTest(pending);
         if (kind === "ok") showTestModels(detail.models ?? [], detail.latencyMs);
         else if (kind === "empty") showTestLine(s.connTestOkNoModels);
-        else showTestLine(detail, { warn: true });
+        else showTestLine(keyless ? `${detail} ${s.connTestNoKey}` : detail, { warn: true });
       };
       currentTest = pending;
       connectionPendingTests.push(pending);
@@ -1125,8 +1402,19 @@ function buildConnectionPage() {
         endTest(pending);
         showTestLine(s.connTestTimeout, { warn: true });
       }, CONNECTION_TEST_TIMEOUT_MS);
+      // (A timeout is about reachability, not credentials, so it gets no
+      // keyless addendum.)
       connectionTestTimers.add(pending.timer);
-      api.send({ cmd: "testProvider", baseUrl: target.baseUrl, apiKeyEnv: target.apiKeyEnv, model: target.model });
+      // Only the fields that were filled in: an empty `apiKey` would ask the
+      // host to send an empty credential, and an empty `apiKeyEnv` would ask it
+      // to read a variable with no name.
+      api.send({
+        cmd: "testProvider",
+        baseUrl: target.baseUrl,
+        ...(target.apiKey === "" ? {} : { apiKey: target.apiKey }),
+        ...(target.apiKeyEnv === "" ? {} : { apiKeyEnv: target.apiKeyEnv }),
+        ...(target.model === "" ? {} : { model: target.model }),
+      });
     };
 
     const testButton = sButton(s.connTest, runTest, { quiet: true });
@@ -1138,6 +1426,10 @@ function buildConnectionPage() {
           // A test this card started has nowhere to report now; leaving it
           // pending would let an answer land on a node nothing shows.
           if (currentTest) cancelTest(currentTest);
+          // The card is gone, and the name it was filed under is free again;
+          // leaving the mark behind would open an unrelated card that later
+          // took the same name.
+          if (lastName !== "") connectionExpanded.delete(lastName);
           const at = cards.findIndex((item) => item.node === node);
           if (at >= 0) cards.splice(at, 1);
           node.remove();
@@ -1176,12 +1468,18 @@ function buildConnectionPage() {
         models[id] = { ...handle.carried };
       }
 
+      // Keys are trimmed the same way the kernel trims them
+      // (`resolveProviderApiKey`): a value that is only whitespace counts as
+      // "not set" and is left out of the file rather than written as an empty
+      // credential. Both may be present; the kernel prefers `apiKey`.
+      const apiKey = apiKeyInput.value.trim();
       const apiKeyEnv = apiKeyEnvInput.value.trim();
       return {
         name,
         value: {
           protocol: entry.protocol,
           baseUrl,
+          ...(apiKey === "" ? {} : { apiKey }),
           ...(apiKeyEnv === "" ? {} : { apiKeyEnv }),
           models,
           // `pricePerMillion` rides in here with the other keys this page does
@@ -1201,10 +1499,17 @@ function buildConnectionPage() {
         problem.textContent = "";
       },
       showProblem: (message, field) => {
+        // The problem line is inside the body. Shown on a collapsed card it
+        // would be a Save that visibly did nothing: the refusal has to open
+        // the card it is about, or the user has no way to find it (R3).
+        setExpanded(true);
         problem.textContent = message;
         problem.hidden = false;
         field?.focus();
       },
+      /** The first-run path needs a way to open a card the user has never
+       *  touched; the collapsed default would hide the field it focuses. */
+      expand: () => setExpanded(true),
     };
   };
 
@@ -1244,6 +1549,11 @@ function buildConnectionPage() {
 
   for (const [name, provider] of Object.entries(config)) addCard(entryFrom(name, provider));
 
+  // First run: the page was opened to fill the endpoint in, and `openSetup`
+  // focuses `#setting-base-url` on the first card. A collapsed card would make
+  // that focus land on a hidden input, so the first card starts open.
+  if (connectionSetupHint && cards.length > 0) cards[0].expand();
+
   const foot = el("div", "settings-form-actions");
   foot.append(
     savedNote,
@@ -1252,6 +1562,9 @@ function buildConnectionPage() {
       s.connAddProvider,
       () => {
         const card = addCard(blankEntry());
+        // A new card has nothing to read in a header — no endpoint, no models —
+        // so it opens, ready to be filled in.
+        card.expand();
         markDirty();
         card.nameInput.focus();
       },
@@ -1658,16 +1971,16 @@ function buildSessionsPage() {
         label: s.branchPrefix,
         desc: s.branchPrefixDesc,
         control: sText({
-          value: state.branchPrefix ?? "prometheus/",
+          value: state.branchPrefix ?? "embedded-ai/",
           mono: true,
-          placeholder: "prometheus/",
+          placeholder: "embedded-ai/",
           onChange: (value) => applyPref("branchPrefix", value),
         }),
       }),
       sRow({
         label: s.worktreeLocation,
         desc: s.worktreeLocationDesc,
-        control: el("code", "setting-code", "<repo>/.prometheus/worktrees"),
+        control: el("code", "setting-code", "<repo>/.embedded-ai/worktrees"),
       }),
     ]),
   );
@@ -2209,7 +2522,7 @@ function buildToolsPage() {
         }
         row.appendChild(main);
 
-        // 来源：PATH、安装目录、还是 Prometheus 装的 pack。用户在排查
+        // 来源：PATH、安装目录、还是本应用装的 pack。用户在排查
         // "为什么用的是旧版本"时，这一列就是答案。
         if (tool?.source) row.appendChild(el("span", "tc-source", s.tcSource?.[tool.source] ?? tool.source));
 
@@ -2525,14 +2838,18 @@ function buildHooksPage() {
     actions.appendChild(button);
   }
 
-  pane.appendChild(
-    sGroup(s.groupCustomize, [
-      // A file path, not a setting: repeating the page description under it
-      // said nothing about the file.
-      sRow({ label: status.file || ".prometheus/hooks.json", desc: "", control: stateRow, wide: true, mono: true }),
-      sRow({ label: s.hookState, desc: s.hookReview, control: actions, wide: true }),
-    ]),
+  // A file path, not a setting: repeating the page description under it said
+  // nothing about the file. The path is only shown when the host named a file
+  // it actually read — this kernel has no hook mechanism, so a hard-coded
+  // path would describe something that does not exist.
+  const rows = [];
+  if (status.file) rows.push(sRow({ label: status.file, desc: "", control: stateRow, wide: true, mono: true }));
+  rows.push(
+    status.exists
+      ? sRow({ label: s.hookState, desc: s.hookReview, control: actions, wide: true })
+      : sRow({ label: s.hookState, desc: "", control: stateRow, wide: true }),
   );
+  pane.appendChild(sGroup(s.groupCustomize, rows));
 
   if (status.entries.length > 0) {
     const table = el("section", "setting-group");
@@ -2553,10 +2870,26 @@ function buildHooksPage() {
   return pane;
 }
 
+/**
+ * The folder the app keeps its files in.
+ *
+ * Every config file the host reports sits directly inside this folder. When
+ * the host reported one, show the folder it names; otherwise name the variable
+ * and its default rather than inventing a path that may not exist here.
+ */
+function dataFolderPath() {
+  const file = state.configPaths?.providers;
+  if (typeof file === "string" && file !== "") {
+    const cut = Math.max(file.lastIndexOf("/"), file.lastIndexOf("\\"));
+    if (cut > 0) return file.slice(0, cut);
+  }
+  return "$HARNESS_HOME (default ~/.harness)";
+}
+
 function buildAboutPage() {  const s = S();
   const pane = sPage(s.pageAbout, s.pageAboutDesc);
   const row = el("section", "about-row");
-  row.appendChild(el("span", "about-version", `Prometheus ${state.appVersion ?? ""}`));
+  row.appendChild(el("span", "about-version", `Embedded AI Master ${state.appVersion ?? ""}`));
   const check = sButton(t.checkUpdate, async () => {
     const note = $("update-note");
     note.textContent = t.updateChecking;
@@ -2578,7 +2911,7 @@ function buildAboutPage() {  const s = S();
       sRow({
         label: s.dataFolder,
         desc: s.dataFolderDesc,
-        control: el("code", "setting-code", "~/.prometheus"),
+        control: el("code", "setting-code", dataFolderPath()),
       }),
       sRow({
         label: s.localOnly,

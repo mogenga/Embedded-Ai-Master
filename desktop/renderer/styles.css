@@ -1,4 +1,4 @@
-/* Prometheus desktop theme.
+/* Embedded AI Master desktop theme.
  *
  * A graphite base with one cool accent. The palette is deliberately not the
  * warm-cream-plus-terracotta default: the product is a terminal-adjacent tool,
@@ -269,6 +269,19 @@ svg {
   /* The single left edge for every row in this column. Declared here so the
      header and the button row below it read the same number. */
   --rail-inset: 12px;
+  /* Everything in a workspace row that sits before its name: the row's own
+     left padding, the fold chevron, the gap, the folder glyph, the gap. A
+     session row is padded by exactly this, so a conversation title starts on
+     the left edge of the workspace name it belongs to. That shared edge is
+     the level structure — a few pixels of margin is not enough to see, and a
+     second, separate indent number would drift the moment either row's
+     padding changed. Used by the empty-workspace hint and the session row. */
+  --group-lead: calc(7px + 14px + 6px + 14px + 6px);
+  /* The markers a session row may carry (run-state dot, pin) sit inside the
+     indent at this offset, under the workspace's fold chevron. They are taken
+     out of flow, so a row with a dot keeps its title on the same edge as one
+     without. */
+  --session-mark: 7px;
   /* The header strip is the window's drag area, not the whole column. Marking
      the entire sidebar `drag` made every button inside it unclickable on
      Windows: the OS routes mouse events in a drag region to the window
@@ -421,75 +434,47 @@ body.resizing-sidebar .sidebar {
   color: var(--text-secondary);
 }
 
-/* The workspace entry sits directly under the new-chat button: choosing where
-   the next session runs belongs to starting it, not to the top bar alone.
-   Two lines — label above, folder name below — because a sidebar narrows to
-   200px and one long line would either clip the name or push the icon out. */
-.sidebar-workspace {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  width: 100%;
-  margin-top: 4px;
-  padding: 6px 10px;
-  border-radius: var(--radius);
-  border: 1px solid transparent;
-  text-align: left;
-  min-width: 0;
-  transition: background 120ms ease, border-color 120ms ease;
+/* Choosing a folder is an action of the workspaces section, so it sits in
+   that section's header as an icon button. It used to be a two-line entry
+   under the new-chat button, which read as one more workspace row — while the
+   real workspace rows were the group headers in the list below it, all of the
+   folders that hold sessions. Two things called "workspace" side by side is
+   the reason the list had no hierarchy to read. The current folder is the
+   active row in the list; this button only changes it. */
+.sidebar-workspace.empty {
+  /* No folder yet: the button is the only way to pick one from here, and the
+     accent says "this is the thing to click", not "disabled". */
+  color: var(--accent);
 }
 
-.sidebar-workspace:hover {
-  background: var(--surface);
-  border-color: var(--border);
+/* Both rules are spelled with the `.empty` class so they outrank the generic
+   `.icon-button` colours the button also carries; otherwise the accent would
+   vanish on hover and the one control worth noticing would go quiet. */
+.sidebar-workspace.empty:hover {
+  color: var(--accent-hover);
 }
 
-.sidebar-workspace svg {
-  width: 14px;
-  height: 14px;
-  color: var(--text-secondary);
-}
-
-.sidebar-workspace-text {
-  display: flex;
-  flex: 1 1 auto;
-  flex-direction: column;
-  min-width: 0;
-  line-height: 1.35;
-}
-
-.sidebar-workspace-label {
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  letter-spacing: 0.02em;
-}
-
-.sidebar-workspace-name {
-  font-size: var(--text-sm);
-  color: var(--text);
-  /* A workspace name is often longer than the rail; the full path is in the
-     tooltip, so the row truncates rather than wraps and pushes the session
-     list down. */
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* No folder yet: the entry is the only way to pick one from here, and a
-   muted row reads as "empty slot to fill", not as disabled. */
-.sidebar-workspace.empty .sidebar-workspace-name {
-  color: var(--text-secondary);
-  font-style: italic;
-}
-
+/* The section heading names the first level, and its buttons act on the whole
+   list. `space-between` would spread five children across the rail; the label
+   grows instead and the buttons stay a group at the right. */
 .sidebar-section-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  padding: 4px 8px 6px;
+  gap: 2px;
+  /* Same left edge as the brand and the new-chat button: the sidebar already
+     contributes 10px, so this makes up the difference to --rail-inset. */
+  padding: 4px calc(var(--rail-inset) - 10px) 6px;
   font-size: var(--text-xs);
   color: var(--text-faint);
   letter-spacing: 0.02em;
+}
+
+.sidebar-section-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-list {
@@ -500,7 +485,11 @@ body.resizing-sidebar .sidebar {
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding-bottom: 8px;
+  /* The rows carry no horizontal margin of their own, so they line up here
+     instead: the sidebar already contributes 10px, and this makes up the
+     difference to --rail-inset. One place to change, and the hover background
+     of every row reaches the same left edge as the section label above it. */
+  padding: 0 calc(var(--rail-inset) - 10px) 8px;
 }
 
 /* ---------- file tree ---------- */
@@ -1180,14 +1169,23 @@ body.resizing-sidebar .sidebar {
   border: 2px solid var(--sidebar);
 }
 
-.session-group {
-  padding: 10px 8px 4px;
-  font-size: var(--text-xs);
-  color: var(--text-faint);
+/* Task state, as a dot the eye can catch while scanning the list. */
+/* The markers before a title sit in a lane that is already inside the
+   conversation's indent, so the title starts on the workspace name's left edge
+   whether the row carries a dot, a pin, both, or neither. Taken out of flow for
+   exactly that reason: in flow, a dot would push the title right and break the
+   alignment the indent exists to create. `left` is the workspace row's own
+   padding, so the markers line up under its chevron. */
+.session-flags {
+  position: absolute;
+  left: var(--session-mark);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
-
-/* Task state, as a dot the eye can catch while scanning the list. */
 .session-state {
   flex: 0 0 auto;
   width: 6px;
@@ -1269,7 +1267,9 @@ body.resizing-sidebar .sidebar {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 7px 9px;
+  /* Right padding stays the row's own; the left is the whole workspace lead,
+     so the conversation title starts under the workspace name it belongs to. */
+  padding: 7px 9px 7px var(--group-lead);
   border-radius: var(--radius-sm);
   text-align: left;
   position: relative;
@@ -1351,20 +1351,35 @@ body.resizing-sidebar .sidebar {
   opacity: 0.5;
 }
 
-/* Project header: foldable, one per workspace, with its conversation count
-   and a quick "new chat in this project" affordance. */
+/* First level: one foldable row per workspace, carrying the folder glyph, its
+   name, the conversation count and a quick "new chat in this project". The
+   row is the level — its name is what the conversations below align to. */
 .session-group {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  margin-top: 6px;
+  /* Groups are separated by the interval between them, not by a line: the
+     list is two levels deep and a border would compete with the row chrome
+     that already marks the hovered and active ones. */
+  margin-top: 10px;
   padding: 5px 7px;
   border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
-  font-weight: 500;
-  color: var(--text-secondary);
+  /* The level is read from size, not only from indent. A workspace name that
+     is *smaller* than the conversations under it inverts the hierarchy the
+     indent is trying to draw — the parent looked like a caption for its own
+     children. One step up from `--text-sm`, with the weight and the glyph
+     carrying the "this is a container" reading. */
+  font-size: var(--text-base);
+  font-weight: 600;
+  color: var(--text);
   text-align: left;
+}
+
+/* The first group sits directly under the search field, which already ends
+   with a margin; the interval above a group is only between groups. */
+.session-group:first-child {
+  margin-top: 0;
 }
 
 .session-group:hover {
@@ -1386,6 +1401,26 @@ body.resizing-sidebar .sidebar {
 .session-group-twisty .icon {
   width: 13px;
   height: 13px;
+}
+
+/* The folder is what says "this row is a place, the rows under it are
+   conversations". It is fixed-width like the chevron so the name of every
+   workspace starts on the same edge, folded or not. */
+.session-group-glyph {
+  display: flex;
+  width: 14px;
+  flex: 0 0 14px;
+  color: var(--text-faint);
+}
+
+.session-group-glyph .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.session-group:hover .session-group-glyph,
+.session-group.active .session-group-glyph {
+  color: var(--text-secondary);
 }
 
 .session-group-name {
@@ -1440,10 +1475,46 @@ body.resizing-sidebar .sidebar {
   color: var(--text);
 }
 
-/* Conversations sit visually inside their project. */
-.session-group + .session-item {
-  margin-left: 6px;
-  width: calc(100% - 6px);
+/* Second level: an empty workspace says so and offers the way out of being
+   empty. It stands where its conversations would, on the same indent and in
+   the same muted voice — but it is not a session row: nothing here opens, and
+   there is nothing to right-click. */
+.session-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 9px 5px var(--group-lead);
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+.session-empty-hint {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A quiet action, not the primary new-chat button: the row exists to explain
+   an absence, and the button in the header is already the loud way to start. */
+.session-empty-action {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--accent-text);
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+
+.session-empty-action:hover {
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.session-empty-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .session-item:hover {
@@ -1457,7 +1528,10 @@ body.resizing-sidebar .sidebar {
 .session-title {
   flex: 1;
   min-width: 0;
-  font-size: var(--text-base);
+  /* One step below the workspace name above it. The row inherits `--text-md`
+     from the body, so leaving this to inheritance made conversations larger
+     than the folders that contain them. */
+  font-size: var(--text-sm);
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1468,25 +1542,9 @@ body.resizing-sidebar .sidebar {
   color: var(--text);
 }
 
-/* The timestamp is reference, not navigation: it fades in on hover instead
-   of taking a second line in every row. */
-.session-meta {
-  flex: 0 0 auto;
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  opacity: 0;
-  transition: opacity var(--fast) var(--ease);
-}
-
-.session-item:hover .session-meta,
-.session-item.active .session-meta {
-  opacity: 1;
-}
-
-.session-item.active .session-title {
-  color: var(--text);
-}
-
+/* The timestamp is reference, not navigation: it fades in on hover instead of
+   taking a second line in every row. Absolute, so the title keeps the whole
+   width and the date paints over its tail behind a fade. */
 .session-meta {
   position: absolute;
   right: 8px;
@@ -1499,11 +1557,12 @@ body.resizing-sidebar .sidebar {
   background: linear-gradient(to right, transparent, var(--sidebar) 12px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 120ms ease;
+  transition: opacity var(--fast) var(--ease);
 }
 
 .session-item:hover .session-meta,
-.session-item:focus-visible .session-meta {
+.session-item:focus-visible .session-meta,
+.session-item.active .session-meta {
   opacity: 1;
 }
 
@@ -1511,6 +1570,8 @@ body.resizing-sidebar .sidebar {
   background: linear-gradient(to right, transparent, var(--surface-hover) 12px);
 }
 
+/* Shared by the tree, the Tasks pane and the artifact list as well as this
+   column, so it carries no indent of its own. */
 .sidebar-empty {
   padding: 8px;
   font-size: var(--text-sm);
@@ -1541,37 +1602,6 @@ body.resizing-sidebar .sidebar {
 .sidebar-more:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-}
-
-.sidebar-foot {
-  flex: 0 0 auto;
-  margin-top: auto;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
-}
-
-.locale-switch {
-  display: inline-flex;
-  padding: 2px;
-  gap: 2px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-}
-
-.locale-switch button {
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-}
-
-.locale-switch button.active {
-  background: var(--surface-hover);
-  color: var(--text);
 }
 
 /* ---------- main column ---------- */
@@ -2396,6 +2426,17 @@ mark.find-hit.current {
   color: var(--danger);
 }
 
+/* A failed call says so twice: the glyph and summary turn red, and the name —
+   which is what the eye scans first — gains a struck-through weight of its
+   own. Colour alone would be the only carrier of "this failed", which the
+   accessibility floor forbids; the row must stay legible in high contrast and
+   to a colour-blind reader. The name keeps its own colour so the red reads as
+   the call's outcome rather than as part of the address it was given. */
+.tool-row.failed .tool-name {
+  text-decoration: underline wavy var(--danger);
+  text-underline-offset: 3px;
+}
+
 /* Tool annotations: the property the tool declares about itself, next to its
    name. A destructive tool is the one worth noticing, so it gets the warning
    colour; read-only and evidence stay quiet. No badge means "not declared",
@@ -3097,8 +3138,8 @@ mark.find-hit.current {
   gap: 8px;
   /* One line, always. Wrapping turned the two halves into two rows the moment
      the inspector opened, which made the composer twice as tall exactly when
-     vertical space was scarce. Anything that will not fit is hidden by
-     `.controls-right`'s overflow rule rather than pushed to a second row. */
+     vertical space was scarce. Anything that will not fit shrinks instead:
+     the chips carry their own `min-width: 0` and ellipsis. */
   flex-wrap: nowrap;
   min-width: 0;
   padding-top: 7px;
@@ -3116,7 +3157,11 @@ mark.find-hit.current {
   margin-left: auto;
   flex: 0 1 auto;
   min-width: 0;
-  overflow: hidden;
+  /* No `overflow: hidden` here. It was added to keep the row from wrapping,
+     but wrapping is `.composer-bar`'s `flex-wrap` and this container is the
+     containing block of the model popover — clipping it hid the entire menu
+     (`.model-menu` is absolutely positioned inside `.model-control`, which
+     sits wholly within this box). Shrinking is the chips' own job. */
 }
 
 .plus-control {
@@ -3179,11 +3224,17 @@ mark.find-hit.current {
   position: relative;
 }
 
+/* The three controls on the composer bar are all "a small pill of text with a
+   chevron", so they share one box: same padding, same gap, same radius. They
+   used to be `4px 6px`, `4px 8px 4px 10px` and `4px 7px`, which put the mode
+   label, the model name and the token count on three different optical
+   baselines inside one row. The values live here as variables so a change to
+   one cannot drift from the other two. */
 .mode-picker {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 4px 6px;
+  gap: 6px;
+  padding: 4px 8px;
   border-radius: var(--radius-sm);
   font-size: var(--text-sm);
   color: var(--text-secondary);
@@ -3205,9 +3256,13 @@ mark.find-hit.current {
    popover. A percentage alone was unreadable — 17% of what? */
 .context-chip {
   display: inline-flex;
-  align-items: baseline;
+  /* `center`, not `baseline`: the chip sits beside the model picker, and a
+     baseline alignment moved its text a couple of pixels off theirs whenever
+     the picker showed a chevron and this one did not. */
+  align-items: center;
   gap: 6px;
-  padding: 4px 7px;
+  /* Same box as `.mode-picker` and `.chip-button` — see the note there. */
+  padding: 4px 8px;
   border-radius: var(--radius-sm);
   font-family: var(--mono);
   font-size: var(--text-sm);
@@ -4313,7 +4368,10 @@ mark.find-hit.current {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 8px 4px 10px;
+  /* Symmetric, matching `.mode-picker` and `.context-chip`: the extra 2 px on
+     the left existed to balance the chevron on the right, and it only made the
+     text sit off the other two chips' text. */
+  padding: 4px 8px;
   border-radius: var(--radius-sm);
   background: var(--surface);
   border: 1px solid var(--border);
@@ -4485,10 +4543,18 @@ mark.find-hit.current {
 .model-menu {
   position: absolute;
   bottom: calc(100% + 6px);
-  left: 0;
-  width: 320px;
+  /* Anchored to the right edge, because the chip is the rightmost control:
+     `left: 0` grew the 320px box outwards from a chip near the viewport edge
+     and pushed it off screen. */
+  right: 0;
+  width: min(320px, calc(100vw - 32px));
   max-height: 340px;
-  overflow-y: auto;
+  /* The field and the refresh row stay put and the list scrolls under them;
+     scrolling the whole popover made the filter disappear exactly when a long
+     list made it useful. */
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   padding: 4px;
   background: var(--surface-raised);
   border: 1px solid var(--border);
@@ -4498,17 +4564,64 @@ mark.find-hit.current {
   animation: slide-up 120ms ease-out;
 }
 
-.model-option {
+.model-list {
+  /* Takes the leftover height so the footer never leaves the viewport. */
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  outline: none;
+}
+
+.model-list:focus-visible {
+  outline: 1px solid var(--border-strong);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.model-filter-input {
+  width: 100%;
+  flex: 0 0 auto;
+  margin-bottom: 4px;
+  padding: 6px 8px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: var(--text-sm);
+}
+
+.model-filter-input::placeholder {
+  color: var(--text-faint);
+}
+
+.model-filter-input:focus {
+  outline: none;
+  border-color: var(--border-strong);
+}
+
+.model-group-label {
+  padding: 6px 10px 4px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  text-transform: none;
+}
+
+/* The row layout is scoped to this menu: the board picker reuses the
+   `.model-option` class for its own, differently shaped rows. */
+.model-menu .model-option {
   display: flex;
-  flex-direction: column;
-  gap: 1px;
+  align-items: flex-start;
+  gap: 6px;
   width: 100%;
   padding: 7px 10px;
   border-radius: var(--radius-sm);
   text-align: left;
 }
 
-.model-option:hover {
+.model-option:hover,
+.model-option[data-highlight="1"] {
   background: var(--surface-hover);
 }
 
@@ -4516,25 +4629,59 @@ mark.find-hit.current {
   background: var(--accent-soft);
 }
 
-.model-id {
-  font-family: var(--mono);
-  font-size: var(--text-sm);
-  color: var(--text);
+.model-menu .model-option[data-highlight="1"] {
+  /* The keyboard's position has to be visible without relying on the pointer,
+     and the selected row has its own mark below; an outline reads as "you are
+     here" without competing with "this is the one in use". */
+  outline: 1px solid var(--border-strong);
+  outline-offset: -1px;
 }
 
-.model-option.active .model-id {
+.model-mark {
+  flex: 0 0 12px;
+  height: 14px;
   color: var(--accent-text);
+  opacity: 0;
+}
+
+.model-mark svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* Selection is marked by a glyph, not only by the tint: colour alone is not a
+   state anyone can rely on. */
+.model-option.active .model-mark {
+  opacity: 1;
+}
+
+.model-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
 }
 
 .model-name {
+  font-family: var(--mono);
   font-size: var(--text-sm);
-  color: var(--text-secondary);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-option.active .model-name {
+  color: var(--accent-text);
 }
 
 .model-meta {
   font-family: var(--mono);
   font-size: var(--text-xs);
   color: var(--text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .model-empty {
@@ -4543,8 +4690,27 @@ mark.find-hit.current {
   color: var(--text-faint);
 }
 
-.model-refresh {
+.model-empty-action {
   width: 100%;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--accent-text);
+  text-align: left;
+}
+
+.model-empty-action:hover {
+  background: var(--surface-hover);
+}
+
+.model-refresh {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  /* In a flex column a full-width button would flex-shrink with the list;
+     this one is the fixed footer and keeps its height. */
+  flex: 0 0 auto;
   margin-top: 4px;
   padding: 7px 10px;
   border-top: 1px solid var(--border);
@@ -4552,6 +4718,12 @@ mark.find-hit.current {
   color: var(--text-secondary);
   text-align: left;
   border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+
+.model-refresh .icon {
+  width: 12px;
+  height: 12px;
+  color: var(--text-faint);
 }
 
 .model-refresh:hover {
