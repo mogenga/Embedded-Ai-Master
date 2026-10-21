@@ -1,0 +1,313 @@
+{
+  "subsample": [
+    "idx-001",
+    "idx-002",
+    "idx-003",
+    "idx-004",
+    "idx-006",
+    "idx-007",
+    "srch-001",
+    "srch-002",
+    "srch-003",
+    "srch-004"
+  ],
+  "max_tool_rounds": 6,
+  "repeats": {
+    "1_grid_log": {
+      "n": 10,
+      "recall@2": 1.0,
+      "hit@1": 0.8,
+      "mrr": 0.9,
+      "timeouts": 0
+    },
+    "2_full_run": {
+      "n": 10,
+      "recall@2": 0.9,
+      "hit@1": 0.8,
+      "mrr": 0.85,
+      "timeouts": 1
+    },
+    "3_rerun": {
+      "n": 10,
+      "recall@2": 0.9,
+      "hit@1": 0.9,
+      "mrr": 0.9,
+      "timeouts": 1
+    }
+  },
+  "per_query": {
+    "idx-001": {
+      "repeat1": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/no-output.md",
+          "protocols/uart/_overview.md"
+        ]
+      },
+      "repeat2": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/no-output.md",
+          "protocols/uart/_overview.md",
+          "system/power-reset/brownout-unexpected-reset.md",
+          "system/clock-tree/hse-not-starting.md",
+          "method/compound-fault-decoupling.md"
+        ]
+      },
+      "repeat3": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/no-output.md",
+          "protocols/uart/_overview.md",
+          "system/clock-tree/hse-not-starting.md",
+          "debug/swd/no-connect.md",
+          "cases/case-s2-hse-mismatch.md"
+        ],
+        "rounds": 5,
+        "elapsed_s": 89.2,
+        "error": null
+      }
+    },
+    "idx-002": {
+      "repeat1": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/garbled-data.md",
+          "protocols/uart/_overview.md"
+        ]
+      },
+      "repeat2": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/garbled-data.md",
+          "protocols/uart/_overview.md"
+        ]
+      },
+      "repeat3": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/garbled-data.md",
+          "protocols/uart/_overview.md",
+          "system/clock-tree/hse-not-starting.md",
+          "cases/case-s2-hse-mismatch.md",
+          "protocols/uart/framing-errors.md"
+        ],
+        "rounds": 5,
+        "elapsed_s": 80.8,
+        "error": null
+      }
+    },
+    "idx-003": {
+      "repeat1": {
+        "status": "ok",
+        "paths": [
+          "cases/case-s3-intermittent-overrun.md",
+          "protocols/uart/dropped-bytes.md"
+        ]
+      },
+      "repeat2": {
+        "status": "ok",
+        "paths": [
+          "cases/case-s3-intermittent-overrun.md",
+          "protocols/uart/dropped-bytes.md",
+          "method/intermittent-fault-method.md",
+          "protocols/uart/framing-errors.md",
+          "protocols/uart/_overview.md"
+        ]
+      },
+      "repeat3": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/dropped-bytes.md",
+          "cases/case-s3-intermittent-overrun.md"
+        ],
+        "rounds": 4,
+        "elapsed_s": 89.6,
+        "error": null
+      }
+    },
+    "idx-004": {
+      "repeat1": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/framing-errors.md",
+          "cases/case-s4-rs485-compound.md"
+        ]
+      },
+      "repeat2": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/framing-errors.md",
+          "cases/case-s4-rs485-compound.md"
+        ]
+      },
+      "repeat3": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/framing-errors.md",
+          "cases/case-s4-rs485-compound.md",
+          "method/compound-fault-decoupling.md",
+          "protocols/uart/dropped-bytes.md",
+          "protocols/uart/garbled-data.md"
+        ],
+        "rounds": 5,
+        "elapsed_s": 77.4,
+        "error": null
+      }
+    },
+    "idx-006": {
+      "repeat1": {
+        "status": "ok",
+        "paths": [
+          "protocols/spi/all-zero-or-ff.md",
+          "protocols/spi/mode-mismatch.md"
+        ]
+      },
+      "repeat2": {
+        "status": "timeout",
+        "paths": []
+      },
+      "repeat3": {
+        "status": "ok",
+        "paths": [
+          "protocols/spi/all-zero-or-ff.md",
+          "protocols/spi/mode-mismatch.md",
+          "protocols/spi/_overview.md",
+          "reference/spi-mode-timing.md"
+        ],
+        "rounds": 5,
+        "elapsed_s": 81.9,
+        "error": null
+      }
+    },
+    "idx-007": {
+      "repeat1": {
+        "status": "ok",
+        "paths": [
+          "protocols/uart/dropped-bytes.md",
+          "protocols/spi/intermittent-corruption.md"
+        ]
+      },
+      "repeat2": {
+        "status": "ok",
+        "paths": [
+          "protocols/spi/intermittent-corruption.md",
+          "protocols/uart/dropped-bytes.md",
+          "protocols/uart/framing-errors.md",
+          "cases/case-s3-intermittent-overrun.md",
+          "system/dma/dma-data-not-appearing.md"
+        ]
+      },
+      "repeat3": {
+        "status": "timeout",
+        "paths": [],
+        "rounds": 6,
+        "elapsed_s": 105.8,
+        "error": null
+      }
+    },
+    "srch-001": {
+      "repeat1": {
+        "status": "ok",
+        "paths": [
+          "reference/stm32-rcc-usart-registers.md"
+        ]
+      },
+      "repeat2": {
+        "status": "ok",
+        "paths": [
+          "reference/stm32-rcc-usart-registers.md",
+          "reference/renode-simulation.md"
+        ]
+      },
+      "repeat3": {
+        "status": "ok",
+        "paths": [
+          "reference/stm32-rcc-usart-registers.md",
+          "reference/renode-simulation.md"
+        ],
+        "rounds": 3,
+        "elapsed_s": 47.8,
+        "error": null
+      }
+    },
+    "srch-002": {
+      "repeat1": {
+        "status": "ok",
+        "paths": [
+          "reference/scb-fault-registers.md",
+          "debug/hardfault/cortex-m-decode.md"
+        ]
+      },
+      "repeat2": {
+        "status": "ok",
+        "paths": [
+          "reference/scb-fault-registers.md",
+          "debug/hardfault/cortex-m-decode.md",
+          "debug/hardfault/invstate-thumbbit.md",
+          "cases/case-h1-thumbbit-hardware.md"
+        ]
+      },
+      "repeat3": {
+        "status": "ok",
+        "paths": [
+          "reference/scb-fault-registers.md",
+          "debug/hardfault/cortex-m-decode.md",
+          "debug/hardfault/invstate-thumbbit.md"
+        ],
+        "rounds": 3,
+        "elapsed_s": 40.1,
+        "error": null
+      }
+    },
+    "srch-003": {
+      "repeat1": {
+        "status": "ok",
+        "paths": [
+          "reference/modbus-crc-vectors.md",
+          "protocols/modbus/rtu-timing.md"
+        ]
+      },
+      "repeat2": {
+        "status": "ok",
+        "paths": [
+          "reference/modbus-crc-vectors.md"
+        ]
+      },
+      "repeat3": {
+        "status": "ok",
+        "paths": [
+          "reference/modbus-crc-vectors.md"
+        ],
+        "rounds": 3,
+        "elapsed_s": 77.3,
+        "error": null
+      }
+    },
+    "srch-004": {
+      "repeat1": {
+        "status": "ok",
+        "paths": [
+          "reference/i2c-timing-spec.md"
+        ]
+      },
+      "repeat2": {
+        "status": "ok",
+        "paths": [
+          "reference/i2c-timing-spec.md",
+          "protocols/i2c/rise-time.md"
+        ]
+      },
+      "repeat3": {
+        "status": "ok",
+        "paths": [
+          "reference/i2c-timing-spec.md",
+          "protocols/i2c/rise-time.md"
+        ],
+        "rounds": 3,
+        "elapsed_s": 39.9,
+        "error": null
+      }
+    }
+  }
+}

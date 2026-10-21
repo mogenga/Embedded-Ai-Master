@@ -1,0 +1,41 @@
+{
+  "subsample": [
+    "idx-001",
+    "idx-002",
+    "idx-003",
+    "idx-004",
+    "idx-006",
+    "idx-007",
+    "srch-001",
+    "srch-002",
+    "srch-003",
+    "srch-004"
+  ],
+  "spacing_seconds": 15.0,
+  "cooldown_seconds": 300.0,
+  "rows": [
+    {
+      "max_tool_rounds": 12,
+      "n": 10,
+      "valid": 9,
+      "errors": 1,
+      "timeouts": 0,
+      "recall@2_on_valid": 1.0,
+      "recall@5_on_valid": 1.0,
+      "hit@1_on_valid": 0.8889,
+      "mrr_on_valid": 0.9444,
+      "input_tokens": 130388,
+      "output_tokens": 6069,
+      "elapsed_s": 799.6
+    }
+  ],
+  "failures": [
+    {
+      "rounds": 12,
+      "query_id": "idx-006",
+      "status": "error",
+      "error": "LLMError: chat 重试 3 次仍失败：网关返回 429：{\"error\": {\"message\": \"upstream rate limit reached for this model; retry in 56s - {\\\"code\\\":6020,\\\"msg\\\":\\\"queue.waiting.title\\\",\\\"requestId\\\":\\\"01a1599b4fb073e2af305695d6a53e7e\\\",\\\"data\\\":{\\\"queue_position\\\":6982,\\\"queue_size\\\":\\\"999+\\\",\\\"retry_after\\\":40,\\\"estimated_wait\\\":34910,\\\"client_user_type\\\":\\\"fr\", \"type\": \"rate_limit_error\", \"code\": 429, \"retry_after\": 56}}",
+      "elapsed_s": 131.4
+    }
+  ]
+}

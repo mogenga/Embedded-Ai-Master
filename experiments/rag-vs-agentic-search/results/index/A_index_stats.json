@@ -1,0 +1,11 @@
+{
+  "scheme": "A",
+  "chunking": "whole_file",
+  "model_id": "BAAI/bge-m3",
+  "chunks": 264,
+  "files": 104,
+  "build_seconds": 0.4,
+  "index_cached": true,
+  "cache_dir": "results/cache/embeddings",
+  "index_path": "results/cache/A_index.json"
+}

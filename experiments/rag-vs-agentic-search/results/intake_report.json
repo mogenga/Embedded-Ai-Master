@@ -1,0 +1,18 @@
+{
+  "ok": true,
+  "counts": {
+    "queries": 80,
+    "dev": 55,
+    "test": 25,
+    "perturbations": 0,
+    "negatives": 25,
+    "multi_gold": 50,
+    "multi_gold_covered_index": 50,
+    "queries_with_unindexed_gold": 11
+  },
+  "errors": [],
+  "warnings": [
+    "缺少文件：perturbations.jsonl（H6 扰动鲁棒性 将标记为 BLOCKED）",
+    "11/80 条查询的 gold 不在 index.yaml 中（方案 C 的 lookup 分支结构性无法命中，须分层报告）：srch-001, srch-002, srch-003, srch-004, srch-005"
+  ]
+}

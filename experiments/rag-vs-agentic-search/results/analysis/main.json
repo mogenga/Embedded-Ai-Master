@@ -1,0 +1,193 @@
+{
+  "run_id": "main",
+  "schemes_loaded": [
+    "A",
+    "B",
+    "C",
+    "C_prime"
+  ],
+  "alignment": {
+    "misaligned": false,
+    "problems": [],
+    "n": 80
+  },
+  "latency": [
+    {
+      "scheme": "B",
+      "n": 80,
+      "p50_latency_ms": 65032.77,
+      "p95_latency_ms": 101515.13,
+      "failure_rate": 0.025,
+      "status_counts": {
+        "ok": 78,
+        "timeout": 2
+      }
+    },
+    {
+      "scheme": "C",
+      "n": 80,
+      "p50_latency_ms": 1.72,
+      "p95_latency_ms": 86.85,
+      "failure_rate": 0.15,
+      "status_counts": {
+        "ok": 68,
+        "no_match": 12
+      }
+    },
+    {
+      "scheme": "C_prime",
+      "n": 80,
+      "p50_latency_ms": 0.62,
+      "p95_latency_ms": 1.08,
+      "failure_rate": 0.0,
+      "status_counts": {
+        "ok": 80
+      }
+    }
+  ],
+  "significance": {
+    "family_size": 4,
+    "compared": 3,
+    "comparisons": [
+      {
+        "name": "A vs C′",
+        "scheme_a": "A",
+        "scheme_b": "C_prime",
+        "n": 80,
+        "recall@2_a": 0.8,
+        "recall@2_b": 0.8,
+        "diff_pp": 0.0,
+        "mcnemar": {
+          "only_a": 6,
+          "only_b": 6
+        },
+        "p_value": 1.0,
+        "p_adjusted": 1.0,
+        "ci_low_pp": -8.8,
+        "ci_high_pp": 8.8,
+        "significant": false,
+        "strata": [
+          "index",
+          "search"
+        ],
+        "skipped_reason": null
+      },
+      {
+        "name": "A vs B",
+        "scheme_a": "A",
+        "scheme_b": "B",
+        "n": 80,
+        "recall@2_a": 0.8,
+        "recall@2_b": 0.925,
+        "diff_pp": -12.5,
+        "mcnemar": {
+          "only_a": 2,
+          "only_b": 12
+        },
+        "p_value": 0.012939453125,
+        "p_adjusted": 0.038818359375,
+        "ci_low_pp": -21.2,
+        "ci_high_pp": -3.8,
+        "significant": true,
+        "strata": [
+          "index",
+          "search"
+        ],
+        "skipped_reason": null
+      },
+      {
+        "name": "C′ vs C",
+        "scheme_a": "C_prime",
+        "scheme_b": "C",
+        "n": 80,
+        "recall@2_a": 0.8,
+        "recall@2_b": 0.45,
+        "diff_pp": 35.0,
+        "mcnemar": {
+          "only_a": 30,
+          "only_b": 2
+        },
+        "p_value": 2.4633482098579407e-07,
+        "p_adjusted": 9.853392839431763e-07,
+        "ci_low_pp": 23.8,
+        "ci_high_pp": 46.2,
+        "significant": true,
+        "strata": [
+          "index",
+          "search"
+        ],
+        "skipped_reason": null
+      },
+      {
+        "name": "D vs 最优单一方案（B）",
+        "scheme_a": "D",
+        "scheme_b": "B",
+        "n": 0,
+        "recall@2_a": 0.0,
+        "recall@2_b": 0.0,
+        "diff_pp": 0.0,
+        "mcnemar": {
+          "only_a": 0,
+          "only_b": 0
+        },
+        "p_value": 1.0,
+        "p_adjusted": null,
+        "ci_low_pp": 0.0,
+        "ci_high_pp": 0.0,
+        "significant": false,
+        "strata": [],
+        "skipped_reason": "D 无全量数据（未跑批）"
+      }
+    ],
+    "notes": [
+      "缺席的族内比较（D vs 最优单一方案（B））按 p = 1 计入 Holm 族大小（族大小不因缺数据而缩小）；其缺失原因已列出，不得据此声称两者无差异"
+    ]
+  },
+  "h7": [
+    {
+      "scheme": "A",
+      "skipped": false,
+      "total": 25,
+      "false_candidates": 0,
+      "false_candidate_rate": 0.0,
+      "correct_refusals": 25,
+      "correct_refusal_rate": 1.0,
+      "threshold": null,
+      "auroc": 1.0,
+      "threshold_source": "本方案在 dev 负样本上选（§7.7）",
+      "source": "2026-10-20 上一轮实算（本轮沿用：负样本/索引/模型均未变）"
+    },
+    {
+      "scheme": "B",
+      "skipped": true,
+      "skipped_reason": "B 没有负样本跑批实现，无法评估拒答能力；不报数（不得用「没人跑过」换来的 no_match 充当成绩）"
+    },
+    {
+      "scheme": "C",
+      "total": 25,
+      "false_candidates": 23,
+      "false_candidate_rate": 0.92,
+      "correct_refusals": 23,
+      "correct_refusal_rate": 0.92,
+      "threshold": 9.375,
+      "auroc": 0.7612,
+      "skipped": false,
+      "threshold_source": "本方案在 dev 负样本上选（§7.7）"
+    },
+    {
+      "scheme": "C_prime",
+      "total": 25,
+      "false_candidates": 25,
+      "false_candidate_rate": 1.0,
+      "correct_refusals": 23,
+      "correct_refusal_rate": 0.92,
+      "threshold": 26.41227171300006,
+      "auroc": 0.6725,
+      "skipped": false,
+      "threshold_source": "本方案在 dev 负样本上选（§7.7）"
+    }
+  ],
+  "h7_note": "A 的 H7 沿用 2026-10-20 的实算结果（负样本/索引/模型未变）；B 无负样本跑批实现，整块跳过，不报数",
+  "mode": "exploratory",
+  "warning": "探索性结果：预注册未冻结，不得作主判定（spec T2）"
+}

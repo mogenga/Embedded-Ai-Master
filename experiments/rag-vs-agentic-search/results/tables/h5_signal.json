@@ -1,0 +1,26 @@
+{
+  "signal": true,
+  "criteria": [
+    {
+      "name": "判据 1",
+      "satisfied": false,
+      "insufficient_data": false,
+      "detail": "index 轨 A−B -18.0pp、search 轨 A−B -3.3pp：未同时满足「方向相反」与「两侧 ≥ 5pp」"
+    },
+    {
+      "name": "判据 2",
+      "satisfied": true,
+      "insufficient_data": false,
+      "detail": "index 轨：C 比最优 C′ 低 28.0pp，且差值 95% CI 上界 -14.0pp 仍低于 0"
+    },
+    {
+      "name": "判据 3",
+      "satisfied": true,
+      "insufficient_data": false,
+      "detail": "index 轨：C 的 status!=ok 比例 22.0% ≥ 10%，而 C′ < 3%"
+    }
+  ],
+  "a_run_id": "main",
+  "b_run_id": "main",
+  "note": "判据 1 的『数据不足』不等于『不满足』；不得据此声称 H5 无信号"
+}

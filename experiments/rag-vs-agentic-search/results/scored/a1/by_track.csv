@@ -1,0 +1,3 @@
+scheme,track,n,recall@2,recall@5,hit@1,mrr,ndcg@5,p50_latency_ms,p95_latency_ms,failure_rate
+A,index,50,0.7000,0.8800,0.5800,0.6893,0.7367,105.8687,158.9051,0.0000
+A,search,30,0.9667,1.0000,0.9667,0.9750,0.9810,105.8493,131.3969,0.0000

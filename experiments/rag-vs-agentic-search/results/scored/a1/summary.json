@@ -1,0 +1,48 @@
+{
+  "run_id": "a1",
+  "partition": "all",
+  "mode": "exploratory",
+  "overall": [
+    {
+      "scheme": "A",
+      "n": 80,
+      "recall@2": 0.8,
+      "recall@5": 0.925,
+      "hit@1": 0.725,
+      "mrr": 0.7964583333333334,
+      "ndcg@5": 0.8282958288555038,
+      "p50_latency_ms": 105.86865000368562,
+      "p95_latency_ms": 136.23280499632523,
+      "failure_rate": 0.0
+    }
+  ],
+  "by_track": [
+    {
+      "scheme": "A",
+      "track": "index",
+      "n": 50,
+      "recall@2": 0.7,
+      "recall@5": 0.88,
+      "hit@1": 0.58,
+      "mrr": 0.6893333333333334,
+      "ndcg@5": 0.7366597950073382,
+      "p50_latency_ms": 105.86865000368562,
+      "p95_latency_ms": 158.90513000267674,
+      "failure_rate": 0.0
+    },
+    {
+      "scheme": "A",
+      "track": "search",
+      "n": 30,
+      "recall@2": 0.9666666666666667,
+      "recall@5": 1.0,
+      "hit@1": 0.9666666666666667,
+      "mrr": 0.975,
+      "ndcg@5": 0.9810225519357798,
+      "p50_latency_ms": 105.8492500014836,
+      "p95_latency_ms": 131.39686999857076,
+      "failure_rate": 0.0
+    }
+  ],
+  "warning": "探索性结果：不得作为主判定（spec T2）"
+}
