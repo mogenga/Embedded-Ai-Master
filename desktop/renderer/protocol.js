@@ -323,7 +323,14 @@ export function sessionEventToHostEvents(event, ctx) {
       });
       if (ok) {
         const content = truncateUtf8(textOf(payload.text), MAX_TOOL_OUTPUT_BYTES);
-        if (content !== "") out.push({ type: "tool_output", name, content });
+        const output = { type: "tool_output", name, content };
+        // The kernel writes the artifact file for oversized output; the text
+        // is a summary. Passing the path through gives the renderer something
+        // to open instead of only something to read.
+        if (typeof payload.artifactPath === "string" && payload.artifactPath !== "") {
+          output.artifactPath = payload.artifactPath;
+        }
+        if (content !== "" || output.artifactPath !== undefined) out.push(output);
       }
       ctx.pendingCalls.delete(callId);
       if (ctx.openTool === name) ctx.openTool = "";
@@ -408,7 +415,21 @@ export function sessionEventToHostEvents(event, ctx) {
         outputTokens: Number(payload.completionTokens) || 0,
         cachedTokens: Number(payload.cachedTokens) || 0,
       };
-      out.push({ type: "usage", usage });
+      const message = { type: "usage", usage };
+      // Occupancy and spend are optional: an older log has neither, and a
+      // provider without a price never produces a cost. Absent fields stay
+      // absent so the renderer can tell "unknown" from zero.
+      if (isRecord(payload.context)) {
+        message.context = {
+          tokens: Number(payload.context.tokens) || 0,
+          percent: Number(payload.context.percent) || 0,
+          window: Number(payload.context.window) || 0,
+        };
+      }
+      if (typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd)) {
+        message.costUsd = payload.costUsd;
+      }
+      out.push(message);
       break;
     }
 
@@ -494,7 +515,7 @@ export function sessionEventToHostEvents(event, ctx) {
  */
 export function initialState(options = {}) {
   const models = Array.isArray(options.models) ? options.models : [];
-  return {
+  const state = {
     type: "state",
     sessionId: textOf(options.sessionId),
     cwd: textOf(options.cwd),
@@ -514,6 +535,19 @@ export function initialState(options = {}) {
     board: { selection: {}, projectKind: "unknown" },
     serial: { open: false, port: null, baud: null, buffered: 0, queued: 0 },
   };
+  // Spend and occupancy only when the caller has a real figure. A zero here
+  // would read as "known to be free" and blank the meter's honest unknown.
+  if (isRecord(options.context)) {
+    state.context = {
+      tokens: Number(options.context.tokens) || 0,
+      percent: Number(options.context.percent) || 0,
+      ...(Number(options.context.window) ? { window: Number(options.context.window) } : {}),
+    };
+  }
+  if (typeof options.costUsd === "number" && Number.isFinite(options.costUsd)) {
+    state.costUsd = options.costUsd;
+  }
+  return state;
 }
 
 /**
@@ -571,8 +605,29 @@ export function usageTotals(events) {
   return totals;
 }
 
+/**
+ * Session spend from a full log, or `undefined` when no call priced it.
+ *
+ * `costUsd` on a usage event is the running total for the session, not this
+ * call's share, so the last one that carries it is the answer. Undefined is
+ * kept distinct from 0: a provider with no price has not told us the spend.
+ */
+export function sessionCostUsd(events) {
+  if (!Array.isArray(events)) return undefined;
+  let cost;
+  for (const event of events) {
+    if (!isRecord(event) || event.type !== "usage") continue;
+    const payload = isRecord(event.payload) ? event.payload : {};
+    if (typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd)) {
+      cost = payload.costUsd;
+    }
+  }
+  return cost;
+}
+
 /** `session_loaded` event for a freshly opened or created conversation. */
 export function sessionLoadedEvent(events, options = {}) {
+  const costUsd = sessionCostUsd(events);
   return {
     type: "session_loaded",
     messages: sessionEventsToMessages(events),
@@ -580,8 +635,75 @@ export function sessionLoadedEvent(events, options = {}) {
     mode: textOf(options.mode) || "diagnose",
     effort: "auto",
     usage: usageTotals(events),
+    ...(costUsd === undefined ? {} : { costUsd }),
   };
 }
 
 /** Where the renderer remembers the last conversation, mirroring its boot code. */
 export const LAST_SESSION_STORAGE_KEY = LAST_SESSION_KEY;
+
+/**
+ * Render a session log as Markdown.
+ *
+ * Export reads the log rather than the DOM: the transcript on screen may be
+ * scrolled, collapsed or partly rebuilt, while the log is the record. Tool
+ * results are quoted and capped so an export of a long session stays a
+ * document rather than a dump of stack traces.
+ */
+export function sessionMarkdown(events, options = {}) {
+  const list = Array.isArray(events) ? events : [];
+  const title = textOf(options.title);
+  const lines = [`# ${title === "" ? "Conversation" : title}`, ""];
+  const outputLimit = 2000;
+  for (const event of list) {
+    if (!isRecord(event)) continue;
+    const payload = isRecord(event.payload) ? event.payload : {};
+    switch (event.type) {
+      case "user": {
+        const content = textOf(payload.content).trim();
+        if (content !== "") lines.push("## User", "", content, "");
+        break;
+      }
+      case "assistant": {
+        const content = textOf(payload.content).trim();
+        const calls = Array.isArray(payload.toolCalls) ? payload.toolCalls : [];
+        if (content !== "") lines.push("## Assistant", "", content, "");
+        for (const call of calls) {
+          if (!isRecord(call)) continue;
+          const args = isRecord(call.arguments) ? JSON.stringify(call.arguments) : "";
+          lines.push(`- \`${textOf(call.name)}\` ${args}`.trimEnd());
+        }
+        if (calls.length > 0) lines.push("");
+        break;
+      }
+      case "tool_result": {
+        const text = textOf(payload.text).trim();
+        const name = textOf(payload.toolName);
+        lines.push(`### ${name === "" ? "tool" : name} ${payload.ok === false ? "(failed)" : ""}`.trimEnd());
+        if (text !== "") {
+          const capped =
+            text.length > outputLimit ? `${text.slice(0, outputLimit)}\n…[truncated]` : text;
+          lines.push("```", capped, "```");
+        }
+        const artifact = textOf(payload.artifactPath);
+        if (artifact !== "") lines.push(`Artifact: \`${artifact}\``);
+        lines.push("");
+        break;
+      }
+      case "interrupted": {
+        lines.push(`> Interrupted: ${textOf(payload.reason) || "unknown"}`, "");
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return lines.join("\n");
+}
+
+/** A filesystem-safe export name derived from the session or its title. */
+export function sessionExportName(sessionId, title) {
+  const base = textOf(title).trim() || textOf(sessionId) || "session";
+  const safe = base.replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
+  return `${safe.slice(0, 60) || "session"}.md`;
+}

@@ -413,6 +413,147 @@ describe("ui api", () => {
     expect(errorCode(rejected.body)).toBe("invalid_mode");
   });
 
+  it("POST /api/actions 透传运行上限，非法类型在启动前 400", async () => {
+    const runner = makeRunner();
+    const s = createUiServer({ harnessHome: makeHome(), runner });
+    close = s.close;
+    const ok = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      writeHeaders(s.port),
+      JSON.stringify({ text: "hi", maxTurns: 4, maxCostUsd: 0.25, timeoutMs: 5000, systemPrompt: "p" }),
+    );
+    expect(ok.status).toBe(202);
+    expect(vi.mocked(runner.start)).toHaveBeenCalledWith({
+      text: "hi",
+      maxTurns: 4,
+      maxCostUsd: 0.25,
+      timeoutMs: 5000,
+      systemPrompt: "p",
+    });
+
+    const wrong = await rawRequest(
+      s.port,
+      "/api/actions",
+      "POST",
+      writeHeaders(s.port),
+      JSON.stringify({ text: "hi", maxTurns: "4" }),
+    );
+    expect(wrong.status).toBe(400);
+    expect(errorCode(wrong.body)).toBe("invalid_run_limits");
+    // The rejected call never reached the runner.
+    expect(vi.mocked(runner.start)).toHaveBeenCalledTimes(1);
+  });
+
+  it("PATCH /api/sessions/:id 写入标题并要求写请求头", async () => {
+    const home = makeHome();
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+
+    const noOrigin = await rawRequest(
+      s.port,
+      "/api/sessions/s1",
+      "PATCH",
+      { "content-type": "application/json" },
+      JSON.stringify({ title: "串口无输出" }),
+    );
+    expect(noOrigin.status).toBe(403);
+
+    const ok = await rawRequest(
+      s.port,
+      "/api/sessions/s1",
+      "PATCH",
+      writeHeaders(s.port),
+      JSON.stringify({ title: "串口无输出", pinned: true }),
+    );
+    expect(ok.status).toBe(200);
+    expect(JSON.parse(ok.body)).toMatchObject({ id: "s1", title: "串口无输出", pinned: true });
+
+    // The title is listed, not only readable through the detail endpoint.
+    const list = JSON.parse(
+      (await rawRequest(s.port, "/api/sessions")).body,
+    ) as { sessions: Array<{ id: string; title?: string; pinned?: boolean }> };
+    expect(list.sessions.find((entry) => entry.id === "s1")).toMatchObject({
+      title: "串口无输出",
+      pinned: true,
+    });
+  });
+
+  it("DELETE /api/sessions/:id 删除会话，fork 产出新 id", async () => {
+    const home = makeHome();
+    writeSession(home, "s2", "s2");
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+
+    const forked = await rawRequest(
+      s.port,
+      "/api/sessions/s2/fork",
+      "POST",
+      writeHeaders(s.port),
+    );
+    expect(forked.status).toBe(201);
+    const forkId = (JSON.parse(forked.body) as { sessionId: string }).sessionId;
+    expect(forkId).not.toBe("s2");
+
+    const removed = await rawRequest(
+      s.port,
+      "/api/sessions/s2",
+      "DELETE",
+      writeHeaders(s.port),
+    );
+    expect(removed.status).toBe(200);
+    expect((await rawRequest(s.port, "/api/sessions/s2")).status).toBe(404);
+    expect((await rawRequest(s.port, `/api/sessions/${forkId}`)).status).toBe(200);
+  });
+
+  it("GET /api/config 返回 MCP/权限/运行上限，PUT 逐段写入", async () => {
+    const home = makeHome();
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+
+    const initial = JSON.parse((await rawRequest(s.port, "/api/config")).body) as {
+      mcpServers: unknown[];
+      permissions: { preset: string; approvalTimeoutMs: number };
+      run: { maxTurns: number };
+    };
+    expect(initial.mcpServers).toEqual([]);
+    expect(initial.permissions).toMatchObject({ preset: "diagnose", approvalTimeoutMs: 120000 });
+    expect(initial.run.maxTurns).toBe(10);
+
+    const putMcp = await rawRequest(
+      s.port,
+      "/api/config",
+      "PUT",
+      writeHeaders(s.port),
+      JSON.stringify({
+        mcpServers: [{ name: "probe", command: "node", args: ["probe.js"] }],
+      }),
+    );
+    expect(putMcp.status).toBe(200);
+    expect((JSON.parse(putMcp.body) as { mcpServers: unknown[] }).mcpServers).toHaveLength(1);
+
+    const putBad = await rawRequest(
+      s.port,
+      "/api/config",
+      "PUT",
+      writeHeaders(s.port),
+      JSON.stringify({ permissions: { preset: "yolo" } }),
+    );
+    expect(putBad.status).toBe(400);
+    expect(errorCode(putBad.body)).toBe("invalid_config");
+
+    const putRun = await rawRequest(
+      s.port,
+      "/api/config",
+      "PUT",
+      writeHeaders(s.port),
+      JSON.stringify({ run: { maxTurns: 3 } }),
+    );
+    expect(putRun.status).toBe(200);
+    expect((JSON.parse(putRun.body) as { run: { maxTurns: number } }).run.maxTurns).toBe(3);
+  });
+
   it("写端点缺少 Origin 返回 403 forbidden_origin", async () => {
     const s = createUiServer({ harnessHome: makeHome(), runner: makeRunner() });
     close = s.close;
@@ -548,6 +689,7 @@ describe("ui api", () => {
     ["invalid_text", 400],
     ["invalid_session_id", 400],
     ["invalid_mode", 400],
+    ["invalid_run_limits", 400],
     ["unknown_session", 404],
     ["session_busy", 409],
     ["session_corrupt", 500],

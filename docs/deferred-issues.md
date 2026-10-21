@@ -1471,7 +1471,7 @@
 - **影响**: 界面不显示上下文占用率(原 Preact 工作台有此指标);不影响运行与证据。
 - **触发升级条件**: 需要在界面上提示“上下文快满了”;或需要按占用率触发自动压缩。
 - **修复建议**: 内核在写 `usage` 时附带当前消息序列的估算 token 与窗口上限;前端恢复百分比展示。
-- **状态**: 未解决。
+- **状态**: 已解决(2026-10-21)。`src/loop/query.ts` 在写 `usage` 时用 `ctx.budget(buildMessages(...))` 测当前转录，附带 `context: { tokens, percent, window }`；测不出（0）时不写该字段——0 表示「测不到」，不是「空上下文」。前端把占用率写进 `state.context` 并显示 chip 百分比与弹层明细。
 
 ### D-166 · 前端未覆盖的能力被隐藏,能力清单以 desktop/MATRIX.md 为准
 
@@ -1509,21 +1509,26 @@
 
 - **发现**: 2026-10-21,按用户要求逐项核查「内核存在但未与前后端联调的功能」,只列不改;随后用户指示按优先级直接修。
 - **本轮已修**(均有离线测试):① 审批条读的是 diff 形状,而内核 `approval_request` 带的是 `paramsPreview`,导致批准写操作时看不到任何参数(R2 在 UI 上不成立);② 浏览器形态 `setMode` 只改本地状态,内核预设不变(假控件,涉及安全边界);③ bridge 每次追问都 `since=-1` 重放整段历史;④ bridge 无缺口检测与重连上限(README 曾承诺);⑤ 桌面 `getSettings` 回占位值,打开设置即重置主题/密度/字号;⑥ 「跟随系统」主题一次启动后被固化;⑦ `device_status` 被塞进 `board_state`,板卡面板永远停在「正在扫描」;⑧ usage 事件是每次模型调用一条,前端覆盖式赋值却标「本次会话累计」;⑨ 会话搜索只按 UUID 匹配;⑩ 桌面 host 严格解析日志,崩溃半行尾的会话在浏览器能开、桌面打不开;⑪ `setModel`/`refreshModels`/`setCwd` 无宿主实现而控件可见;⑫ 压缩摘要把 seq 当 token 数显示;⑬ 拒绝原因显示英文码。
-- **仍未修**(内核侧缺口,不是接线问题):
-  1. **MCP 配置无 UI**:probe/kb 两个 server 只能手编 `~/.harness/mcp.json`;`settings.js` 的 `buildMcpPage` 存在但不在 `settingsPages()` 里。
-  2. **权限规则无 UI**:`permissions.json` 的 rules / `approvalTimeoutMs` 无编辑入口;审批条会显示倒计时,但超时值只能改文件。
-  3. **项目权限配置恒被跳过**:runner 不传 `trustProjectConfig`,每个 run 都写 `permissions_project_config_skipped`。
-  4. **系统提示词 / maxTurns / maxCostUsd / timeoutMs 无入口**:`RunOptions` 支持,`src/server/runner.ts` 从不透传。
-  5. **fork 无入口**:`src/session/persistence.ts:forkSession` 完整实现,无 CLI/HTTP/host 接线。
-  6. **会话重命名/删除/置顶/归档无内核支持**:header 无 `title`,无删除 API。
-  7. **上下文占用率**:内核不产出(见 D-165)。
-  8. **成本**:内核算了 `computeCostUsd`,前端零消费。
-  9. **工具注解** `readOnly`/`destructive`/`evidence` 未被 UI 消费(frontend-design §15 第 5 条)。
-  10. **产物路径**:`artifactPath` 只出现在工具输出文本里,无打开入口。
-- **影响**: 1-4 让「开箱配置」不成立——不手编两个 JSON 就既接不上模型也接不上探针;5-6 是会话管理能力缺口;7-10 是体验缺口。
-- **触发升级条件**: 要求「不改配置文件即可用」;要求 fork / 重命名;成本或上下文计量进入验收。
-- **修复建议**: 1-2 优先——把 `buildMcpPage` / rules 页接回 `settingsPages()`,并给内核补 `GET/PUT /api/config` 之类的读写端点;3 让 runner 透传 `trustProjectConfig`;4 在 `RunOptions` 之上加一层 `POST /api/actions` 的可选字段。
-- **状态**: 未解决(第一批接线已修,剩余为内核侧缺口)。
+- **第二轮已修**(2026-10-21,同上「不改配置文件即可用」):
+  - **配置读写**：新增 `src/config/app-config.ts`（`mcp.json` / `permissions.json` / `run.json` 的校验与原子写）与 `src/server/config-api.ts`；HTTP 侧 `GET/PUT /api/config`。三份文件都是「临时文件 + rename」，非法输入 400 且原文件不变。
+  - **MCP 配置页**：`settingsPages()` 重新列出 `mcp`，表单写 `$HARNESS_HOME/mcp.json`。删掉了旧表单里的 `scope` / `url` / 预设目录——内核只支持 user 级 stdio 配置，留着就是点了没反应的控件。
+  - **权限页**：`behavior` 页接回四预设、`approvalTimeoutMs`（秒呈现 / 毫秒发送）、审批规则增删与运行上限（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`）。整份写回，避免只提交一部分把其余字段重置成默认。
+  - **运行上限透传**：`ActionInput` 与 `POST /api/actions` 增加 `maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`（400 `invalid_run_limits`），桌面宿主从 `run.json` 读取。
+  - **会话管理**：新增 `src/session/metadata.ts`（旁挂 `meta.json`——header 校验会丢弃未知字段，标题不能放进去）与 `src/server/session-admin.ts`；HTTP 侧 `PATCH`/`DELETE /api/sessions/:id`、`POST /api/sessions/:id/fork`。宿主与 bridge 的改名/置顶/归档/删除/分叉全部接上，列表按 `updatedAt` 倒序。
+  - **上下文占用与成本**：`usage` 事件新增 `context{tokens,percent,window}` 与 `costUsd`（仅在 provider 配了 `pricePerMillion` 时出现——未定价与成本为 0 是两件事）；用量弹层显示成本，`state`/`session_loaded` 也带。
+  - **产物入口**：`tool_result.artifactPath` 透传到 `tool_output`，输出块底部出现「打开产物」，桌面经 preload 的 `revealArtifact` 在文件管理器中选中，浏览器回一条含路径的 notice。
+  - **导出**：`exportSession` 由宿主/bridge 读日志渲染 Markdown（`protocol.sessionMarkdown`），桌面经 `saveFile`，浏览器走下载。
+  - **宿主命令串行化**：`loadSession` → `exportSession` 这类同一击发的两条命令过去并发执行，导出可能读到尚未设置的 `sessionId` 而回「没有可导出的对话」。
+  - **顶栏菜单可达**：`#more-button` 一直是 `hidden`，导出 / 主题 / 语言 / 快捷键都没有入口。一并删掉「新窗口」「分屏」两行——本外壳单实例单窗口，preload 里没有 `newWindow`/`splitWindow`，点了只会抛错。
+- **仍未修**:
+  1. **项目权限配置恒被跳过**:runner 不传 `trustProjectConfig`,每个 run 都写 `permissions_project_config_skipped`。
+  2. **工具注解** `readOnly`/`destructive`/`evidence` 未被 UI 消费(frontend-design §15 第 5 条)。
+  3. **产物列表**：单个产物的打开入口已接，但没有「本次会话的产物」列表（`getArtifacts` 无通道）。
+  4. **分屏/多窗口**:`desktop/main.js` 单实例单窗口。
+- **影响**: 剩余 1 是安全边界上的一个静默跳过（会以 `notice` 显示）；2-4 是体验缺口。
+- **触发升级条件**: 要求项目级权限配置生效；要求产物列表或分屏。
+- **修复建议**: 1 让 runner 透传 `trustProjectConfig`（默认仍为 false，由设置页显式开启，因为项目配置是仓库内容）；2 在工具行上用 `annotations` 打标记；4 需要 `main.js` 支持第二个窗口，且要处理会话锁。
+- **状态**: 部分解决（第一轮接线 + 第二轮配置/会话/计量均已完成，剩余 4 项）。
 
 ---
 
@@ -1597,3 +1602,4 @@
 | 2026-10-20 | D-164 修复:模型适配层支持 OpenAI 流式响应(SSE `delta.content` / `delta.tool_calls`,网关拒绝时自动降级为一次性响应),新增 `assistant_delta` 会话事件并批量落盘,前端按增量实时显示;D-164 标记已解决 |
 | 2026-10-20 | 前端文档重写:`docs/frontend-design.md` v1.4 → v2.0,整体改为以 `desktop/renderer/` 实现为准(原 v1.4 基于已删除的 Preact 工作台,§2/§3/§4/§5/§6/§7/§11/§12 作废);`README.md` 修正断线续传的过度承诺与「前端工作台」已知限制段,设计文档索引改指 `desktop/MATRIX.md`;阶段 4 spec 顶部加失效声明(§7-§9 依赖已删除的 `src/ui`);`ui-workbench` spec/plan 加作废标注;录入 D-167(前端 4 处文档-实现偏差)与 D-168(阶段 4 spec §7-§9 需重写) |
 | 2026-10-21 | 前后端联调核查与第一批修复:审批条改用内核 `paramsPreview` 并加超时倒计时(R2);`POST /api/actions` 接受 `mode`,runner 用它覆盖本次运行预设(新增 `invalid_mode`),bridge 的 `setMode` 随 prompt 下发;bridge 补 `seq` 缺口检测+整量重拉(≤3 次)与 `stream_error` 续接上限(≤3 次),追问不再 `since=-1` 重放;`device_status` 改为独立事件并渲染到板卡面板「设备」段;桌面对话搜索按标题/工作dir/id;桌面 host 用 `readSessionSnapshot(allowTrailingPartial)` 容忍崩溃半行尾;新增宿主 `setModel`/`refreshModels`/`setCwd`;桌面 `getSettings` 不再回占位值,「跟随系统」主题不再被固化;usage 事件按会话累计;压缩不再把 seq 当 token;拒绝原因翻成中文。录入 D-169(剩余内核侧缺口),D-167 前两项标记已解决 |
+| 2026-10-21 | 功能闭环第二批:新增 `src/config/app-config.ts` + `src/server/config-api.ts`,`GET/PUT /api/config` 读写 `mcp.json`/`permissions.json`/`run.json`(原子写,非法输入 400 且原文件不变);设置页恢复「MCP 服务器」与「行为(权限/运行上限)」两页;`ActionInput` 与 `POST /api/actions` 新增 `maxTurns`/`maxCostUsd`/`timeoutMs`/`systemPrompt`(400 `invalid_run_limits`);新增 `src/session/metadata.ts`(旁挂 `meta.json`)与 `src/server/session-admin.ts`,HTTP 侧 `PATCH`/`DELETE /api/sessions/:id` 与 `POST /api/sessions/:id/fork`,前端改名/置顶/归档/删除/分叉全部接上;`usage` 事件带 `context{tokens,percent,window}` 与 `costUsd`(D-165 标记已解决);产物入口与 Markdown 导出(宿主 `exportSession`、bridge 读日志渲染);宿主命令改为串行执行(修 `loadSession → exportSession` 竞态);顶栏「⋯」菜单改为可见并删掉无外壳支持的新窗口/分屏两行;D-169 更新为部分解决 |

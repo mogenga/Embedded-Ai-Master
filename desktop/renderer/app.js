@@ -89,8 +89,15 @@ const state = {
   tree: [],
   cwd: "",
   context: { tokens: 0, percent: 0 },
+  /** The active model's window, drawn next to its name in the bottom bar. */
+  contextWindow: 0,
   sandbox: "enforce",
   usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0 },
+  /**
+   * Session spend in USD as the kernel reported it, or null when it reported
+   * no price. Null is "unknown", never "free": the popover hides the row.
+   */
+  costUsd: null,
   /** Explicit project fold states; anything not listed follows the active-project default. */
   expandedProjects: new Set(JSON.parse(localStorage.getItem("prometheus.expandedProjects") || "[]")),
   collapsedProjects: new Set(JSON.parse(localStorage.getItem("prometheus.collapsedProjects") || "[]")),
@@ -681,12 +688,64 @@ function lastToolRow() {
   return state.lastToolNode && state.lastToolNode.isConnected ? state.lastToolNode : null;
 }
 
-function attachToolOutput(node, name, output) {
-  if (!output || output.trim() === "") return;
+/**
+ * A "show in file manager" button for a tool result whose full text was
+ * written to disk.
+ *
+ * It lives inside the `<pre>` that holds the output, so it opens and closes
+ * with the details block instead of floating above a collapsed row. The click
+ * asks the host to reveal the path: the renderer cannot open a `file://` URL
+ * (Electron blocks it, and in a browser it is meaningless), and a host that
+ * has no file manager answers with a notice, which is the honest degradation.
+ */
+function attachArtifactLink(container, artifactPath) {
+  // The details arrive after the block is built (and a later `tool_output`
+  // reuses it), so an existing button is updated rather than stacked.
+  const existing = container.querySelector(".artifact-open");
+  if (existing) {
+    existing.dataset.path = artifactPath;
+    existing.title = `${t.artifactRevealHint} ${artifactPath}`;
+    return existing;
+  }
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "btn btn-quiet small artifact-open";
+  button.dataset.path = artifactPath;
+  button.textContent = t.artifactOpen;
+  button.title = `${t.artifactRevealHint} ${artifactPath}`;
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const target = button.dataset.path;
+    // The preload is the only route that can actually select the file in a
+    // window. Without it (the browser form) the command goes to the host,
+    // which answers with a notice naming the path: a notice is honest, while
+    // a `file://` anchor would be blocked and look like a broken button.
+    if (typeof api.revealArtifact === "function") {
+      void api.revealArtifact(target);
+      return;
+    }
+    api.send({ cmd: "revealArtifact", path: target });
+  });
+  // A leading newline puts the button on its own line at the end of the
+  // output; the container is a `<pre>` with pre-wrap, so without it the
+  // button would sit on the same line as the last line of text.
+  container.append("\n", button);
+  return button;
+}
+
+function attachToolOutput(node, name, output, artifactPath) {
+  // A large result keeps only a summary in the transcript and writes the full
+  // text to a file. That path is the only way to see all of it, so a call with
+  // an artifact is worth rendering even when the summary is empty.
+  const hasArtifact = typeof artifactPath === "string" && artifactPath !== "";
+  if ((!output || output.trim() === "") && !hasArtifact) return;
   const row = node;
   const existing = row.nextElementSibling;
   if (existing && existing.classList.contains("tool-output")) {
-    existing.textContent = output;
+    // Rewriting the text drops any button the block already had, so it is
+    // re-attached below; a result that arrives without a path leaves none.
+    existing.textContent = output ?? "";
+    if (hasArtifact) attachArtifactLink(existing, artifactPath);
     return;
   }
   const outputNode = document.createElement("pre");
@@ -695,7 +754,8 @@ function attachToolOutput(node, name, output) {
   // the details toggle.
   const expanded = state.transcriptView === "verbose";
   outputNode.hidden = !expanded;
-  outputNode.textContent = output;
+  outputNode.textContent = output ?? "";
+  if (hasArtifact) attachArtifactLink(outputNode, artifactPath);
   // A detail block belongs to its call, so it is wrapped with it rather than
   // being a sibling inside the activity group.
   const block = document.createElement("div");
@@ -1293,6 +1353,13 @@ function updateMeter(context, usage, { replace = false } = {}) {
   if (context) {
     state.context = { tokens: context.tokens ?? 0, percent: Math.min(100, Math.round(context.percent ?? 0)) };
     contextLabel.textContent = `${state.context.percent}%`;
+    // The window is what turns the percentage into "how much is left"; the
+    // model picker knows it too, but the kernel's figure wins when it sends one.
+    const window = Number(context.window) || 0;
+    if (window > 0 && window !== state.contextWindow) {
+      state.contextWindow = window;
+      renderContextLength();
+    }
   }
   if (usage) {
     const add = {
@@ -1312,6 +1379,44 @@ function updateMeter(context, usage, { replace = false } = {}) {
     // lives in the popover this chip opens.
   }
   renderUsage();
+}
+
+/**
+ * Take the session spend an event carries, if it carries one.
+ *
+ * `costUsd` is optional and its absence is meaningful: an old log has none,
+ * and an unpriced provider never produces one. So an event that omits it
+ * leaves the displayed figure alone — a `state` event without a cost is the
+ * same session changing a mode, not a session that spent nothing. `replace`
+ * is for a different transcript: there, an absent cost means unknown, so the
+ * previous session's number is cleared rather than inherited. `null` is the
+ * kernel saying "no price" and clears the number either way.
+ */
+function applyCost(message, { replace = false } = {}) {
+  if (message && "costUsd" in message) {
+    const cost = message.costUsd;
+    state.costUsd = typeof cost === "number" && Number.isFinite(cost) ? cost : null;
+  } else if (replace) {
+    state.costUsd = null;
+  }
+}
+
+/**
+ * Dollars with enough precision to stay non-zero: sub-cent spend is common in
+ * a short session, and "$0.00" would read as "this cost nothing".
+ *
+ * Below a hundredth of a cent even four places round to zero, so that case is
+ * spelled as a bound rather than as a zero. A real zero stays "$0.00" — the
+ * kernel priced the call and the price was nothing, which is a fact.
+ */
+function formatCost(usd) {
+  const value = Number(usd);
+  if (!Number.isFinite(value)) return "—";
+  if (value === 0) return "$0.00";
+  if (value > 0 && value < 0.00005) return "<$0.0001";
+  if (value < 0.01) return `$${value.toFixed(4)}`;
+  if (value < 1) return `$${value.toFixed(3)}`;
+  return `$${value.toFixed(2)}`;
 }
 
 /**
@@ -1337,6 +1442,22 @@ function renderUsage() {
   $("usage-cached-value").textContent = formatTokens(usage.cachedTokens);
   $("usage-output-value").textContent = formatTokens(usage.outputTokens);
   $("usage-total-value").textContent = formatTokens(usage.inputTokens + usage.outputTokens);
+
+  // The spend line is filled before the breakdown guard: the kernel does not
+  // produce a breakdown at all today, and returning first would make the cost
+  // permanently invisible. No price means no row — a $0.00 would be a claim.
+  const costRow = $("usage-cost-row");
+  const costValue = $("usage-cost-value");
+  if (costRow && costValue) {
+    const cost = state.costUsd;
+    if (typeof cost === "number" && Number.isFinite(cost)) {
+      costValue.textContent = formatCost(cost);
+      costRow.hidden = false;
+    } else {
+      costValue.textContent = "—";
+      costRow.hidden = true;
+    }
+  }
 
   const info = state.contextBreakdown;
   if (!info) {
@@ -1718,7 +1839,11 @@ function handleEvent(message) {
       }
       state.cwd = message.cwd;
       renderTopbarLocation();
-      // A state event carries session-level totals: replace, never add.
+      // A state event carries session-level totals: replace, never add. It
+      // may also carry spend and occupancy (the host attaches them when it
+      // opens a stored session); a state event without them is the same
+      // session changing a mode, so the figures on screen stay.
+      applyCost(message);
       updateMeter(message.context, message.usage, { replace: true });
       break;
 
@@ -2045,7 +2170,12 @@ function handleEvent(message) {
       break;
 
     case "usage":
-      updateMeter(state.context, message.usage);
+      // A live event adds to the totals but may also carry occupancy and the
+      // session's running spend. The cost is taken first so the redraw at the
+      // end of updateMeter already has it; the token sum stays with the call
+      // below, which owns the add-vs-replace rule.
+      applyCost(message);
+      updateMeter(message.context, message.usage);
       break;
 
     case "run_start":
@@ -2215,7 +2345,7 @@ function handleEvent(message) {
 
     case "tool_output": {
       const row = lastToolRow();
-      if (row) attachToolOutput(row, message.name, message.content);
+      if (row) attachToolOutput(row, message.name, message.content, message.artifactPath);
       scrollToBottom();
       break;
     }
@@ -2507,7 +2637,11 @@ function handleEvent(message) {
         setEffort(message.effort);
       }
       // The transcript was replaced with this session's; so was its spend.
+      // The cost is replaced rather than merged: an older log carries none,
+      // and keeping the previous session's figure would attribute it here.
+      applyCost(message, { replace: true });
       if (message.usage) updateMeter(null, message.usage, { replace: true });
+      else renderUsage();
       target
         .querySelectorAll(".turn, .tool-row, .tool-group, .tool-item, .tool-output, .notice, .plan, .thinking, .subagent, .compact-marker")
         .forEach((node) => node.remove());
@@ -4387,14 +4521,19 @@ function closeSessionMenu() {
   }
 }
 
-/** Right-click actions for one session: pin, rename, archive, delete. */
+/**
+ * Right-click actions for one session: pin, rename, fork, archive, delete.
+ *
+ * Split view is not offered: it needs a second BrowserWindow, and this shell
+ * creates exactly one — the preload has no `splitWindow`, so the row would
+ * throw on click rather than open anything.
+ */
 function openSessionMenu(event, session) {
   closeSessionMenu();
   const menu = document.createElement("div");
   menu.className = "session-menu";
   const actions = [
     [session.pinned ? t.sessionUnpin : t.sessionPin, () => sendSessionFlags(session, { pinned: !session.pinned })],
-    [t.sessionOpenSplit, () => openSplitPicker(session)],
     [t.sessionRename, () => renameSession(session)],
     [t.sessionFork, () => api.send({ cmd: "forkSession", id: session.id })],
     [session.archived ? t.sessionUnarchive : t.sessionArchive, () => {
@@ -4421,70 +4560,6 @@ function openSessionMenu(event, session) {
   menu.style.top = `${event.clientY}px`;
   document.body.appendChild(menu);
   sessionMenu = menu;
-}
-
-/**
- * Pick the session to sit beside this one.
- *
- * Two sessions in one window would mean two transcripts under one host, and
- * the session lock exists precisely so that never happens: one writer per
- * session file. A split is two windows, each with its own host and its own
- * session, placed side by side by the main process.
- *
- * `exclude` is the session the menu was opened on; the current one is
- * excluded too, because a session cannot be open twice.
- */
-function openSplitPicker(exclude) {
-  const candidates = state.sessions.filter((session) => session.id !== state.sessionId && session.id !== exclude?.id);
-  if (candidates.length === 0) {
-    void confirmAction(t.splitNeedsAnother, { ok: t.close, cancel: t.cancel });
-    return;
-  }
-  const previous = document.activeElement;
-  const overlay = document.createElement("div");
-  overlay.className = "confirm-overlay";
-  overlay.innerHTML =
-    `<div class="confirm-dialog split-dialog" role="dialog" aria-modal="true">` +
-    `<div class="confirm-text">${escapeHtml(t.splitPick)}</div>` +
-    `<div class="split-list"></div>` +
-    `<div class="confirm-actions"><button class="confirm-cancel">${escapeHtml(t.cancel)}</button></div>` +
-    `</div>`;
-  const list = overlay.querySelector(".split-list");
-  for (const session of candidates.slice(0, 40)) {
-    const title = session.title || (session.summary && session.summary !== "(no messages)" ? session.summary : t.noMessages);
-    const row = document.createElement("button");
-    row.className = "split-option";
-    row.innerHTML =
-      `<span class="split-option-title">${escapeHtml(title)}</span>` +
-      `<span class="split-option-meta">${escapeHtml(relativeDate(session.updatedAt))}</span>`;
-    row.addEventListener("click", () => {
-      close();
-      // Open the picked session beside this one; the current window keeps its
-      // own session. Whichever is `exclude` is the one that was right-clicked.
-      api.splitWindow({ sessionId: session.id, cwd: session.cwd });
-    });
-    list.appendChild(row);
-  }
-  document.body.appendChild(overlay);
-
-  const close = () => {
-    overlay.remove();
-    document.removeEventListener("keydown", onKey, true);
-    if (previous && typeof previous.focus === "function") previous.focus();
-  };
-  function onKey(event) {
-    if (event.key === "Escape") {
-      event.preventDefault();
-      event.stopPropagation();
-      close();
-    }
-  }
-  document.addEventListener("keydown", onKey, true);
-  overlay.querySelector(".confirm-cancel").addEventListener("click", close);
-  overlay.addEventListener("click", (event) => {
-    if (event.target === overlay) close();
-  });
-  list.querySelector(".split-option")?.focus();
 }
 
 function sendSessionFlags(session, flags) {  api.send({ cmd: "sessionFlags", id: session.id, includeArchived: state.showArchived, ...flags });
@@ -5511,9 +5586,12 @@ $("worktree-discard").addEventListener("click", () => {
 });
 
 const clearConversation = () => {
-  // Clearing keeps the session and its saved history; only the transcript goes.
+  // The kernel has no "erase this transcript" operation — the log is append
+  // only and is the audit record. Starting a fresh conversation is the
+  // closest real thing, so the confirmation says that instead of promising a
+  // clear that would only redraw the screen.
   void confirmAction(t.clearConfirm, { danger: true }).then((yes) => {
-    if (yes) api.send({ cmd: "clearHistory" });
+    if (yes) api.send({ cmd: "newSession" });
   });
 };
 $("new-session").addEventListener("click", () => api.send({ cmd: "newSession" }));
@@ -5971,8 +6049,6 @@ topbarMenu.addEventListener("click", (event) => {
   if (!row) return;
   setTopbarMenu(false);
   if (row.id === "menu-export") api.send({ cmd: "exportSession" });
-  else if (row.id === "menu-new-window") api.newWindow();
-  else if (row.id === "menu-split-view") openSplitPicker(null);
   else if (row.id === "menu-shortcuts") openShortcuts();
   else if (row.id === "menu-clear") clearConversation();
 });

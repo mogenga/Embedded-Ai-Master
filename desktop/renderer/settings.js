@@ -20,12 +20,32 @@ export function createSettings(deps) {
 
 /* ---------- settings ---------- */
 
+/** Kernel defaults, mirrored so the form has something to compare against
+ *  before the host answers (`src/config/app-config.ts`). */
+const DEFAULT_RUN_LIMITS = { maxTurns: 10, maxCostUsd: null, timeoutMs: null, systemPrompt: "" };
+const DEFAULT_PERMISSIONS = { preset: "diagnose", approvalTimeoutMs: 120_000, rules: [] };
+/** The kernel's MCP server name rule (`src/mcp/config.ts`). */
+const MCP_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
+/** `src/permissions/config.ts` MAX_APPROVAL_TIMEOUT_MS. */
+const MAX_APPROVAL_TIMEOUT_MS = 2_147_483_647;
+/** `src/permissions/config.ts` MAX_PATTERN_LENGTH. */
+const MAX_PATTERN_LENGTH = 200;
+
 /** Newest settings payload from the host; controls read from here on refill. */
 state.settings = null;
 state.settingsTab = "general";
 state.usageRange = 30;
 state.usageSummary = null;
 state.mcpServers = [];
+/** Config files the settings pages write; reported by the host per platform. */
+state.configPaths = {};
+/** Why the host could not read the config files, if it could not. */
+state.settingsError = "";
+/** `$HARNESS_HOME/permissions.json`, as the host last reported it. */
+state.permissions = null;
+state.rules = [];
+/** `$HARNESS_HOME/run.json`, as the host last reported it. */
+state.runLimits = { ...DEFAULT_RUN_LIMITS };
 state.skills = [];
 state.memory = { global: [], project: [] };
 state.systemState = null;
@@ -62,14 +82,19 @@ const SETTINGS_ICON_NAMES = {
  */
 function settingsPages() {
   const s = S();
-  // Only UI preferences and the read-only profile have a backend here.
-  // Provider keys, MCP servers, skills, memory, instructions, hooks, packs and
-  // the system page would each need a write API this kernel does not expose;
-  // listing them would produce forms whose save button cannot work.
-  // The builders stay in this file so restoring a page is a one-line change.
+  // Only pages whose controls reach a real backend are listed. The host owns
+  // four config surfaces — UI preferences, the provider catalogue, MCP servers,
+  // and the permissions/run limits files — so those are the four families of
+  // form that can actually save something.
+  // The rest of the builders (usage, connection, skills, memory, instructions,
+  // hooks, packs, system, sessions) stay in this file so restoring a page is a
+  // one-line change, but listing them would produce forms whose save button
+  // cannot work.
   return [
     { id: "general", group: s.groupSettings, title: s.pageGeneral, build: buildGeneralPage },
     { id: "appearance", group: s.groupSettings, title: s.pageAppearance, build: buildAppearancePage },
+    { id: "behavior", group: s.groupSettings, title: s.pageBehavior, build: buildBehaviorPage },
+    { id: "mcp", group: s.groupSettings, title: s.pageMcp, build: buildMcpPage },
     { id: "about", group: s.groupComputer, title: s.pageAbout, build: buildAboutPage },
   ];
 }
@@ -760,189 +785,355 @@ function buildConnectionPage() {
   return pane;
 }
 
+/**
+ * Behaviour: the two files the kernel reads before a turn — `permissions.json`
+ * and `run.json` — plus the approval rules inside the first.
+ *
+ * Every control applies immediately; there is no Save step, which is why the
+ * value checks below refuse a bad number instead of writing it. A refusal is
+ * shown next to the field that produced it: dropping the edit silently would
+ * leave the control displaying a value the kernel never received (R3).
+ */
 function buildBehaviorPage() {
   const s = S();
   const pane = sPage(s.pageBehavior, s.pageBehaviorDesc);
-  const settings = state.settings ?? {};
+  const permissions = {
+    ...DEFAULT_PERMISSIONS,
+    ...(state.permissions ?? {}),
+    rules: Array.isArray(state.permissions?.rules) ? state.permissions.rules : [],
+  };
+  const run = { ...DEFAULT_RUN_LIMITS, ...(state.runLimits ?? {}) };
 
+  const configProblem = state.settingsError
+    ? el("p", "setting-note pack-problem", s.behaviorConfigError.replace("{error}", state.settingsError))
+    : null;
+  if (configProblem) pane.appendChild(configProblem);
+
+  /**
+   * Write the permissions file back whole.
+   *
+   * The host replaces the file rather than patching it, so every save has to
+   * carry all three fields; sending only what changed would reset the others
+   * to the kernel defaults. The local copy is updated in the same breath as
+   * the send, because the next save composes from it: two rule edits inside
+   * one round-trip would otherwise both send the pre-edit list and the second
+   * would undo the first.
+   */
+  const savePermissions = (patch) => {
+    const next = {
+      preset: patch.preset ?? permissions.preset,
+      approvalTimeoutMs: patch.approvalTimeoutMs ?? permissions.approvalTimeoutMs,
+      rules: patch.rules ?? permissions.rules,
+    };
+    Object.assign(permissions, next);
+    api.send({ cmd: "savePermissions", permissions: next });
+  };
+
+  /** Same whole-object (and same optimistic local copy) rule for `run.json`. */
+  const saveRun = (patch) => {
+    Object.assign(run, patch);
+    api.send({ cmd: "saveRunLimits", run: { ...run } });
+  };
+
+  /**
+   * One refusal line per group, so a rejected value has somewhere to speak.
+   *
+   * A refusal also puts the field back to the value that is actually saved.
+   * Leaving the rejected text in the box would show a number the kernel never
+   * received, which is the same lie as saving it silently.
+   */
+  const refusals = [];
+  const refusal = () => {
+    const line = el("p", "setting-note pack-problem", "");
+    line.hidden = true;
+    refusals.push(line);
+    return {
+      node: line,
+      show(message, field, restoreTo) {
+        for (const other of refusals) other.hidden = true;
+        line.textContent = message;
+        line.hidden = false;
+        if (field && restoreTo !== undefined) field.value = String(restoreTo);
+        field?.focus();
+      },
+    };
+  };
+
+  /* ---------- permissions ---------- */
+
+  const presetRefusal = refusal();
+  const timeoutInput = sText({
+    id: "setting-approval-timeout",
+    type: "number",
+    min: 1,
+    max: Math.floor(MAX_APPROVAL_TIMEOUT_MS / 1000),
+    step: 1,
+    // Seconds on screen, milliseconds on the wire: 120000 ms is the kernel's
+    // default and reads as "120" to anyone thinking about a prompt.
+    value: Math.round(permissions.approvalTimeoutMs / 1000),
+    onChange: (value) => {
+      const seconds = Number(String(value).trim());
+      const ms = seconds * 1000;
+      if (!Number.isInteger(seconds) || seconds <= 0 || ms > MAX_APPROVAL_TIMEOUT_MS) {
+        presetRefusal.show(s.behaviorApprovalTimeoutInvalid, timeoutInput, Math.round(permissions.approvalTimeoutMs / 1000));
+        return;
+      }
+      savePermissions({ approvalTimeoutMs: ms });
+    },
+  });
   pane.appendChild(
-    sGroup(s.groupModel, [
+    sGroup(s.groupPermissions, [
       sRow({
-        id: "setting-mode",
-        label: s.mode,
-        desc: s.modeDesc,
+        id: "setting-preset",
+        label: s.behaviorPreset,
+        desc: s.behaviorPresetDesc,
         control: sSelect({
-          id: "setting-mode",
-          value: settings.mode ?? "ask",
-          // Every mode the runtime implements. The composer's menu is the
-          // primary switch, but a settings dialog that offered three of six
-          // was the reason the other three looked unimplemented.
+          id: "setting-preset",
+          value: permissions.preset,
           options: [
-            { value: "ask", label: t.modeAsk },
-            { value: "auto", label: t.modeAuto },
-            { value: "acceptEdits", label: t.modeAcceptEdits },
-            { value: "plan", label: t.modePlan },
-            { value: "dontAsk", label: t.modeDontAsk },
-            { value: "bypassPermissions", label: t.modeBypass },
+            { value: "read-only", label: s.presetReadOnly },
+            { value: "workspace-write", label: s.presetWorkspaceWrite },
+            { value: "diagnose", label: s.presetDiagnose },
+            { value: "danger-full-access", label: s.presetDangerFullAccess },
           ],
-          onChange: (value) => applyConfig({ mode: value }),
+          onChange: (value) => savePermissions({ preset: value }),
         }),
       }),
+      // The file is what a *new* run loads; the composer's menu owns the mode
+      // of the run in flight. Saying so is the difference between a setting
+      // and a switch that appears to do nothing.
+      sHint(s.behaviorPresetNote),
       sRow({
-        id: "setting-effort",
-        label: s.effort,
-        desc: s.effortDesc,
-        control: sSelect({
-          id: "setting-effort",
-          value: settings.effort ?? "auto",
-          // The levels are per model; the settings pane uses the same list the
-          // composer does, falling back to the common three before the
-          // catalogue has arrived.
-          options: [
-            { value: "auto", label: t.effortAuto },
-            ...(state.effortChoices?.levels?.length ? state.effortChoices.levels : ["low", "medium", "high"]).map(
-              (level) => ({ value: level, label: level[0].toUpperCase() + level.slice(1) }),
-            ),
-          ],
-          onChange: (value) => applyConfig({ effort: value }),
-        }),
+        id: "setting-approval-timeout",
+        label: s.behaviorApprovalTimeout,
+        desc: s.behaviorApprovalTimeoutDesc,
+        control: timeoutInput,
       }),
-      sRow({
-        id: "setting-max-tokens",
-        label: s.maxTokens,
-        desc: s.maxTokensDesc,
-        control: sText({
-          id: "setting-max-tokens",
-          type: "number",
-          min: 256,
-          max: 128000,
-          step: 256,
-          value: settings.maxTokens ?? 16000,
-          onChange: (value) => applyConfig({ maxTokens: Number(value) }),
-        }),
-      }),
-      sRow({
-        id: "setting-context",
-        label: s.context,
-        desc: s.contextDesc,
-        control: sText({
-          id: "setting-context",
-          type: "number",
-          min: 8000,
-          max: 4000000,
-          step: 1000,
-          // The configured value, and nothing pre-filled into it. A number sat
-          // in this field before anyone chose one, and the usage meter then
-          // reported progress against it as though the endpoint had said so.
-          value: settings.contextWindow ?? "",
-          placeholder: "128000",
-          onChange: (value) => applyConfig({ contextWindow: Number(value) }),
-        }),
-      }),
+      presetRefusal.node,
     ]),
   );
 
-  pane.appendChild(
-    sGroup(s.groupSafety, [
-      sRow({
-        id: "setting-sandbox",
-        label: s.sandbox,
-        desc: s.sandboxDesc,
-        control: sSelect({
-          id: "setting-sandbox",
-          value: settings.sandbox === "off" ? "off" : "enforce",
-          options: [
-            { value: "enforce", label: s.on },
-            { value: "off", label: s.off },
-          ],
-          onChange: (value) => applyConfig({ sandbox: value }),
-        }),
-      }),
-      sRow({
-        id: "setting-kernel-sandbox",
-        label: s.kernelSandbox,
-        desc: state.kernelSandbox?.state === "ready"
-          ? s.kernelSandboxReady.replace("{distro}", String(state.kernelSandbox.distro ?? "WSL"))
-          : state.kernelSandbox?.reason ?? s.kernelSandboxChecking,
-        control: sSelect({
-          id: "setting-kernel-sandbox",
-          value: ["off", "auto", "wsl"].includes(settings.kernelSandbox) ? settings.kernelSandbox : "auto",
-          options: [
-            { value: "off", label: s.kernelSandboxOff },
-            { value: "auto", label: s.kernelSandboxAuto },
-            { value: "wsl", label: s.kernelSandboxRequire },
-          ],
-          onChange: (value) => applyConfig({ kernelSandbox: value }),
-        }),
-      }),
-      sRow({
-        id: "setting-sandbox-fail",
-        label: s.sandboxFail,
-        desc: s.sandboxFailDesc,
-        control: sSelect({
-          id: "setting-sandbox-fail",
-          value: settings.sandboxFailIfUnavailable === true ? "on" : "off",
-          options: [
-            { value: "off", label: s.sandboxFailOff },
-            { value: "on", label: s.sandboxFailOn },
-          ],
-          onChange: (value) => applyConfig({ sandboxFailIfUnavailable: value === "on" }),
-        }),
-      }),
-      sRow({
-        id: "setting-network",
-        label: s.network,
-        desc: s.networkDesc,
-        control: sSelect({
-          id: "setting-network",
-          // Two options, because there are two behaviours. "Proxy only" was
-          // offered and then silently rewritten to "off" at load time, so
-          // choosing it changed nothing and the setting lied.
-          value: settings.networkPolicy === "open" ? "open" : "off",
-          options: [
-            { value: "off", label: s.networkOff },
-            { value: "open", label: s.networkOpen },
-          ],
-          onChange: (value) => applyConfig({ networkPolicy: value }),
-        }),
-      }),
-      sRow({
-        id: "setting-auto-approve",
-        label: s.autoApprove,
-        desc: s.autoApproveRulesHint,
-        control: sText({
-          id: "setting-auto-approve",
-          value: (settings.autoApprove ?? []).join(", "),
-          mono: true,
-          // The same `Tool(specifier)` grammar saved rules use, so a CI grant
-          // and a standing approval are one language rather than two lists
-          // that disagree about what "bash" means.
-          placeholder: "read_file, Bash(git status), mcp__github__*",
-          onChange: (value) => applyConfig({ autoApprove: value }),
-        }),
-      }),
-      sRow({
-        id: "setting-echo-reasoning",
-        label: s.echoReasoning,
-        desc: s.echoReasoningDesc,
-        control: sToggle({
-          id: "setting-echo-reasoning",
-          checked: Boolean(settings.echoReasoning),
-          onChange: (value) => applyConfig({ echoReasoning: value }),
-        }),
-      }),
-      sHint(s.sandboxHint),
-    ]),
-  );
+  /* ---------- approval rules ---------- */
 
-  const rules = el("div", "rules-list");
-  rules.id = "setting-rules";
-  renderRules(settings.rules ?? []);
   const rulesGroup = el("section", "setting-group");
   rulesGroup.appendChild(el("h3", "setting-group-title", s.groupRules));
   rulesGroup.appendChild(el("p", "setting-note", s.rulesDesc));
-  rulesGroup.appendChild(rules);
+  const rulesList = el("div", "rules-list");
+  rulesList.id = "setting-rules";
+  rulesGroup.appendChild(rulesList);
+
+  const drawRules = () => {
+    rulesList.innerHTML = "";
+    if (permissions.rules.length === 0) {
+      rulesList.appendChild(el("span", "rules-empty", s.rulesEmpty));
+      return;
+    }
+    permissions.rules.forEach((rule, index) => {
+      const row = el("div", "rules-row");
+      row.appendChild(el("span", "rules-label", `${s.ruleActions[rule.action] ?? rule.action} · ${rule.tool}`));
+      if (rule.reason) row.appendChild(el("span", "setting-desc", rule.reason));
+      const remove = el("button", "link-button", s.remove);
+      remove.type = "button";
+      // The whole list goes back: the file has no ids, so an index is the only
+      // identity a rule has here. The row disappears at once rather than
+      // waiting for the host's reply — the removal is in the payload that was
+      // just sent, and `fillSettings` redraws from the file when it lands.
+      remove.addEventListener("click", () => {
+        savePermissions({ rules: permissions.rules.filter((_, position) => position !== index) });
+        drawRules();
+      });
+      row.appendChild(remove);
+      rulesList.appendChild(row);
+    });
+  };
+  drawRules();
+
+  const ruleRefusal = refusal();
+  rulesGroup.appendChild(ruleRefusal.node);
+
+  /** One form at a time; the button does nothing while it is already open. */
+  let ruleFormOpen = false;
+
+  const ruleForm = () => {
+    const card = el("form", "settings-form-card");
+    card.appendChild(el("h3", "", s.ruleAddTitle));
+    const tool = sText({ placeholder: "fs", mono: true });
+    const reason = sText({ placeholder: s.ruleReasonPlaceholder });
+    let action = "ask";
+    card.append(
+      sRow({ label: s.ruleTool, desc: s.ruleToolDesc, control: tool }),
+      sRow({
+        label: s.ruleAction,
+        desc: s.ruleActionDesc,
+        control: sSelect({
+          value: action,
+          options: [
+            { value: "allow", label: s.ruleAllow },
+            { value: "ask", label: s.ruleAsk },
+            { value: "deny", label: s.ruleDeny },
+          ],
+          onChange: (value) => (action = value),
+        }),
+      }),
+      sRow({ label: s.ruleReason, desc: s.ruleReasonDesc, control: reason }),
+      sHint(s.ruleParamsNote),
+    );
+    const actions = el("div", "settings-form-actions");
+    const close = () => {
+      ruleFormOpen = false;
+      card.remove();
+    };
+    actions.append(
+      sButton(s.cancel, close, { quiet: true }),
+      sButton(
+        s.ruleAdd,
+        () => {
+          const pattern = tool.value.trim();
+          if (pattern === "" || pattern.length > MAX_PATTERN_LENGTH) {
+            ruleRefusal.show(s.ruleToolInvalid, tool);
+            return;
+          }
+          // A whitespace-only reason is no reason at all; the schema rejects
+          // the blank string, so it is omitted rather than sent to fail.
+          const text = reason.value.trim();
+          const rule = {
+            tool: pattern,
+            action,
+            ...(text === "" ? {} : { reason: text }),
+          };
+          savePermissions({ rules: [...permissions.rules, rule] });
+          drawRules();
+          close();
+        },
+        { primary: true },
+      ),
+    );
+    card.appendChild(actions);
+    card.addEventListener("submit", (event) => event.preventDefault());
+    tool.focus();
+    return card;
+  };
+
+  const foot = el("div", "settings-list-foot");
+  foot.appendChild(
+    sButton(
+      s.ruleAdd,
+      () => {
+        if (ruleFormOpen) return;
+        ruleFormOpen = true;
+        rulesGroup.insertBefore(ruleForm(), rulesList);
+      },
+      { primary: true },
+    ),
+  );
+  rulesGroup.appendChild(foot);
   pane.appendChild(rulesGroup);
+
+  /* ---------- run limits ---------- */
+
+  // Each numeric limit is positive-or-empty; empty means "no limit" and is
+  // sent as null, which the host passes to the kernel as "unset".
+  const positiveOrNull = (value) => {
+    const text = String(value).trim();
+    if (text === "") return { value: null };
+    const parsed = Number(text);
+    if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+    return { value: parsed };
+  };
+
+  const runRefusal = refusal();
+  const promptArea = document.createElement("textarea");
+  promptArea.className = "setting-textarea";
+  promptArea.id = "setting-system-prompt";
+  promptArea.rows = 6;
+  promptArea.spellcheck = false;
+  promptArea.placeholder = s.behaviorSystemPromptPlaceholder;
+  promptArea.value = run.systemPrompt ?? "";
+  // Text commits on blur, like every other text control in this dialog: a save
+  // per keystroke would rewrite run.json while the sentence is still forming.
+  promptArea.addEventListener("change", () => saveRun({ systemPrompt: promptArea.value }));
+
+  const maxTurnsInput = sText({
+    id: "setting-max-turns",
+    type: "number",
+    min: 1,
+    step: 1,
+    value: run.maxTurns,
+    onChange: (value) => {
+      const parsed = Number(String(value).trim());
+      // The kernel stops the loop *before* turn one when this is 0, so a zero
+      // here reads as "the agent does nothing" rather than "unlimited".
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        runRefusal.show(s.behaviorMaxTurnsInvalid, maxTurnsInput, run.maxTurns);
+        return;
+      }
+      saveRun({ maxTurns: parsed });
+    },
+  });
+  const maxCostInput = sText({
+    id: "setting-max-cost",
+    type: "number",
+    min: 0,
+    step: 0.01,
+    value: run.maxCostUsd ?? "",
+    placeholder: s.behaviorUnlimited,
+    onChange: (value) => {
+      const parsed = positiveOrNull(value);
+      if (parsed === undefined) {
+        runRefusal.show(s.behaviorMaxCostInvalid, maxCostInput, run.maxCostUsd ?? "");
+        return;
+      }
+      saveRun({ maxCostUsd: parsed.value });
+    },
+  });
+  const runTimeoutInput = sText({
+    id: "setting-run-timeout",
+    type: "number",
+    min: 1,
+    step: 1000,
+    value: run.timeoutMs ?? "",
+    placeholder: s.behaviorUnlimited,
+    onChange: (value) => {
+      const parsed = positiveOrNull(value);
+      if (parsed === undefined) {
+        runRefusal.show(s.behaviorRunTimeoutInvalid, runTimeoutInput, run.timeoutMs ?? "");
+        return;
+      }
+      saveRun({ timeoutMs: parsed.value });
+    },
+  });
+
+  pane.appendChild(
+    sGroup(s.groupRunLimits, [
+      sRow({
+        id: "setting-max-turns",
+        label: s.behaviorMaxTurns,
+        desc: s.behaviorMaxTurnsDesc,
+        control: maxTurnsInput,
+      }),
+      sRow({
+        id: "setting-max-cost",
+        label: s.behaviorMaxCost,
+        desc: s.behaviorMaxCostDesc,
+        control: maxCostInput,
+      }),
+      sRow({
+        id: "setting-run-timeout",
+        label: s.behaviorRunTimeout,
+        desc: s.behaviorRunTimeoutDesc,
+        control: runTimeoutInput,
+      }),
+      sRow({
+        id: "setting-system-prompt",
+        label: s.behaviorSystemPrompt,
+        desc: s.behaviorSystemPromptDesc,
+        control: promptArea,
+        wide: true,
+      }),
+      runRefusal.node,
+    ]),
+  );
+
   return pane;
 }
 
@@ -994,48 +1185,228 @@ function buildSessionsPage() {
   return pane;
 }
 
+/**
+ * MCP servers: the stdio commands the kernel mounts as tools.
+ *
+ * The kernel reads one per-computer `mcp.json` (`src/mcp/config.ts`) and starts
+ * each entry over stdio. There is no project scope, no HTTP transport and no
+ * preset catalogue in this kernel, so the page edits exactly that file and
+ * nothing else — an entry the kernel does not read would be a control that
+ * saves into a void.
+ */
 function buildMcpPage() {
   const s = S();
   const pane = sPage(s.pageMcp, s.pageMcpDesc);
   const list = el("div", "mcp-list");
   pane.appendChild(list);
 
+  /** null = adding, a name = editing that server, undefined = list only.
+   *  Scoped to the build: re-entering the page starts from the list, which is
+   *  the same thing a failed save already does. */
+  let mcpEditing;
+
+  /** The file every save on this page writes, or nothing when the host did not
+   *  say where it lives. */
+  const configPathNote = () => {
+    const file = state.configPaths?.mcp;
+    return file ? el("p", "setting-note", s.mcpConfigPath.replace("{path}", file)) : null;
+  };
+
+  /** The host takes `args` as one space-separated string, not an array, and a
+   *  server row is replaced wholesale by name — so every save sends all of it. */
+  const payloadOf = (server, disabled) => ({
+    name: server.name,
+    command: server.command,
+    args: (server.args ?? []).join(" "),
+    cwd: server.cwd ?? "",
+    timeoutMs: server.timeoutMs ?? null,
+    disabled,
+  });
+
+  const form = (server, refresh) => {
+    const card = el("form", "settings-form-card");
+    card.appendChild(el("h3", "", server ? s.mcpEditTitle(server.name) : s.mcpAddTitle));
+
+    const nameInput = sText({
+      value: server?.name ?? "",
+      placeholder: "filesystem",
+      mono: true,
+      // The name is the key in mcp.json: a save replaces the entry with that
+      // name. Renaming here would silently add a second server instead.
+      disabled: Boolean(server),
+    });
+    const command = sText({ value: server?.command ?? "", placeholder: "npx", mono: true });
+    const args = sText({
+      value: (server?.args ?? []).join(" "),
+      placeholder: "-y @modelcontextprotocol/server-filesystem .",
+      mono: true,
+    });
+    const cwd = sText({ value: server?.cwd ?? "", placeholder: "/path/to/project", mono: true });
+    const timeout = sText({
+      value: server?.timeoutMs ?? "",
+      type: "number",
+      min: 1,
+      step: 1,
+      placeholder: "15000",
+    });
+    let disabled = Boolean(server?.disabled);
+
+    // Inline, in the form: a rejected name or command has to say so where the
+    // field is, not in a toast that scrolls away from the control at fault.
+    const problem = el("p", "setting-note pack-problem", "");
+    problem.hidden = true;
+    const fail = (message, field) => {
+      problem.textContent = message;
+      problem.hidden = false;
+      field?.focus();
+    };
+
+    card.append(
+      sRow({
+        label: s.name,
+        desc: server ? s.mcpNameLocked : s.mcpNameDesc,
+        control: nameInput,
+      }),
+      sRow({ label: s.command, desc: s.commandDesc, control: command }),
+      sRow({ label: s.arguments, desc: s.argumentsDesc, control: args }),
+      sRow({ label: s.mcpCwd, desc: s.mcpCwdDesc, control: cwd }),
+      sRow({ label: s.mcpTimeout, desc: s.mcpTimeoutDesc, control: timeout }),
+      sRow({
+        label: s.disabled,
+        desc: s.mcpDisabledDesc,
+        control: sToggle({ checked: disabled, onChange: (value) => (disabled = value) }),
+      }),
+      problem,
+    );
+
+    const actions = el("div", "settings-form-actions");
+    actions.append(
+      sButton(
+        s.cancel,
+        () => {
+          mcpEditing = undefined;
+          refresh();
+        },
+        { quiet: true },
+      ),
+      sButton(
+        s.save,
+        () => {
+          const name = nameInput.value.trim();
+          if (!MCP_NAME_PATTERN.test(name)) {
+            fail(s.mcpNameInvalid, nameInput);
+            return;
+          }
+          const commandText = command.value.trim();
+          if (commandText === "") {
+            fail(s.mcpCommandInvalid, command);
+            return;
+          }
+          const timeoutText = String(timeout.value).trim();
+          let timeoutMs = null;
+          if (timeoutText !== "") {
+            const parsed = Number(timeoutText);
+            if (!Number.isInteger(parsed) || parsed <= 0) {
+              fail(s.mcpTimeoutInvalid, timeout);
+              return;
+            }
+            timeoutMs = parsed;
+          }
+          api.send({
+            cmd: "saveMcpServer",
+            server: {
+              name,
+              command: commandText,
+              args: args.value.trim(),
+              cwd: cwd.value.trim(),
+              timeoutMs,
+              disabled,
+            },
+          });
+          mcpEditing = undefined;
+          refresh();
+        },
+        { primary: true },
+      ),
+    );
+    card.appendChild(actions);
+    // A form element submits on Enter; without this the page would navigate
+    // and the renderer would reload instead of saving.
+    card.addEventListener("submit", (event) => event.preventDefault());
+    nameInput.focus();
+    return card;
+  };
+
   const render = () => {
     list.innerHTML = "";
+    // A refresh can drop the server being edited (removed in an editor, or
+    // renamed elsewhere). Falling back to the add form would quietly invite a
+    // new server, so the form closes and the list speaks for itself.
+    if (mcpEditing !== undefined) {
+      const editing = state.mcpServers.find((entry) => entry.name === mcpEditing) ?? null;
+      if (editing !== null || mcpEditing === null) list.appendChild(form(editing, render));
+      else mcpEditing = undefined;
+    }
+
     if (state.mcpServers.length === 0) {
-      const empty = el("div", "settings-empty-card");
-      empty.appendChild(el("h3", "", s.mcpEmptyTitle));
-      empty.appendChild(el("p", "", s.mcpEmptyBody));
-      const actions = el("div", "settings-empty-actions");
-      actions.append(
-        sButton(s.mcpAdd, () => openMcpForm(null), { primary: true }),
-        sButton(s.mcpEditConfig, () => revealMcpConfig(), { quiet: true }),
-      );
-      empty.appendChild(actions);
-      list.appendChild(empty);
+      if (mcpEditing === undefined) {
+        const empty = el("div", "settings-empty-card");
+        empty.appendChild(el("h3", "", s.mcpEmptyTitle));
+        empty.appendChild(el("p", "", s.mcpEmptyBody));
+        const actions = el("div", "settings-empty-actions");
+        actions.appendChild(
+          sButton(
+            s.mcpAdd,
+            () => {
+              mcpEditing = null;
+              render();
+            },
+            { primary: true },
+          ),
+        );
+        empty.appendChild(actions);
+        const path = configPathNote();
+        if (path) empty.appendChild(path);
+        list.appendChild(empty);
+      }
+      list.appendChild(el("p", "setting-note", s.mcpTransportNote));
       return;
     }
+
     for (const server of state.mcpServers) {
       const row = el("div", "mcp-row");
       const main = el("div", "mcp-main");
       const title = el("div", "mcp-title");
       title.appendChild(el("strong", "", server.name));
-      title.appendChild(el("span", `mcp-scope scope-${server.scope}`, server.scope === "project" ? s.scopeProject : s.scopeUser));
       if (server.disabled) title.appendChild(el("span", "mcp-scope disabled", s.disabled));
       main.appendChild(title);
-      main.appendChild(el("code", "mcp-command", server.url || [server.command, ...(server.args ?? [])].filter(Boolean).join(" ")));
+      main.appendChild(
+        el("code", "mcp-command", [server.command, ...(server.args ?? [])].filter(Boolean).join(" ")),
+      );
+      const meta = [server.cwd, server.timeoutMs ? `${server.timeoutMs} ms` : ""].filter(Boolean).join(" · ");
+      if (meta) main.appendChild(el("span", "setting-desc", meta));
+
       const actions = el("div", "mcp-actions");
       actions.appendChild(
         sToggle({
           checked: !server.disabled,
           onChange: (value) => {
-            api.send({ cmd: "saveMcpServer", server: { ...server, disabled: !value } });
+            api.send({ cmd: "saveMcpServer", server: payloadOf(server, !value) });
           },
         }),
       );
-      actions.appendChild(sButton(s.edit, () => openMcpForm(server), { quiet: true }));
       actions.appendChild(
-        sButton(s.remove, () => api.send({ cmd: "removeMcpServer", scope: server.scope, name: server.name }), {
+        sButton(
+          s.edit,
+          () => {
+            mcpEditing = server.name;
+            render();
+          },
+          { quiet: true },
+        ),
+      );
+      actions.appendChild(
+        sButton(s.remove, () => api.send({ cmd: "removeMcpServer", name: server.name }), {
           quiet: true,
           danger: true,
         }),
@@ -1043,113 +1414,29 @@ function buildMcpPage() {
       row.append(main, actions);
       list.appendChild(row);
     }
-    const foot = el("div", "settings-list-foot");
-    foot.appendChild(sButton(s.mcpAdd, () => openMcpForm(null), { primary: true }));
-    list.appendChild(foot);
 
-    // Vendor presets: the same entry the form writes, pre-filled with the
-    // command from the vendor's own documentation. Shown even when the tool
-    // is missing, with what to install — hiding it reads as "unsupported".
-    const presets = state.mcpPresets ?? [];
-    if (presets.length > 0) {
-      const group = el("div", "settings-group");
-      group.appendChild(el("div", "settings-group-title", s.mcpPresets));
-      for (const preset of presets) {
-        const row = el("div", "mcp-row");
-        const main = el("div", "mcp-main");
-        const title = el("div", "mcp-title");
-        title.appendChild(el("strong", "", preset.label));
-        main.appendChild(title);
-        main.appendChild(el("p", "settings-hint", preset.description));
-        if (preset.requires) main.appendChild(el("code", "mcp-command", preset.requires));
-        const actions = el("div", "mcp-actions");
-        actions.appendChild(sButton(s.mcpAddPreset, () => api.send({ cmd: "addMcpPreset", id: preset.id }), { quiet: true }));
-        row.append(main, actions);
-        group.appendChild(row);
-      }
-      list.appendChild(group);
-    }
-  };
-
-  const openMcpForm = (server) => {
-    const form = el("form", "settings-form-card");
-    const title = el("h3", "", server ? s.mcpEditTitle(server.name) : s.mcpAddTitle);
-    form.appendChild(title);
-
-    const name = sText({ value: server?.name ?? "", placeholder: "filesystem", mono: true });
-    const scope = sSelect({
-      value: server?.scope ?? "user",
-      options: [
-        { value: "user", label: s.scopeUser },
-        { value: "project", label: s.scopeProject },
-      ],
-      onChange: () => {},
-    });
-    const command = sText({ value: server?.command ?? "", placeholder: "npx", mono: true });
-    const args = sText({ value: (server?.args ?? []).join(" "), placeholder: "-y @modelcontextprotocol/server-filesystem .", mono: true });
-    const url = sText({ value: server?.url ?? "", placeholder: "https://mcp.example.com/mcp", mono: true });
-
-    form.append(
-      sRow({ label: s.name, control: name }),
-      sRow({ label: s.scope, control: scope }),
-      sRow({ label: s.command, desc: s.commandDesc, control: command }),
-      sRow({ label: s.arguments, desc: s.argumentsDesc, control: args }),
-      sRow({ label: s.url, desc: s.urlDesc, control: url }),
-    );
-    const actions = el("div", "settings-form-actions");
-    actions.append(
-      sButton(s.cancel, () => form.remove(), { quiet: true }),
-      sButton(s.save, () => {
-        if (!name.value.trim()) {
-          name.focus();
-          return;
-        }
-        api.send({
-          cmd: "saveMcpServer",
-          server: {
-            name: name.value.trim(),
-            scope: scope.value,
-            command: command.value.trim(),
-            args: args.value.trim(),
-            url: url.value.trim(),
-            disabled: Boolean(server?.disabled),
+    if (mcpEditing === undefined) {
+      const foot = el("div", "settings-list-foot");
+      foot.appendChild(
+        sButton(
+          s.mcpAdd,
+          () => {
+            mcpEditing = null;
+            render();
           },
-        });
-        dismiss();
-      }, { primary: true }),
-    );
-    form.appendChild(actions);
-    // One thing to act on at a time: the empty state and the add button step
-    // aside while the form is open, and come back when it is dismissed.
-    const empty = list.querySelector(".settings-empty-card");
-    const foot = list.querySelector(".settings-list-foot");
-    const dismiss = () => {
-      form.remove();
-      if (empty) empty.hidden = false;
-      if (foot) foot.hidden = false;
-    };
-    if (empty) empty.hidden = true;
-    if (foot) foot.hidden = true;
-    list.prepend(form);
-    name.focus();
-    form.querySelectorAll(".settings-form-actions .btn").forEach((button, index, all) => {
-      if (index === all.length - 1) return;
-      button.addEventListener("click", dismiss);
-    });
+          { primary: true },
+        ),
+      );
+      list.appendChild(foot);
+    }
+    const path = configPathNote();
+    if (path) list.appendChild(path);
+    list.appendChild(el("p", "setting-note", s.mcpTransportNote));
   };
 
   state.renderMcpPage = render;
   render();
   return pane;
-}
-
-function revealMcpConfig() {
-  // The config files live under ~/.prometheus; the Settings page can only
-  // open a folder the shell knows, so point the user at the path instead.
-  const list = document.querySelector(".mcp-list");
-  if (!list || list.querySelector(".config-path-note")) return;
-  const note = el("p", "setting-note config-path-note", S().mcpConfigPath);
-  list.appendChild(note);
 }
 
 function buildSkillsPage() {
@@ -1998,27 +2285,6 @@ function openSetup() {
 
 $("setup-button").addEventListener("click", openSetup);
 
-/** Saved approval rules with a remove action, newest last. */
-function renderRules(rules) {
-  const list = $("setting-rules");
-  if (!list) return;
-  list.innerHTML = "";
-  if (rules.length === 0) {
-    list.appendChild(el("span", "rules-empty", t.rulesEmpty));
-    return;
-  }
-  for (const rule of rules) {
-    const row = el("div", "rules-row");
-    const label = el("span", "rules-label", `${rule.action === "deny" ? "✕" : "✓"} ${rule.tool}${rule.match ? ` · ${rule.match}` : ""}`);
-    label.title = `${rule.scope}${rule.cwd ? ` · ${rule.cwd}` : ""}`;
-    const remove = el("button", "link-button", t.rulesRemove);
-    remove.type = "button";
-    remove.addEventListener("click", () => api.send({ cmd: "removeRule", id: rule.id }));
-    row.append(label, remove);
-    list.appendChild(row);
-  }
-}
-
 /**
  * The host answered getSettings; refill the open page.
  *
@@ -2032,6 +2298,16 @@ function fillSettings(settings) {
   state.providers = settings.providers || [];
   state.provider = settings.provider || "custom";
   if (settings.locale) state.locale = settings.locale;
+  // The config files. Absent means "this host could not read them", which the
+  // pages must show as such rather than as an empty, editable file: writing
+  // back over a file nobody read would delete every entry in it.
+  if (Array.isArray(settings.mcpServers)) state.mcpServers = settings.mcpServers;
+  if (settings.permissions) {
+    state.permissions = settings.permissions;
+    state.rules = Array.isArray(settings.permissions.rules) ? settings.permissions.rules : [];
+  }
+  if (settings.run) state.runLimits = { ...DEFAULT_RUN_LIMITS, ...settings.run };
+  if (settings.configPaths) state.configPaths = settings.configPaths;
   const prefs = [
     ["theme", "theme"],
     ["density", "density"],
@@ -2077,6 +2353,10 @@ function basename(path) {
   function handleEvent(message) {
     switch (message.type) {
       case "settings":
+        // A payload that could not read the config files says so at the top
+        // level, beside the fields it did send, so the failure survives the
+        // page rebuild that `fillSettings` triggers.
+        state.settingsError = message.settingsError ?? "";
         fillSettings(message.settings);
         break;
       case "settings_saved":
@@ -2089,11 +2369,6 @@ function basename(path) {
       case "usage_summary":
         state.usageSummary = message.summary;
         state.renderUsagePage?.();
-        break;
-      case "mcp_servers":
-        state.mcpServers = message.servers ?? [];
-        state.mcpPresets = message.presets ?? state.mcpPresets ?? [];
-        state.renderMcpPage?.();
         break;
       case "skills":
         state.skills = message.skills ?? [];

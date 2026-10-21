@@ -81,7 +81,17 @@ docs/             设计、计划与已知问题
 }
 ```
 
-模型引用为 `provider/model`（如 `local-gw/flash`）。`apiKeyEnv` 指向的环境变量存在且非空时发送 `Authorization: Bearer <key>`；否则不发送该头（本地网关可空跑）。`pricePerMillion` 缺省时只统计 token，不启用 `maxCostUsd` 熔断。`requestTimeoutMs` 默认 120000，超时抛可重试的 `RequestTimeoutError`；`maxResponseBytes` 默认 8388608（8 MiB），流式读取超限即取消并抛 `invalid_response`。
+模型引用为 `provider/model`（如 `local-gw/flash`）。`apiKeyEnv` 指向的环境变量存在且非空时发送 `Authorization: Bearer <key>`；否则不发送该头（本地网关可空跑）。`pricePerMillion` 缺省时只统计 token，不启用 `maxCostUsd` 熔断，`usage` 事件里也不会出现 `costUsd`（未定价与「成本为 0」是两件事）。`requestTimeoutMs` 默认 120000，超时抛可重试的 `RequestTimeoutError`；`maxResponseBytes` 默认 8388608（8 MiB），流式读取超限即取消并抛 `invalid_response`。
+
+同目录下另有三份可选配置，设置页可直接编辑（不手编也行）：
+
+| 文件 | 内容 |
+|---|---|
+| `mcp.json` | `{ "mcpServers": { "<name>": { "command", "args", "env", "cwd", "timeoutMs", "disabled" } } }` |
+| `permissions.json` | `{ "version": 1, "preset", "rules": [{ "tool", "params", "action", "reason" }], "approvalTimeoutMs" }` |
+| `run.json` | `{ "maxTurns", "maxCostUsd", "timeoutMs", "systemPrompt" }`；`null` 表示不限，`systemPrompt: ""` 表示用默认 |
+
+三份文件都由「临时文件 + rename」原子替换；内容非法时报错并保留原文件，不会写坏。
 
 ## 内置工具
 
@@ -452,8 +462,13 @@ npm --prefix desktop run desktop
 
   | 方法 | 路径 | 行为 |
   |---|---|---|
-  | GET | `/api/sessions` | `{ sessions: [{ id, createdAt, status, model?, workdir? }], errors: [{ dir, code }] }`；坏会话目录进 `errors` 而不是中断列表，符号链接 / junction 目录记 `skipped_link` |
+  | GET | `/api/sessions` | `{ sessions: [{ id, createdAt, updatedAt, status, model?, workdir?, title?, pinned?, archived? }], errors: [{ dir, code }] }`；坏会话目录进 `errors` 而不是中断列表，符号链接 / junction 目录记 `skipped_link` |
   | GET | `/api/sessions/:id` | `{ header, events }`；非法 id 400，不存在 404，损坏会话 500 `session_corrupt` |
+  | PATCH | `/api/sessions/:id` | 写 `{ title?, pinned?, archived? }`，200 回合并后的摘要；标题等元数据存旁挂 `meta.json`（header 校验会丢弃未知字段），会话被占用时 409 |
+  | DELETE | `/api/sessions/:id` | 删除会话目录，200 `{ id, deleted: true }`；被占用 409 |
+  | POST | `/api/sessions/:id/fork` | 从日志末尾（或 body 的 `atSeq`）分叉，201 `{ sessionId }` |
+  | GET | `/api/config` | `{ mcpServers, permissions, run, mcpPath, permissionsPath, runPath }`——三份配置文件的当前内容 |
+  | PUT | `/api/config` | 整份写其中一份：`{ mcpServers }` / `{ permissions }` / `{ run }`；400 `invalid_config` 带具体字段原因 |
   | GET | `/api/kb` | `{ root, tree }`；未配置 `kb/` 时返回 `{ root: null, tree: [] }` |
   | GET | `/api/device` | 当前恒为 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` |
   | POST | `/api/actions` | 发起会话或追加输入，202 `{ sessionId, created }`；错误码见「Web 会话与审批」 |
@@ -461,7 +476,10 @@ npm --prefix desktop run desktop
   | POST | `/api/approvals` | 回传审批决策，202/200；错误码见「Web 会话与审批」 |
   | GET | `/api/events` | SSE 单会话事件流，见「实时事件流」；非法 id/cursor 400，不存在 404，损坏 500 |
 
-- **诚实边界**：写端点必须带 loopback `Origin`；提交失败在转录中显示可读错误，不伪造成功。202 只表示受理/送达，工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准。内核没有的能力（git/PR、终端、worktree、packs、skills/memory/instructions/hooks、subagents、goals、文件树、导出、检查点恢复）在前端隐藏入口，宿主/bridge 收到对应命令时回显式 `notice`，不静默吞掉（R3）。
+- **配置**：设置页有「MCP 服务器」与「行为」两页，前者读写 `$HARNESS_HOME/mcp.json`，后者读写 `permissions.json`（预设 / 审批超时 / 审批规则）与 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`）。运行上限随每次 `POST /api/actions` 下发；桌面宿主同样从 `run.json` 读取。改动在下一回合生效，不手编文件也能接上探针与模型。
+- **会话管理**：侧栏右键可改名、置顶、归档、删除、复制为新会话；标题存 `meta.json`，与内核的 `header.json` 分离。列表按 `updatedAt` 倒序，改过名的会话不会被埋在新建会话下面。
+- **导出**：顶栏「⋯」菜单导出当前对话为 Markdown，内容由会话日志渲染（不是抓 DOM），工具输出按 2000 字符截断。
+- **诚实边界**：写端点必须带 loopback `Origin`；提交失败在转录中显示可读错误，不伪造成功。202 只表示受理/送达，工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准。内核没有的能力（git/PR、终端、worktree、packs、skills/memory/instructions/hooks、subagents、goals、文件树、检查点恢复）在前端隐藏入口，宿主/bridge 收到对应命令时回显式 `notice`，不静默吞掉（R3）。
 - **审批**：内核按单次请求审批，没有「始终允许」的持久规则；该按钮不渲染。审批条展示 `approval_request` 携带的 `paramsPreview`（这次调用要写入/执行的参数），并按 `deadlineAt` 显示剩余秒数——批准一次写操作时能看见写的是什么（R2）。审批超时/中止时由 `permission_decision` 触发 `permission_closed`，审批条自动收起。
 - **空态**：无会话显示「暂无会话」；设备字段为 `unknown` 时显示「未接入」。
 - **主题**：`light` / `system` / `dark` 三态，`localStorage` 键 `prometheus.theme`，默认 `dark`；所有颜色经 CSS 变量，图标为内联 SVG sprite。
@@ -511,10 +529,13 @@ npm run build && npm run serve:ui
 请求：
 
 ```json
-{ "text": "读取 0x20000000 的 4 字节", "sessionId": "可选", "mode": "可选" }
+{ "text": "读取 0x20000000 的 4 字节", "sessionId": "可选", "mode": "可选",
+  "maxTurns": 10, "maxCostUsd": 0.5, "timeoutMs": 60000, "systemPrompt": "可选" }
 ```
 
 缺省 `sessionId` 新建会话；带 `sessionId` 时向该会话追加输入（使用 `header.model` 与 `header.workdir`）。`mode` 是本次运行的权限预设（`read-only` / `workspace-write` / `diagnose` / `danger-full-access`），覆盖运行器构造时的预设，仅对这一次 run 生效——浏览器形态的权限模式菜单就是靠它下发的。
+
+`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt` 是本次运行的上限，缺省时用内核默认值（`maxTurns` 10、无成本上限、provider 的 `requestTimeoutMs`、默认系统提示词）。`maxCostUsd` 只在 provider 配了 `pricePerMillion` 时生效。
 
 202 响应：
 
@@ -528,6 +549,7 @@ npm run build && npm run serve:ui
 | 400 | `invalid_text` | `text` 为空/纯空白、超过 8000 字符 |
 | 400 | `invalid_session_id` | `sessionId` 非法 |
 | 400 | `invalid_mode` | `mode` 非字符串，或不是四个预设之一 |
+| 400 | `invalid_run_limits` | `maxTurns` / `maxCostUsd` / `timeoutMs` 非数字或非正，`systemPrompt` 非字符串 |
 | 404 | `unknown_session` | 指定会话不存在 |
 | 409 | `session_busy` | 同会话正在运行 |
 | 500 | `session_corrupt` | 追加会话的 header 损坏 |

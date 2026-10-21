@@ -26,6 +26,51 @@ export interface ActionInput {
    * the runner was built without permissions and the value is absent.
    */
   mode?: PermissionPreset;
+  /** Loop breakers and per-call timeout; absent means the kernel defaults. */
+  maxTurns?: number;
+  maxCostUsd?: number;
+  timeoutMs?: number;
+  /** Replaces the built-in system prompt for this run. */
+  systemPrompt?: string;
+}
+
+/** The subset of `ActionInput` that has to survive validation. */
+interface RunLimits {
+  maxTurns?: number;
+  maxCostUsd?: number;
+  timeoutMs?: number;
+  systemPrompt?: string;
+}
+
+function readRunLimits(input: ActionInput): RunLimits {
+  const limits: RunLimits = {};
+  if (input.maxTurns !== undefined) {
+    if (!Number.isInteger(input.maxTurns) || input.maxTurns < 1) {
+      throw new RunnerError("invalid_run_limits", `maxTurns 必须是正整数: ${String(input.maxTurns)}`);
+    }
+    limits.maxTurns = input.maxTurns;
+  }
+  if (input.maxCostUsd !== undefined) {
+    if (!Number.isFinite(input.maxCostUsd) || input.maxCostUsd <= 0) {
+      throw new RunnerError("invalid_run_limits", `maxCostUsd 必须是正数: ${String(input.maxCostUsd)}`);
+    }
+    limits.maxCostUsd = input.maxCostUsd;
+  }
+  if (input.timeoutMs !== undefined) {
+    if (!Number.isInteger(input.timeoutMs) || input.timeoutMs < 1) {
+      throw new RunnerError("invalid_run_limits", `timeoutMs 必须是正整数: ${String(input.timeoutMs)}`);
+    }
+    limits.timeoutMs = input.timeoutMs;
+  }
+  if (input.systemPrompt !== undefined) {
+    if (typeof input.systemPrompt !== "string") {
+      throw new RunnerError("invalid_run_limits", "systemPrompt 必须是字符串");
+    }
+    // An empty string means "use the default", not "send no system prompt":
+    // the latter is indistinguishable from a caller who never set one.
+    if (input.systemPrompt.trim() !== "") limits.systemPrompt = input.systemPrompt;
+  }
+  return limits;
 }
 
 const PERMISSION_PRESETS: readonly PermissionPreset[] = [
@@ -45,6 +90,7 @@ export type RunnerErrorCode =
   | "invalid_text"
   | "invalid_session_id"
   | "invalid_mode"
+  | "invalid_run_limits"
   | "unknown_session"
   | "session_busy"
   | "session_corrupt"
@@ -211,6 +257,7 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
       // operator believes they selected something else.
       throw new RunnerError("invalid_mode", `非法的权限预设: ${String(input.mode)}`);
     }
+    const limits = readRunLimits(input);
 
     const requestedId = input?.sessionId;
     if (requestedId !== undefined) {
@@ -260,6 +307,7 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
       home: opts.harnessHome,
       providersText: JSON.stringify(providers),
       signal: controller.signal,
+      ...limits,
       // A per-run mode wins over the constructor preset; everything else
       // (rules, timeout, config paths) still comes from the runner.
       permissions: {

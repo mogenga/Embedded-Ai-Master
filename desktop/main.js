@@ -196,6 +196,12 @@ function startWindow(options = {}) {
 
   ipcMain.handle("app-version", () => pkg.version ?? "0.0.0");
   ipcMain.handle("open-external", (_event, url) => shell.openExternal(String(url)));
+  // Reveal a produced artifact rather than opening it: an artifact can be a
+  // binary capture, and handing it to its default application would launch a
+  // program the operator did not ask for.
+  ipcMain.handle("reveal-artifact", (_event, target) =>
+    shell.showItemInFolder(String(target ?? "")),
+  );
   ipcMain.handle("notify", (_event, payload) => {
     if (Notification.isSupported()) {
       new Notification({ title: String(payload?.title ?? "Embedded AI Master"), body: String(payload?.body ?? "") }).show();

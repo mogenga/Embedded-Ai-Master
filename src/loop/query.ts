@@ -378,11 +378,39 @@ export async function* query(
         if (normalized.cachedTokens !== undefined) {
           payload.cachedTokens = normalized.cachedTokens;
         }
+        // Occupancy is measured on the transcript as it now stands: the
+        // assistant turn is already appended, so this is what the next request
+        // would carry. Without it the UI can only show spend, never how full
+        // the window is (D-165).
+        try {
+          const measured = ctx.budget(buildMessages(session.events()));
+          // A zero measurement is not "an empty context" — it is a transcript
+          // the meter could not read. Reporting it would paint a 0% window.
+          if (measured.tokens > 0 && ctx.modelCfg.contextWindow > 0) {
+            payload.context = {
+              tokens: measured.tokens,
+              // One decimal keeps small movements visible; the UI rounds for
+              // display but the event is the fact.
+              percent: Math.min(
+                100,
+                Math.round((measured.tokens / ctx.modelCfg.contextWindow) * 1000) / 10,
+              ),
+              window: ctx.modelCfg.contextWindow,
+            };
+          }
+        } catch {
+          // A usage figure the meter cannot measure must not fail the turn:
+          // occupancy is display data, the usage event is the audit record.
+        }
         if (normalized.cachedTokensRaw !== undefined) {
           payload.cachedTokensRaw = normalized.cachedTokensRaw;
         }
-        await session.append({ type: "usage", payload });
         costUsd += computeCostUsd(usage, ctx.pricePerMillion);
+        // `computeCostUsd` returns 0 when no price is configured, and zero
+        // dollars is a different claim from "no price known". The field only
+        // travels when the provider actually carries a price.
+        if (ctx.pricePerMillion !== undefined) payload.costUsd = costUsd;
+        await session.append({ type: "usage", payload });
         ctx.meter?.observe(normalized.promptTokens, messages);
       } else {
         await session.append({ type: "status", payload: { status: "usage_missing" } });

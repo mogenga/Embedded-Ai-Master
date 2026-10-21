@@ -725,13 +725,19 @@ describe("query 主循环", () => {
     const usages = session.events()
       .filter((event) => event.type === "usage")
       .map((event) => event.payload);
+    // `costUsd` travels because the provider carries a price; a normalized
+    // zero-cost call is still a priced call, so the running total (0) is the
+    // fact rather than an unknown.
     expect(usages[0]).toStrictEqual({
       promptTokens: 0,
       completionTokens: 0,
       cachedTokens: 0,
       cachedTokensRaw: -3,
+      costUsd: 0,
     });
-    expect(usages[1]).toStrictEqual({ promptTokens: 1, completionTokens: 0 });
+    // One prompt token at $1M/M is a whole dollar: the running total is the
+    // fact, not this call's share.
+    expect(usages[1]).toEqual({ promptTokens: 1, completionTokens: 0, costUsd: 1 });
   });
 
   it("usage 落日志写归一化 cachedTokens", async () => {
@@ -745,11 +751,13 @@ describe("query 主循环", () => {
     await collect(query(ctx, "x", { maxTurns: 10 }));
 
     const usage = session.events().find((event) => event.type === "usage");
-    expect(usage?.payload).toStrictEqual({
+    // 1M input at $1/M + 1M output at $1/M with 10 cached tokens at $0.1/M.
+    expect(usage?.payload).toEqual({
       promptTokens: 10,
       completionTokens: 1,
       cachedTokens: 10,
       cachedTokensRaw: 100,
+      costUsd: expect.closeTo(0.000002, 10),
     });
   });
 

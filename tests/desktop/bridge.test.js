@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createBrowserBridge } from "../../desktop/renderer/bridge.js";
 
 /** Minimal EventSource stand-in: records URLs and lets a test push frames. */
@@ -592,7 +592,194 @@ describe("bridge: 命令面", () => {
     expect(events.at(-1)).toStrictEqual({ type: "locale", locale: "en" });
   });
 
-  it("getSettings 返回 UI 偏好且不含伪造的服务端配置", () => {
+  it("getSettings 从 /api/config 取真实配置，失败时不伪造", async () => {
+    const config = {
+      mcpServers: [{ name: "probe", command: "node", args: ["probe.js"] }],
+      permissions: { preset: "diagnose", approvalTimeoutMs: 120000, rules: [] },
+      run: { maxTurns: 10, maxCostUsd: null, timeoutMs: null, systemPrompt: "" },
+      mcpPath: "E:/home/mcp.json",
+      permissionsPath: "E:/home/permissions.json",
+      runPath: "E:/home/run.json",
+    };
+    const fetchImpl = fakeFetch([
+      ["/api/config", () => jsonResponse(config)],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "getSettings" });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "settings").length).toBeGreaterThan(0);
+    });
+    const settings = events.filter((event) => event.type === "settings").at(-1);
+    expect(settings.settings.mcpServers).toStrictEqual(config.mcpServers);
+    expect(settings.settings.permissions).toStrictEqual(config.permissions);
+    expect(settings.settings.run).toStrictEqual(config.run);
+    expect(settings.settings.configPaths.mcp).toBe("E:/home/mcp.json");
+
+    // A server that does not answer leaves the settings page without config
+    // rather than with invented values.
+    const broken = createBrowserBridge({
+      fetchImpl: fakeFetch([["/api/config", () => jsonResponse({ error: { message: "boom" } }, 500)]]),
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const brokenEvents = [];
+    broken.api.onEvent((event) => brokenEvents.push(event));
+    broken.boot();
+    broken.api.send({ cmd: "getSettings" });
+    await vi.waitFor(() => {
+      expect(brokenEvents.some((event) => event.type === "notice")).toBe(true);
+    });
+    expect(brokenEvents.filter((event) => event.type === "settings")).toHaveLength(0);
+  });
+
+  it("saveMcpServer 合并后 PUT /api/config，删除只移除同名项", async () => {
+    let stored = {
+      mcpServers: [{ name: "probe", command: "node" }],
+      permissions: { preset: "diagnose", approvalTimeoutMs: 120000, rules: [] },
+      run: { maxTurns: 10, maxCostUsd: null, timeoutMs: null, systemPrompt: "" },
+      mcpPath: "", permissionsPath: "", runPath: "",
+    };
+    const fetchImpl = fakeFetch([
+      [
+        "/api/config",
+        (_url, init) => {
+          if (init.method === "PUT") {
+            const body = JSON.parse(init.body);
+            stored = { ...stored, ...body };
+            return jsonResponse(stored);
+          }
+          return jsonResponse(stored);
+        },
+      ],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "getSettings" });
+    // The merge reads the snapshot the settings event carried, so the test has
+    // to wait for that event, not merely for the request to be issued.
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "settings")).toBe(true);
+    });
+
+    bridge.api.send({
+      cmd: "saveMcpServer",
+      server: { name: "kb", command: "node", args: "-y kb.js", timeoutMs: 5000 },
+    });
+    // Wait for the reply, not the request: the snapshot the next merge reads
+    // only arrives with the response.
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "settings")).toHaveLength(2);
+    });
+    const put = fetchImpl.calls.find((call) => call.method === "PUT");
+    const sent = JSON.parse(put.body);
+    // The existing server survives; the new one is appended with args split.
+    expect(sent.mcpServers).toStrictEqual([
+      { name: "probe", command: "node" },
+      { name: "kb", command: "node", args: ["-y", "kb.js"], timeoutMs: 5000, disabled: false },
+    ]);
+
+    bridge.api.send({ cmd: "removeMcpServer", name: "probe" });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "settings")).toHaveLength(3);
+    });
+    // Removing by name leaves the other server exactly as it was.
+    expect(JSON.parse(fetchImpl.calls.filter((call) => call.method === "PUT")[1].body).mcpServers)
+      .toStrictEqual([{ name: "kb", command: "node", args: ["-y", "kb.js"], timeoutMs: 5000, disabled: false }]);
+  });
+
+  it("sessionFlags/deleteSession/forkSession 打到对应的会话端点", async () => {
+    const fetchImpl = fakeFetch([
+      ["/fork", () => jsonResponse({ sessionId: "forked-1" }, 201)],
+      ["/api/sessions/s1", () => jsonResponse({ id: "s1" })],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+
+    bridge.api.send({ cmd: "sessionFlags", id: "s1", title: "串口无输出", pinned: true });
+    await vi.waitFor(() => {
+      expect(fetchImpl.calls.some((call) => call.method === "PATCH")).toBe(true);
+    });
+    const patch = fetchImpl.calls.find((call) => call.method === "PATCH");
+    expect(patch.url).toBe("/api/sessions/s1");
+    expect(JSON.parse(patch.body)).toStrictEqual({ title: "串口无输出", pinned: true });
+
+    bridge.api.send({ cmd: "deleteSession", id: "s2" });
+    await vi.waitFor(() => {
+      expect(fetchImpl.calls.some((call) => call.method === "DELETE")).toBe(true);
+    });
+    expect(fetchImpl.calls.find((call) => call.method === "DELETE").url).toBe("/api/sessions/s2");
+
+    bridge.api.send({ cmd: "forkSession", id: "s1" });
+    await vi.waitFor(() => {
+      expect(fetchImpl.calls.some((call) => call.url.endsWith("/fork"))).toBe(true);
+    });
+    expect(fetchImpl.calls.find((call) => call.url.endsWith("/fork")).method).toBe("POST");
+  });
+});
+
+describe("bridge: 导出", () => {
+  it("exportSession 从日志渲染 Markdown 并发 export_ready", async () => {
+    const fetchImpl = fakeFetch([
+      [
+        "/api/sessions/s1",
+        () =>
+          jsonResponse({
+            header: { id: "s1", workdir: "E:/p" },
+            events: [
+              { seq: 0, ts: "t", type: "user", payload: { content: "串口没输出" } },
+              { seq: 1, ts: "t", type: "assistant", payload: { content: "先查 KB", toolCalls: [] } },
+            ],
+          }),
+      ],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "loadSession", id: "s1" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "session_loaded")).toBe(true);
+    });
+
+    bridge.api.send({ cmd: "exportSession" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "export_ready")).toBe(true);
+    });
+    const ready = events.find((event) => event.type === "export_ready");
+    // The title comes from the first user message when the session has none.
+    expect(ready.markdown).toContain("# 串口没输出");
+    expect(ready.markdown).toContain("## Assistant");
+    expect(ready.filename).toBe("串口没输出.md");
+  });
+
+  it("没有打开会话时导出回 warn 而不是空文件", () => {
     const bridge = createBrowserBridge({
       fetchImpl: fakeFetch([]),
       EventSourceImpl: FakeEventSource,
@@ -601,10 +788,9 @@ describe("bridge: 命令面", () => {
     const events = [];
     bridge.api.onEvent((event) => events.push(event));
     bridge.boot();
-    bridge.api.send({ cmd: "getSettings" });
-    const settings = events.at(-1);
-    expect(settings.type).toBe("settings");
-    expect(settings.settings.providers).toStrictEqual([]);
-    expect(settings.settings.models).toStrictEqual([]);
+    bridge.api.send({ cmd: "exportSession" });
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("没有可导出");
   });
 });

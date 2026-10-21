@@ -168,6 +168,42 @@ describe("createSessionRunner", () => {
     expect(fake.calls).toHaveLength(2);
   });
 
+  it("运行上限透传给 runSession，非法值在启动前拒绝", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+    await runner.start({
+      text: "hi",
+      maxTurns: 3,
+      maxCostUsd: 0.5,
+      timeoutMs: 1000,
+      systemPrompt: "你是诊断助手",
+    });
+    const call = fake.calls[0];
+    expect(call?.maxTurns).toBe(3);
+    expect(call?.maxCostUsd).toBe(0.5);
+    expect(call?.timeoutMs).toBe(1000);
+    expect(call?.systemPrompt).toBe("你是诊断助手");
+
+    // Absent means "use the kernel default"; an empty prompt is the same thing.
+    await runner.start({ text: "again", systemPrompt: "   " });
+    expect(fake.calls[1]?.maxTurns).toBeUndefined();
+    expect(fake.calls[1]?.maxCostUsd).toBeUndefined();
+    expect(fake.calls[1]?.systemPrompt).toBeUndefined();
+
+    for (const bad of [
+      { maxTurns: 0 },
+      { maxTurns: "3" as never },
+      { maxCostUsd: -1 },
+      { timeoutMs: 1.5 },
+    ]) {
+      const error = await startError(runner, { text: "x", ...bad });
+      expect(error.code).toBe("invalid_run_limits");
+    }
+    expect(fake.calls).toHaveLength(2);
+  });
+
   it("等待 onSession 后才 resolve", async () => {
     const home = makeHome();
     const fake = createFakeRunSession({ delayMs: 50 });

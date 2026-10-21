@@ -5,7 +5,9 @@ import {
   MAX_TOOL_OUTPUT_BYTES,
   sessionEventToHostEvents,
   sessionEventsToMessages,
+  sessionExportName,
   sessionLoadedEvent,
+  sessionMarkdown,
   sessionsEvent,
   summarizeToolCall,
 } from "../../desktop/renderer/protocol.js";
@@ -173,6 +175,24 @@ describe("tool_result", () => {
     const body = output.content.replace("\n…[truncated]", "");
     expect(new TextEncoder().encode(body).length).toBeLessThanOrEqual(MAX_TOOL_OUTPUT_BYTES);
   });
+
+  it("tool_output 透传 artifactPath，没有产物时不带该字段", () => {
+    const withArtifact = translate([
+      ev(0, "tool_result", {
+        id: "c1",
+        ok: true,
+        text: "抓取已保存",
+        toolName: "mcp__probe__capture",
+        artifactPath: "E:/home/sessions/s1/artifacts/capture.sr",
+      }),
+    ]).out.find((item) => item.type === "tool_output");
+    expect(withArtifact.artifactPath).toBe("E:/home/sessions/s1/artifacts/capture.sr");
+
+    const plain = translate([
+      ev(0, "tool_result", { id: "c1", ok: true, text: "ok", toolName: "fs" }),
+    ]).out.find((item) => item.type === "tool_output");
+    expect(plain).not.toHaveProperty("artifactPath");
+  });
 });
 
 describe("审批与权限", () => {
@@ -280,6 +300,25 @@ describe("运行状态", () => {
     expect(out).toStrictEqual([
       { type: "usage", usage: { inputTokens: 10, outputTokens: 2, cachedTokens: 3 } },
     ]);
+  });
+
+  it("usage 带上上下文占用与成本时一并透传，缺失则不带字段", () => {
+    const { out } = translate([
+      ev(0, "usage", {
+        promptTokens: 10,
+        completionTokens: 2,
+        context: { tokens: 4200, percent: 51.3, window: 8192 },
+        costUsd: 0.0123,
+      }),
+    ]);
+    expect(out[0].context).toStrictEqual({ tokens: 4200, percent: 51.3, window: 8192 });
+    expect(out[0].costUsd).toBe(0.0123);
+
+    // A provider with no price writes no `costUsd`: absent means unknown, and
+    // a zero here would read as "known to be free".
+    const bare = translate([ev(0, "usage", { promptTokens: 1, completionTokens: 1 })]);
+    expect(bare.out[0]).not.toHaveProperty("costUsd");
+    expect(bare.out[0]).not.toHaveProperty("context");
   });
 });
 
@@ -402,6 +441,20 @@ describe("state / sessions / session_loaded", () => {
     expect(state.models).toHaveLength(1);
   });
 
+  it("initialState 只在有真数据时带上下文占用与成本", () => {
+    const bare = initialState({ sessionId: "s1" });
+    expect(bare.context).toStrictEqual({ tokens: 0, percent: 0 });
+    expect(bare).not.toHaveProperty("costUsd");
+
+    const measured = initialState({
+      sessionId: "s1",
+      context: { tokens: 3000, percent: 36.6, window: 8192 },
+      costUsd: 0.42,
+    });
+    expect(measured.context).toStrictEqual({ tokens: 3000, percent: 36.6, window: 8192 });
+    expect(measured.costUsd).toBe(0.42);
+  });
+
   it("sessionsEvent 把 workdir 映射为 cwd 并给出 renderer 需要的字段", () => {
     const event = sessionsEvent([
       { id: "s1", createdAt: "2026-10-20T00:00:00.000Z", status: "closed", workdir: "E:/p", model: "gw/flash" },
@@ -419,6 +472,29 @@ describe("state / sessions / session_loaded", () => {
       status: "ready",
     });
     expect(event.total).toBe(1);
+  });
+
+  it("sessionsEvent 采用内核给的标题、置顶与更新时间", () => {
+    const event = sessionsEvent([
+      {
+        id: "s1",
+        createdAt: "2026-10-20T00:00:00.000Z",
+        updatedAt: "2026-10-21T09:00:00.000Z",
+        status: "closed",
+        workdir: "E:/p",
+        title: "串口无输出",
+        pinned: true,
+        archived: true,
+      },
+    ]);
+    expect(event.sessions[0]).toMatchObject({
+      title: "串口无输出",
+      // The summary the row falls back to is the title, not the id.
+      summary: "串口无输出",
+      pinned: true,
+      archived: true,
+      updatedAt: "2026-10-21T09:00:00.000Z",
+    });
   });
 
   it("sessionLoadedEvent 携带消息、模式与本次会话用量", () => {
@@ -439,5 +515,65 @@ describe("state / sessions / session_loaded", () => {
       // usage events are per model call; the popover says "this session".
       usage: { inputTokens: 14, outputTokens: 2, cachedTokens: 3 },
     });
+  });
+
+  it("sessionLoadedEvent 的成本取最后一条带 costUsd 的用量事件", () => {
+    const event = sessionLoadedEvent([
+      ev(0, "usage", { promptTokens: 1, costUsd: 0.01 }),
+      ev(1, "usage", { promptTokens: 1 }),
+      ev(2, "usage", { promptTokens: 1, costUsd: 0.02 }),
+    ]);
+    // `costUsd` is the running session total, not this call's share.
+    expect(event.costUsd).toBe(0.02);
+    // No priced call at all: the field is absent, so the renderer can hide the
+    // row instead of printing "$0.00" for a provider that has no price.
+    expect(sessionLoadedEvent([ev(0, "usage", { promptTokens: 1 })])).not.toHaveProperty("costUsd");
+  });
+});
+
+describe("导出", () => {
+  const log = [
+    ev(0, "user", { content: "串口没输出" }),
+    ev(1, "assistant", {
+      content: "先查一下",
+      toolCalls: [{ id: "c1", name: "mcp__probe__attach", arguments: { target: "stm32" } }],
+    }),
+    ev(2, "tool_result", {
+      id: "c1",
+      ok: true,
+      text: "attached",
+      toolName: "mcp__probe__attach",
+      artifactPath: "E:/home/sessions/s1/artifacts/capture.txt",
+    }),
+    ev(3, "tool_result", { id: "c2", ok: false, text: "boom", toolName: "shell" }),
+    ev(4, "interrupted", { reason: "aborted" }),
+    ev(5, "checkpoint", { turn: 1 }),
+  ];
+
+  it("按日志渲染 Markdown：用户/助手/工具/产物/中断，跳过 checkpoint", () => {
+    const md = sessionMarkdown(log, { title: "串口没输出" });
+    expect(md.startsWith("# 串口没输出")).toBe(true);
+    expect(md).toContain("## User\n\n串口没输出");
+    expect(md).toContain("## Assistant\n\n先查一下");
+    expect(md).toContain("- `mcp__probe__attach` {\"target\":\"stm32\"}");
+    expect(md).toContain("### mcp__probe__attach");
+    expect(md).toContain("```\nattached\n```");
+    expect(md).toContain("Artifact: `E:/home/sessions/s1/artifacts/capture.txt`");
+    expect(md).toContain("### shell (failed)");
+    expect(md).toContain("> Interrupted: aborted");
+    expect(md).not.toContain("checkpoint");
+  });
+
+  it("超长工具输出截断，空日志也有标题", () => {
+    const md = sessionMarkdown([ev(0, "tool_result", { id: "c", ok: true, toolName: "t", text: "x".repeat(5000) })]);
+    expect(md).toContain("…[truncated]");
+    expect(md.length).toBeLessThan(2500);
+    expect(sessionMarkdown([])).toBe("# Conversation\n");
+  });
+
+  it("导出文件名去掉路径非法字符", () => {
+    expect(sessionExportName("s1", "a/b:c*?")).toBe("a-b-c-.md");
+    expect(sessionExportName("s1", "")).toBe("s1.md");
+    expect(sessionExportName("", "")).toBe("session.md");
   });
 });

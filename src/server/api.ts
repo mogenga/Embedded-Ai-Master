@@ -9,6 +9,7 @@ import { createLogTailEventSource } from "../events/log-tail.js";
 import type { SessionEventSource } from "../events/types.js";
 import { SessionCorruptionError } from "../session/errors.js";
 import { isValidSessionId } from "../session/handle.js";
+import { readSessionMeta } from "../session/metadata.js";
 import {
   listSessionLogFiles,
   readSessionDir,
@@ -17,8 +18,10 @@ import {
 } from "../session/persistence.js";
 import type { SessionEvent, SessionHeader } from "../session/types.js";
 import { readJsonBody } from "./body.js";
+import { createConfigApi } from "./config-api.js";
 import { createEventStreamHandler } from "./event-stream.js";
 import { HttpError, sendError, sendJson } from "./http.js";
+import { createSessionAdmin } from "./session-admin.js";
 import type { PermissionPreset } from "../permissions/types.js";
 import { createSessionRunner, RunnerError } from "./runner.js";
 import type { SessionRunner } from "./runner.js";
@@ -39,6 +42,17 @@ export interface SessionSummary {
   status: "open" | "closed";
   model?: string;
   workdir?: string;
+  /**
+   * Operator-assigned metadata from `meta.json`.
+   *
+   * The header is the kernel's own record and its validator drops unknown
+   * fields, so a title cannot live there. `updatedAt` falls back to
+   * `createdAt` for a session that was never renamed.
+   */
+  title?: string;
+  pinned?: boolean;
+  archived?: boolean;
+  updatedAt?: string;
 }
 
 export interface KbNode {
@@ -181,6 +195,7 @@ function mapRunnerError(error: RunnerError): HttpError {
     case "invalid_text":
     case "invalid_session_id":
     case "invalid_mode":
+    case "invalid_run_limits":
       return new HttpError(400, error.code, error.message);
     case "unknown_session":
       return new HttpError(404, error.code, error.message);
@@ -213,18 +228,109 @@ async function handleAction(
   }
   const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
   const mode = typeof body.mode === "string" ? body.mode : undefined;
+  const limits = readRunLimitsBody(body);
   let outcome: Awaited<ReturnType<SessionRunner["start"]>>;
   try {
     outcome = await runner.start({
       text: body.text,
       ...(sessionId === undefined ? {} : { sessionId }),
       ...(mode === undefined ? {} : { mode: mode as PermissionPreset }),
+      ...limits,
     });
   } catch (error) {
     if (error instanceof RunnerError) throw mapRunnerError(error);
     throw error;
   }
   sendJson(res, 202, outcome);
+}
+
+/**
+ * Optional per-run limits from the request body.
+ *
+ * Type errors are caught here so a string where a number belongs is a 400
+ * before a session is touched; the runner re-validates the same fields
+ * because it is also called from the desktop host.
+ */
+function readRunLimitsBody(body: Record<string, unknown>): {
+  maxTurns?: number;
+  maxCostUsd?: number;
+  timeoutMs?: number;
+  systemPrompt?: string;
+} {
+  const limits: {
+    maxTurns?: number;
+    maxCostUsd?: number;
+    timeoutMs?: number;
+    systemPrompt?: string;
+  } = {};
+  for (const key of ["maxTurns", "maxCostUsd", "timeoutMs"] as const) {
+    const value = body[key];
+    if (value === undefined) continue;
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new HttpError(400, "invalid_run_limits", `${key} 必须是数字`);
+    }
+    limits[key] = value;
+  }
+  if (body.systemPrompt !== undefined) {
+    if (typeof body.systemPrompt !== "string") {
+      throw new HttpError(400, "invalid_run_limits", "systemPrompt 必须是字符串");
+    }
+    limits.systemPrompt = body.systemPrompt;
+  }
+  return limits;
+}
+
+/** Titles, pins and archives live beside the session, not in its header. */
+async function handleSessionMeta(
+  req: IncomingMessage,
+  res: ServerResponse,
+  harnessHome: string,
+  rawId: string,
+): Promise<void> {
+  const id = decodeSegment(rawId);
+  assertSessionId(id);
+  const admin = createSessionAdmin({ harnessHome });
+  const body = await readJsonBody(req);
+  const outcome = await admin.update(id, body);
+  sendJson(res, 200, outcome);
+}
+
+async function handleSessionDelete(
+  res: ServerResponse,
+  harnessHome: string,
+  rawId: string,
+): Promise<void> {
+  const id = decodeSegment(rawId);
+  assertSessionId(id);
+  const admin = createSessionAdmin({ harnessHome });
+  await admin.remove(id);
+  sendJson(res, 200, { id, deleted: true });
+}
+
+async function handleSessionFork(
+  req: IncomingMessage,
+  res: ServerResponse,
+  harnessHome: string,
+  rawId: string,
+): Promise<void> {
+  const id = decodeSegment(rawId);
+  assertSessionId(id);
+  const admin = createSessionAdmin({ harnessHome });
+  let body: Record<string, unknown> = {};
+  // A fork from the UI's menu sends nothing; a body is only read when the
+  // client actually sent bytes (a Content-Type header alone is common on
+  // `fetch` calls with no payload, and parsing an empty stream would 400).
+  const contentLength = Number(req.headers["content-length"] ?? "0");
+  const hasBody = Number.isFinite(contentLength) && contentLength > 0;
+  if (hasBody) body = await readJsonBody(req);
+  const atSeq = body.atSeq;
+  // A mistyped position must not silently fork at the end of the log: the
+  // caller asked for a specific transcript state.
+  if (atSeq !== undefined && (typeof atSeq !== "number" || !Number.isInteger(atSeq))) {
+    throw new HttpError(400, "invalid_body", "atSeq 必须是整数");
+  }
+  const outcome = await admin.fork(id, atSeq);
+  sendJson(res, 201, outcome);
 }
 
 async function handleAbort(
@@ -324,13 +430,18 @@ export function readSessionHeader(dir: string): SessionHeader {
   return header;
 }
 
-function summarize(header: SessionHeader): SessionSummary {
+function summarize(header: SessionHeader, dir: string): SessionSummary {
+  const meta = readSessionMeta(dir);
   return {
     id: header.id,
     createdAt: header.createdAt,
     status: header.status,
     ...(header.model === undefined ? {} : { model: header.model }),
     ...(header.workdir === undefined ? {} : { workdir: header.workdir }),
+    ...(meta.title === undefined ? {} : { title: meta.title }),
+    ...(meta.pinned === undefined ? {} : { pinned: meta.pinned }),
+    ...(meta.archived === undefined ? {} : { archived: meta.archived }),
+    updatedAt: meta.updatedAt,
   };
 }
 
@@ -361,7 +472,7 @@ async function handleSessions(res: ServerResponse, harnessHome: string): Promise
     }
     try {
       const header = readSessionHeader(path.join(sessionsDir, dir));
-      sessions.push({ ...summarize(header), id: dir });
+      sessions.push({ ...summarize(header, path.join(sessionsDir, dir)), id: dir });
       if (header.id !== dir) errors.push({ dir, code: "id_mismatch" });
     } catch (error) {
       errors.push({
@@ -539,9 +650,61 @@ export function createApiHandler(
       }
       const sessionMatch = /^\/api\/sessions\/([^/]+)$/.exec(pathname);
       if (sessionMatch !== null) {
-        requireMethod(method, "GET");
-        await handleSession(res, harnessHome, sessionMatch[1]);
+        const id = sessionMatch[1];
+        if (method === "GET") {
+          await handleSession(res, harnessHome, id);
+          return;
+        }
+        if (method === "PATCH") {
+          requireWriteRequest(req, opts.port);
+          await handleSessionMeta(req, res, harnessHome, id);
+          return;
+        }
+        if (method === "DELETE") {
+          requireWriteRequest(req, opts.port);
+          await handleSessionDelete(res, harnessHome, id);
+          return;
+        }
+        throw new HttpError(405, "method_not_allowed", "不支持的请求方法");
+      }
+      const forkMatch = /^\/api\/sessions\/([^/]+)\/fork$/.exec(pathname);
+      if (forkMatch !== null) {
+        requireMethod(method, "POST");
+        requireWriteRequest(req, opts.port);
+        await handleSessionFork(req, res, harnessHome, forkMatch[1]);
         return;
+      }
+      if (pathname === "/api/config") {
+        const config = createConfigApi({ harnessHome });
+        if (method === "GET") {
+          sendJson(res, 200, config.get());
+          return;
+        }
+        if (method === "PUT") {
+          requireWriteRequest(req, opts.port);
+          const body = await readJsonBody(req);
+          if (typeof body.mcpServers !== "undefined") {
+            const outcome = await config.putMcp({ servers: body.mcpServers });
+            sendJson(res, 200, { ...config.get(), ...outcome });
+            return;
+          }
+          if (typeof body.permissions !== "undefined") {
+            const outcome = await config.putPermissions({ permissions: body.permissions });
+            sendJson(res, 200, { ...config.get(), ...outcome });
+            return;
+          }
+          if (typeof body.run !== "undefined") {
+            const outcome = await config.putRun({ run: body.run });
+            sendJson(res, 200, { ...config.get(), ...outcome });
+            return;
+          }
+          throw new HttpError(
+            400,
+            "invalid_body",
+            "PUT /api/config 需要 mcpServers、permissions 或 run",
+          );
+        }
+        throw new HttpError(405, "method_not_allowed", "不支持的请求方法");
       }
       if (pathname === "/api/kb") {
         requireMethod(method, "GET");

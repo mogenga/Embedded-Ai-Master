@@ -107,7 +107,9 @@
             <button class="icon-button" id="terminal-button" data-i18n-title="terminalTitle" hidden>
               <svg class="icon" aria-hidden="true"><use href="#i-terminal"></use></svg>
             </button>
-            <button class="icon-button" id="more-button" data-i18n-title="more" aria-haspopup="menu" aria-expanded="false" hidden>
+            <!-- Export, theme, language and the shortcut list live here. It
+                 used to be hidden, which left all of them with no way in. -->
+            <button class="icon-button" id="more-button" data-i18n-title="more" aria-haspopup="menu" aria-expanded="false">
               <svg class="icon" aria-hidden="true"><use href="#i-more"></use></svg>
             </button>
             <button class="icon-button" id="settings-button" data-i18n-title="settings">
@@ -119,14 +121,10 @@
               <svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>
               <span data-i18n="menuExport">Export conversation</span>
             </button>
-            <button class="menu-row" id="menu-new-window" role="menuitem">
-              <svg class="icon" aria-hidden="true"><use href="#i-new-window"></use></svg>
-              <span data-i18n="menuNewWindow">New window</span>
-            </button>
-            <button class="menu-row" id="menu-split-view" role="menuitem">
-              <svg class="icon" aria-hidden="true"><use href="#i-new-window"></use></svg>
-              <span data-i18n="menuSplitView">Open this session in split view</span>
-            </button>
+            <!-- New window and split view both need a second BrowserWindow.
+                 This shell holds a single-instance lock and one window, so a
+                 row here could only fail; the hosts are one per window and the
+                 session lock allows one writer anyway. -->
             <button class="menu-row" id="menu-shortcuts" role="menuitem">
               <svg class="icon" aria-hidden="true"><use href="#i-keyboard"></use></svg>
               <span data-i18n="menuShortcuts">Keyboard shortcuts</span>
@@ -348,6 +346,13 @@
                   <div class="usage-row total">
                     <span data-i18n="usageTotal">Total this session</span>
                     <span class="usage-value" id="usage-total-value">0</span>
+                  </div>
+                  <!-- Spend only appears when the provider config carries a
+                       price: zero dollars and "no price configured" are not
+                       the same fact, and a $0.00 row would claim the former. -->
+                  <div class="usage-row" id="usage-cost-row" hidden>
+                    <span data-i18n="usageCost">Session cost</span>
+                    <span class="usage-value" id="usage-cost-value">—</span>
                   </div>
                   <button type="button" class="btn btn-quiet small usage-reset" id="usage-reset" data-i18n="usageReset">Reset counter</button>
                 </div>

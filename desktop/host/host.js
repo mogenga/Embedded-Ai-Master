@@ -33,6 +33,10 @@ function fatal(message) {
   send({ type: "fatal", message });
 }
 
+function messageOf(error) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 // ---------------------------------------------------------------------------
 // Kernel modules (compiled)
 // ---------------------------------------------------------------------------
@@ -47,6 +51,9 @@ try {
     { loadProviders, resolveModelRef },
     { readSessionHeader },
     { isValidSessionId },
+    { readSessionMeta },
+    { readAppConfig, writeMcpServers, writePermissionConfig, writeRunLimits },
+    { createSessionAdmin },
     protocol,
   ] = await Promise.all([
     import(dist("server/runner.js")),
@@ -56,6 +63,9 @@ try {
     import(dist("config/providers.js")),
     import(dist("server/api.js")),
     import(dist("session/handle.js")),
+    import(dist("session/metadata.js")),
+    import(dist("config/app-config.js")),
+    import(dist("server/session-admin.js")),
     import("../renderer/protocol.js"),
   ]);
   kernel = {
@@ -68,6 +78,12 @@ try {
     resolveModelRef,
     readSessionHeader,
     isValidSessionId,
+    readSessionMeta,
+    readAppConfig,
+    writeMcpServers,
+    writePermissionConfig,
+    writeRunLimits,
+    createSessionAdmin,
     protocol,
   };
 } catch (error) {
@@ -120,19 +136,31 @@ const sessions = (() => {
         const dir = path.join(sessionsRoot, entry.name);
         try {
           const header = kernel.readSessionHeader(dir);
+          // A title is operator data kept beside the session, not in the
+          // kernel's header: `validateHeader` drops fields it does not know,
+          // so writing one there would be silently discarded on the next read.
+          const meta = kernel.readSessionMeta(dir);
           out.push({
             id: entry.name,
             createdAt: header.createdAt,
+            updatedAt: meta.updatedAt,
             status: header.status,
             ...(header.model === undefined ? {} : { model: header.model }),
             ...(header.workdir === undefined ? {} : { workdir: header.workdir }),
+            ...(meta.title === undefined ? {} : { title: meta.title }),
+            ...(meta.pinned === undefined ? {} : { pinned: meta.pinned }),
+            ...(meta.archived === undefined ? {} : { archived: meta.archived }),
           });
         } catch {
           // A corrupt or unreadable directory is skipped rather than shown as
           // an empty conversation; the renderer gets fewer rows, not fake ones.
         }
       }
-      out.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      // A renamed or pinned session is newer than a session created after it
+      // but never touched; sorting by creation alone buried exactly the
+      // conversations the operator had just worked in.
+      const stamp = (entry) => entry.updatedAt ?? entry.createdAt;
+      out.sort((left, right) => stamp(right).localeCompare(stamp(left)));
       return out;
     },
     detail(id) {
@@ -199,7 +227,107 @@ function baseUrlOf(ref) {
   }
 }
 
+/** Saved run limits, re-read whenever the settings save handler runs. */
+let runLimits = { maxTurns: 10, maxCostUsd: null, timeoutMs: null, systemPrompt: "" };
+
+/**
+ * The limits to hand this run.
+ *
+ * `null` means "not set", not "zero": sending `maxCostUsd: null` would fail
+ * the runner's number check, and sending 0 would stop the loop before its
+ * first turn. Unset fields are omitted so the kernel defaults apply.
+ */
+function runLimitOptions() {
+  return {
+    ...(runLimits.maxTurns === 10 ? {} : { maxTurns: runLimits.maxTurns }),
+    ...(runLimits.maxCostUsd === null ? {} : { maxCostUsd: runLimits.maxCostUsd }),
+    ...(runLimits.timeoutMs === null ? {} : { timeoutMs: runLimits.timeoutMs }),
+    ...(runLimits.systemPrompt === "" ? {} : { systemPrompt: runLimits.systemPrompt }),
+  };
+}
+
+/**
+ * Read both config files and describe them for the renderer.
+ *
+ * A broken file is reported in `errors` rather than thrown: the settings page
+ * must still open so the user can see (and fix) the other half. The kernel
+ * itself refuses to start a run under a broken permissions file, so this is a
+ * display concern only.
+ */
+function readConfigSnapshot() {
+  try {
+    return { config: kernel.readAppConfig(harnessHome), error: undefined };
+  } catch (error) {
+    return {
+      config: undefined,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function configEvent() {
+  const { config, error } = readConfigSnapshot();
+  const base = {
+    type: "settings",
+    settings: {
+      locale,
+      providers: Object.keys(providers).map((name) => ({
+        id: name,
+        baseUrl: providers[name]?.baseUrl ?? "",
+      })),
+      models: modelList,
+      model: modelRef,
+    },
+  };
+  if (config === undefined) {
+    send({ ...base, settingsError: error });
+    return;
+  }
+  send({
+    ...base,
+    settings: {
+      ...base.settings,
+      mcpServers: config.mcpServers,
+      permissions: config.permissions,
+      run: config.run,
+      configPaths: { mcp: config.mcpPath, permissions: config.permissionsPath, run: config.runPath },
+    },
+  });
+}
+
+/**
+ * Occupancy and spend as of the last priced call in a log.
+ *
+ * `state` is sent on boot and on every session switch; without these figures
+ * the meter drops back to zero each time a conversation is reopened, even
+ * though its transcript is full.
+ */
+function lastMeasure(events) {
+  let context;
+  let costUsd;
+  for (const event of events) {
+    if (event?.type !== "usage" || typeof event.payload !== "object" || event.payload === null) continue;
+    const payload = event.payload;
+    if (typeof payload.context === "object" && payload.context !== null) {
+      context = payload.context;
+    }
+    if (typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd)) {
+      costUsd = payload.costUsd;
+    }
+  }
+  return {
+    ...(context === undefined ? {} : { context }),
+    ...(costUsd === undefined ? {} : { costUsd }),
+  };
+}
+
+let lastSessionId = "";
+let lastSessionMeasure = {};
+
 function stateEvent() {
+  // The cached measure belongs to the session that produced it; showing it
+  // over a different conversation would be a fabricated number.
+  const extra = sessionId !== "" && sessionId === lastSessionId ? lastSessionMeasure : {};
   return kernel.protocol.initialState({
     sessionId,
     cwd,
@@ -209,6 +337,7 @@ function stateEvent() {
     models: modelList,
     modelsSource: "providers.json",
     baseUrl: baseUrlOf(modelRef),
+    ...extra,
   });
 }
 
@@ -240,6 +369,9 @@ const titleCache = new Map();
 const TITLE_SCAN_LIMIT = 30;
 
 function titleFor(entry) {
+  // A name the operator gave is the title; the first user message is only a
+  // stand-in for a session nobody renamed.
+  if (typeof entry.title === "string" && entry.title !== "") return entry.title;
   const key = `${entry.id}@${entry.createdAt}`;
   const cached = titleCache.get(key);
   if (cached !== undefined) return cached;
@@ -293,6 +425,16 @@ function startFollow(id, since) {
       const reader = eventSource.follow(id, since, signal);
       for await (const event of reader) {
         if (signal.aborted) return;
+        // Keep the cached measure current: a later `state` (a settings change,
+        // a session switch back) reads it rather than the log.
+        if (event.type === "usage" && typeof event.payload === "object" && event.payload !== null) {
+          if (typeof event.payload.context === "object" && event.payload.context !== null) {
+            lastSessionMeasure = { ...lastSessionMeasure, context: event.payload.context };
+          }
+          if (typeof event.payload.costUsd === "number" && Number.isFinite(event.payload.costUsd)) {
+            lastSessionMeasure = { ...lastSessionMeasure, costUsd: event.payload.costUsd };
+          }
+        }
         for (const message of kernel.protocol.sessionEventToHostEvents(event, ctx)) {
           send(message);
         }
@@ -359,6 +501,7 @@ async function handlePrompt(text) {
     outcome = await runner.start({
       text,
       ...(sessionId === "" ? {} : { sessionId }),
+      ...runLimitOptions(),
     });
   } catch (error) {
     running = false;
@@ -371,6 +514,8 @@ async function handlePrompt(text) {
   const created = outcome.created;
   if (created || outcome.sessionId !== sessionId) {
     sessionId = outcome.sessionId;
+    lastSessionId = sessionId;
+    lastSessionMeasure = {};
     // No `session_loaded`: the renderer already echoed the user's message.
     // Only switching to another session rebuilds the transcript.
     send(stateEvent());
@@ -397,6 +542,8 @@ function handleNewSession() {
   }
   stopFollow();
   sessionId = "";
+  lastSessionId = "";
+  lastSessionMeasure = {};
   ctx = kernel.protocol.createContext({ cwd });
   send({ type: "session_loaded", messages: [], cwd, mode, effort: "auto" });
   send(stateEvent());
@@ -425,6 +572,8 @@ async function handleLoadSession(id) {
   ctx = kernel.protocol.createContext({ sessionId: id, cwd });
   const lastSeq = detail.events.at(-1)?.seq ?? -1;
   ctx.lastSeq = lastSeq;
+  lastSessionId = id;
+  lastSessionMeasure = lastMeasure(detail.events);
   send(
     kernel.protocol.sessionLoadedEvent(detail.events, {
       cwd: detail.header.workdir ?? cwd,
@@ -494,6 +643,10 @@ const handlers = {
 
     runner = createRunner();
     eventSource = kernel.createLogTailEventSource({ sessionsRoot });
+    // Saved run limits apply from the first prompt; a broken file leaves the
+    // defaults in place and surfaces on the settings page instead.
+    const { config } = readConfigSnapshot();
+    if (config !== undefined) runLimits = config.run;
     send(stateEvent());
     send({ type: "ready" });
     send(sessionsEvent());
@@ -528,6 +681,32 @@ const handlers = {
 
   listSessions() {
     send(sessionsEvent());
+  },
+
+  /**
+   * Render the open conversation as Markdown and hand it to the window.
+   *
+   * The log is the source, not the transcript: a scrolled or partly rebuilt
+   * DOM would export what happens to be drawn.
+   */
+  exportSession() {
+    if (sessionId === "") {
+      send({ type: "notice", level: "warn", text: "没有可导出的对话" });
+      return;
+    }
+    let events;
+    try {
+      events = sessions.detail(sessionId).events;
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `导出失败：${messageOf(error)}` });
+      return;
+    }
+    const title = titleFor(sessions.list().find((entry) => entry.id === sessionId) ?? { id: sessionId, createdAt: "" });
+    send({
+      type: "export_ready",
+      markdown: kernel.protocol.sessionMarkdown(events, { title }),
+      filename: kernel.protocol.sessionExportName(sessionId, title),
+    });
   },
 
   setMode(payload) {
@@ -660,18 +839,180 @@ const handlers = {
    * receives.
    */
   getSettings() {
-    send({
-      type: "settings",
-      settings: {
-        locale,
-        providers: Object.keys(providers).map((name) => ({
-          id: name,
-          baseUrl: providers[name]?.baseUrl ?? "",
-        })),
-        models: modelList,
-        model: modelRef,
-      },
+    configEvent();
+  },
+
+  /**
+   * Write one config file, then answer with a fresh snapshot.
+   *
+   * A validation error leaves the file alone and comes back as a warning the
+   * settings page shows inline; the page never closes on a failed save.
+   */
+  async saveMcpServer(payload) {
+    const { config } = readConfigSnapshot();
+    const existing = config?.mcpServers ?? [];
+    const wanted = payload.server;
+    if (typeof wanted !== "object" || wanted === null) {
+      send({ type: "notice", level: "warn", text: "缺少 server 对象" });
+      return;
+    }
+    const name = String(wanted.name ?? "").trim();
+    const next = existing.filter((entry) => entry.name !== name);
+    next.push({
+      name,
+      command: String(wanted.command ?? "").trim(),
+      ...(String(wanted.args ?? "").trim() === ""
+        ? {}
+        : { args: String(wanted.args).trim().split(/\s+/) }),
+      ...(String(wanted.cwd ?? "").trim() === "" ? {} : { cwd: String(wanted.cwd).trim() }),
+      ...(wanted.timeoutMs === undefined || wanted.timeoutMs === null || wanted.timeoutMs === ""
+        ? {}
+        : { timeoutMs: Number(wanted.timeoutMs) }),
+      disabled: wanted.disabled === true,
     });
+    try {
+      await kernel.writeMcpServers(harnessHome, next);
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `MCP 配置未保存：${messageOf(error)}` });
+      return;
+    }
+    configEvent();
+  },
+
+  async removeMcpServer(payload) {
+    const { config } = readConfigSnapshot();
+    const name = String(payload.name ?? "");
+    const next = (config?.mcpServers ?? []).filter((entry) => entry.name !== name);
+    if (next.length === (config?.mcpServers ?? []).length) {
+      send({ type: "notice", level: "warn", text: `没有名为 ${name} 的 MCP server` });
+      return;
+    }
+    try {
+      await kernel.writeMcpServers(harnessHome, next);
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `MCP 配置未保存：${messageOf(error)}` });
+      return;
+    }
+    configEvent();
+  },
+
+  async savePermissions(payload) {
+    const wanted = payload.permissions;
+    if (typeof wanted !== "object" || wanted === null) {
+      send({ type: "notice", level: "warn", text: "缺少 permissions 对象" });
+      return;
+    }
+    try {
+      await kernel.writePermissionConfig(harnessHome, wanted);
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `权限配置未保存：${messageOf(error)}` });
+      return;
+    }
+    // The preset in the file is not the running preset: this host owns the
+    // live mode so the composer's menu stays authoritative.
+    configEvent();
+    send({
+      type: "notice",
+      level: "dim",
+      text: "权限配置已保存；运行中的模式仍以输入框上方选择为准",
+    });
+  },
+
+  async saveRunLimits(payload) {
+    const wanted = payload.run;
+    if (typeof wanted !== "object" || wanted === null) {
+      send({ type: "notice", level: "warn", text: "缺少 run 对象" });
+      return;
+    }
+    try {
+      runLimits = await kernel.writeRunLimits(harnessHome, wanted);
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `运行参数未保存：${messageOf(error)}` });
+      return;
+    }
+    if (ctx.running) {
+      send({ type: "notice", level: "dim", text: "运行参数将在下一回合生效" });
+    }
+    configEvent();
+  },
+
+  /**
+   * Rename, pin or archive a saved conversation.
+   *
+   * Renaming the open session is allowed: the title lives beside the log, so
+   * the transcript and the header are untouched, and the sidebar redraws from
+   * the same list the host just sent.
+   */
+  async sessionFlags(payload) {
+    const id = String(payload.id ?? "");
+    if (id === "") return;
+    const admin = kernel.createSessionAdmin({ harnessHome });
+    try {
+      await admin.update(id, {
+        ...(payload.title !== undefined ? { title: payload.title } : {}),
+        ...(payload.pinned !== undefined ? { pinned: payload.pinned === true } : {}),
+        ...(payload.archived !== undefined ? { archived: payload.archived === true } : {}),
+      });
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `会话未更新：${messageOf(error)}` });
+      return;
+    }
+    send(sessionsEvent());
+  },
+
+  async deleteSession(payload) {
+    const id = String(payload.id ?? "");
+    if (id === "") return;
+    if (id === sessionId) {
+      send({ type: "notice", level: "warn", text: "不能删除当前打开的会话，请先新建会话" });
+      return;
+    }
+    const admin = kernel.createSessionAdmin({ harnessHome });
+    try {
+      await admin.remove(id);
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `会话未删除：${messageOf(error)}` });
+      return;
+    }
+    titleCache.delete(id);
+    send(sessionsEvent());
+  },
+
+  async forkSession(payload) {
+    const id = String(payload.id ?? "");
+    if (id === "") return;
+    if (ctx.running) {
+      send({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
+      return;
+    }
+    const admin = kernel.createSessionAdmin({ harnessHome });
+    let outcome;
+    try {
+      outcome = await admin.fork(id);
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `会话未分叉：${messageOf(error)}` });
+      return;
+    }
+    send(sessionsEvent());
+    send({ type: "notice", level: "dim", text: `已从该会话分叉出 ${outcome.sessionId}` });
+    return handleLoadSession(outcome.sessionId);
+  },
+
+  /**
+   * Answer an artifact-path request from a client without a preload.
+   *
+   * The renderer reveals through the preload's `revealArtifact`, which the
+   * host process cannot do — it has no window. A client that sends the command
+   * anyway gets the path back in a notice, so the file is findable instead of
+   * the click being a silent no-op.
+   */
+  revealArtifact(payload) {
+    const target = typeof payload.path === "string" ? payload.path : "";
+    if (target === "") {
+      send({ type: "notice", level: "warn", text: "产物路径为空" });
+      return;
+    }
+    send({ type: "notice", level: "dim", text: `产物：${target}` });
   },
 
   getUsage() {
@@ -769,6 +1110,42 @@ const handlers = {
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
+/**
+ * Run one command and report its failure.
+ *
+ * `undefined` for a handler that answered synchronously, a promise otherwise;
+ * the queue below awaits it either way.
+ */
+function runCommand(payload) {
+  try {
+    const result = handlers[payload.cmd](payload);
+    if (result instanceof Promise) {
+      return result.catch((error) => {
+        send({
+          type: "error",
+          message: `${payload.cmd} 失败：${error instanceof Error ? error.message : String(error)}`,
+        });
+      });
+    }
+  } catch (error) {
+    send({
+      type: "error",
+      message: `${payload.cmd} 失败：${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+  return undefined;
+}
+
+/**
+ * Commands run one at a time, in arrival order.
+ *
+ * `loadSession` and `sleep`-less sequences like `loadSession` → `exportSession`
+ * are two writes from the same click; running them concurrently let the
+ * export read `sessionId` before the load had set it and answer "nothing to
+ * export" for a session the user was looking at.
+ */
+let commandQueue = Promise.resolve();
+
 rl.on("line", (line) => {
   const text = line.trim();
   if (text === "") return;
@@ -792,22 +1169,7 @@ rl.on("line", (line) => {
     });
     return;
   }
-  try {
-    const result = handler(payload);
-    if (result instanceof Promise) {
-      result.catch((error) => {
-        send({
-          type: "error",
-          message: `${payload.cmd} 失败：${error instanceof Error ? error.message : String(error)}`,
-        });
-      });
-    }
-  } catch (error) {
-    send({
-      type: "error",
-      message: `${payload.cmd} 失败：${error instanceof Error ? error.message : String(error)}`,
-    });
-  }
+  commandQueue = commandQueue.then(() => runCommand(payload));
 });
 
 rl.on("close", () => {

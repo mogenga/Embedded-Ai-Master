@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -344,6 +344,129 @@ describe("desktop host", () => {
     // Session ids are generated, so id-only matching made this useless.
     expect(matches.sessions).toHaveLength(1);
     expect(matches.sessions[0].title).toBe("串口没输出");
+  }, HOST_TIMEOUT_MS);
+
+  it("getSettings 带上 MCP/权限/运行上限，saveMcpServer 写盘后回新快照", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "getSettings" },
+        {
+          cmd: "saveMcpServer",
+          server: { name: "probe", command: "node", args: "probe.js --stdio", timeoutMs: 5000 },
+        },
+      ],
+      {
+        until: (all) => {
+          const settings = all.filter((event) => event.type === "settings");
+          return settings.length >= 2 && settings.at(-1).settings.mcpServers?.length === 1;
+        },
+      },
+    );
+    const settings = events.filter((event) => event.type === "settings");
+    // The first answer has no server yet and names the files it reads.
+    expect(settings[0].settings.mcpServers).toStrictEqual([]);
+    expect(settings[0].settings.configPaths.mcp).toContain("mcp.json");
+    expect(settings[0].settings.permissions.preset).toBe("diagnose");
+    expect(settings[0].settings.run.maxTurns).toBe(10);
+
+    const written = settings.at(-1).settings.mcpServers;
+    expect(written).toStrictEqual([
+      { name: "probe", command: "node", args: ["probe.js", "--stdio"], timeoutMs: 5000, disabled: false },
+    ]);
+    // The file is the source of truth, not host memory: a fresh edit of
+    // mcp.json reaches the next settings read.
+    const onDisk = JSON.parse(await readFile(path.join(home, "mcp.json"), "utf8"));
+    expect(onDisk.mcpServers.probe.command).toBe("node");
+  }, HOST_TIMEOUT_MS);
+
+  it("sessionFlags 写入标题，会话列表随之显示", async () => {
+    const home = await tempHome();
+    const created = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "prompt", text: "串口没输出" }],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+    const sessionId = created.find((event) => event.type === "sessions" && event.sessions.length > 0)
+      ?.sessions[0]?.id;
+    expect(sessionId).toBeDefined();
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "sessionFlags", id: sessionId, title: "UART 无输出", pinned: true },
+      ],
+      {
+        until: (all) =>
+          all.some(
+            (event) =>
+              event.type === "sessions"
+              && event.sessions.some((entry) => entry.title === "UART 无输出"),
+          ),
+      },
+    );
+    // The `init` handshake also sends a list, and it predates the rename; the
+    // last row for the session is the one that carries the new title.
+    const row = events
+      .filter((event) => event.type === "sessions")
+      .flatMap((event) => event.sessions)
+      .filter((entry) => entry.id === sessionId)
+      .at(-1);
+    expect(row.title).toBe("UART 无输出");
+    expect(row.pinned).toBe(true);
+
+    const meta = JSON.parse(
+      await readFile(path.join(home, "sessions", sessionId, "meta.json"), "utf8"),
+    );
+    // The kernel's header validator drops unknown fields, so the title has to
+    // live beside the session rather than inside header.json.
+    expect(meta.title).toBe("UART 无输出");
+  }, HOST_TIMEOUT_MS);
+
+  it("exportSession 从已打开的会话日志渲染 Markdown", async () => {
+    const home = await tempHome();
+    const created = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "prompt", text: "串口没输出" }],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+    const sessionId = created
+      .filter((event) => event.type === "sessions")
+      .flatMap((event) => event.sessions)
+      .at(-1)?.id;
+    expect(sessionId).toBeDefined();
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "loadSession", id: sessionId },
+        { cmd: "exportSession" },
+      ],
+      { until: (all) => all.some((event) => event.type === "export_ready") },
+    );
+    const ready = events.find((event) => event.type === "export_ready");
+    // The title is the first user message; the body comes from the log, not
+    // from whatever the renderer happens to have drawn.
+    expect(ready.markdown).toContain("# 串口没输出");
+    expect(ready.markdown).toContain("## User");
+    expect(ready.filename).toBe("串口没输出.md");
+  }, HOST_TIMEOUT_MS);
+
+  it("exportSession 在没有打开的会话时回 warn", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "exportSession" }],
+      { until: (all) => all.some((event) => event.type === "notice") },
+    );
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("没有可导出");
+    expect(events.some((event) => event.type === "export_ready")).toBe(false);
   }, HOST_TIMEOUT_MS);
 
   it("loadSession 拒绝非法 id", async () => {

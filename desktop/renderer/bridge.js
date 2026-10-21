@@ -27,7 +27,9 @@ import {
   initialState,
   sessionEventToHostEvents,
   sessionEventsToMessages,
+  sessionExportName,
   sessionLoadedEvent,
+  sessionMarkdown,
   sessionsEvent,
 } from "./protocol.js";
 
@@ -299,10 +301,12 @@ export function createBrowserBridge(options = {}) {
       }
       const body = await response.json();
       const summaries = isRecord(body) && Array.isArray(body.sessions) ? body.sessions : [];
-      // The list API has no title; fetch the first user message of a bounded
-      // number of sessions, and cache what was already read.
+      // A session the operator renamed carries its title from the API. Only
+      // the rest need the first user message read out of the log, and only a
+      // bounded number of them: this is one request per untitled session.
       const missing = summaries
-        .map((summary) => textOf(isRecord(summary) ? summary.id : undefined))
+        .filter((summary) => isRecord(summary) && textOf(summary.title) === "")
+        .map((summary) => textOf(summary.id))
         .filter((id) => id !== "" && !titles.has(id))
         .slice(0, 30);
       await Promise.all(
@@ -333,7 +337,7 @@ export function createBrowserBridge(options = {}) {
         summaries.map((summary) => {
           const record = isRecord(summary) ? summary : {};
           const id = textOf(record.id);
-          const title = titles.get(id) ?? "";
+          const title = textOf(record.title) || (titles.get(id) ?? "");
           return { ...record, title, summary: title === "" ? id : title };
         }),
       );
@@ -536,7 +540,130 @@ export function createBrowserBridge(options = {}) {
     "listCommands",
     "getTree",
     "searchSessions",
+    "saveMcpServer",
+    "removeMcpServer",
+    "savePermissions",
+    "saveRunLimits",
+    "sessionFlags",
+    "deleteSession",
+    "forkSession",
+    "revealArtifact",
+    "exportSession",
   ]);
+
+  /** The last `/api/config` snapshot; the settings page reads from here. */
+  let lastConfig = null;
+
+  async function refreshConfig() {
+    try {
+      const response = await fetchImpl("/api/config");
+      if (!response.ok) {
+        emit({ type: "notice", level: "warn", text: `配置读取失败：${await readError(response)}` });
+        return;
+      }
+      lastConfig = await response.json();
+    } catch (error) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `配置读取失败：${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    emitSettings();
+  }
+
+  function emitSettings() {
+    const settings = { locale, providers: [], models: [], model: lastModel };
+    const stored = storage?.getItem("prometheus.theme");
+    if (stored !== null && stored !== undefined) settings.theme = stored;
+    if (isRecord(lastConfig)) {
+      if (Array.isArray(lastConfig.mcpServers)) settings.mcpServers = lastConfig.mcpServers;
+      if (isRecord(lastConfig.permissions)) settings.permissions = lastConfig.permissions;
+      if (isRecord(lastConfig.run)) settings.run = lastConfig.run;
+      settings.configPaths = {
+        mcp: textOf(lastConfig.mcpPath),
+        permissions: textOf(lastConfig.permissionsPath),
+        run: textOf(lastConfig.runPath),
+      };
+    }
+    emit({ type: "settings", settings });
+  }
+
+  /** PUT /api/config with one section; a rejection becomes a warning. */
+  async function putConfig(section, value) {
+    try {
+      const response = await fetchImpl("/api/config", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ [section]: value }),
+      });
+      if (!response.ok) {
+        emit({ type: "notice", level: "warn", text: `配置未保存：${await readError(response)}` });
+        return;
+      }
+      lastConfig = await response.json();
+    } catch (error) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `配置未保存：${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    emitSettings();
+  }
+
+  /**
+   * Render the open conversation as Markdown and hand it to the renderer.
+   *
+   * The transcript is rebuilt from the log, not scraped from the DOM: the log
+   * is the record, and a scrolled or partly built screen is not.
+   */
+  async function exportSession(id) {
+    try {
+      const response = await fetchImpl(`/api/sessions/${encodeURIComponent(id)}`);
+      if (!response.ok) throw new Error(await readError(response));
+      const body = await response.json();
+      const events = isRecord(body) && Array.isArray(body.events) ? body.events : [];
+      const title = titles.get(id) ?? titleOf(events);
+      emit({
+        type: "export_ready",
+        markdown: sessionMarkdown(events, { title }),
+        filename: sessionExportName(id, title),
+      });
+    } catch (error) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `导出失败：${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  /** One mutating call against a saved session; failures become a warning. */
+  async function sessionCommand(method, path, body) {
+    try {
+      const response = await fetchImpl(path, {
+        method,
+        ...(body === undefined
+          ? {}
+          : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }),
+      });
+      if (!response.ok) {
+        emit({ type: "notice", level: "warn", text: `会话操作失败：${await readError(response)}` });
+        return undefined;
+      }
+      return await response.json().catch(() => ({}));
+    } catch (error) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `会话操作失败：${error instanceof Error ? error.message : String(error)}`,
+      });
+      return undefined;
+    }
+  }
 
   function unsupported(command) {
     emit({
@@ -583,13 +710,101 @@ export function createBrowserBridge(options = {}) {
       case "loadSession":
         void loadSession(textOf(payload.id));
         return;
-      case "getSettings": {
-        // Only fields with a real source. Absent keys are left alone by the
-        // renderer; inventing values here reset the user's own preferences.
-        const settings = { locale, providers: [], models: [], model: lastModel };
-        const stored = storage?.getItem("prometheus.theme");
-        if (stored !== null && stored !== undefined) settings.theme = stored;
-        return emit({ type: "settings", settings });
+      case "getSettings":
+        // The config half comes from `/api/config`; the UI half is local.
+        // Re-reading on every open is what makes an edit to `mcp.json` in an
+        // editor show up without a server restart.
+        void refreshConfig();
+        return;
+      case "saveMcpServer": {
+        const server = isRecord(payload.server) ? payload.server : {};
+        const existing = Array.isArray(lastConfig?.mcpServers) ? lastConfig.mcpServers : [];
+        const name = textOf(server.name).trim();
+        const next = existing.filter((entry) => textOf(entry.name) !== name);
+        next.push({
+          name,
+          command: textOf(server.command).trim(),
+          ...(textOf(server.args).trim() === "" ? {} : { args: textOf(server.args).trim().split(/\s+/) }),
+          ...(textOf(server.cwd).trim() === "" ? {} : { cwd: textOf(server.cwd).trim() }),
+          ...(server.timeoutMs === undefined || server.timeoutMs === null || server.timeoutMs === ""
+            ? {}
+            : { timeoutMs: Number(server.timeoutMs) }),
+          disabled: server.disabled === true,
+        });
+        void putConfig("mcpServers", next);
+        return;
+      }
+      case "removeMcpServer": {
+        const name = textOf(payload.name);
+        const existing = Array.isArray(lastConfig?.mcpServers) ? lastConfig.mcpServers : [];
+        void putConfig("mcpServers", existing.filter((entry) => textOf(entry.name) !== name));
+        return;
+      }
+      case "savePermissions":
+        void putConfig("permissions", isRecord(payload.permissions) ? payload.permissions : {});
+        return;
+      case "saveRunLimits":
+        void putConfig("run", isRecord(payload.run) ? payload.run : {});
+        return;
+      case "sessionFlags": {
+        const id = textOf(payload.id);
+        if (id === "") return;
+        void sessionCommand("PATCH", `/api/sessions/${encodeURIComponent(id)}`, {
+          ...(payload.title !== undefined ? { title: payload.title } : {}),
+          ...(payload.pinned !== undefined ? { pinned: payload.pinned === true } : {}),
+          ...(payload.archived !== undefined ? { archived: payload.archived === true } : {}),
+        }).then((body) => {
+          if (body === undefined) return;
+          void refreshSessions();
+        });
+        return;
+      }
+      case "deleteSession": {
+        const id = textOf(payload.id);
+        if (id === "") return;
+        if (id === currentSessionId) {
+          emit({ type: "notice", level: "warn", text: "不能删除当前打开的会话，请先新建会话" });
+          return;
+        }
+        void sessionCommand("DELETE", `/api/sessions/${encodeURIComponent(id)}`).then((body) => {
+          if (body === undefined) return;
+          titles.delete(id);
+          void refreshSessions();
+        });
+        return;
+      }
+      case "forkSession": {
+        const id = textOf(payload.id);
+        if (id === "") return;
+        if (ctx.running) {
+          emit({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
+          return;
+        }
+        void sessionCommand("POST", `/api/sessions/${encodeURIComponent(id)}/fork`).then((body) => {
+          const forkedId = isRecord(body) ? textOf(body.sessionId) : "";
+          if (forkedId === "") return;
+          emit({ type: "notice", level: "dim", text: `已从该会话分叉出 ${forkedId}` });
+          void refreshSessions();
+          void loadSession(forkedId);
+        });
+        return;
+      }
+      case "revealArtifact": {
+        const target = textOf(payload.path);
+        if (target === "") return;
+        // A browser cannot open the file manager. An `openExternal` call on a
+        // `file://` URL is silently ignored by Chrome, so the path is reported
+        // instead of pretending a window opened.
+        emit({ type: "notice", level: "dim", text: `产物：${target}` });
+        return;
+      }
+      case "exportSession": {
+        if (currentSessionId === "") {
+          emit({ type: "notice", level: "warn", text: "没有可导出的对话" });
+          return;
+        }
+        void exportSession(currentSessionId);
+        return;
       }
       case "setMode": {
         const mode = textOf(payload.mode);
