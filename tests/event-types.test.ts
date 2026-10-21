@@ -9,6 +9,13 @@ import type {
 } from "../src/session/types.js";
 
 const toolStarted: ToolStartedPayload = { callId: "c1", tool: "fs", access: "read" };
+// annotations 是可选的：老日志没有这个字段，回放时仍要能当作 ToolStartedPayload 用。
+const toolStartedWithAnnotations: ToolStartedPayload = {
+  callId: "c2",
+  tool: "shell",
+  access: "write",
+  annotations: { destructive: true },
+};
 const mcpStatus: McpStatusPayload = { kind: "connected", server: "probe", toolCount: 2 };
 const deviceStatus: DeviceStatusPayload = {
   callId: "c1",
@@ -42,5 +49,19 @@ describe("新事件类型", () => {
     // state: the board pane's fields (target, ports, scan) do not exist here.
     expect(out[2].device).toStrictEqual({ probe: "attached" });
     expect(out[2].tool).toBe("mcp__probe__attach");
+  });
+
+  it("带 annotations 的 tool_started 仍是合法事件，且不影响消息投影", () => {
+    const withMarks: SessionEvent[] = [
+      { seq: 0, ts: "t", type: "tool_started", payload: { ...toolStartedWithAnnotations } },
+    ];
+    expect(() => buildMessages(withMarks)).not.toThrow();
+    expect(buildMessages(withMarks).length).toBe(0);
+    expect(sessionEventsToMessages(withMarks)).toEqual([]);
+
+    const ctx = createContext({ sessionId: "s" });
+    const out = withMarks.flatMap((event) => sessionEventToHostEvents(event, ctx));
+    expect(out.map((message) => message.type)).toStrictEqual(["tool_start"]);
+    expect(out[0].name).toBe("shell");
   });
 });

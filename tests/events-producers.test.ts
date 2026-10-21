@@ -597,7 +597,14 @@ describe("query tool_started 生命周期", () => {
     expect(decision!.seq).toBeLessThan(started!.seq);
     expect(started!.seq).toBeLessThan(result!.seq);
     expect(started!.parent).toBe(assistant!.seq);
-    expect(started!.payload).toEqual({ callId: "c1", tool: "echo", access: "write" });
+    // `echo` declares `readOnly: true`; the annotation travels so the UI can
+    // mark the row without a table of its own.
+    expect(started!.payload).toEqual({
+      callId: "c1",
+      tool: "echo",
+      access: "write",
+      annotations: { readOnly: true },
+    });
   });
 
   it("无 permission gate 时 access 回退为 unknown", async () => {
@@ -610,7 +617,12 @@ describe("query tool_started 生命周期", () => {
     await collect(query(ctx, "x", { maxTurns: 10 }));
 
     const started = session.events().find((event) => event.type === "tool_started");
-    expect(started?.payload).toEqual({ callId: "c1", tool: "echo", access: "unknown" });
+    expect(started?.payload).toEqual({
+      callId: "c1",
+      tool: "echo",
+      access: "unknown",
+      annotations: { readOnly: true },
+    });
   });
 });
 

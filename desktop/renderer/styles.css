@@ -2335,6 +2335,30 @@ mark.find-hit.current {
   color: var(--danger);
 }
 
+/* Tool annotations: the property the tool declares about itself, next to its
+   name. A destructive tool is the one worth noticing, so it gets the warning
+   colour; read-only and evidence stay quiet. No badge means "not declared",
+   which is why there is no neutral variant. */
+.tool-annotation {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: var(--text-faint);
+}
+
+.tool-annotation .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.tool-annotation.destructive {
+  color: var(--warn);
+}
+
+.tool-annotation.evidence {
+  color: var(--success, var(--accent));
+}
+
 .tool-name {
   font-size: var(--text-sm);
   color: var(--text-secondary);

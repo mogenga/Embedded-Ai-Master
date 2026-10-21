@@ -20,6 +20,7 @@ import type { SessionEvent, SessionHeader } from "../session/types.js";
 import { readJsonBody } from "./body.js";
 import { createConfigApi } from "./config-api.js";
 import { createEventStreamHandler } from "./event-stream.js";
+import { listSessionArtifacts, readFilePreview } from "./files-api.js";
 import { HttpError, sendError, sendJson } from "./http.js";
 import { createSessionAdmin } from "./session-admin.js";
 import type { PermissionPreset } from "../permissions/types.js";
@@ -709,6 +710,22 @@ export function createApiHandler(
       if (pathname === "/api/kb") {
         requireMethod(method, "GET");
         await handleKb(res, harnessHome);
+        return;
+      }
+      if (pathname === "/api/file") {
+        requireMethod(method, "GET");
+        const preview = await readFilePreview(harnessHome, url.searchParams.get("path"));
+        sendJson(res, 200, preview);
+        return;
+      }
+      const artifactMatch = /^\/api\/sessions\/([^/]+)\/artifacts$/.exec(pathname);
+      if (artifactMatch !== null) {
+        requireMethod(method, "GET");
+        const artifacts = await listSessionArtifacts(
+          harnessHome,
+          decodeSegment(artifactMatch[1]),
+        );
+        sendJson(res, 200, { artifacts });
         return;
       }
       if (pathname === "/api/device") {

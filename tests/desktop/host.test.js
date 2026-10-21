@@ -531,6 +531,299 @@ describe("desktop host", () => {
     });
   }, HOST_TIMEOUT_MS);
 
+  it("listSessions 的 includeArchived:false 过滤掉归档会话", async () => {
+    const home = await tempHome();
+    const created = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "prompt", text: "串口没输出" }],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+    const sessionId = created
+      .filter((event) => event.type === "sessions")
+      .flatMap((event) => event.sessions)
+      .at(-1)?.id;
+    expect(sessionId).toBeDefined();
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "sessionFlags", id: sessionId, archived: true },
+        { cmd: "listSessions", includeArchived: false },
+        { cmd: "listSessions", includeArchived: true },
+      ],
+      {
+        until: (all) =>
+          all.filter((event) => event.type === "sessions").length >= 4
+          && all.filter((event) => event.type === "sessions").at(-1).sessions.length === 1,
+      },
+    );
+    const lists = events.filter((event) => event.type === "sessions");
+    // The boot list predates the archive, so the row is still in it.
+    expect(lists[0].sessions).toHaveLength(1);
+    // The push after `sessionFlags` reuses the default filter, so the row it
+    // just archived is gone: otherwise the archive button looks inert.
+    expect(lists[1].sessions).toStrictEqual([]);
+    expect(lists[1].total).toBe(0);
+    expect(lists[2].sessions).toStrictEqual([]);
+    // Asking for archived rows brings the session back.
+    expect(lists.at(-1).sessions).toHaveLength(1);
+    expect(lists.at(-1).sessions[0].archived).toBe(true);
+    expect(lists.at(-1).total).toBe(1);
+  }, HOST_TIMEOUT_MS);
+
+  it("listSessions 的 limit 只返回一页，total 是过滤后的全量", async () => {
+    const home = await tempHome();
+    // Two sessions: each prompt that creates one writes another directory.
+    const created = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "prompt", text: "第一" }],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+    expect(created.some((event) => event.type === "run_end")).toBe(true);
+    await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "newSession" }, { cmd: "prompt", text: "第二" }],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+    const dirs = await readdir(path.join(home, "sessions"));
+    expect(dirs).toHaveLength(2);
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "listSessions", limit: 1 },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "sessions" && event.limit === 1 && event.total === 2),
+      },
+    );
+    const page = events.find((event) => event.type === "sessions" && event.limit === 1);
+    expect(page.sessions).toHaveLength(1);
+    // total/all describe the filtered set, not the page: that is what the
+    // sidebar's "load more" row counts down.
+    expect(page.total).toBe(2);
+    expect(page.all).toBe(2);
+    // Paging is stable: the first page is the newest session.
+    const ids = dirs.map((id) => path.join(home, "sessions", id));
+    expect(ids).toContain(path.join(home, "sessions", page.sessions[0].id));
+  }, HOST_TIMEOUT_MS);
+
+  it("listSessions 的 cwd 过滤归一化大小写与分隔符", async () => {
+    const home = await tempHome();
+    const created = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "prompt", text: "症状" }],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+    expect(created.some((event) => event.type === "run_end")).toBe(true);
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        // A different folder matches nothing; the session's own workdir matches.
+        { cmd: "listSessions", cwd: path.join(home, "nope") },
+        { cmd: "listSessions", cwd: home.replace(/\\/g, "/").toUpperCase() },
+      ],
+      {
+        until: (all) => all.filter((event) => event.type === "sessions").length >= 3,
+      },
+    );
+    const lists = events.filter((event) => event.type === "sessions");
+    // Boot list, then the empty one, then the match.
+    expect(lists[1].sessions).toStrictEqual([]);
+    expect(lists[1].total).toBe(0);
+    expect(lists[2].sessions).toHaveLength(1);
+    expect(lists[2].total).toBe(1);
+  }, HOST_TIMEOUT_MS);
+
+  it("getFile 读工作目录内的文本，越界与二进制分别被拒/标出", async () => {
+    const home = await tempHome();
+    const outside = await mkdtemp(path.join(tmpdir(), "eam-outside-"));
+    tempDirs.push(outside);
+    await writeFile(path.join(outside, "secret.txt"), "outside", "utf8");
+    await writeFile(path.join(home, "note.txt"), "寄存器 0x10 = 0", "utf8");
+    // A NUL byte in the first 8 KiB marks the file as binary.
+    await writeFile(path.join(home, "firmware.bin"), Buffer.from([0x7f, 0x45, 0x4c, 0x00, 0x01]));
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "getFile", path: "note.txt" },
+        { cmd: "getFile", path: path.join(outside, "secret.txt") },
+        { cmd: "getFile", path: "firmware.bin" },
+        { cmd: "getFile", path: "" },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "file" && event.file.path === "firmware.bin")
+          && all.some((event) => event.type === "notice")
+          && all.some((event) => event.type === "error"),
+      },
+    );
+    const file = events.find((event) => event.type === "file");
+    expect(file.file).toStrictEqual({
+      path: "note.txt",
+      content: "寄存器 0x10 = 0",
+      truncated: false,
+      binary: false,
+    });
+
+    const notices = events.filter((event) => event.type === "notice");
+    const escape = notices.find((notice) => notice.text.includes("不在工作目录内"));
+    expect(escape).toBeDefined();
+    expect(escape.level).toBe("warn");
+    // The escaped file is never read: no `file` event names it.
+    const escaped = path.join(outside, "secret.txt");
+    expect(events.filter((event) => event.type === "file" && event.file.path === escaped)).toHaveLength(0);
+    expect(events.filter((event) => event.type === "file").map((event) => event.file.path)).toStrictEqual([
+      "note.txt",
+      "firmware.bin",
+    ]);
+
+    const binary = events.find(
+      (event) => event.type === "file" && event.file.path === "firmware.bin",
+    );
+    expect(binary.file).toMatchObject({ content: "", binary: true });
+
+    expect(events.find((event) => event.type === "error").message).toContain("文件路径");
+  }, HOST_TIMEOUT_MS);
+
+  it("getFile 对目录回 notice 而不是当作文件", async () => {
+    const home = await tempHome();
+    await mkdir(path.join(home, "sessions"), { recursive: true });
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "getFile", path: "sessions" },
+      ],
+      { until: (all) => all.some((event) => event.type === "notice") },
+    );
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("不是普通文件");
+    expect(events.some((event) => event.type === "file")).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  it("getArtifacts 在没有打开的会话时回空数组", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "getArtifacts" },
+      ],
+      { until: (all) => all.some((event) => event.type === "artifacts") },
+    );
+    expect(events.find((event) => event.type === "artifacts")).toStrictEqual({
+      type: "artifacts",
+      artifacts: [],
+    });
+    // An empty sidebar is the expected state here, not an error.
+    expect(events.some((event) => event.type === "error")).toBe(false);
+    expect(events.some((event) => event.type === "notice")).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  it("getArtifacts/getArtifact 列出并读取当前会话的产物", async () => {
+    const home = await tempHome();
+    const created = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "prompt", text: "串口没输出" }],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+    const sessionId = created
+      .filter((event) => event.type === "sessions")
+      .flatMap((event) => event.sessions)
+      .at(-1)?.id;
+    expect(sessionId).toBeDefined();
+    const artifactDir = path.join(home, "sessions", sessionId, "artifacts");
+    await mkdir(artifactDir, { recursive: true });
+    await writeFile(path.join(artifactDir, "call-1.txt"), "full output", "utf8");
+    // A directory inside the artifact folder is not an artifact.
+    await mkdir(path.join(artifactDir, "nested"), { recursive: true });
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "loadSession", id: sessionId },
+        { cmd: "getArtifacts" },
+        { cmd: "getArtifact", path: path.join(artifactDir, "call-1.txt") },
+        { cmd: "getArtifact", path: path.join(artifactDir, "..", "header.json") },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "artifact")
+          && all.some((event) => event.type === "notice"),
+      },
+    );
+    const list = events.find((event) => event.type === "artifacts");
+    expect(list.artifacts).toHaveLength(1);
+    expect(list.artifacts[0]).toMatchObject({ name: "call-1.txt", kind: "text", size: 11 });
+
+    const artifact = events.find((event) => event.type === "artifact");
+    expect(artifact.artifact).toStrictEqual({
+      path: path.join(artifactDir, "call-1.txt"),
+      kind: "text",
+      content: "full output",
+      truncated: false,
+    });
+    // `..` out of the artifact directory is refused, not read.
+    const escape = events.filter((event) => event.type === "notice").at(-1);
+    expect(escape.text).toContain("不在当前会话的 artifacts 目录内");
+  }, HOST_TIMEOUT_MS);
+
+  it("setEffort 回 warn notice 且不发 state", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "setEffort", effort: "high" },
+        // A later command marks the end of the queue: `state` would have been
+        // sent before it if `setEffort` had claimed to apply.
+        { cmd: "listSessions" },
+      ],
+      { until: (all) => all.some((event) => event.type === "sessions") },
+    );
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice).toStrictEqual({
+      type: "notice",
+      level: "warn",
+      text: "内核不支持调整推理强度",
+    });
+    // Only the boot `state`; claiming success would need a second one.
+    expect(events.filter((event) => event.type === "state")).toHaveLength(1);
+  }, HOST_TIMEOUT_MS);
+
+  it("saveSettings 只接受 locale，其他字段回 warn", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "saveSettings", settings: { locale: "en" } },
+        { cmd: "saveSettings", settings: { theme: "dark" } },
+        { cmd: "listSessions" },
+      ],
+      { until: (all) => all.some((event) => event.type === "sessions") },
+    );
+    const locale = events.filter((event) => event.type === "locale").at(-1);
+    expect(locale).toStrictEqual({ type: "locale", locale: "en" });
+    // The language switch also refreshes state so the chrome follows it.
+    expect(events.filter((event) => event.type === "state").at(-1).locale).toBe("en");
+
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("该设置没有后端");
+    expect(notice.text).toContain("theme");
+  }, HOST_TIMEOUT_MS);
+
   it("无法解析的指令被拒绝而不是让宿主崩溃", async () => {
     const home = await tempHome();
     const child = spawn(process.execPath, [HOST], {

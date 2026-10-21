@@ -363,14 +363,19 @@
           <section class="workbench" id="workbench" hidden>
             <div class="workbench-head">
               <div class="workbench-tabs" id="workbench-tabs" role="tablist">
-                <!-- Only the pane with a backend is listed: files/diff/
-                     history/tasks/artifact/terminal/browser have no kernel
-                     counterpart, and the serial monitor needs commands
-                     (`serialOpen`/`serialRead`/…) this host does not provide —
-                     the kernel only exposes the probe through MCP tools the
-                     model calls. An empty tab that can never fill is not a
-                     placeholder, it is a dead end. -->
+                <!-- Three panes have a real source: the board reads
+                     `device_status`, the file pane reads `GET /api/file`
+                     (or the host's `getFile`), and the artifact pane lists
+                     what `pipeline.writeArtifact` wrote. The rest — diff,
+                     history, tasks, terminal, browser — have no kernel
+                     counterpart, and the serial monitor needs commands this
+                     host does not provide; an empty tab that can never fill is
+                     a dead end, not a placeholder. File and artifact start
+                     hidden because they are opened by an action (a tool row
+                     click), not by browsing. -->
                 <button role="tab" aria-selected="true" tabindex="0" data-pane="board" class="active" data-i18n="paneBoard">Board</button>
+                <button role="tab" aria-selected="false" tabindex="-1" data-pane="file" data-i18n="paneFile" hidden>File</button>
+                <button role="tab" aria-selected="false" tabindex="-1" data-pane="artifact" data-i18n="paneArtifact" hidden>Artifact</button>
               </div>
               <div class="workbench-meta" id="workbench-meta"></div>
               <button class="icon-button small" id="close-workbench" data-i18n-title="closePane">

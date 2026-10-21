@@ -14,7 +14,15 @@
  * Domain behaviour — approvals, permissions, MCP, tools — stays in the kernel.
  */
 
-import { existsSync, readdirSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  lstatSync,
+  openSync,
+  readdirSync,
+  readSync,
+  realpathSync,
+} from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -380,10 +388,57 @@ function titleFor(entry) {
   return title === entry.id ? "" : title;
 }
 
-function sessionsEvent() {
+/** Rows per page when the renderer does not ask for a specific page size. */
+const DEFAULT_SESSION_LIMIT = 80;
+
+/**
+ * The filter the renderer last asked for.
+ *
+ * Every command that changes a session pushes a fresh list (`sessionFlags`,
+ * `deleteSession`, `forkSession`, the end of a turn). Those pushes reuse this
+ * filter: otherwise archiving a row would answer with a list that still
+ * contains it, and the archive button would look like it did nothing.
+ */
+let sessionListQuery = { includeArchived: false, limit: DEFAULT_SESSION_LIMIT };
+
+/**
+ * One spelling per workspace, for comparison only.
+ *
+ * Windows paths are case-insensitive and get written with either separator,
+ * so `G:\proj` and `g:/proj/` name the same folder and must filter as one.
+ */
+function normalizeWorkdir(value) {
+  return String(value ?? "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+/** Apply the renderer's filter to the full list, before paging. */
+function filterSessions(all, query) {
+  let rows = all;
+  if (query.includeArchived !== true) {
+    rows = rows.filter((entry) => entry.archived !== true);
+  }
+  if (typeof query.cwd === "string" && query.cwd !== "") {
+    const wanted = normalizeWorkdir(query.cwd);
+    rows = rows.filter((entry) => normalizeWorkdir(entry.workdir) === wanted);
+  }
+  if (query.status === "working") {
+    rows = rows.filter((entry) => entry.id === sessionId && running);
+  }
+  return rows;
+}
+
+function sessionsEvent(query = sessionListQuery) {
   const all = sessions.list();
+  // `sessions.list()` is already newest-first (`updatedAt ?? createdAt`), so
+  // paging is stable: the same limit returns the same rows while nothing new
+  // arrives.
+  const filtered = filterSessions(all, query);
+  const total = filtered.length;
+  const limit =
+    Number.isSafeInteger(query.limit) && query.limit > 0 ? query.limit : DEFAULT_SESSION_LIMIT;
+  const page = filtered.slice(0, limit);
   let scanned = 0;
-  const list = all.map((entry) => {
+  const list = page.map((entry) => {
     const alreadyCached = titleCache.has(`${entry.id}@${entry.createdAt}`);
     const title = alreadyCached || scanned < TITLE_SCAN_LIMIT ? titleFor(entry) : "";
     if (!alreadyCached) scanned += 1;
@@ -394,7 +449,211 @@ function sessionsEvent() {
     ...session,
     status: session.id === sessionId && running ? "working" : "ready",
   }));
+  // The protocol counts the rows it was handed; the sidebar needs the size of
+  // the whole filtered set to know whether "load more" still applies.
+  event.total = total;
+  event.all = total;
+  event.limit = limit;
   return event;
+}
+
+// ---------------------------------------------------------------------------
+// Read-only file access
+// ---------------------------------------------------------------------------
+
+/** Files larger than this are cut, never loaded whole. */
+const MAX_PREVIEW_BYTES = 256 * 1024;
+/** How much of a file is inspected for a NUL byte before calling it binary. */
+const BINARY_SNIFF_BYTES = 8 * 1024;
+
+/** Case-fold a resolved path for comparison; Windows does not distinguish. */
+function pathKey(value) {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+/** True when `target` is `root` or lives underneath it. */
+function isInside(root, target) {
+  const parent = pathKey(root);
+  const child = pathKey(target);
+  if (child === parent) return true;
+  return child.startsWith(parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`);
+}
+
+/**
+ * The roots a preview may read from.
+ *
+ * The workspace and the open session's own directory: a session's artifacts
+ * and log live beside it, and the operator pointing a preview at their own
+ * project is the whole purpose. Anything else is refused rather than read and
+ * hidden afterwards.
+ */
+function allowedReadRoots() {
+  const roots = [cwd];
+  if (sessionId !== "") roots.push(path.join(sessionsRoot, sessionId));
+  return roots;
+}
+
+/**
+ * Where a requested path would land, with symlinks resolved.
+ *
+ * The target may not exist (that is a different notice), so the deepest
+ * existing ancestor is resolved instead and the rest is re-appended. Without
+ * this, a symlinked parent directory would let a path pass the prefix check
+ * while the actual file sat outside every allowed root.
+ */
+function resolveForCheck(target) {
+  const absolute = path.resolve(target);
+  const rest = [];
+  let current = absolute;
+  for (;;) {
+    if (existsSync(current)) {
+      const base = realpathSync(current);
+      return rest.length === 0 ? base : path.join(base, ...rest.reverse());
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return absolute;
+    rest.push(path.basename(current));
+    current = parent;
+  }
+}
+
+/** True when the path, once resolved, is inside one of the allowed roots. */
+function isAllowedPath(target) {
+  const resolved = resolveForCheck(target);
+  return allowedReadRoots().some((root) => isInside(root, resolved));
+}
+
+/**
+ * Read at most `maxBytes` of a regular file, and say whether it was cut.
+ *
+ * The descriptor is opened read-only and closed in `finally` so a refused or
+ * oversized file leaves nothing behind. `readSync` is bounded by the file's
+ * own size, which `lstat` already reported.
+ */
+function readBounded(absolute, maxBytes) {
+  const fd = openSync(absolute, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(maxBytes);
+    const read = readSync(fd, buffer, 0, maxBytes, 0);
+    return buffer.subarray(0, read);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** A NUL byte in the first 8 KiB means "not text"; the rest is not read. */
+function looksBinary(buffer) {
+  const sniff = buffer.subarray(0, BINARY_SNIFF_BYTES);
+  return sniff.includes(0);
+}
+
+/**
+ * Answer a read request with one of the renderer's file/artifact shapes.
+ *
+ * Every failure path is a notice: a pane that shows nothing looks exactly like
+ * an empty file, so a refused or unreadable path has to say why (R3).
+ */
+function readPreview(absolute, requested, kind) {
+  let stat;
+  try {
+    // `lstat`, then `realpath`: a symlink is not the file the operator thinks
+    // they are reading, and its target may sit outside the allowed roots.
+    stat = lstatSync(absolute);
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : "";
+    const reason = code === "ENOENT" ? "文件不存在" : `无法读取：${messageOf(error)}`;
+    send({ type: "notice", level: "warn", text: `${reason}：${requested}` });
+    return;
+  }
+  if (stat.isSymbolicLink()) {
+    send({ type: "notice", level: "warn", text: `不读取符号链接：${requested}` });
+    return;
+  }
+  if (!stat.isFile()) {
+    send({ type: "notice", level: "warn", text: `不是普通文件：${requested}` });
+    return;
+  }
+  let buffer;
+  try {
+    buffer = readBounded(absolute, Math.min(stat.size, MAX_PREVIEW_BYTES));
+  } catch (error) {
+    send({ type: "notice", level: "warn", text: `读取失败：${messageOf(error)}` });
+    return;
+  }
+  const truncated = stat.size > MAX_PREVIEW_BYTES;
+  const binary = looksBinary(buffer);
+  const content = binary ? "" : buffer.toString("utf8");
+  if (kind === "file") {
+    send({ type: "file", file: { path: requested, content, truncated, binary } });
+    return;
+  }
+  // Artifacts are the kernel's own text output; a NUL byte there means the
+  // file is not what the manifest said, so the caller is told rather than
+  // handed an empty artifact that renders as "no content".
+  if (binary) {
+    send({ type: "notice", level: "warn", text: `产物不是文本文件：${requested}` });
+    return;
+  }
+  send({
+    type: "artifact",
+    artifact: { path: requested, kind: "text", content, truncated },
+  });
+}
+
+/** Extension → artifact kind. The kernel only writes `.txt`; the other text
+ *  extensions cover a file the operator dropped in by hand. */
+const ARTIFACT_KINDS = new Map([
+  [".txt", "text"],
+  [".log", "text"],
+  [".json", "text"],
+  [".md", "text"],
+]);
+
+/** The current session's artifact directory, or "" when none is open. */
+function artifactsDirOf() {
+  if (sessionId === "") return "";
+  return path.join(sessionsRoot, sessionId, "artifacts");
+}
+
+/**
+ * Ordinary files in the current session's artifact directory.
+ *
+ * A missing directory (no artifacts yet, or no session) is an empty list, not
+ * an error: the sidebar is meant to be empty until the first artifact lands.
+ */
+function listArtifacts() {
+  const dir = artifactsDirOf();
+  if (dir === "") return [];
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const entry of entries) {
+    const absolute = path.join(dir, entry.name);
+    let stat;
+    try {
+      stat = lstatSync(absolute);
+    } catch {
+      continue;
+    }
+    // `lstat().isFile()` is false for a symlink even when it resolves to a
+    // file, which is exactly the exclusion wanted here.
+    if (!stat.isFile()) continue;
+    out.push({
+      path: absolute,
+      name: entry.name,
+      kind: ARTIFACT_KINDS.get(path.extname(entry.name).toLowerCase()) ?? "unknown",
+      size: stat.size,
+    });
+  }
+  // Newest names last in the kernel's `<callId>-<n>.txt` scheme, so a plain
+  // name sort is stable and predictable without touching mtimes.
+  out.sort((left, right) => left.name.localeCompare(right.name));
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -679,8 +938,39 @@ const handlers = {
     return handleLoadSession(payload.id);
   },
 
-  listSessions() {
-    send(sessionsEvent());
+  /**
+   * The sidebar's list: filter, then one page of it.
+   *
+   * `status` has no reliable source for two of its three values: the host
+   * knows which session is running (`working`), but nothing records "waiting
+   * for the operator" or "failed" for a saved conversation — the kernel's log
+   * does not carry a per-session error state that survives a reload. Rather
+   * than guess those two, they are dropped and the renderer is told, so an
+   * empty sidebar reads as "not supported" instead of "no matches".
+   */
+  listSessions(payload = {}) {
+    const query = {
+      includeArchived: payload.includeArchived === true,
+      limit:
+        Number.isSafeInteger(payload.limit) && payload.limit > 0
+          ? payload.limit
+          : DEFAULT_SESSION_LIMIT,
+    };
+    if (typeof payload.cwd === "string" && payload.cwd !== "") query.cwd = payload.cwd;
+    if (payload.status === "working") {
+      query.status = "working";
+    } else if (payload.status === "needs-input" || payload.status === "error") {
+      send({
+        type: "notice",
+        level: "dim",
+        text: `会话筛选“${payload.status}”暂不可用；已显示全部会话`,
+      });
+    }
+    // Remembered, not one-shot: the pushes that follow (a turn ending, a row
+    // being archived) must answer with the same filter, or the filter chip in
+    // the sidebar would describe a list the host no longer applies.
+    sessionListQuery = query;
+    send(sessionsEvent(query));
   },
 
   /**
@@ -1015,6 +1305,112 @@ const handlers = {
     send({ type: "notice", level: "dim", text: `产物：${target}` });
   },
 
+  /**
+   * Preview one text file.
+   *
+   * Only the workspace and the open session's directory are readable: the
+   * renderer string is not a trusted path, and a preview is the one place a
+   * bad path would otherwise be followed straight off the machine.
+   */
+  getFile(payload = {}) {
+    const requested = payload.path;
+    if (typeof requested !== "string" || requested.trim() === "") {
+      send({ type: "error", message: "缺少文件路径" });
+      return;
+    }
+    // A relative path is taken against the workspace, which is what the
+    // renderer means by `getFile({ path: "src/x.ts" })`.
+    const absolute = path.resolve(cwd, requested);
+    if (!isAllowedPath(absolute)) {
+      send({ type: "notice", level: "warn", text: `路径不在工作目录内：${requested}` });
+      return;
+    }
+    readPreview(absolute, requested, "file");
+  },
+
+  /**
+   * The open session's artifacts.
+   *
+   * No session means an empty list, not an error: the sidebar opens before any
+   * conversation does and must not greet the operator with a warning.
+   */
+  getArtifacts() {
+    send({ type: "artifacts", artifacts: listArtifacts() });
+  },
+
+  /** One artifact's text, restricted to the open session's artifact directory. */
+  getArtifact(payload = {}) {
+    const requested = payload.path;
+    if (typeof requested !== "string" || requested.trim() === "") {
+      send({ type: "error", message: "缺少产物路径" });
+      return;
+    }
+    const dir = artifactsDirOf();
+    if (dir === "") {
+      send({ type: "notice", level: "warn", text: `没有打开的会话，无法读取产物：${requested}` });
+      return;
+    }
+    // Both a full path and a bare file name are accepted: the manifest hands
+    // out absolute paths, but a client may send back only the name it drew.
+    const absolute = path.isAbsolute(requested) ? path.resolve(requested) : path.resolve(dir, requested);
+    if (!isInside(dir, resolveForCheck(absolute))) {
+      send({ type: "notice", level: "warn", text: `产物不在当前会话的 artifacts 目录内：${requested}` });
+      return;
+    }
+    readPreview(absolute, requested, "artifact");
+  },
+
+  /**
+   * Reasoning effort is not a kernel capability.
+   *
+   * The model adapter sends a plain chat completion; there is no reasoning
+   * parameter to set. Answering with a `state` carrying the new level would
+   * show the operator a setting that does nothing.
+   */
+  setEffort() {
+    send({ type: "notice", level: "warn", text: "内核不支持调整推理强度" });
+  },
+
+  /**
+   * The settings page's one write that is not a config file.
+   *
+   * Only the locale is accepted, and only by forwarding to the same path the
+   * language menu uses. Everything else is refused: a general settings write
+   * would let any client change fields this host does not own, and the real
+   * config entry points are `saveMcpServer` / `savePermissions` /
+   * `saveRunLimits`.
+   */
+  saveSettings(payload = {}) {
+    const settings = payload.settings;
+    if (typeof settings !== "object" || settings === null || Array.isArray(settings)) {
+      send({ type: "notice", level: "warn", text: "缺少 settings 对象" });
+      return;
+    }
+    const keys = Object.keys(settings);
+    const localeWanted = settings.locale;
+    if (localeWanted !== undefined && localeWanted !== "en" && localeWanted !== "zh") {
+      send({ type: "notice", level: "warn", text: `不支持的语言：${String(localeWanted)}` });
+      return;
+    }
+    const unsupported = keys.filter((key) => key !== "locale");
+    if (unsupported.length > 0) {
+      send({
+        type: "notice",
+        level: "warn",
+        text: `该设置没有后端：${unsupported.join(", ")}`,
+      });
+      return;
+    }
+    if (localeWanted === undefined) {
+      // An empty object is not a save: saying "saved" would be a lie.
+      send({ type: "notice", level: "warn", text: "没有可保存的设置" });
+      return;
+    }
+    locale = localeWanted;
+    send({ type: "locale", locale });
+    send(stateEvent());
+  },
+
   getUsage() {
     let inputTokens = 0;
     let outputTokens = 0;
@@ -1079,10 +1475,16 @@ const handlers = {
    */
   searchSessions(payload) {
     const query = String(payload.query ?? "").trim().toLowerCase();
+    // The same archive rule the list uses: a session hidden from the sidebar
+    // must not reappear as a search hit for a word in its title.
+    const rows =
+      payload.includeArchived === true
+        ? sessions.list()
+        : sessions.list().filter((entry) => entry.archived !== true);
     const matches =
       query === ""
         ? []
-        : sessions.list().filter((entry) => {
+        : rows.filter((entry) => {
             const title = titleFor(entry);
             return (
               entry.id.toLowerCase().includes(query)

@@ -234,6 +234,62 @@ describe("query 主循环", () => {
     });
   });
 
+  it("tool_started payload 带工具注解：只写为 true 的键", async () => {
+    // echo 的注解是 { readOnly: true }：事件应原样带出只读标记。
+    const readOnlyProvider = scriptedProvider([
+      reply("用 echo", [echoCall("c1")]),
+      reply("完成"),
+    ]);
+    const readOnly = await makeCtx(readOnlyProvider);
+    await collect(query(readOnly.ctx, "回显", { maxTurns: 10 }));
+
+    const echoStarted = readOnly.session
+      .events()
+      .find((event) => event.type === "tool_started");
+    expect(echoStarted?.payload).toStrictEqual({
+      callId: "c1",
+      tool: "echo",
+      access: "unknown",
+      annotations: { readOnly: true },
+    });
+
+    // 没有任何注解的工具：字段整个不出现，而不是空的 {}。
+    const bareTool: ToolDef<{ text: string }> = {
+      name: "bare",
+      description: "无注解工具",
+      schema: z.object({ text: z.string() }),
+      execute: async (input) => ({ isError: false, code: "ok", message: "", text: input.text }),
+    };
+    const bareProvider = scriptedProvider([
+      reply("调用", [{ id: "b1", name: "bare", arguments: { text: "x" } }]),
+      reply("完成"),
+    ]);
+    const bare = await makeCtx(bareProvider, { tools: new ToolRegistry([bareTool]) });
+    await collect(query(bare.ctx, "调用", { maxTurns: 10 }));
+
+    const bareStarted = bare.session.events().find((event) => event.type === "tool_started");
+    expect(bareStarted?.payload).toStrictEqual({ callId: "b1", tool: "bare", access: "unknown" });
+    expect(bareStarted?.payload).not.toHaveProperty("annotations");
+
+    // 显式的 false 不等于缺省：只保留 true 的键，不把 false 一起写出去。
+    const mixedTool: ToolDef<{ text: string }> = {
+      name: "mixed",
+      description: "混合注解工具",
+      schema: z.object({ text: z.string() }),
+      annotations: { readOnly: false, destructive: true },
+      execute: async (input) => ({ isError: false, code: "ok", message: "", text: input.text }),
+    };
+    const mixedProvider = scriptedProvider([
+      reply("调用", [{ id: "m1", name: "mixed", arguments: { text: "x" } }]),
+      reply("完成"),
+    ]);
+    const mixed = await makeCtx(mixedProvider, { tools: new ToolRegistry([mixedTool]) });
+    await collect(query(mixed.ctx, "调用", { maxTurns: 10 }));
+
+    const mixedStarted = mixed.session.events().find((event) => event.type === "tool_started");
+    expect(mixedStarted?.payload.annotations).toStrictEqual({ destructive: true });
+  });
+
   it("tool_result payload 写入 toolName 与 evidence", async () => {
     const evidenceTool: ToolDef<{ text: string }> = {
       name: "evidence",

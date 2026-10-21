@@ -86,6 +86,8 @@ const state = {
   checkpointRedo: false,
   selectedChange: null,
   selectedFile: null,
+  /** Pending "the preview never arrived" timeout; cleared on the reply. */
+  fileLoadTimer: null,
   tree: [],
   cwd: "",
   context: { tokens: 0, percent: 0 },
@@ -574,12 +576,41 @@ function toolGlyph(name) {
   return "file";
 }
 
-function addToolRow(name, summary) {
+/**
+ * One marker per property the tool declares about itself.
+ *
+ * Only properties the kernel actually sent are drawn: an absent annotation
+ * means "not declared", and drawing a neutral badge for it would claim the
+ * tool was checked and found safe. The glyph carries a title, so the meaning
+ * is available without a legend.
+ */
+function toolAnnotationBadges(annotations) {
+  if (!annotations || typeof annotations !== "object") return "";
+  const badges = [];
+  if (annotations.destructive === true) {
+    badges.push(
+      `<span class="tool-annotation destructive" title="${escapeHtml(t.toolDestructive)}">${icon("alert")}</span>`,
+    );
+  } else if (annotations.readOnly === true) {
+    badges.push(
+      `<span class="tool-annotation readonly" title="${escapeHtml(t.toolReadOnly)}">${icon("shield")}</span>`,
+    );
+  }
+  if (annotations.evidence === true) {
+    badges.push(
+      `<span class="tool-annotation evidence" title="${escapeHtml(t.toolEvidence)}">${icon("check")}</span>`,
+    );
+  }
+  return badges.join("");
+}
+
+function addToolRow(name, summary, annotations) {
   const row = document.createElement("div");
   row.className = "tool-row running";
   row.innerHTML =
     `<span class="tool-glyph">${icon(toolGlyph(name))}</span>` +
     `<span class="tool-name">${escapeHtml(toolLabel(name))}</span>` +
+    toolAnnotationBadges(annotations) +
     `<span class="tool-summary">${escapeHtml(summary || "")}</span>` +
     // A chevron, not the word "details": it reads as "there is more here" at
     // a glance and costs no width in a column of many rows. It stays hidden
@@ -2301,7 +2332,7 @@ function handleEvent(message) {
         setStatus("statusWorking");
       }
       if (state.currentAssistant) flushAssistant();
-      addToolRow(message.name, message.summary);
+      addToolRow(message.name, message.summary, message.annotations);
       break;
 
     case "tool_detail":
@@ -2827,19 +2858,24 @@ function renderSubagents() {
  * pane whose Start button answers "unsupported". The probe's serial state is
  * visible as a field in the board pane's Device section.
  */
-const SUPPORTED_PANES = new Set(["board"]);
+const SUPPORTED_PANES = new Set(["board", "file", "artifact"]);
 
 function openWorkbench(pane) {
   if (pane !== undefined && !SUPPORTED_PANES.has(pane)) {
-    // A tool row for a file, a diff, or the terminal used to open the pane it
-    // belonged to. Those backends are not mounted, so the row stays a row
-    // instead of opening an empty inspector.
+    // A tool row for a diff or the terminal used to open the pane it belonged
+    // to. Those backends are not mounted, so the row stays a row instead of
+    // opening an empty inspector.
     return;
   }
   state.pane = pane ?? state.pane;
   // Use the attribute directly: a stale hidden="false" still matches
   // [hidden]{display:none} and would keep the pane invisible.
   workbench.removeAttribute("hidden");
+  // A pane that is opened only by an action (a tool row, an artifact from a
+  // different one) reveals its tab the first time it is reached; leaving it
+  // hidden would leave the strip claiming a pane that is on screen.
+  const activeTab = workbenchTabs.querySelector(`button[data-pane="${state.pane}"]`);
+  if (activeTab) activeTab.hidden = false;
   state.workbenchOpen = true;
   localStorage.setItem("prometheus.workbench", "1");
   localStorage.setItem("prometheus.pane", state.pane);
@@ -4042,14 +4078,25 @@ function openFile(path) {
   state.selectedFile = path;
   openWorkbench("file");
   fileRoot.innerHTML = `<div class="diff-empty">…</div>`;
+  // The failure path is a notice, which the transcript shows — but the pane
+  // would sit on the ellipsis forever, so a timeout puts a reason there.
+  const wanted = path;
+  clearTimeout(state.fileLoadTimer);
+  state.fileLoadTimer = setTimeout(() => {
+    if (state.selectedFile !== wanted) return;
+    if (!fileRoot.textContent.trim() || fileRoot.textContent.trim() === "…") {
+      fileRoot.innerHTML = `<div class="diff-empty">${escapeHtml(t.fileReadFailed)}</div>`;
+    }
+  }, 5000);
   api.send({ cmd: "getFile", path });
 }
 
 function renderFilePreview(file) {
   if (!file || file.path !== state.selectedFile) return;
+  clearTimeout(state.fileLoadTimer);
   workbenchMeta.textContent = `${file.path}${file.truncated ? " · truncated" : ""}`;
   if (file.binary) {
-    fileRoot.innerHTML = `<div class="diff-empty">binary file</div>`;
+    fileRoot.innerHTML = `<div class="diff-empty">${escapeHtml(t.fileBinary)}</div>`;
     return;
   }
   const lines = file.content.replace(/\r\n/g, "\n").split("\n");
@@ -4220,10 +4267,8 @@ function renderArtifacts() {
 
 /** Render one artifact in the right-hand workbench. */
 function renderArtifact(artifact) {
-  const tab = workbenchTabs.querySelector('[data-pane="artifact"]');
-  if (tab) tab.hidden = false;
   // Open the artifact's own tab through the normal path so every other pane
-  // is hidden consistently.
+  // is hidden consistently; `openWorkbench` reveals the tab on first reach.
   state.selectedArtifact = artifact.path;
   openWorkbench("artifact");
   $("artifact-list-pane").hidden = true;

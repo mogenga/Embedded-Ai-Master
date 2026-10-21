@@ -343,6 +343,77 @@ describe("ui api", () => {
     expect(body.tree).toEqual([expect.objectContaining({ name: "protocols", kind: "dir" })]);
   });
 
+  it("GET /api/file 只读允许目录内的文本，越界与二进制如实标注", async () => {
+    const home = makeHome();
+    const inside = path.join(home, "sessions", "s1", "notes.txt");
+    writeFileSync(inside, "串口没输出\n");
+    const binary = path.join(home, "sessions", "s1", "capture.bin");
+    writeFileSync(binary, Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x01]));
+    const outside = path.join(home, "secret.txt");
+    writeFileSync(outside, "不应读取");
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+
+    const ok = await fetch(
+      `http://127.0.0.1:${s.port}/api/file?path=${encodeURIComponent(inside)}`,
+    );
+    expect(ok.status).toBe(200);
+    const preview = (await ok.json()) as { content: string; binary: boolean; truncated: boolean };
+    expect(preview.content).toBe("串口没输出\n");
+    expect(preview.binary).toBe(false);
+    expect(preview.truncated).toBe(false);
+
+    const elf = await fetch(
+      `http://127.0.0.1:${s.port}/api/file?path=${encodeURIComponent(binary)}`,
+    );
+    expect(elf.status).toBe(200);
+    // A NUL byte means "not text": reporting content would show mojibake.
+    expect((await elf.json()) as { binary: boolean }).toMatchObject({ binary: true, content: "" });
+
+    const escape = await fetch(
+      `http://127.0.0.1:${s.port}/api/file?path=${encodeURIComponent(outside)}`,
+    );
+    expect(escape.status).toBe(400);
+    expect(errorCode(await escape.text())).toBe("invalid_path");
+
+    expect((await fetch(`http://127.0.0.1:${s.port}/api/file`)).status).toBe(400);
+  });
+
+  it("GET /api/sessions/:id/artifacts 列出产物，目录不存在回空列表", async () => {
+    const home = makeHome();
+    const artifacts = path.join(home, "sessions", "s1", "artifacts");
+    mkdirSync(artifacts, { recursive: true });
+    writeFileSync(path.join(artifacts, "call-abc.txt"), "full output");
+    writeFileSync(path.join(artifacts, "capture.dat"), "binary-ish");
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+
+    const listed = await fetch(`http://127.0.0.1:${s.port}/api/sessions/s1/artifacts`);
+    expect(listed.status).toBe(200);
+    const body = (await listed.json()) as {
+      artifacts: Array<{ name: string; kind: string; size: number }>;
+    };
+    expect(body.artifacts.map((entry) => entry.name)).toStrictEqual(["call-abc.txt", "capture.dat"]);
+    expect(body.artifacts[0].kind).toBe("text");
+    expect(body.artifacts[0].size).toBe(Buffer.byteLength("full output"));
+
+    const empty = await fetch(`http://127.0.0.1:${s.port}/api/sessions/s1/artifacts?x=1`);
+    expect(empty.status).toBe(200);
+    // The list is per session; the query string must not turn it into a 404.
+    expect((await empty.json()) as { artifacts: unknown[] }).toMatchObject({ artifacts: expect.any(Array) });
+  });
+
+  it("GET /api/sessions/:id/artifacts 拒绝非法 id 与不存在目录", async () => {
+    const home = makeHome();
+    const s = createUiServer({ harnessHome: home });
+    close = s.close;
+    const bad = await fetch(`http://127.0.0.1:${s.port}/api/sessions/..%2Fescape/artifacts`);
+    expect(bad.status).toBe(400);
+    const missing = await fetch(`http://127.0.0.1:${s.port}/api/sessions/nosuch/artifacts`);
+    expect(missing.status).toBe(200);
+    expect((await missing.json()) as { artifacts: unknown[] }).toMatchObject({ artifacts: [] });
+  });
+
   it("设备状态诚实返回 unknown", async () => {
     const s = createUiServer({ harnessHome: makeHome() });
     close = s.close;

@@ -49,6 +49,8 @@ export interface ToolStartedPayload {
   callId: string;
   tool: string;
   access?: ToolAccess;
+  /** 工具自身的语义标记；取自 ToolDef.annotations，缺省即未知。 */
+  annotations?: { readOnly?: boolean; destructive?: boolean; evidence?: boolean };
 }
 
 /**

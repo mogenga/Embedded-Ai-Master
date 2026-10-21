@@ -12,6 +12,9 @@
  *   abort           POST /api/abort
  *   listSessions    GET  /api/sessions
  *   loadSession     GET  /api/sessions/:id
+ *   getFile         GET  /api/file?path=…
+ *   getArtifacts    GET  /api/sessions/:id/artifacts
+ *   getArtifact     GET  /api/file?path=…
  *   live events     GET  /api/events (SSE)
  *
  * Everything else answers with a `notice` naming the command. A silent no-op
@@ -41,6 +44,17 @@ function isRecord(value) {
 
 function textOf(value) {
   return typeof value === "string" ? value : "";
+}
+
+/**
+ * A path key that compares the same way the sidebar groups sessions.
+ *
+ * Windows sessions were saved with both separators (`G:\x` and `G:/x`), and
+ * the renderer's own `normalizeCwd` folds case; matching a filter with a raw
+ * `===` would hide every session under the folder the user is looking at.
+ */
+function pathKey(value) {
+  return textOf(value).replace(/[\\/]+/g, "/").replace(/\/+$/, "").toLowerCase();
 }
 
 function titleOf(events) {
@@ -292,7 +306,40 @@ export function createBrowserBridge(options = {}) {
     if (wasRunning) openStream(lastSeq);
   }
 
-  async function refreshSessions() {
+  /**
+   * The list/filter the operator last asked for.
+   *
+   * `listSessions` carries the sidebar's archive toggle and filter, and the
+   * HTTP list has no query parameters — the bridge filters what the server
+   * returns. Remembering the request keeps a background refresh (after a run
+   * or a rename) from putting the archived rows the user just hid back on
+   * screen.
+   */
+  let listFilter = {};
+
+  /** The last `status` filter the bridge warned about, so it warns once. */
+  let lastStatusNotice = "";
+
+  async function refreshSessions(options) {
+    if (options !== undefined) {
+      listFilter = {
+        includeArchived: options.includeArchived === true,
+        cwd: textOf(options.cwd),
+        status: textOf(options.status),
+      };
+    }
+    const filter = listFilter;
+    if (filter.status !== undefined && filter.status !== "") {
+      // The HTTP list carries no run state, so the four state filters cannot
+      // be answered. Saying so beats an unchanged list that reads as "no
+      // sessions match"; the notice fires once per selection, not per refresh.
+      if (filter.status !== lastStatusNotice) {
+        lastStatusNotice = filter.status;
+        emit({ type: "notice", level: "dim", text: "浏览器形态暂不支持按状态筛选" });
+      }
+    } else {
+      lastStatusNotice = "";
+    }
     try {
       const response = await fetchImpl("/api/sessions");
       if (!response.ok) {
@@ -300,7 +347,22 @@ export function createBrowserBridge(options = {}) {
         return;
       }
       const body = await response.json();
-      const summaries = isRecord(body) && Array.isArray(body.sessions) ? body.sessions : [];
+      const all = isRecord(body) && Array.isArray(body.sessions) ? body.sessions : [];
+      // The open session's workdir is read from the unfiltered list: the open
+      // conversation may be archived or in another folder, and the sidebar
+      // still needs its cwd to expand the right group.
+      const openSummary = all.find(
+        (summary) => isRecord(summary) && summary.id === currentSessionId,
+      );
+      const workdir = textOf(isRecord(openSummary) ? openSummary.workdir : undefined);
+      const summaries = all.filter((summary) => {
+        if (!isRecord(summary)) return true;
+        if (summary.archived === true && filter.includeArchived !== true) return false;
+        if (filter.cwd !== undefined && filter.cwd !== "" && pathKey(summary.workdir) !== pathKey(filter.cwd)) {
+          return false;
+        }
+        return true;
+      });
       // A session the operator renamed carries its title from the API. Only
       // the rest need the first user message read out of the log, and only a
       // bounded number of them: this is one request per untitled session.
@@ -325,10 +387,6 @@ export function createBrowserBridge(options = {}) {
       // The sidebar expands the group matching `state.cwd`; without a cwd the
       // open conversation's project would start folded. Adopt the open
       // session's workdir as soon as the list reveals it.
-      const openSummary = summaries.find(
-        (summary) => isRecord(summary) && summary.id === currentSessionId,
-      );
-      const workdir = textOf(isRecord(openSummary) ? openSummary.workdir : undefined);
       if (workdir !== "" && workdir !== currentCwd) {
         currentCwd = workdir;
         emit(stateEvent());
@@ -345,6 +403,10 @@ export function createBrowserBridge(options = {}) {
         ...session,
         status: session.id === runningSessionId ? "working" : "ready",
       }));
+      // The filtered count is the number the sidebar paginates against; the
+      // server total would offer "load more" for rows the filter removed.
+      event.total = event.sessions.length;
+      event.all = event.sessions.length;
       lastSessions = event.sessions;
       emit(event);
     } catch (error) {
@@ -539,7 +601,12 @@ export function createBrowserBridge(options = {}) {
     "getSetupChecklist",
     "listCommands",
     "getTree",
+    "getFile",
+    "getArtifacts",
+    "getArtifact",
     "searchSessions",
+    "saveSettings",
+    "setEffort",
     "saveMcpServer",
     "removeMcpServer",
     "savePermissions",
@@ -641,6 +708,122 @@ export function createBrowserBridge(options = {}) {
     }
   }
 
+  /**
+   * One read of `/api/file`; the server owns the path rules.
+   *
+   * Returns the preview body or `undefined` after emitting the warning. The
+   * path travels percent-encoded: an absolute Windows path carries `:` and
+   * `\`, and building the URL by hand would split the query at the first one.
+   */
+  async function readFilePreview(path, label) {
+    let response;
+    try {
+      response = await fetchImpl(`/api/file?path=${encodeURIComponent(path)}`);
+    } catch (error) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `${label}：${error instanceof Error ? error.message : String(error)}`,
+      });
+      return undefined;
+    }
+    if (!response.ok) {
+      emit({ type: "notice", level: "warn", text: `${label}：${await readError(response)}` });
+      return undefined;
+    }
+    const body = await response.json().catch(() => undefined);
+    if (!isRecord(body)) {
+      emit({ type: "notice", level: "warn", text: `${label}：服务端返回了无法解析的内容` });
+      return undefined;
+    }
+    return body;
+  }
+
+  /**
+   * Open one file in the workbench.
+   *
+   * The renderer keys the preview on `file.path` matching `state.selectedFile`,
+   * and `selectedFile` is what was clicked. The server answers with the
+   * resolved real path (`G:\x` for `g:/x`), so passing it through unchanged
+   * would make the renderer drop the preview as "not the selected file". The
+   * requested path is kept and the resolved one travels alongside.
+   */
+  async function getFile(path) {
+    if (path === "") {
+      emit({ type: "notice", level: "warn", text: "文件读取失败：没有给出路径" });
+      return;
+    }
+    const body = await readFilePreview(path, "文件读取失败");
+    if (body === undefined) return;
+    emit({
+      type: "file",
+      file: {
+        path,
+        ...(textOf(body.path) === "" || body.path === path ? {} : { resolvedPath: body.path }),
+        content: textOf(body.content),
+        truncated: body.truncated === true,
+        binary: body.binary === true,
+      },
+    });
+  }
+
+  /** The current session's artifacts; no session is an empty list, not an error. */
+  async function getArtifacts() {
+    if (currentSessionId === "") {
+      emit({ type: "artifacts", artifacts: [] });
+      return;
+    }
+    let response;
+    try {
+      response = await fetchImpl(`/api/sessions/${encodeURIComponent(currentSessionId)}/artifacts`);
+    } catch (error) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `产物列表读取失败：${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    if (!response.ok) {
+      emit({ type: "notice", level: "warn", text: `产物列表读取失败：${await readError(response)}` });
+      return;
+    }
+    const body = await response.json().catch(() => undefined);
+    const artifacts = isRecord(body) && Array.isArray(body.artifacts) ? body.artifacts : [];
+    emit({ type: "artifacts", artifacts });
+  }
+
+  /**
+   * Render one artifact in the workbench pane.
+   *
+   * Same endpoint as `getFile`, different event: `renderArtifact` takes a
+   * `kind` and picks a renderer from it. The listing reports `unknown` for
+   * files it cannot classify, which the pane would draw as raw JSON; a listed
+   * artifact that is plain text is therefore opened as `text`. A binary file
+   * cannot be drawn at all, and saying so is the honest answer.
+   */
+  async function getArtifact(path) {
+    if (path === "") {
+      emit({ type: "notice", level: "warn", text: "产物读取失败：没有给出路径" });
+      return;
+    }
+    const body = await readFilePreview(path, "产物读取失败");
+    if (body === undefined) return;
+    if (body.binary === true) {
+      emit({ type: "notice", level: "dim", text: `产物是二进制文件，无法在浏览器中预览：${path}` });
+      return;
+    }
+    emit({
+      type: "artifact",
+      artifact: {
+        path,
+        kind: "text",
+        content: textOf(body.content),
+        truncated: body.truncated === true,
+      },
+    });
+  }
+
   /** One mutating call against a saved session; failures become a warning. */
   async function sessionCommand(method, path, body) {
     try {
@@ -705,7 +888,14 @@ export function createBrowserBridge(options = {}) {
         emit(stateEvent());
         return;
       case "listSessions":
-        void refreshSessions();
+        // The sidebar's archive toggle and filter travel with the request;
+        // without them `refreshSessions` would answer with the full list and
+        // the controls would look like they did nothing.
+        void refreshSessions({
+          includeArchived: payload.includeArchived === true,
+          cwd: textOf(payload.cwd),
+          status: textOf(payload.status),
+        });
         return;
       case "loadSession":
         void loadSession(textOf(payload.id));
@@ -835,6 +1025,50 @@ export function createBrowserBridge(options = {}) {
       }
       case "setUiPreference":
         emit({ type: "ui_preference", key: payload.key, value: payload.value });
+        return;
+      case "setEffort":
+        // Reasoning effort is a harness/model setting the kernel does not
+        // expose, and `POST /api/actions` carries none. Answering with a
+        // `state` would make the menu show a level that never reached the
+        // model, so the command says what it cannot do instead.
+        emit({ type: "notice", level: "warn", text: "内核不支持调整推理强度" });
+        return;
+      case "saveSettings": {
+        // Only the locale half has a browser-side home (localStorage). The
+        // other settings (`provider`, `model`, `apiKey`, …) belong to the
+        // kernel's own config files, and this bridge has no general write
+        // path for them: a silent success would leave the form claiming a
+        // value that was never saved.
+        const settings = isRecord(payload.settings) ? payload.settings : {};
+        const unknown = Object.keys(settings).filter((key) => key !== "locale");
+        let applied = false;
+        if (settings.locale === "en" || settings.locale === "zh") {
+          locale = settings.locale;
+          storage?.setItem("prometheus.locale", settings.locale);
+          emit({ type: "locale", locale: settings.locale });
+          applied = true;
+        } else if (settings.locale !== undefined) {
+          unknown.push("locale");
+        }
+        if (unknown.length > 0) {
+          emit({
+            type: "notice",
+            level: "warn",
+            text: `该设置没有后端：${unknown.join(", ")}`,
+          });
+        } else if (!applied) {
+          emit({ type: "notice", level: "warn", text: "该设置没有后端" });
+        }
+        return;
+      }
+      case "getFile":
+        void getFile(textOf(payload.path));
+        return;
+      case "getArtifacts":
+        void getArtifacts();
+        return;
+      case "getArtifact":
+        void getArtifact(textOf(payload.path));
         return;
       case "getUsage":
         emit({ type: "usage_summary", days: Number(payload.days) || 30, summary: null });

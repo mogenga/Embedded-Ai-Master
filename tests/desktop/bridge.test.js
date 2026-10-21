@@ -739,6 +739,300 @@ describe("bridge: 命令面", () => {
   });
 });
 
+describe("bridge: 文件与产物", () => {
+  function fileBridge(routes) {
+    const fetchImpl = fakeFetch([...routes, ["/api/sessions", () => jsonResponse({ sessions: [] })]]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    return { bridge, events, fetchImpl };
+  }
+
+  it("getFile 命中 /api/file 且路径完整编码", async () => {
+    const { bridge, events, fetchImpl } = fileBridge([
+      [
+        "/api/file",
+        () =>
+          jsonResponse({
+            path: "E:\\work\\src\\main.c",
+            content: "int main() {}",
+            truncated: false,
+            binary: false,
+          }),
+      ],
+    ]);
+    bridge.api.send({ cmd: "getFile", path: "E:\\work\\src\\main.c" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "file")).toBe(true);
+    });
+
+    const call = fetchImpl.calls.find((entry) => entry.url.startsWith("/api/file"));
+    // `:` and `\` inside a query value break a hand-built URL; the whole path
+    // is one percent-encoded parameter.
+    expect(call.url).toBe(`/api/file?path=${encodeURIComponent("E:\\work\\src\\main.c")}`);
+    expect(call.url).toContain("%3A");
+    expect(call.url).toContain("%5C");
+
+    const file = events.find((event) => event.type === "file").file;
+    // The renderer matches `file.path` against `state.selectedFile` (the path
+    // it was given) and drops a preview whose path differs, so the requested
+    // path stays and the resolved one travels beside it.
+    expect(file.path).toBe("E:\\work\\src\\main.c");
+    expect(file.content).toBe("int main() {}");
+    expect(file.truncated).toBe(false);
+    expect(file.binary).toBe(false);
+  });
+
+  it("getFile 失败回显式 warn，不发 file 事件", async () => {
+    const { bridge, events } = fileBridge([
+      ["/api/file", () => jsonResponse({ error: { code: "invalid_path", message: "只能查看会话目录内的文件" } }, 400)],
+    ]);
+    bridge.api.send({ cmd: "getFile", path: "/etc/passwd" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "notice")).toBe(true);
+    });
+    const notice = events.find((event) => event.type === "notice");
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("文件读取失败");
+    expect(notice.text).toContain("只能查看会话目录内的文件");
+    expect(events.some((event) => event.type === "file")).toBe(false);
+  });
+
+  it("getArtifacts 无会话时回空数组，有会话时透传列表", async () => {
+    const artifacts = [{ path: "E:/s/artifacts/a.txt", name: "a.txt", kind: "text", size: 12 }];
+    const { bridge, events, fetchImpl } = fileBridge([
+      ["/artifacts", () => jsonResponse({ artifacts })],
+      [
+        "/api/sessions/s1",
+        () => jsonResponse({ header: { id: "s1", workdir: "E:/p" }, events: [] }),
+      ],
+    ]);
+
+    bridge.api.send({ cmd: "getArtifacts" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "artifacts")).toBe(true);
+    });
+    // With no session open there is nothing to ask the server about; an empty
+    // list is the honest answer, not a request for another session's files.
+    expect(fetchImpl.calls.some((call) => call.url.includes("/artifacts"))).toBe(false);
+    expect(events.find((event) => event.type === "artifacts").artifacts).toStrictEqual([]);
+
+    bridge.api.send({ cmd: "loadSession", id: "s1" });
+    await vi.waitFor(() => {
+      expect(bridge._internal.getSessionId()).toBe("s1");
+    });
+    bridge.api.send({ cmd: "getArtifacts" });
+    await vi.waitFor(() => {
+      expect(fetchImpl.calls.some((call) => call.url === "/api/sessions/s1/artifacts")).toBe(true);
+    });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "artifacts").length).toBe(2);
+    });
+    expect(events.filter((event) => event.type === "artifacts").at(-1).artifacts).toStrictEqual(artifacts);
+  });
+
+  it("getArtifact 把文件内容包成 artifact 事件，二进制只回提示", async () => {
+    const { bridge, events } = fileBridge([
+      [
+        "/api/file",
+        (url) =>
+          url.includes("bin")
+            ? jsonResponse({ path: "E:/s/bin.dat", content: "", truncated: false, binary: true })
+            : jsonResponse({ path: "E:/s/out.txt", content: "行 1", truncated: true, binary: false }),
+      ],
+    ]);
+
+    bridge.api.send({ cmd: "getArtifact", path: "E:/s/out.txt" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "artifact")).toBe(true);
+    });
+    expect(events.find((event) => event.type === "artifact").artifact).toStrictEqual({
+      path: "E:/s/out.txt",
+      kind: "text",
+      content: "行 1",
+      truncated: true,
+    });
+
+    bridge.api.send({ cmd: "getArtifact", path: "E:/s/bin.out" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "notice" && event.text.includes("二进制"))).toBe(true);
+    });
+    // Passing empty content to `renderArtifact` would draw an empty pane and
+    // claim the file was read; the notice says why there is nothing to draw.
+    expect(events.filter((event) => event.type === "artifact")).toHaveLength(1);
+  });
+
+  it("setEffort 回 warn 且不发 state", () => {
+    const { bridge, events } = fileBridge([]);
+    bridge.api.send({ cmd: "setEffort", effort: "high" });
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice).toStrictEqual({ type: "notice", level: "warn", text: "内核不支持调整推理强度" });
+    // A `state` with an effort the kernel never received would make the menu
+    // show a level that is not in effect.
+    expect(events.some((event) => event.type === "state" && event.effort === "high")).toBe(false);
+  });
+
+  it("saveSettings 只接受 locale，其他字段回 warn", () => {
+    const storage = storageStub();
+    const bridge = createBrowserBridge({
+      fetchImpl: fakeFetch([]),
+      EventSourceImpl: FakeEventSource,
+      storage,
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+
+    bridge.api.send({ cmd: "saveSettings", settings: { locale: "en" }, skipCatalog: true });
+    expect(storage.getItem("prometheus.locale")).toBe("en");
+    expect(events.at(-1)).toStrictEqual({ type: "locale", locale: "en" });
+
+    const before = events.length;
+    bridge.api.send({ cmd: "saveSettings", settings: { provider: "gw", model: "flash" } });
+    expect(events).toHaveLength(before + 1);
+    expect(events.at(-1)).toMatchObject({ type: "notice", level: "warn" });
+    expect(events.at(-1).text).toContain("该设置没有后端");
+    expect(events.at(-1).text).toContain("provider");
+    expect(events.at(-1).text).toContain("model");
+  });
+});
+
+describe("bridge: 会话筛选", () => {
+  const rows = [
+    { id: "s1", workdir: "E:/p", createdAt: "2026-10-20T00:00:00.000Z", archived: false },
+    { id: "s2", workdir: "E:/p", createdAt: "2026-10-20T00:00:00.000Z", archived: true },
+    { id: "s3", workdir: "E:\\q", createdAt: "2026-10-20T00:00:00.000Z", archived: false },
+  ];
+
+  function listBridge() {
+    const fetchImpl = fakeFetch([
+      ["/api/sessions/s", () => jsonResponse({ header: {}, events: [] })],
+      ["/api/sessions", () => jsonResponse({ sessions: rows })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    return { bridge, events, fetchImpl };
+  }
+
+  it("includeArchived:false 过滤归档行，total 是过滤后的总数", async () => {
+    const { bridge, events } = listBridge();
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "sessions").length).toBe(1);
+    });
+    // The renderer boots with its archive toggle off, and an absent option is
+    // "not included": the archived row is already gone from the first list.
+    const boot = events.filter((event) => event.type === "sessions").at(-1);
+    expect(boot.sessions.map((session) => session.id)).toStrictEqual(["s1", "s3"]);
+    expect(boot.total).toBe(2);
+
+    bridge.api.send({ cmd: "listSessions", includeArchived: false });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "sessions").length).toBe(2);
+    });
+    const list = events.filter((event) => event.type === "sessions").at(-1);
+    expect(list.sessions.map((session) => session.id)).toStrictEqual(["s1", "s3"]);
+    // The server's total would offer "load more" for a row the filter removed.
+    expect(list.total).toBe(2);
+    expect(list.all).toBe(2);
+
+    bridge.api.send({ cmd: "listSessions", includeArchived: true });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "sessions").length).toBe(3);
+    });
+    expect(events.filter((event) => event.type === "sessions").at(-1).sessions.map((s) => s.id))
+      .toStrictEqual(["s1", "s2", "s3"]);
+  });
+
+  it("cwd 按归一化路径过滤（分隔符与大小写不敏感）", async () => {
+    const { bridge, events } = listBridge();
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "sessions").length).toBe(1);
+    });
+
+    bridge.api.send({ cmd: "listSessions", includeArchived: true, cwd: "e:\\p\\" });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "sessions").length).toBe(2);
+    });
+    const list = events.filter((event) => event.type === "sessions").at(-1);
+    expect(list.sessions.map((session) => session.id)).toStrictEqual(["s1", "s2"]);
+    expect(list.total).toBe(2);
+  });
+
+  it("status 筛选不被支持，发 dim 提示且只发一次", async () => {
+    const { bridge, events } = listBridge();
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "sessions").length).toBe(1);
+    });
+
+    bridge.api.send({ cmd: "listSessions", includeArchived: false, status: "error" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "notice" && event.text.includes("按状态筛选"))).toBe(true);
+    });
+    const notice = events.find((event) => event.type === "notice" && event.text.includes("按状态筛选"));
+    expect(notice.level).toBe("dim");
+    // The HTTP list has no run state, so the status filter is a no-op: the
+    // rows still come back and the notice says why nothing was filtered.
+    const list = events.filter((event) => event.type === "sessions").at(-1);
+    expect(list.sessions.map((session) => session.id)).toStrictEqual(["s1", "s3"]);
+
+    bridge.api.send({ cmd: "listSessions", includeArchived: false, status: "error" });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "sessions").length).toBe(3);
+    });
+    // Re-selecting the same filter is not news; one notice per selection.
+    expect(events.filter((event) => event.type === "notice" && event.text.includes("按状态筛选")))
+      .toHaveLength(1);
+  });
+
+  it("后台刷新沿用最近一次的筛选，不把归档行放回来", async () => {
+    const fetchImpl = fakeFetch([
+      ["/api/actions", () => jsonResponse({ sessionId: "s1", created: false }, 202)],
+      ["/api/sessions/s", () => jsonResponse({ header: {}, events: [] })],
+      ["/api/sessions", () => jsonResponse({ sessions: rows })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "sessions").length).toBe(1);
+    });
+
+    bridge.api.send({ cmd: "loadSession", id: "s1" });
+    await vi.waitFor(() => {
+      expect(bridge._internal.getSessionId()).toBe("s1");
+    });
+    bridge.api.send({ cmd: "listSessions", includeArchived: false });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "sessions").length).toBe(2);
+    });
+
+    // `startPrompt` refreshes the list without options; it must not undo the
+    // toggle the operator just set.
+    bridge.api.send({ cmd: "prompt", text: "hi" });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "sessions").length).toBe(3);
+    });
+    expect(events.filter((event) => event.type === "sessions").at(-1).sessions.map((s) => s.id))
+      .toStrictEqual(["s1", "s3"]);
+  });
+});
+
 describe("bridge: 导出", () => {
   it("exportSession 从日志渲染 Markdown 并发 export_ready", async () => {
     const fetchImpl = fakeFetch([

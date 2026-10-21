@@ -471,6 +471,8 @@ npm --prefix desktop run desktop
   | PUT | `/api/config` | 整份写其中一份：`{ mcpServers }` / `{ permissions }` / `{ run }`；400 `invalid_config` 带具体字段原因 |
   | GET | `/api/kb` | `{ root, tree }`；未配置 `kb/` 时返回 `{ root: null, tree: [] }` |
   | GET | `/api/device` | 当前恒为 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` |
+  | GET | `/api/file?path=…` | `{ path, content, truncated, binary }`；只读，256 KiB 上限。只允许读会话目录与会话工作目录内的路径（`realpath` 后判定），越界 400 `invalid_path`、不存在 404、目录/非普通文件 400。含 NUL 字节按二进制返回 `content: ""` |
+  | GET | `/api/sessions/:id/artifacts` | `{ artifacts: [{ path, name, kind, size }] }`；列 `artifacts/` 下的普通文件，跳过目录与符号链接，目录不存在回空数组 |
   | POST | `/api/actions` | 发起会话或追加输入，202 `{ sessionId, created }`；错误码见「Web 会话与审批」 |
   | POST | `/api/abort` | 中止运行中的会话，202 `{ sessionId, aborted }`；会话不在运行时 `aborted:false`（幂等，不报 404） |
   | POST | `/api/approvals` | 回传审批决策，202/200；错误码见「Web 会话与审批」 |

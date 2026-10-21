@@ -457,6 +457,18 @@ export async function* query(
             tool: call.name,
             access,
           };
+          // 工具行上的「只读 / 会破坏 / 证据」标记来自工具自己的注解。
+          // 只写为 true 的键:缺省是「未知」,与 false 的「确认不是只读」不是一回事,
+          // 把 false 也写进去会让 UI 把未知当成否定。工具可能根本不存在(模型编造的
+          // 名字),此时 lookup 返回 undefined,整个字段不写。
+          const annotations = ctx.tools.lookup(call.name)?.annotations;
+          if (annotations !== undefined) {
+            const marks: NonNullable<ToolStartedPayload["annotations"]> = {};
+            if (annotations.readOnly === true) marks.readOnly = true;
+            if (annotations.destructive === true) marks.destructive = true;
+            if (annotations.evidence === true) marks.evidence = true;
+            if (Object.keys(marks).length > 0) payload.annotations = marks;
+          }
           await session.append({
             type: "tool_started",
             payload: { ...payload },

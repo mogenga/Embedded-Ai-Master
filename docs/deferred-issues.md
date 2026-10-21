@@ -1520,15 +1520,22 @@
   - **导出**：`exportSession` 由宿主/bridge 读日志渲染 Markdown（`protocol.sessionMarkdown`），桌面经 `saveFile`，浏览器走下载。
   - **宿主命令串行化**：`loadSession` → `exportSession` 这类同一击发的两条命令过去并发执行，导出可能读到尚未设置的 `sessionId` 而回「没有可导出的对话」。
   - **顶栏菜单可达**：`#more-button` 一直是 `hidden`，导出 / 主题 / 语言 / 快捷键都没有入口。一并删掉「新窗口」「分屏」两行——本外壳单实例单窗口，preload 里没有 `newWindow`/`splitWindow`，点了只会抛错。
+- **第三轮已修**(2026-10-21,「继续发子代理修」):
+  - **工具注解**：`ToolStartedPayload` 增加 `annotations`,从 `ToolDef.annotations` 取，**只写值为 true 的键**（缺省 = 未声明，与 false 不是一回事）。协议层同样只转发 true 键，`addToolRow` 在工具名后画徽标：destructive 用警告色，readOnly 用盾牌，evidence 用对勾；没有注解就不画——不画中立徽标，因为那会读成「已检查且安全」。
+  - **文件预览**：`GET /api/file` + 宿主 `getFile`。只允许读会话目录与会话工作目录（realpath 后判定），256 KiB 上限，含 NUL 字节按二进制处理且不给文本。宿主侧额外用 `lstat` 拒符号链接，并对最深的已存在祖先做 realpath 再把剩余段接回，防止链接父目录绕过前缀检查。工作台的 File tab 因此有了后端。
+  - **产物列表**：`GET /api/sessions/:id/artifacts` + 宿主 `getArtifacts`/`getArtifact`,Artifact tab 恢复。
+  - **会话筛选与分页**：`listSessions` 的 `includeArchived` / `cwd` / `limit` 真正生效（此前归档按钮点了行还在）；`total` 改成过滤后的总数，分页按 `updatedAt` 倒序稳定切片。宿主记住最近一次的筛选条件，`sessionFlags` / `deleteSession` / 回合结束的推送都沿用它——否则归档后推回的列表又包含那一行。`searchSessions` 也按同一规则过滤归档。
+  - **`setEffort` 如实拒绝**：内核模型适配层根本不发 reasoning effort 参数。此前桌面宿主没有 handler（回「暂不支持该命令」），快捷键与菜单却仍在发。现在两端都回一条 warn notice 且**不发 `state`**——发 state 会让界面显示一个内核从未收到的值。
+  - **`saveSettings` 窄实现**：设置页切语言会发 `{ settings: { locale } }`。只接受 locale（en/zh），转调 `setLocale`；其他字段回 warn。没有做成万能写配置入口。
 - **仍未修**:
   1. **项目权限配置恒被跳过**:runner 不传 `trustProjectConfig`,每个 run 都写 `permissions_project_config_skipped`。
-  2. **工具注解** `readOnly`/`destructive`/`evidence` 未被 UI 消费(frontend-design §15 第 5 条)。
-  3. **产物列表**：单个产物的打开入口已接，但没有「本次会话的产物」列表（`getArtifacts` 无通道）。
-  4. **分屏/多窗口**:`desktop/main.js` 单实例单窗口。
-- **影响**: 剩余 1 是安全边界上的一个静默跳过（会以 `notice` 显示）；2-4 是体验缺口。
-- **触发升级条件**: 要求项目级权限配置生效；要求产物列表或分屏。
-- **修复建议**: 1 让 runner 透传 `trustProjectConfig`（默认仍为 false，由设置页显式开启，因为项目配置是仓库内容）；2 在工具行上用 `annotations` 打标记；4 需要 `main.js` 支持第二个窗口，且要处理会话锁。
-- **状态**: 部分解决（第一轮接线 + 第二轮配置/会话/计量均已完成，剩余 4 项）。
+  2. **分屏/多窗口**:`desktop/main.js` 单实例单窗口（preload 无 `newWindow`/`splitWindow`，入口已删）。
+  3. **文件树与 `@` 提及**:`getTree` / `searchFiles` 仍是空实现；本次只做了单文件预览。
+  4. **浏览器形态的配置页**：`settings.js` 的「连接」页仍会发 `saveSettings` 带 `provider`/`model`/`apiKey`,浏览器侧一律落到「该设置没有后端」。控件没有在该形态下隐藏。
+- **影响**: 1 是安全边界上的一个静默跳过（会以 `notice` 显示）；2-4 是体验缺口。
+- **触发升级条件**: 要求项目级权限配置生效；要求分屏；要求文件树。
+- **修复建议**: 1 让 runner 透传 `trustProjectConfig`（默认仍为 false，由设置页显式开启，因为项目配置是仓库内容）；2 需要 `main.js` 支持第二个窗口并处理会话锁；4 在 bridge 形态下隐藏连接页（或把它做成只读展示）。
+- **状态**: 部分解决（三轮接线已完成，剩余 4 项均为内核/外壳能力缺口）。
 
 ---
 
@@ -1603,3 +1610,4 @@
 | 2026-10-20 | 前端文档重写:`docs/frontend-design.md` v1.4 → v2.0,整体改为以 `desktop/renderer/` 实现为准(原 v1.4 基于已删除的 Preact 工作台,§2/§3/§4/§5/§6/§7/§11/§12 作废);`README.md` 修正断线续传的过度承诺与「前端工作台」已知限制段,设计文档索引改指 `desktop/MATRIX.md`;阶段 4 spec 顶部加失效声明(§7-§9 依赖已删除的 `src/ui`);`ui-workbench` spec/plan 加作废标注;录入 D-167(前端 4 处文档-实现偏差)与 D-168(阶段 4 spec §7-§9 需重写) |
 | 2026-10-21 | 前后端联调核查与第一批修复:审批条改用内核 `paramsPreview` 并加超时倒计时(R2);`POST /api/actions` 接受 `mode`,runner 用它覆盖本次运行预设(新增 `invalid_mode`),bridge 的 `setMode` 随 prompt 下发;bridge 补 `seq` 缺口检测+整量重拉(≤3 次)与 `stream_error` 续接上限(≤3 次),追问不再 `since=-1` 重放;`device_status` 改为独立事件并渲染到板卡面板「设备」段;桌面对话搜索按标题/工作dir/id;桌面 host 用 `readSessionSnapshot(allowTrailingPartial)` 容忍崩溃半行尾;新增宿主 `setModel`/`refreshModels`/`setCwd`;桌面 `getSettings` 不再回占位值,「跟随系统」主题不再被固化;usage 事件按会话累计;压缩不再把 seq 当 token;拒绝原因翻成中文。录入 D-169(剩余内核侧缺口),D-167 前两项标记已解决 |
 | 2026-10-21 | 功能闭环第二批:新增 `src/config/app-config.ts` + `src/server/config-api.ts`,`GET/PUT /api/config` 读写 `mcp.json`/`permissions.json`/`run.json`(原子写,非法输入 400 且原文件不变);设置页恢复「MCP 服务器」与「行为(权限/运行上限)」两页;`ActionInput` 与 `POST /api/actions` 新增 `maxTurns`/`maxCostUsd`/`timeoutMs`/`systemPrompt`(400 `invalid_run_limits`);新增 `src/session/metadata.ts`(旁挂 `meta.json`)与 `src/server/session-admin.ts`,HTTP 侧 `PATCH`/`DELETE /api/sessions/:id` 与 `POST /api/sessions/:id/fork`,前端改名/置顶/归档/删除/分叉全部接上;`usage` 事件带 `context{tokens,percent,window}` 与 `costUsd`(D-165 标记已解决);产物入口与 Markdown 导出(宿主 `exportSession`、bridge 读日志渲染);宿主命令改为串行执行(修 `loadSession → exportSession` 竞态);顶栏「⋯」菜单改为可见并删掉无外壳支持的新窗口/分屏两行;D-169 更新为部分解决 |
+| 2026-10-21 | 功能闭环第三轮:工具注解写入 `tool_started` 并在工具行画徽标(只转发 true 键);新增 `src/server/files-api.ts` + `GET /api/file`(只读预览,256 KiB / 二进制判定 / realpath 边界)与 `GET /api/sessions/:id/artifacts`,宿主补 `getFile`/`getArtifacts`/`getArtifact`,工作台恢复 File 与 Artifact 两个 tab;`listSessions` 的 `includeArchived`/`cwd`/`limit` 真正生效且 `total` 改为过滤后总数,宿主记住筛选条件供推送复用,`searchSessions` 同步过滤归档;`setEffort` 两端改为如实拒绝(不发 `state`);`saveSettings` 收窄为只认 `locale`;`D-167` 第 5 条与 `D-169` 第 2/3 项标记已解决 |

@@ -79,6 +79,44 @@ describe("assistant 三段合成", () => {
       id: "c1",
     });
   });
+
+  it("tool_started 的注解透传，只保留 true 的键", () => {
+    const { out } = translate([
+      ev(0, "tool_started", {
+        callId: "c1",
+        tool: "read_file",
+        annotations: { readOnly: true, destructive: false, evidence: true },
+      }),
+    ]);
+    expect(out).toStrictEqual([
+      {
+        type: "tool_start",
+        name: "read_file",
+        summary: "read_file",
+        id: "c1",
+        annotations: { readOnly: true, evidence: true },
+      },
+    ]);
+  });
+
+  it("没有注解的旧日志不产出 annotations 字段", () => {
+    const { out } = translate([ev(0, "tool_started", { callId: "c1", tool: "shell" })]);
+    // A `false`-filled object would read as "known to be non-destructive"; the
+    // absent field is what lets the consumer tell "unknown" apart.
+    expect(out[0]).not.toHaveProperty("annotations");
+    expect(Object.keys(out[0])).toStrictEqual(["type", "name", "summary", "id"]);
+  });
+
+  it("注解全为 false 或不是对象时也不产出 annotations", () => {
+    const allFalse = translate([
+      ev(0, "tool_started", { callId: "c1", tool: "shell", annotations: { destructive: false } }),
+    ]);
+    expect(allFalse.out[0]).not.toHaveProperty("annotations");
+    const notRecord = translate([
+      ev(0, "tool_started", { callId: "c1", tool: "shell", annotations: "read-only" }),
+    ]);
+    expect(notRecord.out[0]).not.toHaveProperty("annotations");
+  });
 });
 
 describe("assistant_delta 流式片段", () => {

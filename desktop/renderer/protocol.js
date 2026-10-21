@@ -82,6 +82,31 @@ export function summarizeToolCall(name, args) {
   return tool;
 }
 
+/** The annotation flags the kernel may attach to a `tool_started` event. */
+const ANNOTATION_FLAGS = ["readOnly", "destructive", "evidence"];
+
+/**
+ * The tool annotations worth carrying to the renderer, or `undefined`.
+ *
+ * Only `true` survives: a missing flag and a `false` one mean the same thing,
+ * and writing the falses out turns a one-flag annotation into noise. A log
+ * written before the kernel had annotations has no `annotations` at all and
+ * must stay without one — the renderer reads "no field" as "unknown", which a
+ * fabricated all-false object would erase.
+ */
+function toolAnnotations(value) {
+  if (!isRecord(value)) return undefined;
+  const out = {};
+  let marked = false;
+  for (const flag of ANNOTATION_FLAGS) {
+    if (value[flag] === true) {
+      out[flag] = true;
+      marked = true;
+    }
+  }
+  return marked ? out : undefined;
+}
+
 /**
  * Rebuild the renderer's `publicMessages` list from a full event log.
  *
@@ -288,12 +313,19 @@ export function sessionEventToHostEvents(event, ctx) {
       const name = toolNameFor(ctx, callId, payload.tool);
       ctx.openTool = name;
       ctx.startedTools.add(callId);
-      out.push({
+      const message = {
         type: "tool_start",
         name,
         summary: summarizeToolCall(name, call?.arguments),
         id: callId,
-      });
+      };
+      // The kernel marks what a tool does (`readOnly` / `destructive` /
+      // `evidence`). Only the true flags travel: a `false` and an absent flag
+      // both mean "not marked", and writing them out would make the renderer
+      // read an unannotated tool as a complete, all-false annotation.
+      const annotations = toolAnnotations(payload.annotations);
+      if (annotations !== undefined) message.annotations = annotations;
+      out.push(message);
       break;
     }
 
