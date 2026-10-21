@@ -684,7 +684,8 @@ describe("ui api", () => {
     ) as { providers: unknown };
     expect(reread.providers).toEqual(providers);
 
-    // A model without contextWindow is something the kernel cannot run.
+    // A model without contextWindow is valid: the kernel defaults it. What is
+    // still rejected is a value the kernel cannot use.
     const bad = await rawRequest(
       s.port,
       "/api/config",
@@ -695,7 +696,7 @@ describe("ui api", () => {
           "local-gw": {
             protocol: "openai-chat-completions",
             baseUrl: "http://127.0.0.1:8080/v1",
-            models: { flash: { maxOutput: 4096 } },
+            models: { flash: { contextWindow: 0 } },
           },
         },
       }),

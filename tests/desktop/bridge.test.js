@@ -1384,3 +1384,337 @@ describe("bridge: providers 保存", () => {
     expect(events.some((event) => event.type === "settings")).toBe(false);
   });
 });
+
+describe("bridge: 测试连接（testProvider）", () => {
+  function probeBridge(handler) {
+    const fetchImpl = fakeFetch([
+      ["/api/providers/test", handler],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    return { bridge, events, fetchImpl };
+  }
+
+  it("POST /api/providers/test，成功回包转成带模型列表的 provider_test", async () => {
+    const { bridge, events, fetchImpl } = probeBridge(() =>
+      jsonResponse({
+        ok: true,
+        baseUrl: "https://gw.example/v1",
+        models: ["flash", "pro"],
+        latencyMs: 42,
+      }),
+    );
+    bridge.api.send({
+      cmd: "testProvider",
+      baseUrl: "https://gw.example/v1",
+      apiKeyEnv: "GW_KEY",
+      model: "flash",
+    });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+
+    const call = fetchImpl.calls.find((entry) => entry.url === "/api/providers/test");
+    expect(call.method).toBe("POST");
+    // Only the fields the operator filled in travel: an empty `apiKeyEnv` would
+    // ask the server to read a variable with no name.
+    expect(JSON.parse(call.body)).toStrictEqual({
+      baseUrl: "https://gw.example/v1",
+      apiKeyEnv: "GW_KEY",
+      model: "flash",
+    });
+    expect(events.find((event) => event.type === "provider_test")).toStrictEqual({
+      type: "provider_test",
+      ok: true,
+      baseUrl: "https://gw.example/v1",
+      models: ["flash", "pro"],
+      latencyMs: 42,
+    });
+  });
+
+  it("可选字段为空时不发，回包缺 baseUrl 时补上请求里的值", async () => {
+    const { bridge, events, fetchImpl } = probeBridge(() =>
+      jsonResponse({ ok: true, models: ["flash"] }),
+    );
+    bridge.api.send({ cmd: "testProvider", baseUrl: "https://gw.example/v1", apiKeyEnv: "  ", model: "" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+
+    expect(JSON.parse(fetchImpl.calls.find((entry) => entry.url === "/api/providers/test").body))
+      .toStrictEqual({ baseUrl: "https://gw.example/v1" });
+    const event = events.find((entry) => entry.type === "provider_test");
+    // The settings page keys its card on the address it sent; a reply without
+    // one, or with a normalized spelling of it, would drop the card's state.
+    expect(event.baseUrl).toBe("https://gw.example/v1");
+    expect(event.ok).toBe(true);
+    // No latency in the reply means no latency in the event — not `0`.
+    expect(event.latencyMs).toBeUndefined();
+  });
+
+  it("服务端回 ok:false 时转成失败事件，带上原因与错误码", async () => {
+    const { bridge, events } = probeBridge(() =>
+      jsonResponse({
+        ok: false,
+        baseUrl: "https://gw.example/v1",
+        error: "401 未授权：API key 无效",
+        code: "unauthorized",
+      }),
+    );
+    bridge.api.send({ cmd: "testProvider", baseUrl: "https://gw.example/v1" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event).toStrictEqual({
+      type: "provider_test",
+      ok: false,
+      baseUrl: "https://gw.example/v1",
+      error: "401 未授权：API key 无效",
+      code: "unauthorized",
+    });
+    // 缺省 ≠ 空：a failed probe listed no models, it did not list zero.
+    expect(event.models).toBeUndefined();
+  });
+
+  it("回包没有明确的 ok:true 时不当成连接成功（R3）", async () => {
+    // A 200 with a body that never said `ok` is not a probe result; echoing it
+    // as "connected" would put a green card on an untested gateway.
+    const { bridge, events } = probeBridge(() => jsonResponse({ models: ["flash"] }));
+    bridge.api.send({ cmd: "testProvider", baseUrl: "https://gw.example/v1" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event.ok).toBe(false);
+    expect(typeof event.error).toBe("string");
+    expect(event.error.trim()).not.toBe("");
+  });
+
+  it("HTTP 500 时回 ok:false 并带上服务端的原因，而不是静默", async () => {
+    const { bridge, events } = probeBridge(() =>
+      jsonResponse({ error: { code: "internal", message: "内核探测失败" } }, 500),
+    );
+    bridge.api.send({ cmd: "testProvider", baseUrl: "https://gw.example/v1" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event).toMatchObject({ type: "provider_test", ok: false, baseUrl: "https://gw.example/v1" });
+    expect(event.error).toContain("内核探测失败");
+  });
+
+  it("HTTP 400 的平铺 message 也读得出来，不退化成只有状态码", async () => {
+    // The probe's own rejection may use a flat `{ message }`; reporting
+    // "HTTP 400" for an address the user could fix loses the one sentence
+    // that says what to fix.
+    const { bridge, events } = probeBridge(() =>
+      jsonResponse({ message: "baseUrl 必须是 http 或 https 地址" }, 400),
+    );
+    bridge.api.send({ cmd: "testProvider", baseUrl: "ftp://gw.example/v1" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event.ok).toBe(false);
+    expect(event.error).toContain("baseUrl 必须是 http 或 https 地址");
+    expect(event.error).not.toContain("HTTP 400");
+  });
+
+  it("网络异常时回 ok:false，不抛也不静默", async () => {
+    const { bridge, events } = probeBridge(() => {
+      throw new Error("socket hang up");
+    });
+    bridge.api.send({ cmd: "testProvider", baseUrl: "https://gw.example/v1" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event).toMatchObject({ type: "provider_test", ok: false, baseUrl: "https://gw.example/v1" });
+    expect(event.error).toContain("socket hang up");
+  });
+
+  it("baseUrl 为空时不发请求，直接回失败事件", async () => {
+    const { bridge, events, fetchImpl } = probeBridge(() => jsonResponse({ ok: true }));
+    bridge.api.send({ cmd: "testProvider", baseUrl: "   " });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "provider_test")).toBe(true);
+    });
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event).toMatchObject({ type: "provider_test", ok: false, baseUrl: "" });
+    expect(event.error.trim()).not.toBe("");
+    expect(fetchImpl.calls.some((entry) => entry.url === "/api/providers/test")).toBe(false);
+  });
+});
+
+describe("bridge: 模型配置页可达", () => {
+  it("getSettings 带上 providerConfig，设置页才画得出表单", async () => {
+    const providers = {
+      gw: {
+        protocol: "openai-chat-completions",
+        baseUrl: "https://gw.example/v1",
+        models: { flash: { contextWindow: 128000, maxOutput: 4096 } },
+      },
+    };
+    const config = {
+      mcpServers: [],
+      permissions: { preset: "diagnose", approvalTimeoutMs: 120000, rules: [] },
+      run: { maxTurns: 10, maxCostUsd: null, timeoutMs: null, systemPrompt: "" },
+      mcpPath: "E:/home/mcp.json",
+      permissionsPath: "E:/home/permissions.json",
+      runPath: "E:/home/run.json",
+      providers,
+      providersPath: "E:/home/providers.json",
+    };
+    const fetchImpl = fakeFetch([
+      ["/api/config", () => jsonResponse(config)],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "getSettings" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "settings")).toBe(true);
+    });
+
+    const settings = events.filter((event) => event.type === "settings").at(-1).settings;
+    // Without this the settings page shows "this host does not report an
+    // editable provider configuration" and renders no form at all.
+    expect(settings.providerConfig).toStrictEqual(providers);
+    expect(settings.providers).toStrictEqual([{ id: "gw", baseUrl: "https://gw.example/v1" }]);
+    expect(settings.models.map((model) => model.id)).toStrictEqual(["gw/flash"]);
+    expect(settings.configPaths.providers).toBe("E:/home/providers.json");
+  });
+
+  it("providers 读失败时带 providersError，页面仍能打开去修它", async () => {
+    const config = {
+      mcpServers: [],
+      permissions: { preset: "diagnose", approvalTimeoutMs: 120000, rules: [] },
+      run: { maxTurns: 10, maxCostUsd: null, timeoutMs: null, systemPrompt: "" },
+      mcpPath: "", permissionsPath: "", runPath: "",
+      providers: {},
+      providersPath: "E:/home/providers.json",
+      providersError: "providers 配置校验失败: gw.baseUrl: Invalid url",
+    };
+    const fetchImpl = fakeFetch([
+      ["/api/config", () => jsonResponse(config)],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "getSettings" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "settings")).toBe(true);
+    });
+    const settings = events.filter((event) => event.type === "settings").at(-1).settings;
+    // The reason travels with the (empty) form, so the page can say why it is
+    // empty instead of presenting a blank file as the user's configuration.
+    expect(settings.providersError).toContain("baseUrl");
+    expect(settings.providerConfig).toStrictEqual({});
+  });
+
+  it("读过配置后广播真实模型列表，选单不再停在加载中", async () => {
+    const providers = {
+      gw: {
+        protocol: "openai-chat-completions",
+        baseUrl: "https://gw.example/v1",
+        models: { flash: { contextWindow: 128000, maxOutput: 4096 } },
+      },
+    };
+    const fetchImpl = fakeFetch([
+      ["/api/config", () => jsonResponse({ providers, providersPath: "E:/home/providers.json" })],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "getSettings" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "models")).toBe(true);
+    });
+    // The picker listens for `models`, not `settings`. Without this event the
+    // chip stayed on "loading models…" even though `providers.json` named a
+    // model the next run would use.
+    const models = events.filter((event) => event.type === "models").at(-1);
+    expect(models.models.map((model) => model.id)).toStrictEqual(["gw/flash"]);
+    // The kernel falls back to the file's first reference when none is
+    // configured, so the chip must name the same one the run will use.
+    expect(models.model).toBe("gw/flash");
+  });
+
+  it("saveProviders 成功后选单与表单都跟上文件内容", async () => {
+    let stored = {
+      mcpServers: [],
+      permissions: { preset: "diagnose", approvalTimeoutMs: 120000, rules: [] },
+      run: { maxTurns: 10, maxCostUsd: null, timeoutMs: null, systemPrompt: "" },
+      mcpPath: "", permissionsPath: "", runPath: "",
+      providers: {},
+      providersPath: "E:/home/providers.json",
+    };
+    const fetchImpl = fakeFetch([
+      [
+        "/api/config",
+        (_url, init) => {
+          if (init.method === "PUT") {
+            const body = JSON.parse(init.body);
+            stored = { ...stored, providers: body.providers };
+            return jsonResponse(stored);
+          }
+          return jsonResponse(stored);
+        },
+      ],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    const providers = {
+      gw: {
+        protocol: "openai-chat-completions",
+        baseUrl: "https://gw.example/v1",
+        models: { flash: { contextWindow: 128000, maxOutput: 4096 } },
+      },
+    };
+    bridge.api.send({ cmd: "saveProviders", providers });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "settings").length).toBeGreaterThan(0);
+    });
+    const settings = events.filter((event) => event.type === "settings").at(-1).settings;
+    expect(settings.providerConfig).toStrictEqual(providers);
+    expect(settings.models.map((model) => model.id)).toStrictEqual(["gw/flash"]);
+    // The picker has to learn the new model too, not only the settings form.
+    await vi.waitFor(() => {
+      const state = events.filter((event) => event.type === "state").at(-1);
+      expect(state?.models?.map((model) => model.id)).toStrictEqual(["gw/flash"]);
+    });
+  });
+});

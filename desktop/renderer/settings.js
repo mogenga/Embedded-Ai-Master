@@ -58,7 +58,8 @@ state.packRemoveArmed = null;
 state.settingsQuery = "";
 
 /**
- * Draft bookkeeping for the Connection page.
+ * Draft bookkeeping for the model-services page (`connection` as an id only —
+ * the rail and the header call it 模型服务 / "Model services").
  *
  * That page is the only one with a Save step (it edits `providers.json` whole),
  * so it is the only one that can lose work when the host pushes a fresh
@@ -77,6 +78,70 @@ let connectionSavePending = false;
 let connectionShowSaved = false;
 /** Raised by `openSetup`; cleared when the user leaves the page. */
 let connectionSetupHint = false;
+/** A connection test that never hears back would leave its button reading
+ *  "Testing…" forever; silence is not an answer (R3). */
+const CONNECTION_TEST_TIMEOUT_MS = 15_000;
+/**
+ * Tests waiting on a `provider_test` answer, for the page build that started
+ * them. The event names its endpoint, not its card, so an answer is matched on
+ * `baseUrl`; one that matches nothing was started by a page that is gone.
+ */
+let connectionPendingTests = [];
+/** Timeouts of the tests in flight, so a rebuild can cancel them all. */
+const connectionTestTimers = new Set();
+/** Bumped by every build of the model-services page. A test belongs to the
+ *  build that started it: writing its answer into the nodes that build left
+ *  behind would be invisible work on a detached tree. */
+let connectionPageBuild = 0;
+
+/**
+ * Drop every test still waiting on an answer, and cancel their timers.
+ *
+ * Called when the pane that started them goes away — a rebuild, or a switch to
+ * another settings tab. The answer, if one still arrives, has no card to land
+ * on and is ignored rather than written to a detached node.
+ */
+function abandonConnectionTests() {
+  connectionPageBuild += 1;
+  connectionPendingTests = [];
+  for (const timer of connectionTestTimers) clearTimeout(timer);
+  connectionTestTimers.clear();
+}
+
+/**
+ * A `provider_test` answer from the host.
+ *
+ * The event names the endpoint, not the card: several cards may be testing at
+ * once, and an answer whose `baseUrl` matches no waiting test belongs to a page
+ * that is gone. It is ignored, not shown (R3: no invented result).
+ */
+function handleProviderTest(message) {
+  const baseUrl = typeof message.baseUrl === "string" ? message.baseUrl : "";
+  const at = connectionPendingTests.findIndex((entry) => entry.baseUrl === baseUrl);
+  if (at < 0) return;
+  const [pending] = connectionPendingTests.splice(at, 1);
+  // A rebuild replaced the DOM this test was drawing into.
+  if (pending.build !== connectionPageBuild) return;
+  if (message.ok === true) {
+    const models = Array.isArray(message.models)
+      ? message.models.filter((model) => typeof model === "string")
+      : [];
+    pending.finish(models.length > 0 ? "ok" : "empty", {
+      models,
+      latencyMs: typeof message.latencyMs === "number" ? message.latencyMs : undefined,
+    });
+    return;
+  }
+  // The event's own words first; a failure that names neither an error nor a
+  // code is still a failure, and saying so beats an empty warning line.
+  const detail =
+    typeof message.error === "string" && message.error !== ""
+      ? message.error
+      : typeof message.code === "string" && message.code !== ""
+        ? message.code
+        : S().connTestFailed;
+  pending.finish("failed", detail);
+}
 
 const S = () => settingsStrings[state.locale] ?? settingsStrings.en;
 
@@ -706,16 +771,8 @@ function isFetchableUrl(value) {
   }
 }
 
-/** A positive whole number, or null when the text is not one (empty included). */
-function positiveIntOrNull(text) {
-  const trimmed = String(text ?? "").trim();
-  if (trimmed === "") return null;
-  const value = Number(trimmed);
-  return Number.isInteger(value) && value > 0 ? value : null;
-}
-
 /**
- * Connection: the model services every turn talks to.
+ * Model services (page id `connection`): the endpoints every turn talks to.
  *
  * This page edits `providers.json` as one document, because the host writes it
  * that way (`saveProviders` → `writeProviders` validates the whole file before
@@ -734,6 +791,11 @@ function buildConnectionPage() {
   // belonged to the DOM that is being replaced. `fillSettings` does not rebuild
   // while a draft is dirty, so reaching here means there is no draft to lose.
   connectionDirty = false;
+  // Any test started by the pane that is being replaced is now writing into a
+  // tree nothing shows. Its answer has nowhere honest to go, so the record is
+  // dropped and the timer cancelled; the rebuild draws fresh, idle buttons.
+  abandonConnectionTests();
+  const build = connectionPageBuild;
 
   const config = state.settings?.providerConfig;
   // Nothing safe to edit: `state.settings` is null until the host answers, and
@@ -814,15 +876,25 @@ function buildConnectionPage() {
     protocol: DEFAULT_PROTOCOL,
     baseUrl: "",
     apiKeyEnv: "",
-    models: [{ id: "", contextWindow: "", maxOutput: "" }],
-    price: { input: "", output: "", cachedInput: "" },
+    // A model row is a name and nothing else. Its context window and output
+    // cap are the kernel's to estimate (`src/config/providers.ts` defaults
+    // them): an OpenAI-compatible endpoint does not report either, so asking
+    // the user to type them was asking for a guess in a required field.
+    models: [{ id: "", carried: {} }],
     extra: {},
   });
 
-  /** One saved provider, copied field by field. `extra` holds the keys the
-   *  schema allows but this page does not edit (`requestTimeoutMs`,
-   *  `maxResponseBytes`); they are carried through so saving does not erase
-   *  a setting the user made elsewhere. */
+  /**
+   * One saved provider, copied field by field.
+   *
+   * `carried` is per model: the fields this page does not show. They are kept
+   * so saving does not erase a value the user set in an editor — the form not
+   * displaying a field must not mean the file loses it (R3).
+   *
+   * `extra` holds the provider-level keys the schema allows but this page does
+   * not edit (`requestTimeoutMs`, `maxResponseBytes`, `pricePerMillion`); they
+   * are carried through for the same reason.
+   */
   const entryFrom = (name, provider) => ({
     name,
     protocol: typeof provider?.protocol === "string" ? provider.protocol : DEFAULT_PROTOCOL,
@@ -830,17 +902,15 @@ function buildConnectionPage() {
     apiKeyEnv: typeof provider?.apiKeyEnv === "string" ? provider.apiKeyEnv : "",
     models: Object.entries(provider?.models ?? {}).map(([id, model]) => ({
       id,
-      contextWindow: model?.contextWindow ?? "",
-      maxOutput: model?.maxOutput ?? "",
+      carried: {
+        ...(model?.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
+        ...(model?.maxOutput !== undefined ? { maxOutput: model.maxOutput } : {}),
+      },
     })),
-    price: {
-      input: provider?.pricePerMillion?.input ?? "",
-      output: provider?.pricePerMillion?.output ?? "",
-      cachedInput: provider?.pricePerMillion?.cachedInput ?? "",
-    },
     extra: {
       ...(provider?.requestTimeoutMs !== undefined ? { requestTimeoutMs: provider.requestTimeoutMs } : {}),
       ...(provider?.maxResponseBytes !== undefined ? { maxResponseBytes: provider.maxResponseBytes } : {}),
+      ...(provider?.pricePerMillion !== undefined ? { pricePerMillion: provider.pricePerMillion } : {}),
     },
   });
 
@@ -851,22 +921,10 @@ function buildConnectionPage() {
 
     const head = el("div", "about-row");
     const title = el("h3", "", entry.name || s.connNewProvider);
-    head.append(
-      title,
-      el("code", "setting-code", entry.protocol),
-      sButton(
-        s.remove,
-        () => {
-          const at = cards.findIndex((item) => item.node === node);
-          if (at >= 0) cards.splice(at, 1);
-          node.remove();
-          markDirty();
-          refreshIds();
-          syncEmpty();
-        },
-        { quiet: true, danger: true },
-      ),
-    );
+    // The test button and Remove go here; the button is built below, once the
+    // result area it talks to exists.
+    const headActions = el("div", "mcp-actions");
+    head.append(title, el("code", "setting-code", entry.protocol), headActions);
 
     const nameInput = sText({ value: entry.name, placeholder: "provider1", mono: true });
     nameInput.addEventListener("input", () => {
@@ -884,15 +942,13 @@ function buildConnectionPage() {
     });
 
     const modelList = el("div", "mcp-list");
+    /** One row: a name and Remove. `carried` rides along untouched so a save
+     *  does not drop the counters this page no longer asks for. */
     const modelHandles = [];
     const addModelRow = (model) => {
       const row = el("div", "rules-row");
       const idInput = sText({ value: model.id, placeholder: "model-name", mono: true });
       idInput.setAttribute("aria-label", s.connModelName);
-      const contextInput = sText({ value: model.contextWindow, placeholder: "contextWindow", mono: true });
-      contextInput.setAttribute("aria-label", s.connContextWindow);
-      const maxOutputInput = sText({ value: model.maxOutput, placeholder: "maxOutput", mono: true });
-      maxOutputInput.setAttribute("aria-label", s.connMaxOutput);
       const remove = sButton(
         s.remove,
         () => {
@@ -903,19 +959,21 @@ function buildConnectionPage() {
         },
         { quiet: true, danger: true },
       );
-      modelHandles.push({ row, idInput, contextInput, maxOutputInput });
-      row.append(idInput, contextInput, maxOutputInput, remove);
+      const handle = { row, idInput, carried: { ...(model.carried ?? {}) } };
+      modelHandles.push(handle);
+      row.append(idInput, remove);
       modelList.appendChild(row);
+      return handle;
     };
     // A service with no models yet still gets one empty row: a card that only
     // holds "add" would hide what a model entry looks like.
-    for (const model of entry.models.length > 0 ? entry.models : [{ id: "", contextWindow: "", maxOutput: "" }]) {
+    for (const model of entry.models.length > 0 ? entry.models : [{ id: "", carried: {} }]) {
       addModelRow(model);
     }
     const addModel = sButton(
       s.connAddModel,
       () => {
-        addModelRow({ id: "", contextWindow: "", maxOutput: "" });
+        addModelRow({ id: "", carried: {} });
         markDirty();
       },
       { quiet: true },
@@ -931,34 +989,15 @@ function buildConnectionPage() {
       modelFoot,
     );
 
-    const priceRow = el("div", "mcp-actions");
-    const priceInput = sText({ value: entry.price.input, placeholder: `${s.connPriceInput} $/M`, mono: true });
-    priceInput.setAttribute("aria-label", `${s.connPrice} · ${s.connPriceInput}`);
-    const priceOutputInput = sText({
-      value: entry.price.output,
-      placeholder: `${s.connPriceOutput} $/M`,
-      mono: true,
-    });
-    priceOutputInput.setAttribute("aria-label", `${s.connPrice} · ${s.connPriceOutput}`);
-    const priceCachedInput = sText({
-      value: entry.price.cachedInput,
-      placeholder: `${s.connPriceCached} $/M`,
-      mono: true,
-    });
-    priceCachedInput.setAttribute("aria-label", `${s.connPrice} · ${s.connPriceCached}`);
-    priceRow.append(priceInput, priceOutputInput, priceCachedInput);
-
-    const priceGroup = el("section", "setting-group");
-    priceGroup.append(
-      el("h3", "setting-group-title", s.connPrice),
-      el("p", "setting-desc", s.connPriceDesc),
-      priceRow,
-    );
-
     // A rejected value has to say so where the field is, not in a notice that
     // scrolls away from the control at fault.
     const problem = el("p", "setting-note pack-problem", "");
     problem.hidden = true;
+
+    /** What the last connection test said. Built fresh with the card, so a
+     *  result never outlives the page that produced it. */
+    const testResult = el("p", "setting-note", "");
+    testResult.hidden = true;
 
     node.append(
       head,
@@ -966,8 +1005,148 @@ function buildConnectionPage() {
       sRow({ label: s.baseUrl, desc: s.baseUrlDesc, control: baseUrlInput }),
       sRow({ label: s.connApiKeyEnv, desc: s.connApiKeyEnvDesc, control: apiKeyEnvInput }),
       modelsGroup,
-      priceGroup,
+      testResult,
       problem,
+    );
+
+    /**
+     * The endpoint this card would test, and the key variable and model that
+     * go with it; `problem` is set when the URL cannot be called at all.
+     *
+     * The test does not save, so it reads the live inputs rather than the file:
+     * a user who just typed an endpoint wants to find out whether it answers
+     * before committing it.
+     */
+    const testTarget = () => {
+      const baseUrl = baseUrlInput.value.trim();
+      if (baseUrl === "") return { problem: s.connBaseUrlRequired, field: baseUrlInput };
+      if (!isFetchableUrl(baseUrl)) return { problem: s.connBaseUrlInvalid, field: baseUrlInput };
+      return {
+        baseUrl,
+        apiKeyEnv: apiKeyEnvInput.value.trim(),
+        model: modelHandles[0]?.idInput.value.trim() ?? "",
+      };
+    };
+
+    let testing = false;
+
+    /** One line of outcome. A failed test takes the warn colour (the token the
+     *  transcript's warnings use), not the error red: an endpoint that did not
+     *  answer is a fact about the endpoint, not a crash. The colour is applied
+     *  inline because the settings stylesheet needs no entry for one class. */
+    const showTestLine = (text, { warn = false } = {}) => {
+      testResult.textContent = text;
+      testResult.style.color = warn ? "var(--warn)" : "";
+      testResult.hidden = false;
+    };
+
+    /** Model names from a successful test, each one click away from a new row.
+     *  A name already on this card is not offered twice. */
+    const showTestModels = (models, latencyMs) => {
+      testResult.hidden = false;
+      testResult.textContent = "";
+      testResult.style.color = "";
+      const line = el("span", "", s.connTestOk.replace("{n}", String(models.length)));
+      if (Number.isFinite(latencyMs)) line.textContent += ` · ${Math.round(latencyMs)} ms`;
+      testResult.appendChild(line);
+      const chips = el("span", "mcp-actions");
+      const listed = new Set(modelHandles.map((handle) => handle.idInput.value.trim()));
+      for (const name of models) {
+        if (typeof name !== "string" || name.trim() === "" || listed.has(name)) continue;
+        listed.add(name);
+        const button = el("button", "chip-button", name);
+        button.type = "button";
+        button.title = s.connTestAddModel;
+        button.addEventListener("click", () => {
+          addModelRow({ id: name, carried: {} });
+          button.remove();
+          // The row is an edit like any other: the draft is now newer than the
+          // file, and Save is what makes it real.
+          markDirty();
+        });
+        chips.appendChild(button);
+      }
+      if (chips.childElementCount > 0) testResult.append(" ", chips);
+    };
+
+    /** The test this card is waiting on, if any. */
+    let currentTest = null;
+
+    /** Drop the wait: cancel the timer and stop matching an answer to it. */
+    const cancelTest = (pending) => {
+      clearTimeout(pending.timer);
+      connectionTestTimers.delete(pending.timer);
+      const at = connectionPendingTests.indexOf(pending);
+      if (at >= 0) connectionPendingTests.splice(at, 1);
+      if (currentTest === pending) currentTest = null;
+    };
+
+    /** Back to the idle button, whatever the outcome was. */
+    const endTest = (pending) => {
+      cancelTest(pending);
+      testing = false;
+      testButton.disabled = false;
+      testButton.textContent = s.connTest;
+    };
+
+    const runTest = () => {
+      if (testing) return;
+      const target = testTarget();
+      if (target.problem !== undefined) {
+        showTestLine(target.problem, { warn: true });
+        target.field?.focus();
+        return;
+      }
+      testing = true;
+      testButton.disabled = true;
+      testButton.textContent = s.connTesting;
+      // The last answer described a test that has already happened; leaving it
+      // on screen while a new one runs would show a result for the wrong try.
+      testResult.hidden = true;
+      testResult.textContent = "";
+      testResult.style.color = "";
+      const pending = { build, baseUrl: target.baseUrl, timer: undefined };
+      // The endpoint is the identity the answer comes back with; two cards may
+      // be testing at once, so matching on it is what keeps an answer on the
+      // card that asked.
+      pending.finish = (kind, detail) => {
+        endTest(pending);
+        if (kind === "ok") showTestModels(detail.models ?? [], detail.latencyMs);
+        else if (kind === "empty") showTestLine(s.connTestOkNoModels);
+        else showTestLine(detail, { warn: true });
+      };
+      currentTest = pending;
+      connectionPendingTests.push(pending);
+      // Nothing else will ever resolve this test, and a button stuck on
+      // "Testing…" is a click that produced no answer (R3).
+      pending.timer = setTimeout(() => {
+        connectionTestTimers.delete(pending.timer);
+        if (pending.build !== connectionPageBuild) return;
+        endTest(pending);
+        showTestLine(s.connTestTimeout, { warn: true });
+      }, CONNECTION_TEST_TIMEOUT_MS);
+      connectionTestTimers.add(pending.timer);
+      api.send({ cmd: "testProvider", baseUrl: target.baseUrl, apiKeyEnv: target.apiKeyEnv, model: target.model });
+    };
+
+    const testButton = sButton(s.connTest, runTest, { quiet: true });
+    headActions.append(
+      testButton,
+      sButton(
+        s.remove,
+        () => {
+          // A test this card started has nowhere to report now; leaving it
+          // pending would let an answer land on a node nothing shows.
+          if (currentTest) cancelTest(currentTest);
+          const at = cards.findIndex((item) => item.node === node);
+          if (at >= 0) cards.splice(at, 1);
+          node.remove();
+          markDirty();
+          refreshIds();
+          syncEmpty();
+        },
+        { quiet: true, danger: true },
+      ),
     );
 
     /** Everything the file needs from this card, checked before it is sent: a
@@ -991,29 +1170,10 @@ function buildConnectionPage() {
         // either half would make `provider/model` point somewhere else.
         if (id.includes("/")) return { problem: s.connModelSlash, field: handle.idInput };
         if (Object.hasOwn(models, id)) return { problem: s.connModelDuplicate, field: handle.idInput };
-        const contextWindow = positiveIntOrNull(handle.contextInput.value);
-        if (contextWindow === null) return { problem: s.connCountInvalid, field: handle.contextInput };
-        const maxOutput = positiveIntOrNull(handle.maxOutputInput.value);
-        if (maxOutput === null) return { problem: s.connCountInvalid, field: handle.maxOutputInput };
-        models[id] = { contextWindow, maxOutput };
-      }
-
-      const price = {};
-      for (const [key, input] of [
-        ["input", priceInput],
-        ["output", priceOutputInput],
-        ["cachedInput", priceCachedInput],
-      ]) {
-        const text = input.value.trim();
-        if (text === "") continue;
-        const value = Number(text);
-        if (!Number.isFinite(value) || value < 0) return { problem: s.connPriceInvalid, field: input };
-        price[key] = value;
-      }
-      // The schema requires input and output together; a lone cachedInput or a
-      // lone output would be dropped by the parser, so it is refused here.
-      if (Object.keys(price).length > 0 && (price.input === undefined || price.output === undefined)) {
-        return { problem: s.connPriceIncomplete, field: price.input === undefined ? priceInput : priceOutputInput };
+        // The counters are not on this form; whatever the file already had for
+        // this model travels with it unchanged. A new row carries nothing and
+        // the kernel fills in its own estimate.
+        models[id] = { ...handle.carried };
       }
 
       const apiKeyEnv = apiKeyEnvInput.value.trim();
@@ -1024,16 +1184,9 @@ function buildConnectionPage() {
           baseUrl,
           ...(apiKeyEnv === "" ? {} : { apiKeyEnv }),
           models,
+          // `pricePerMillion` rides in here with the other keys this page does
+          // not show, for the same reason the per-model counters do.
           ...entry.extra,
-          ...(price.input === undefined
-            ? {}
-            : {
-                pricePerMillion: {
-                  input: price.input,
-                  output: price.output,
-                  ...(price.cachedInput === undefined ? {} : { cachedInput: price.cachedInput }),
-                },
-              }),
         },
       };
     };
@@ -2489,7 +2642,7 @@ function applyLocaleChange() {
 
 function openSettings(tab = "general") {
   // Opening Settings starts from the file: `selectSettingsTab` below rebuilds
-  // the Connection pane, so a draft from a previous visit is already gone from
+  // the model-services pane, so a draft from a previous visit is already gone from
   // the screen and must not linger in the flags either.
   connectionDirty = false;
   connectionShowSaved = false;
@@ -2513,7 +2666,7 @@ function openSettings(tab = "general") {
 function selectSettingsTab(tab) {
   const pages = settingsPages();
   const page = pages.find((entry) => entry.id === tab) ?? pages[0];
-  // Leaving the Connection page abandons its draft (that page has a Save step,
+  // Leaving the model-services page abandons its draft (it has a Save step,
   // so a draft left behind would be work the user can no longer see or reach),
   // and the first-run hint belongs to that visit, not to the next.
   if (page.id !== "connection") {
@@ -2521,6 +2674,9 @@ function selectSettingsTab(tab) {
     connectionDirty = false;
     connectionShowSaved = false;
     connectionSavedSeq = -1;
+    // A test whose card is no longer on screen has no result to show; its
+    // timer would otherwise fire into a page the user has left.
+    abandonConnectionTests();
   }
   document.querySelectorAll("[data-settings-tab]").forEach((button) => {
     const active = button.dataset.settingsTab === page.id;
@@ -2689,7 +2845,7 @@ function fillSettings(settings) {
   // effect.
   state.kernelSandbox = settings.kernelSandboxState ?? state.kernelSandbox ?? null;
   setMode(state.mode);
-  // The Connection page holds a draft, and every other page saves on change —
+  // The model-services page holds a draft, every other page saves on change —
   // so a rebuild costs nothing there but would discard what the user typed
   // here. A payload that answers a save is the one case where the file really
   // changed: the draft becomes the saved state and the pane is rebuilt from
@@ -2742,6 +2898,9 @@ function basename(path) {
         if (message.ok === false) {
           state.settingsError = message.error ?? "";
         }
+        break;
+      case "provider_test":
+        handleProviderTest(message);
         break;
       case "usage_summary":
         state.usageSummary = message.summary;

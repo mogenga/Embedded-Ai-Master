@@ -3,6 +3,8 @@ import {
   createContext,
   initialState,
   MAX_TOOL_OUTPUT_BYTES,
+  modelsOf,
+  providersEvent,
   sessionEventToHostEvents,
   sessionEventsToMessages,
   sessionExportName,
@@ -613,5 +615,48 @@ describe("导出", () => {
     expect(sessionExportName("s1", "a/b:c*?")).toBe("a-b-c-.md");
     expect(sessionExportName("s1", "")).toBe("s1.md");
     expect(sessionExportName("", "")).toBe("session.md");
+  });
+});
+
+describe("providers 配置的两种形状", () => {
+  it("providersEvent 把文件拆成选单列表与可编辑对象", () => {
+    const config = {
+      gw: {
+        protocol: "openai-chat-completions",
+        baseUrl: "https://gw.example/v1",
+        apiKeyEnv: "GW_KEY",
+        models: { flash: { contextWindow: 128000, maxOutput: 4096 } },
+      },
+      backup: {
+        protocol: "openai-chat-completions",
+        baseUrl: "https://backup.example/v1",
+        models: { slow: { contextWindow: 4096, maxOutput: 256 } },
+      },
+    };
+    const { providers, providerConfig } = providersEvent(config);
+    // The picker's flat list: one row per provider, carrying its URL.
+    expect(providers).toStrictEqual([
+      { id: "gw", baseUrl: "https://gw.example/v1" },
+      { id: "backup", baseUrl: "https://backup.example/v1" },
+    ]);
+    // The file itself, untouched: the settings page saves this shape back.
+    expect(providerConfig).toStrictEqual(config);
+  });
+
+  it("modelsOf 跨 provider 展开成 provider/model 引用", () => {
+    const models = modelsOf({
+      gw: { models: { flash: { contextWindow: 128000, maxOutput: 4096 } } },
+      backup: { models: { slow: { contextWindow: 4096, maxOutput: 256 } } },
+    });
+    expect(models).toStrictEqual([
+      { id: "gw/flash", name: "flash", contextLength: 128000, supportsTools: true, supportsReasoning: false, supportsVision: false },
+      { id: "backup/slow", name: "slow", contextLength: 4096, supportsTools: true, supportsReasoning: false, supportsVision: false },
+    ]);
+  });
+
+  it("非对象输入不算配置，也不编造条目", () => {
+    expect(providersEvent(null)).toStrictEqual({ providers: [], providerConfig: undefined });
+    expect(providersEvent("nope").providers).toStrictEqual([]);
+    expect(modelsOf(undefined)).toStrictEqual([]);
   });
 });

@@ -18,6 +18,7 @@
  *   getArtifacts    GET  /api/sessions/:id/artifacts
  *   getArtifact     GET  /api/file?path=…
  *   saveProviders   PUT  /api/config           { providers }
+ *   testProvider    POST /api/providers/test   { baseUrl, apiKeyEnv?, model? }
  *   live events     GET  /api/events (SSE)
  *
  * Everything else answers with a `notice` naming the command. A silent no-op
@@ -31,6 +32,8 @@
 import {
   createContext,
   initialState,
+  modelsOf,
+  providersEvent,
   sessionEventToHostEvents,
   sessionEventsToMessages,
   sessionExportName,
@@ -149,8 +152,11 @@ export function createBrowserBridge(options = {}) {
       cwd: currentCwd,
       locale,
       mode: stateMode,
+      // The picker reads the catalogue from here. Sending `[]` left it stuck
+      // on "loading models…" for the whole session, and the chip reported no
+      // model while `providers.json` named one.
       model: lastModel,
-      models: [],
+      models: modelsOf(isRecord(lastConfig) ? lastConfig.providers : undefined),
       modelsSource: "providers.json",
     });
   }
@@ -616,6 +622,7 @@ export function createBrowserBridge(options = {}) {
     "searchSessions",
     "saveSettings",
     "saveProviders",
+    "testProvider",
     "setEffort",
     "saveMcpServer",
     "removeMcpServer",
@@ -648,10 +655,40 @@ export function createBrowserBridge(options = {}) {
       return;
     }
     emitSettings();
+    emitModels();
+  }
+
+  /**
+   * Feed the picker from the provider file.
+   *
+   * The desktop host sends this event after a save; the browser form has the
+   * same job. Only a non-empty list is announced: an empty `models` event
+   * would blank a catalogue the picker already has.
+   */
+  function emitModels() {
+    const models = modelsOf(isRecord(lastConfig) ? lastConfig.providers : undefined);
+    if (models.length === 0) return;
+    // The kernel falls back to the file's first reference when none is
+    // configured, so the chip must name the same one the run will use.
+    if (lastModel === "" || !models.some((model) => model.id === lastModel)) {
+      lastModel = models[0].id;
+    }
+    emit({ type: "models", models, model: lastModel, source: "providers.json" });
+    emit(stateEvent());
   }
 
   function emitSettings() {
-    const settings = { locale, providers: [], models: [], model: lastModel };
+    const file = isRecord(lastConfig) ? lastConfig.providers : undefined;
+    // The file's own shape reaches the settings page here. Without it the page
+    // has nothing it can write back, so it renders "this host does not report
+    // an editable configuration" instead of a form — the browser form had no
+    // way to configure a model at all.
+    const { providers, providerConfig } = providersEvent(file);
+    const settings = { locale, providers, models: modelsOf(file), model: lastModel };
+    if (providerConfig !== undefined) settings.providerConfig = providerConfig;
+    if (typeof lastConfig?.providersError === "string" && lastConfig.providersError !== "") {
+      settings.providersError = lastConfig.providersError;
+    }
     const stored = storage?.getItem("prometheus.theme");
     if (stored !== null && stored !== undefined) settings.theme = stored;
     if (isRecord(lastConfig)) {
@@ -662,6 +699,7 @@ export function createBrowserBridge(options = {}) {
         mcp: textOf(lastConfig.mcpPath),
         permissions: textOf(lastConfig.permissionsPath),
         run: textOf(lastConfig.runPath),
+        providers: textOf(lastConfig.providersPath),
       };
     }
     emit({ type: "settings", settings });
@@ -689,6 +727,121 @@ export function createBrowserBridge(options = {}) {
       return;
     }
     emitSettings();
+    // Saving the provider file is what teaches the picker a new model; the
+    // desktop host does the same after `writeProviders`. Without this a model
+    // added on the settings page would be usable by the next run but still
+    // absent from the menu the operator picks from.
+    if (section === "providers") emitModels();
+  }
+
+  /**
+   * Probe one model gateway for the settings page.
+   *
+   * The server owns the probe: it resolves `apiKeyEnv` against its own
+   * environment and talks to the gateway, so the bridge never reads a key and
+   * never guesses that a gateway is up. Every outcome — a refusal, a network
+   * error, a non-200 — comes back as a `provider_test` event carrying the
+   * address the operator typed: that is the string the page keys its card on,
+   * and a normalized echo would leave the card stuck on "testing".
+   *
+   * `ok: true` is only ever forwarded from the server's own explicit `true`.
+   * A 200 whose body never said so is not evidence the gateway answered, and a
+   * green card on an untested address is the silent success R3 forbids.
+   */
+  async function testProvider(baseUrl, apiKeyEnv, model) {
+    const address = textOf(baseUrl).trim();
+    if (address === "") {
+      emit({
+        type: "provider_test",
+        ok: false,
+        baseUrl: "",
+        error: "连接测试失败：请先填写模型服务地址（baseUrl）",
+      });
+      return;
+    }
+    // Only the fields the operator filled in: an empty `apiKeyEnv` would ask
+    // the server to read a variable with no name.
+    const body = {
+      baseUrl: address,
+      ...(textOf(apiKeyEnv).trim() === "" ? {} : { apiKeyEnv: textOf(apiKeyEnv).trim() }),
+      ...(textOf(model).trim() === "" ? {} : { model: textOf(model).trim() }),
+    };
+    let response;
+    try {
+      response = await fetchImpl("/api/providers/test", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      emit({
+        type: "provider_test",
+        ok: false,
+        baseUrl: address,
+        error: `连接测试失败：${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    if (!response.ok) {
+      // A 400 carries the reason the address was refused. `readError` only
+      // understands the API's `{ error: { message } }` envelope; the probe may
+      // report its own shape, so the body is read here and the same three
+      // spellings are tried before falling back to the status line.
+      let reason = "";
+      try {
+        const body = await response.json();
+        if (isRecord(body)) {
+          reason =
+            textOf(isRecord(body.error) ? body.error.message : undefined)
+            || textOf(body.message)
+            || textOf(body.error);
+        }
+      } catch {
+        // Not JSON: the status line below is the honest answer.
+      }
+      emit({
+        type: "provider_test",
+        ok: false,
+        baseUrl: address,
+        error: `连接测试失败：${reason === "" ? `HTTP ${response.status}` : reason}`,
+      });
+      return;
+    }
+    const payload = await response.json().catch(() => undefined);
+    if (!isRecord(payload)) {
+      emit({
+        type: "provider_test",
+        ok: false,
+        baseUrl: address,
+        error: "连接测试失败：服务端返回了无法解析的内容",
+      });
+      return;
+    }
+    if (payload.ok !== true) {
+      const reason = textOf(payload.error);
+      emit({
+        type: "provider_test",
+        ok: false,
+        baseUrl: address,
+        error: reason === "" ? "连接测试失败：服务端未给出原因" : reason,
+        ...(textOf(payload.code) === "" ? {} : { code: textOf(payload.code) }),
+        // A failed probe has no latency to report; `0` would read as "instant".
+        ...(typeof payload.latencyMs === "number" ? { latencyMs: payload.latencyMs } : {}),
+      });
+      return;
+    }
+    emit({
+      type: "provider_test",
+      ok: true,
+      baseUrl: address,
+      // Absent means "the gateway did not list its models", which is not the
+      // same as "it listed none" — the field is left out rather than sent as
+      // an empty array.
+      ...(Array.isArray(payload.models)
+        ? { models: payload.models.filter((entry) => typeof entry === "string") }
+        : {}),
+      ...(typeof payload.latencyMs === "number" ? { latencyMs: payload.latencyMs } : {}),
+    });
   }
 
   /**
@@ -1078,6 +1231,12 @@ export function createBrowserBridge(options = {}) {
         // Same writer as the other sections: one error path, one settings
         // reply. A second copy would drift the moment the shape changes.
         void putConfig("providers", isRecord(payload.providers) ? payload.providers : {});
+        return;
+      case "testProvider":
+        // Not awaited: the probe can take the server's full timeout (10 s by
+        // default), and the command queue must stay free for a stop or a
+        // session switch while the operator waits for the answer.
+        void testProvider(payload.baseUrl, payload.apiKeyEnv, payload.model);
         return;
       case "sessionFlags": {
         const id = textOf(payload.id);

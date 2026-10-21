@@ -17,8 +17,9 @@
 | `newSession` | ✅ | ✅ | 清空转录，会话 id 留到首个 prompt 才产生 |
 | `loadSession` | ✅ | ✅ | 读整篇日志重建转录 |
 | `listSessions` | ✅ | ✅ | 标题取首条 user 事件（缓存，最多扫 30 条）。支持 `includeArchived` / `cwd` / `limit`：归档行默认隐藏，`total` 是过滤后的总数（`slice` 前算），分页按 `updatedAt` 倒序稳定切片。`status` 筛选在桌面侧只认 `working`，浏览器侧回一条 dim notice 说明不可用 |
-| `getSettings` | ✅ | ✅ | UI 偏好 + provider 列表 + 三份配置文件（`mcpServers` / `permissions` / `run`）及其路径 |
+| `getSettings` | ✅ | ✅ | UI 偏好 + 三份配置文件（`mcpServers` / `permissions` / `run`）及其路径，外加模型服务的两种形状：`providers`（选单用的扁平列表）与 `providerConfig`（`providers.json` 本身，设置页整份写回）。`providersError` 在文件读坏时给出原因，页面据此说明为什么表单是空的 |
 | `saveProviders` | ✅ | ✅ | 整份写 `providers.json`；桌面直写（写完从磁盘重新 `loadProviders`，不信任入参），浏览器走 `PUT /api/config`。模型引用失效时自动回退到首个可用引用并重建 runner |
+| `testProvider` | ✅ | ✅ | 探测一个模型服务：桌面调内核 `probeProvider`（`dist/model/probe.js`，缺失时回「未编译，请先 build」而不是崩宿主），浏览器走 `POST /api/providers/test`。回 `provider_test{ok, baseUrl, models?, error?, code?, latencyMs?}`；`models` 拿不到时字段不存在。**不进命令队列**，探测可能占用 10s，不能把 abort 堵在后面 |
 | `saveMcpServer` | ✅ | ✅ | 合并同名项后整份写 `mcp.json`；桌面直写，浏览器走 `PUT /api/config` |
 | `removeMcpServer` | ✅ | ✅ | 按 name 删除 |
 | `savePermissions` | ✅ | ✅ | 整份写 `permissions.json`（`preset` / `approvalTimeoutMs` / `rules`） |
@@ -84,3 +85,7 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 `docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` 的 §7（回放）、§8（导出）、§9（设备控制）原设计基于已删除的 `src/ui`，需按本前端重写。三项在当前内核上都是可做的：回放只需按事件下标截断后重建消息列表；导出读 `GET /api/sessions/:id`；设备控制把预置指令发进会话、仍经权限与审批。详见 D-166。
 
 > 2026-10-21 第四轮（用户「模型配置没有、无法打开本地文件夹」）：新增 `saveProviders`（整份写 `providers.json`）、`setWorkspace`（登记目录后委托 `setCwd`）、真实 `getTree`（接 `listDirectory` / `GET /api/tree`）；`searchFiles` 仍是空匹配，原因改为写在代码里。设置页恢复「模型服务」页，`apiKeyEnv` 明确标注为环境变量名、未定价时成本显示「未知」。浏览器形态的 `pickDirectory` 不再静默返回 `null`，改为说明拿不到绝对路径并提示手输。
+
+> 2026-10-21 第五轮（用户「模型配置为什么叫连接？而且也无法进行配置操作」）：两处独立缺陷。①**命名**——设置页沿用了移植前端的 `Connection`，而应用其他位置（宿主提示「设置 → 模型服务」、README、页面标题 `connEmptyTitle`）都叫「模型服务」；现统一为「模型服务 / Model services」，首启提示与 `openSetup` 文案一并改掉旧的「填 API 密钥」（密钥本就只存环境变量名）。内部 id `connection` 保留，它不出现在界面上。②**配置页在浏览器形态下是空的**——`bridge.emitSettings()` 从不发 `providerConfig`，`buildConnectionPage` 因此走 `connUnsupported` 分支直接返回，没有卡片、没有「添加」、没有「保存」；桌面宿主发这个字段，但 Electron 未安装，实际能跑的是浏览器形态。现由 `protocol.providersEvent()` 一次给出两种形状（扁平列表 + 文件本体），`modelsOf()` 把文件展开成 `provider/model` 选单条目；`refreshConfig` 与 `putConfig("providers")` 之后都广播 `models`，否则选单停在「正在加载模型…」而 `providers.json` 明明有模型。
+
+> 2026-10-21 第六轮（用户「contextWindow和maxOutput直接删掉」「每百万Token价格直接删掉」「缺少测试连接」「选择本地文件夹应该在侧边栏也可进行」）：①`contextWindow`/`maxOutput` 不再由用户在表单里填，内核改用具名估算默认值（128000 / 4096）；表单保存时**旧值原样透传**，不因界面不显示就抹掉。②「每百万 token 价格」整区删除，旧 `pricePerMillion` 同样透传。③新增 `testProvider`（见上表）：设置页每张卡片一个「测试连接」按钮，15s 超时、按 `baseUrl` 匹配回包、页面重建时用 build 快照丢弃孤儿回包。④侧边栏新增工作区入口，显示当前文件夹名，与顶栏共用同一个 `chooseWorkspace()`——两条路径规则完全一致，没有复制一份。**接缝修复**：`app.js` 的 `handleEvent` 原本没有 `provider_test` 分支，事件会被静默丢弃、按钮只能靠 15s 超时以「没有响应」收场，已补上转发。

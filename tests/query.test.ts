@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
+import { DEFAULT_CONTEXT_WINDOW, DEFAULT_MAX_OUTPUT } from "../src/config/providers.js";
+import { checkBudget } from "../src/context/budget.js";
 import { buildMessages } from "../src/context/build.js";
 import { assertBreakers, computeCostUsd } from "../src/loop/breakers.js";
 import type { LoopEvent } from "../src/loop/events.js";
@@ -542,6 +544,27 @@ describe("query 主循环", () => {
     expect(provider.calls[0].tools.map((tool) => tool.function.name)).toEqual(["echo"]);
     expect(provider.calls[0].maxOutputTokens).toBe(512);
     expect(provider.calls[0].signal).toBe(ctx.signal);
+  });
+
+  it("modelCfg 缺 maxOutput/contextWindow 时请求与占用率都走内核默认值", async () => {
+    const provider = scriptedProvider([
+      reply("done", [], false, { promptTokens: 10, completionTokens: 1 }),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      modelCfg: {},
+      // 让占用率有一个真实可测的 token 数，而不是靠 budget 的桩值。
+      budget: (messages) => checkBudget(messages, DEFAULT_CONTEXT_WINDOW),
+    });
+
+    await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    // max_tokens 不能是 undefined：那会让网关按自己的默认值截断，
+    // 用户看到的「模型话没说完」与配置无关。
+    expect(provider.calls[0].maxOutputTokens).toBe(DEFAULT_MAX_OUTPUT);
+    const usage = session.events().find(
+      (event) => event.type === "usage" && event.payload.context !== undefined,
+    );
+    expect(usage?.payload.context).toMatchObject({ window: DEFAULT_CONTEXT_WINDOW });
   });
 
   it("truncatedByMaxTokens=true 且无工具调用 → 再次 complete", async () => {

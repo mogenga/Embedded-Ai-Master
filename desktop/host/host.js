@@ -121,6 +121,26 @@ try {
 send({ type: "hello" });
 
 // ---------------------------------------------------------------------------
+// Model probe (optional module)
+// ---------------------------------------------------------------------------
+
+/**
+ * The kernel's `probeProvider`, loaded apart from the modules above.
+ *
+ * `dist/model/probe.js` is newer than the rest of the kernel surface: a
+ * `dist/` built before it landed has no such file, and a static import — or a
+ * destructured name in the `Promise.all` above — would throw while this
+ * process is still starting and take the whole host down. One command the
+ * settings page can retry must not cost the operator their window, so the
+ * import is namespace-style and its failure is kept for the handler to report.
+ *
+ * A namespace rather than a named import: a file that exists but does not yet
+ * export `probeProvider` has to fail the same way, and an absent export is
+ * only visible on the namespace.
+ */
+const probeModule = await import(dist("model/probe.js")).catch(() => undefined);
+
+// ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
@@ -948,6 +968,89 @@ function handlePermission(id, answer) {
 }
 
 /**
+ * Probe one model gateway and answer with a `provider_test` event.
+ *
+ * The probe itself is the kernel's: it resolves `apiKeyEnv` against this
+ * process's environment and talks to the gateway. The host does not read the
+ * key and does not decide the outcome — forwarding a `true` nobody measured
+ * would put a green card on an address that was never contacted (R3).
+ *
+ * Every path answers, so the settings page's card always leaves its "testing"
+ * state; only a probe that is still in flight has no event yet.
+ */
+async function handleTestProvider(payload) {
+  const baseUrl = typeof payload.baseUrl === "string" ? payload.baseUrl.trim() : "";
+  if (baseUrl === "") {
+    send({
+      type: "provider_test",
+      ok: false,
+      baseUrl: "",
+      error: "连接测试失败：请先填写模型服务地址（baseUrl）",
+    });
+    return;
+  }
+  const probe = probeModule?.probeProvider;
+  if (typeof probe !== "function") {
+    // A `dist/` built before the probe landed. Say what to do about it; the
+    // rest of the host keeps working, which is why this is not fatal.
+    send({
+      type: "provider_test",
+      ok: false,
+      baseUrl,
+      error: "连接测试不可用：内核未编译该模块，请先在仓库根目录执行 npm run build",
+    });
+    return;
+  }
+  const options = {
+    baseUrl,
+    ...(typeof payload.apiKeyEnv === "string" && payload.apiKeyEnv.trim() !== ""
+      ? { apiKeyEnv: payload.apiKeyEnv.trim() }
+      : {}),
+    ...(typeof payload.model === "string" && payload.model.trim() !== ""
+      ? { model: payload.model.trim() }
+      : {}),
+  };
+  let result;
+  try {
+    result = await probe(options);
+  } catch (error) {
+    send({
+      type: "provider_test",
+      ok: false,
+      baseUrl,
+      error: `连接测试失败：${messageOf(error)}`,
+    });
+    return;
+  }
+  const record = typeof result === "object" && result !== null ? result : {};
+  if (record.ok !== true) {
+    const reason = typeof record.error === "string" ? record.error : "";
+    send({
+      type: "provider_test",
+      ok: false,
+      baseUrl,
+      error: reason === "" ? "连接测试失败：内核未给出原因" : reason,
+      ...(typeof record.code === "string" && record.code !== "" ? { code: record.code } : {}),
+      ...(typeof record.latencyMs === "number" ? { latencyMs: record.latencyMs } : {}),
+    });
+    return;
+  }
+  send({
+    type: "provider_test",
+    ok: true,
+    // The address the operator typed, not the kernel's normalized copy: the
+    // settings page keys its card on the string it sent.
+    baseUrl,
+    // Absent, not `[]`: "the gateway did not list models" is a different fact
+    // from "it listed none".
+    ...(Array.isArray(record.models)
+      ? { models: record.models.filter((entry) => typeof entry === "string") }
+      : {}),
+    ...(typeof record.latencyMs === "number" ? { latencyMs: record.latencyMs } : {}),
+  });
+}
+
+/**
  * Commands this host implements. Everything else answers with a warning:
  * the renderer hides those controls, but a stale client or a keyboard
  * shortcut must not look like it worked.
@@ -1442,6 +1545,18 @@ const handlers = {
     send({ type: "models", models: modelList, model: modelRef, source: "providers.json" });
     send(stateEvent());
     configEvent();
+  },
+
+  /**
+   * Probe one model gateway for the settings page.
+   *
+   * Deliberately not returned to the command queue: a probe can take the
+   * kernel's full timeout, and `abort` / `listSessions` must still answer while
+   * the operator waits. `handleTestProvider` catches everything itself, so
+   * there is no unhandled rejection behind the `void`.
+   */
+  testProvider(payload = {}) {
+    void handleTestProvider(payload);
   },
 
   /**

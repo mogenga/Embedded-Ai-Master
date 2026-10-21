@@ -323,6 +323,35 @@ describe("compactSession", () => {
     ).toBe(true);
   });
 
+  // contextWindow / maxOutput 在 providers.json 里是可选的；压缩路径必须自己兜底，
+  // 否则 undefined 参与算术会得到 NaN 阈值，让压缩永不触发或永远触发。
+  it("modelCfg 缺 contextWindow/maxOutput 时按内核默认值判定不压缩", async () => {
+    const session = await makeSession();
+    await addUser(session, "hello");
+    const { calls, model } = createFakeModel();
+    const before = session.events().length;
+
+    await compactSession(makeOptions(session, model, {}));
+
+    expect(session.events().length).toBe(before);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("modelCfg 缺 maxOutput 时摘要请求用内核默认 maxOutput", async () => {
+    const session = await makeSession();
+    await addUser(session, "x".repeat(6000));
+    await addBatch(session, "c1", "a".repeat(400));
+    await addBatch(session, "c2", "b".repeat(400));
+    await addBatch(session, "c3", "c".repeat(40));
+    const { calls, model } = createFakeModel(async () => ok("SUMMARY_TEXT"));
+    // 只给 contextWindow：摘要的 maxOutputTokens 应回落到默认值，
+    // 且 Math.min(2048, DEFAULT_MAX_OUTPUT) 仍是 2048（默认值大于 2048）。
+    await compactSession(makeOptions(session, model, { contextWindow: 1000 }));
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].maxOutputTokens).toBe(2048);
+  });
+
   it("无可摘要内容时 append failed", async () => {
     const session = await makeSession();
     await addBatch(session, "e1", "E".repeat(4000), { evidence: true });

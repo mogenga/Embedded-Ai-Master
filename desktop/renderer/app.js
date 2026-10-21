@@ -206,6 +206,11 @@ function applyLocale(locale, { announce = false } = {}) {
   if (terminalTab) terminalTab.textContent = t.paneTerminal;
   sendButton.title = t.sendTitle;
   stopButton.title = t.stopTitle;
+  // The sidebar workspace entry is written by renderTopbarLocation, and its
+  // "no folder" text and tooltip are language-dependent, so redraw it here
+  // after `t` has been swapped. This runs before the title assignment below
+  // so the top bar keeps the tooltip it had.
+  renderTopbarLocation();
   $("topbar-cwd").title = t.changeFolderTitle;
   $("refresh-sessions").title = t.refresh;
   const search = $("session-search");
@@ -2176,6 +2181,15 @@ function handleEvent(message) {
       break;
 
     case "rules":
+      settings.handleEvent(message);
+      break;
+
+    case "provider_test":
+      // The settings page owns the per-card state this answers, but it is not
+      // in the renderer's event vocabulary until it arrives here: an event no
+      // branch matches is dropped, which would leave the Test button spinning
+      // until its own timeout said "no response" — a correct message for the
+      // wrong reason.
       settings.handleEvent(message);
       break;
 
@@ -5666,7 +5680,18 @@ function setWorkspace(path) {
   api.send({ cmd: "setWorkspace", path: dir });
 }
 
-$("topbar-cwd").addEventListener("click", async () => {
+/**
+ * Ask for a workspace folder, then register it and switch to it.
+ *
+ * Both the top bar's folder button and the sidebar's workspace entry call
+ * this one function, so the two paths cannot drift apart:
+ * - a picker that throws is not an answer, so it falls through to typing;
+ * - Electron returning null means the native dialog was cancelled, which is
+ *   not an error to punish with a second prompt;
+ * - the browser bridge has no native picker and returns null, so the path is
+ *   typed instead.
+ */
+async function chooseWorkspace() {
   let picked = null;
   let pickerFailed = false;
   try {
@@ -5690,7 +5715,10 @@ $("topbar-cwd").addEventListener("click", async () => {
   // askText), which would put a dead click back in the desktop window.
   const typed = await askText(t.workspacePathPrompt, state.cwd ?? "");
   if (typed) setWorkspace(typed);
-});
+}
+
+$("topbar-cwd").addEventListener("click", chooseWorkspace);
+$("sidebar-workspace").addEventListener("click", chooseWorkspace);
 
 /* ---------- isolated worktree ---------- */
 
@@ -5982,8 +6010,21 @@ function endSidebarDrag() {
 function renderTopbarLocation() {
   const cwd = state.cwd ?? "";
   const parts = cwd.split(/[\\/]/).filter(Boolean);
-  $("topbar-cwd-name").textContent = parts.length > 0 ? parts[parts.length - 1] : t.appName;
+  const name = parts.length > 0 ? parts[parts.length - 1] : "";
+  $("topbar-cwd-name").textContent = name || t.appName;
   $("topbar-cwd").title = cwd || t.appName;
+  // The sidebar entry reads the same name, computed once above: a second
+  // basename helper is how the two views would come to disagree.
+  $("sidebar-workspace-name").textContent = name || t.workspaceNone;
+  $("sidebar-workspace").title = cwd ? `${t.changeFolderTitle}: ${cwd}` : t.workspaceChoose;
+  // aria-label replaces the two lines above rather than adding to them, so it
+  // has to name both the current folder and what the click does; otherwise a
+  // screen reader would hear the action and lose the state.
+  $("sidebar-workspace").setAttribute(
+    "aria-label",
+    `${t.workspaceLabel}: ${name || t.workspaceNone} — ${cwd ? t.changeFolderTitle : t.workspaceChoose}`,
+  );
+  $("sidebar-workspace").classList.toggle("empty", name === "");
   const branch = state.git?.available ? state.git.branch : "";
   const branchNode = $("topbar-cwd-branch");
   branchNode.hidden = !branch;

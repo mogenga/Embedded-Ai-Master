@@ -85,6 +85,32 @@ describe("readProviders", () => {
     expect(result.providersPath).toBe(path.join(home, "providers.json"));
   });
 
+  it("模型没写 contextWindow/maxOutput 时照常读出（由内核默认值兜底）", () => {
+    const home = makeHome();
+    const minimal = {
+      openai: { ...OPENAI_PROVIDER, models: { "test-model": {} } },
+    };
+    writeJson(path.join(home, "providers.json"), minimal);
+
+    const result = readProviders(home);
+
+    // 不补默认值：文件里没写就是没写，设置页与日志都不该声称用户填过。
+    expect(result.providers).toEqual(minimal);
+    expect(result.providers.openai?.models["test-model"]).toEqual({});
+  });
+
+  it("旧文件里写下的 contextWindow/maxOutput 原样保留", () => {
+    const home = makeHome();
+    writeJson(path.join(home, "providers.json"), VALID_FILE);
+
+    const result = readProviders(home);
+
+    expect(result.providers.openai?.models["test-model"]).toEqual({
+      contextWindow: 128_000,
+      maxOutput: 4096,
+    });
+  });
+
   it("坏 JSON 抛 config_unreadable 并指明文件", () => {
     const home = makeHome();
     writeFileSync(path.join(home, "providers.json"), "{bad", "utf8");
@@ -96,8 +122,9 @@ describe("readProviders", () => {
     ["顶层是数组", []],
     ["顶层是数字", 42],
     ["顶层是字符串", "openai"],
-    ["model 缺 contextWindow", { openai: { ...OPENAI_PROVIDER, models: { m: { maxOutput: 1 } } } }],
-    ["model 缺 maxOutput", { openai: { ...OPENAI_PROVIDER, models: { m: { contextWindow: 1 } } } }],
+    // contextWindow / maxOutput 是可选的，缺省由内核默认值兜底，不再算无效配置。
+    ["contextWindow 非正整数", { openai: { ...OPENAI_PROVIDER, models: { m: { contextWindow: 0 } } } }],
+    ["maxOutput 非整数", { openai: { ...OPENAI_PROVIDER, models: { m: { maxOutput: 1.5 } } } }],
     ["protocol 不支持", { openai: { ...OPENAI_PROVIDER, protocol: "anthropic" } }],
     ["baseUrl 非 URL", { openai: { ...OPENAI_PROVIDER, baseUrl: "not-a-url" } }],
     ["models 不是对象", { openai: { ...OPENAI_PROVIDER, models: [] } }],
@@ -149,7 +176,7 @@ describe("writeProviders", () => {
     ["顶层是数组", [OPENAI_PROVIDER]],
     ["顶层是数字", 42],
     ["顶层是 null", null],
-    ["model 缺 contextWindow", { openai: { ...OPENAI_PROVIDER, models: { m: { maxOutput: 1 } } } }],
+    ["contextWindow 非正整数", { openai: { ...OPENAI_PROVIDER, models: { m: { contextWindow: 0 } } } }],
     ["protocol 不支持", { openai: { ...OPENAI_PROVIDER, protocol: "anthropic" } }],
     ["baseUrl 非 URL", { openai: { ...OPENAI_PROVIDER, baseUrl: "not-a-url" } }],
     ["pricePerMillion 为负", {

@@ -30,6 +30,17 @@
             <svg class="icon" aria-hidden="true"><use href="#i-plus"></use></svg>
             <span data-i18n="newSession">New chat</span>
           </button>
+          <!-- The workspace entry repeats the top-bar folder button here
+               because the sidebar is where a session is started and the
+               folder is chosen before that, not after. Both call the same
+               `chooseWorkspace()`; neither is a decoration. -->
+          <button class="sidebar-workspace" id="sidebar-workspace" data-i18n-title="changeFolderTitle">
+            <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
+            <span class="sidebar-workspace-text">
+              <span class="sidebar-workspace-label" data-i18n="workspaceLabel">Workspace</span>
+              <span class="sidebar-workspace-name" id="sidebar-workspace-name">No folder open</span>
+            </span>
+          </button>
         </div>
 
         <div class="sidebar-section-head">

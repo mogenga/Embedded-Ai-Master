@@ -1,3 +1,4 @@
+import { resolveContextWindow, resolveMaxOutput } from "../config/providers.js";
 import type { ModelCfg } from "../config/providers.js";
 import { normalizeUsage } from "../loop/breakers.js";
 import { heuristicCountTokens } from "../model/count.js";
@@ -195,7 +196,11 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   } = opts;
   assertCompactionRatios(keepTailRatio, softRatio);
   assertKeepRecentTurns(keepRecentTurns);
-  const softLimit = Math.floor(modelCfg.contextWindow * softRatio);
+  // contextWindow / maxOutput 在 providers.json 里是可选的：这里一次性解析成本地值，
+  // 避免 undefined 参与算术得出 NaN 阈值（NaN 比较恒为 false，会让压缩静默永不触发）。
+  const contextWindow = resolveContextWindow(modelCfg);
+  const maxOutput = resolveMaxOutput(modelCfg);
+  const softLimit = Math.floor(contextWindow * softRatio);
   const measure = () => {
     const messages = buildMessages(session.events());
     return { messages, tokens: measureWith(meter, messages) };
@@ -234,7 +239,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   }
 
   const latest = session.events();
-  let coversUpToSeq = computeTailBoundary(latest, modelCfg.contextWindow, keepTailRatio);
+  let coversUpToSeq = computeTailBoundary(latest, contextWindow, keepTailRatio);
   coversUpToSeq = adjustSummaryBoundary(latest, coversUpToSeq);
   const previousSummary = lastSummaryEvent(latest);
   if (previousSummary !== undefined && coversUpToSeq <= previousSummary.seq) {
@@ -267,7 +272,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
     return;
   }
 
-  const maxChars = Math.floor(modelCfg.contextWindow * 0.6 * 4);
+  const maxChars = Math.floor(contextWindow * 0.6 * 4);
   const transcript = truncateSurrogateSafe(toTranscript(prefixMessages), maxChars);
 
   let result: CompletionResult;
@@ -278,7 +283,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
         { role: "user", content: transcript },
       ],
       [],
-      { signal, maxOutputTokens: Math.min(2048, modelCfg.maxOutput) },
+      { signal, maxOutputTokens: Math.min(2048, maxOutput) },
     );
   } catch (error) {
     if (signal.aborted || isAbortError(error)) throw error;

@@ -4,7 +4,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { resolveHarnessHome } from "./config/harness-home.js";
 import { loadProviders, parseProviders, resolveModelRef } from "./config/providers.js";
-import { checkBudget, checkBudgetTokens } from "./context/budget.js";
+import { checkBudgetForModel, checkBudgetTokensForModel } from "./context/budget.js";
 import {
   assertCompactionRatios,
   assertKeepRecentTurns,
@@ -571,7 +571,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       const tokenMeter = createTokenMeter(heuristicCountTokens);
       meter = tokenMeter;
       budget = (messages) =>
-        checkBudgetTokens(tokenMeter.measure(messages), model.contextWindow, softRatio);
+        checkBudgetTokensForModel(tokenMeter.measure(messages), model, softRatio);
       compactor = (target) =>
         compactSession({
           session: target,
@@ -589,7 +589,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
             : {}),
         });
     } else {
-      budget = (messages) => checkBudget(messages, model.contextWindow);
+      budget = (messages) => checkBudgetForModel(messages, model);
     }
 
     const builtinTools = createBuiltinTools();

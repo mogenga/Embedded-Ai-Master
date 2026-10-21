@@ -3,9 +3,13 @@ import { resolveHarnessHome } from "../src/config/harness-home.js";
 import {
   ConfigLoadError,
   ConfigValidationError,
+  DEFAULT_CONTEXT_WINDOW,
+  DEFAULT_MAX_OUTPUT,
   loadProviders,
   ModelReferenceError,
   parseProviders,
+  resolveContextWindow,
+  resolveMaxOutput,
   resolveModelRef,
 } from "../src/config/providers.js";
 
@@ -15,6 +19,30 @@ const GOOD = JSON.stringify({
     baseUrl: "http://127.0.0.1:8080/v1",
     models: { flash: { contextWindow: 128000, maxOutput: 8192 } },
   },
+});
+
+describe("内核估算默认值（不是服务商真实上限）", () => {
+  it("默认值就是既定常量", () => {
+    expect(DEFAULT_CONTEXT_WINDOW).toBe(128_000);
+    expect(DEFAULT_MAX_OUTPUT).toBe(4_096);
+  });
+
+  it("用户没填时 resolve 落到内核默认值", () => {
+    expect(resolveContextWindow({})).toBe(DEFAULT_CONTEXT_WINDOW);
+    expect(resolveMaxOutput({})).toBe(DEFAULT_MAX_OUTPUT);
+  });
+
+  it("用户填了就以用户为准，不被默认值覆盖", () => {
+    expect(resolveContextWindow({ contextWindow: 32_000, maxOutput: 1_024 })).toBe(32_000);
+    expect(resolveMaxOutput({ contextWindow: 32_000, maxOutput: 1_024 })).toBe(1_024);
+  });
+
+  it("只填了一个字段时另一个仍走默认值", () => {
+    expect(resolveContextWindow({ contextWindow: 32_000 })).toBe(32_000);
+    expect(resolveMaxOutput({ contextWindow: 32_000 })).toBe(DEFAULT_MAX_OUTPUT);
+    expect(resolveContextWindow({ maxOutput: 1_024 })).toBe(DEFAULT_CONTEXT_WINDOW);
+    expect(resolveMaxOutput({ maxOutput: 1_024 })).toBe(1_024);
+  });
 });
 
 describe("配置加载", () => {
@@ -108,9 +136,34 @@ describe("配置加载", () => {
     );
   });
 
-  it("parseProviders 拒绝缺少 contextWindow", () => {
+  it("parseProviders 接受缺少 contextWindow/maxOutput 的模型：缺省为 undefined，由调用方兜底", () => {
+    const parsed = parseProviders(JSON.stringify({
+      p: { protocol: "openai-chat-completions", baseUrl: "http://x/v1", models: { m: {} } },
+    }));
+    // 缺省不是被填成默认值：读值的人必须显式兜底，才能让「用户没填」与
+    // 「用户填了同一个数」在日志/设置页里保持可区分。
+    expect(parsed.p?.models.m).toEqual({});
+    expect(parsed.p?.models.m.contextWindow).toBeUndefined();
+    expect(parsed.p?.models.m.maxOutput).toBeUndefined();
+  });
+
+  it("parseProviders 兼容旧文件：用户显式写下的 contextWindow/maxOutput 原样保留", () => {
+    const parsed = parseProviders(JSON.stringify({
+      p: {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://x/v1",
+        models: { m: { contextWindow: 32000, maxOutput: 1024 } },
+      },
+    }));
+    expect(parsed.p?.models.m).toEqual({ contextWindow: 32000, maxOutput: 1024 });
+  });
+
+  it("parseProviders 仍拒绝非正整数的 contextWindow/maxOutput", () => {
     expect(() => parseProviders(JSON.stringify({
-      p: { protocol: "openai-chat-completions", baseUrl: "http://x/v1", models: { m: { maxOutput: 1 } } },
+      p: { protocol: "openai-chat-completions", baseUrl: "http://x/v1", models: { m: { contextWindow: 0 } } },
+    }))).toThrowError(expect.objectContaining({ code: "providers_invalid" }));
+    expect(() => parseProviders(JSON.stringify({
+      p: { protocol: "openai-chat-completions", baseUrl: "http://x/v1", models: { m: { maxOutput: 1.5 } } },
     }))).toThrowError(expect.objectContaining({ code: "providers_invalid" }));
   });
 
@@ -156,6 +209,17 @@ describe("配置加载", () => {
     },
   );
 
+  it("模型引用解析后仍能取到调用方兜底前的原始值", () => {
+    const resolved = resolveModelRef(
+      parseProviders(JSON.stringify({
+        p: { protocol: "openai-chat-completions", baseUrl: "http://x/v1", models: { m: {} } },
+      })),
+      "p/m",
+    );
+    expect(resolved.model.contextWindow).toBeUndefined();
+    expect(resolved.model.maxOutput).toBeUndefined();
+  });
+
   it("HARNESS_HOME env 优先于缺省", () => {
     expect(resolveHarnessHome({ HARNESS_HOME: "C:/custom/home" })).toBe("C:/custom/home");
   });
@@ -171,6 +235,41 @@ describe("配置加载", () => {
   it("HARNESS_HOME 为空或仅空白时使用用户目录下的 .harness", () => {
     expect(resolveHarnessHome({ HARNESS_HOME: "" })).toMatch(/\.harness$/);
     expect(resolveHarnessHome({ HARNESS_HOME: "   " })).toMatch(/\.harness$/);
+  });
+
+  // D-170：测试忘了隔离就会写进用户真实配置目录，且事后难以追溯来源。
+  // 这里宁可硬失败，也不返回一个「看起来能用」的真实路径。
+  describe("D-170 vitest 环境下的 home 隔离守卫", () => {
+    it("VITEST 下没有 HARNESS_HOME 时抛错，且错误信息说明原因", () => {
+      let caught: unknown;
+      try {
+        resolveHarnessHome({ VITEST: "true" });
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBeInstanceOf(Error);
+      const message = (caught as Error).message;
+      expect(message).toContain("VITEST");
+      expect(message).toContain("HARNESS_HOME");
+      expect(message).toContain("harnessHome");
+      // 错误不得把真实 home 泄露成「可用值」。
+      expect(message).not.toMatch(/\.harness/);
+    });
+
+    it("NODE_ENV=test 同样触发守卫", () => {
+      expect(() => resolveHarnessHome({ NODE_ENV: "test" })).toThrowError(/HARNESS_HOME/);
+    });
+
+    it("VITEST 下设置了 HARNESS_HOME 时正常返回，不抛错", () => {
+      expect(resolveHarnessHome({ VITEST: "true", HARNESS_HOME: "C:/tmp/isolated" })).toBe(
+        "C:/tmp/isolated",
+      );
+    });
+
+    it("非测试环境行为不变：没有 HARNESS_HOME 时仍返回用户目录下的 .harness", () => {
+      expect(resolveHarnessHome({ NODE_ENV: "production" })).toMatch(/\.harness$/);
+      expect(resolveHarnessHome({ VITEST: "" })).toMatch(/\.harness$/);
+    });
   });
 
   it("loadProviders 文件缺失抛 providers_not_found", () => {

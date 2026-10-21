@@ -2,9 +2,23 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 
+/**
+ * 模型容量参数的**估算**默认值。
+ *
+ * 这不是从服务商读到的真实上限：OpenAI 兼容协议里 `GET /v1/models` 只保证返回
+ * 模型 id，contextWindow / maxOutput 没有标准来源，所以内核不能自动获取，只能给
+ * 一个明示的估算值兜底。用户若在 providers.json 里写了值，一律以用户为准
+ * （见 `resolveContextWindow` / `resolveMaxOutput`）。
+ */
+export const DEFAULT_CONTEXT_WINDOW = 128_000;
+export const DEFAULT_MAX_OUTPUT = 4_096;
+
+// 两者都是可选的：要求用户填自己查不到的数值，只会得到凭感觉乱填。
+// 注意这里**不**写 `.default()`——缺省必须保持 undefined，读值方才有机会
+// 区分「用户没填」与「用户填了恰好等于默认值的数」。
 const ModelConfigSchema = z.object({
-  contextWindow: z.number().int().positive(),
-  maxOutput: z.number().int().positive(),
+  contextWindow: z.number().int().positive().optional(),
+  maxOutput: z.number().int().positive().optional(),
 });
 
 const PriceSchema = z.number().nonnegative().finite();
@@ -28,6 +42,21 @@ const ProvidersFileSchema = z.record(z.string(), ProviderConfigSchema);
 export type ModelCfg = z.infer<typeof ModelConfigSchema>;
 export type ProviderConfig = z.infer<typeof ProviderConfigSchema>;
 export type ProvidersConfig = z.infer<typeof ProvidersFileSchema>;
+
+/**
+ * 取模型实际使用的上下文窗口：用户填了就用用户的，没填返回 `DEFAULT_CONTEXT_WINDOW`。
+ *
+ * 所有读 `modelCfg.contextWindow` 的地方都必须走这里——把 `?? 128000` 撒在调用点
+ * 会让默认值失去单一出处，改一次要改 N 处，且容易漏掉一处得到 NaN。
+ */
+export function resolveContextWindow(modelCfg: ModelCfg): number {
+  return modelCfg.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+}
+
+/** 取模型实际使用的单次输出上限；语义同 `resolveContextWindow`。 */
+export function resolveMaxOutput(modelCfg: ModelCfg): number {
+  return modelCfg.maxOutput ?? DEFAULT_MAX_OUTPUT;
+}
 
 export class ConfigValidationError extends Error {
   readonly code: "providers_invalid_json" | "providers_invalid";

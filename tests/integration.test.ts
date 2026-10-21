@@ -292,6 +292,11 @@ describe("runSession 端到端装配", () => {
   });
 
   it("无效模型引用抛 ModelReferenceError", async () => {
+    // 即使这条用例不会写文件，也要显式隔离：resolveHarnessHome 在测试进程里
+    // 没有 HARNESS_HOME 时会硬失败，忘了隔离就应该在这里报出来（D-170）。
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+
     await expect(
       collect(runSession({ input: "hi", model: "gw/missing", providersText: providersText() })),
     ).rejects.toBeInstanceOf(ModelReferenceError);

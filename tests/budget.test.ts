@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { checkBudget, checkBudgetTokens } from "../src/context/budget.js";
+import {
+  checkBudget,
+  checkBudgetForModel,
+  checkBudgetTokens,
+  checkBudgetTokensForModel,
+} from "../src/context/budget.js";
+import { DEFAULT_CONTEXT_WINDOW } from "../src/config/providers.js";
 import type { ModelChatMessage } from "../src/model/protocol.js";
 
 describe("上下文预算", () => {
@@ -71,5 +77,33 @@ describe("预算计入 tool_calls", () => {
     ];
 
     expect(checkBudget(messages, 10000).over).toBe(true);
+  });
+});
+
+describe("按模型配置判预算时走内核默认 contextWindow", () => {
+  it("模型没填 contextWindow 时按 DEFAULT_CONTEXT_WINDOW 的 softLimit 判定", () => {
+    // 正好是默认窗口的 80%：不 over。若把 undefined 当数字用，
+    // softLimit 会是 NaN，比较恒为 false，压缩会静默永不触发。
+    const tokens = Math.floor(DEFAULT_CONTEXT_WINDOW * 0.8);
+    expect(checkBudgetTokensForModel(tokens, {})).toEqual({
+      over: false,
+      tokens,
+      softLimit: tokens,
+    });
+  });
+
+  it("模型填了 contextWindow 时以用户值为准", () => {
+    expect(checkBudgetTokensForModel(9000, { contextWindow: 10_000 })).toEqual({
+      over: true,
+      tokens: 9000,
+      softLimit: 8000,
+    });
+  });
+
+  it("checkBudgetForModel 按消息估算，窗口缺省同样兜底", () => {
+    const messages: ModelChatMessage[] = [{ role: "user", content: "a".repeat(32000) }];
+
+    expect(checkBudgetForModel(messages, {})).toMatchObject({ over: false, tokens: 8000 });
+    expect(checkBudgetForModel(messages, { contextWindow: 1000 }).over).toBe(true);
   });
 });

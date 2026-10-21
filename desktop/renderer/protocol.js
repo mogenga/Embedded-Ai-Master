@@ -583,6 +583,57 @@ export function initialState(options = {}) {
 }
 
 /**
+ * Split a `providers.json` file into the two shapes the renderer consumes.
+ *
+ * They are not interchangeable and both are needed:
+ *
+ *   - `providers` is the picker's flat list — one row per provider with the
+ *     URL it points at, which is all the model chip and its menu need;
+ *   - `providerConfig` is the file itself, which the settings page edits and
+ *     saves back whole.
+ *
+ * A host that sends only the first leaves the settings page with nothing to
+ * draw: it cannot write back an object it never received, and an empty form
+ * saved in that state would replace the file with `{}`.
+ */
+export function providersEvent(config) {
+  if (!isRecord(config)) return { providers: [], providerConfig: undefined };
+  const providers = Object.entries(config).map(([name, provider]) => ({
+    id: name,
+    baseUrl: isRecord(provider) ? textOf(provider.baseUrl) : "",
+  }));
+  return { providers, providerConfig: config };
+}
+
+/**
+ * Every `provider/model` reference in a `providers.json`, in the picker's shape.
+ *
+ * The kernel resolves references as `provider/model`, so a provider with no
+ * models contributes nothing: a row that no run could use would be a promise
+ * the file cannot keep.
+ */
+export function modelsOf(config) {
+  if (!isRecord(config)) return [];
+  const models = [];
+  for (const [providerName, provider] of Object.entries(config)) {
+    if (!isRecord(provider) || !isRecord(provider.models)) continue;
+    for (const [modelName, model] of Object.entries(provider.models)) {
+      models.push({
+        id: `${providerName}/${modelName}`,
+        name: modelName,
+        contextLength: isRecord(model) ? model.contextWindow : undefined,
+        // The kernel's only adapter speaks OpenAI chat completions, which
+        // carries tool calls; no reasoning or vision parameters are sent.
+        supportsTools: true,
+        supportsReasoning: false,
+        supportsVision: false,
+      });
+    }
+  }
+  return models;
+}
+
+/**
  * `sessions` event from the kernel's session summaries.
  *
  * The renderer groups by `cwd` and sorts nothing itself, so `workdir` is

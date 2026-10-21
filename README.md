@@ -469,6 +469,7 @@ npm --prefix desktop run desktop
   | POST | `/api/sessions/:id/fork` | 从日志末尾（或 body 的 `atSeq`）分叉，201 `{ sessionId }` |
   | GET | `/api/config` | `{ mcpServers, permissions, run, providers, mcpPath, permissionsPath, runPath, providersPath, providersError? }`——四份配置文件的当前内容。`providers.json` 读失败时其余三份照常返回，原因放 `providersError`（设置页要靠它把用户带去修文件） |
   | PUT | `/api/config` | 整份写其中一份：`{ mcpServers }` / `{ permissions }` / `{ run }` / `{ providers }`；400 `invalid_config` 带具体字段原因 |
+  | POST | `/api/providers/test` | 探测一个模型服务：`{ baseUrl, apiKeyEnv?, model? }` → **200** `{ ok, baseUrl, models?, error?, code?, latencyMs? }`。探测失败是正常答案不是 HTTP 错误，所以 `ok:false` 也回 200；只有 `baseUrl` 形状非法才 400 `invalid_base_url`。先请求 `GET {baseUrl}/models`；非 2xx 且给了 `model` 时退一步发一次 `max_tokens: 1` 的极小请求。`code` ∈ `invalid_base_url` / `unreachable` / `unauthorized` / `http_error`。`models` 拿不到时字段不存在（不是空数组）。走 `requireWriteRequest`，与其它写端点一致 |
   | GET | `/api/kb` | `{ root, tree }`；未配置 `kb/` 时返回 `{ root: null, tree: [] }` |
   | GET | `/api/device` | 当前恒为 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` |
   | GET | `/api/file?path=…` | `{ path, content, truncated, binary }`；只读，256 KiB 上限。只允许读会话目录、会话工作目录与已登记工作区内的路径（`realpath` 后判定），越界 400 `invalid_path`、不存在 404、目录/非普通文件 400。含 NUL 字节按二进制返回 `content: ""` |
@@ -480,7 +481,7 @@ npm --prefix desktop run desktop
   | POST | `/api/approvals` | 回传审批决策，202/200；错误码见「Web 会话与审批」 |
   | GET | `/api/events` | SSE 单会话事件流，见「实时事件流」；非法 id/cursor 400，不存在 404，损坏 500 |
 
-- **配置**：设置页有「模型服务」「MCP 服务器」「行为」三页。模型服务读写 `$HARNESS_HOME/providers.json`（provider / `baseUrl` / `apiKeyEnv` / 模型与 `contextWindow` / 价格），首次启动缺这份文件时会提示去这里填，**不会**因它缺失而拒绝启动。「`apiKeyEnv` 填的是环境变量名，不是密钥」——应用本身不保存密钥，只在调用时从自己的运行环境读该变量。价格留空表示未定价，此时成本显示「未知」而不是 0。MCP 页读写 `mcp.json`；行为页读写 `permissions.json`（预设 / 审批超时 / 审批规则）与 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`）。运行上限随每次 `POST /api/actions` 下发；桌面宿主同样从 `run.json` 读取。改动在下一回合生效，不手编文件也能接上探针与模型。
+- **配置**：设置页有「模型服务」「MCP 服务器」「行为」三页。模型服务读写 `$HARNESS_HOME/providers.json`（provider / `baseUrl` / `apiKeyEnv` / 模型名），首次启动缺这份文件时会提示去这里填，**不会**因它缺失而拒绝启动。「`apiKeyEnv` 填的是环境变量名，不是密钥」——应用本身不保存密钥，只在调用时从自己的运行环境读该变量。每张服务卡片有**「测试连接」**：请求 `GET {baseUrl}/models` 列出可用模型，非 2xx 且填了模型名时退一步打一次极小请求（`max_tokens: 1`）；失败原因分「地址不通 / 鉴权失败 / HTTP 错误 / 地址非法」并说清楚，鉴权失败还会区分「环境变量没设置」和「密钥被拒」。`contextWindow` 与 `maxOutput` 不在表单里——OpenAI 兼容协议不提供真实值，内核按估算默认值处理（128000 / 4096），需要精确值时在 `providers.json` 里手写，**写入优先**。价格同理不再出现在界面，旧文件里已有的 `pricePerMillion` 保存时原样保留。桌面宿主直接写盘，浏览器形态走 `PUT /api/config` 的 `providers` 段；`getSettings` 同时给出 `providers`（选单用的扁平列表）与 `providerConfig`（文件本体，设置页据此画表单并整份写回），文件读坏时带 `providersError` 说明原因，表单仍可编辑——保存即覆盖。MCP 页读写 `mcp.json`；行为页读写 `permissions.json`（预设 / 审批超时 / 审批规则）与 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`）。运行上限随每次 `POST /api/actions` 下发；桌面宿主同样从 `run.json` 读取。改动在下一回合生效，不手编文件也能接上探针与模型。
 - **会话管理**：侧栏右键可改名、置顶、归档、删除、复制为新会话；标题存 `meta.json`，与内核的 `header.json` 分离。列表按 `updatedAt` 倒序，改过名的会话不会被埋在新建会话下面。
 - **导出**：顶栏「⋯」菜单导出当前对话为 Markdown，内容由会话日志渲染（不是抓 DOM），工具输出按 2000 字符截断。
 - **工作区**：顶栏的工作区按钮可切换目录。桌面形态弹系统目录选择框；浏览器形态拿不到目录的绝对路径（`showDirectoryPicker` 只给句柄，没有路径），因此会说明原因并让你直接粘贴路径，而不是静默失败。选中的目录同时被登记为文件树的浏览边界，文件树（顶栏「⋯」→ 浏览工作区文件）只列已登记工作区、会话目录与会话工作目录内的路径。

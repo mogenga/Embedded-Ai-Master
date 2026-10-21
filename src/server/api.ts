@@ -7,6 +7,8 @@ import path from "node:path";
 import { resolveHarnessHome } from "../config/harness-home.js";
 import { createLogTailEventSource } from "../events/log-tail.js";
 import type { SessionEventSource } from "../events/types.js";
+import { probeProvider } from "../model/probe.js";
+import type { ProviderProbeResult } from "../model/probe.js";
 import { SessionCorruptionError } from "../session/errors.js";
 import { isValidSessionId } from "../session/handle.js";
 import { readSessionMeta } from "../session/metadata.js";
@@ -406,6 +408,43 @@ async function handleApproval(
   }
 }
 
+/**
+ * `POST /api/providers/test`：探测模型服务是否可用。
+ *
+ * 探测失败（连不上、401、404）是**正常答案**，一律 200 + `ProviderProbeResult`：
+ * 它是用户点「测试连接」想要的信息，不是服务端错误。只有请求体形状非法
+ * （baseUrl 缺失/不是字符串）才 400。
+ *
+ * 这里只用 `readJsonBody` 收敛字段类型，地址合法性交给内核的
+ * `probeProvider`（与真正发消息时同一套规则，见 `parseProviderBaseUrl`）：
+ * 非法地址由探测返回 `invalid_base_url`，前端展示同一条原因。
+ */
+async function handleProviderProbe(
+  req: IncomingMessage,
+  res: ServerResponse,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  if (typeof body.baseUrl !== "string") {
+    throw new HttpError(400, "invalid_base_url", "baseUrl 必须是字符串");
+  }
+  const optionalString = (key: "apiKeyEnv" | "model"): string | undefined => {
+    const value = body[key];
+    if (value === undefined) return undefined;
+    if (typeof value !== "string") {
+      throw new HttpError(400, "invalid_base_url", `${key} 必须是字符串`);
+    }
+    return value;
+  };
+  const apiKeyEnv = optionalString("apiKeyEnv");
+  const model = optionalString("model");
+  const result: ProviderProbeResult = await probeProvider({
+    baseUrl: body.baseUrl,
+    ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
+    ...(model === undefined ? {} : { model }),
+  });
+  sendJson(res, 200, result);
+}
+
 function isPermissionError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException).code;
   return code === "EACCES" || code === "EPERM";
@@ -797,6 +836,12 @@ export function createApiHandler(
         await handleApproval(req, res, requireRunner(opts.runner));
         return;
       }
+      if (pathname === "/api/providers/test") {
+        requireMethod(method, "POST");
+        requireWriteRequest(req, opts.port);
+        await handleProviderProbe(req, res);
+        return;
+      }
       if (pathname === "/api/events") {
         requireMethod(method, "GET");
         await eventStream(req, res);
@@ -822,9 +867,25 @@ export function createApiHandler(
   };
 }
 
+export interface UiServer {
+  server: Server;
+  port: number;
+  /**
+   * Resolves once the listener is bound; rejects with the bind error
+   * (e.g. `EADDRINUSE`) instead of letting it escape as an uncaught `error`
+   * event. See D-171.
+   *
+   * The rejection is always considered handled internally, so the many call
+   * sites that start a server on a known-free port and never await this do not
+   * produce an `unhandledRejection`; callers that care can await it.
+   */
+  listening: Promise<void>;
+  close(): Promise<void>;
+}
+
 export function createUiServer(
   opts: ApiOptions & { port?: number; host?: string } = {},
-): { server: Server; port: number; close(): Promise<void> } {
+): UiServer {
   const port = opts.port ?? 5174;
   const host = opts.host ?? "127.0.0.1";
   const harnessHome = path.resolve(opts.harnessHome ?? resolveHarnessHome());
@@ -844,10 +905,39 @@ export function createUiServer(
   const server = createServer((req, res) => {
     void handler(req, res);
   });
+
+  // `listen()` is asynchronous: EADDRINUSE arrives later as an `error` event,
+  // and an `error` event with no listener is an uncaught exception that kills
+  // the process (D-171). The listener stays attached for the server's whole
+  // life so a later socket error cannot become uncaught either; `serve.ts`
+  // attaches its own listener on top (EventEmitter calls all of them, neither
+  // replaces the other, so its `exitCode = 1` still runs).
+  //
+  // The bind outcome is surfaced through `listening` instead of the process
+  // dying. An error after a successful bind cannot change that promise any
+  // more; callers who need to see it add their own listener, as serve.ts does.
+  let rejectListening: ((error: Error) => void) | undefined;
+  const listening = new Promise<void>((resolve, reject) => {
+    rejectListening = reject;
+    server.once("listening", () => {
+      rejectListening = undefined;
+      resolve();
+    });
+  });
+  server.on("error", (error: Error) => {
+    rejectListening?.(error);
+  });
+  // Mark the rejection as observed at creation time: call sites that start on
+  // a port they just freed do not await this, and an `unhandledRejection`
+  // would crash them for a binding failure they can do nothing about.
+  // Awaiting `listening` still throws for callers who want it.
+  listening.catch(() => undefined);
+
   server.listen(port, host);
   return {
     server,
     port,
+    listening,
     async close(): Promise<void> {
       await new Promise<void>((resolve) => {
         if (!server.listening) {

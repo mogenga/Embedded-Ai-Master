@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -6,6 +7,23 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 const HOST = path.join(import.meta.dirname, "..", "..", "desktop", "host", "host.js");
+const REPO_ROOT = path.join(import.meta.dirname, "..", "..");
+/**
+ * Whether the kernel's probe module has been compiled.
+ *
+ * The host treats `dist/model/probe.js` as optional so a `dist/` that predates
+ * it degrades to a message instead of killing the process. Two test states
+ * follow from that, and they are not the same:
+ *
+ * - `dist/` was never built (a fresh clone): the probe tests cannot run, so
+ *   they say so as skipped rather than green.
+ * - `dist/` exists but has no `probe.js` while `src/` does: a stale build. The
+ *   host's test button would never work in the shipped app, so that fails
+ *   loudly instead of skipping.
+ */
+const PROBE_SOURCE = path.join(REPO_ROOT, "src", "model", "probe.ts");
+const DIST_BUILT = existsSync(path.join(REPO_ROOT, "dist", "model", "openai.js"));
+const PROBE_BUILT = existsSync(path.join(REPO_ROOT, "dist", "model", "probe.js"));
 // 每个用例都要起一个 Node 宿主进程；满负载下会超过 vitest 的 5s 默认超时。
 const HOST_TIMEOUT_MS = 30_000;
 const tempDirs = [];
@@ -28,6 +46,40 @@ async function failingGateway() {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
   return `http://127.0.0.1:${port}/v1`;
+}
+
+/**
+ * A local gateway that answers `/models` the way an OpenAI-compatible one does.
+ *
+ * `testProvider` probes this endpoint; the same server also accepts chat
+ * completions so a probe that falls back to a completion still gets an answer.
+ * Nothing leaves the machine.
+ */
+async function healthyGateway() {
+  const server = createServer((req, res) => {
+    req.resume();
+    if (req.url?.includes("/models")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ object: "list", data: [{ id: "flash" }, { id: "pro" }] }));
+      return;
+    }
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "completions not used by this test" } }));
+  });
+  servers.push(server);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  return `http://127.0.0.1:${port}/v1`;
+}
+
+/**
+ * An address nothing listens on.
+ *
+ * Port 1 on loopback is reserved and never bound; the connection is refused
+ * immediately, so the failure path is exercised without a test timeout.
+ */
+function unreachableBaseUrl() {
+  return "http://127.0.0.1:1/v1";
 }
 
 async function tempHome() {
@@ -965,6 +1017,115 @@ describe("desktop host", () => {
     expect(notice.level).toBe("warn");
     expect(notice.text).toContain("不是普通文件");
     expect(events.some((event) => event.type === "file")).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  it("已构建过的 dist 里不能缺少 probe.js（陈旧构建）", () => {
+    // A `dist/` that predates `src/model/probe.ts` answers every probe with
+    // "not compiled" while the source says otherwise. A fresh clone has no
+    // `dist/` at all and is not this case; this one is a build that must be
+    // re-run, so it fails loudly instead of quietly skipping.
+    const stale = DIST_BUILT && existsSync(PROBE_SOURCE) && !PROBE_BUILT;
+    expect(stale).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  it.skipIf(!PROBE_BUILT)("testProvider 打到本地假网关，回 provider_test 且带模型列表", async () => {
+    const home = await tempHome();
+    const baseUrl = await healthyGateway();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "testProvider", baseUrl, model: "flash" },
+      ],
+      {
+        until: (all) => all.some((event) => event.type === "provider_test"),
+        timeoutMs: 30_000,
+      },
+    );
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event).toBeDefined();
+    expect(event.ok).toBe(true);
+    // The address the operator typed is what the settings page matches on.
+    expect(event.baseUrl).toBe(baseUrl);
+    expect(event.models).toContain("flash");
+    expect(event.models).toContain("pro");
+    expect(typeof event.latencyMs).toBe("number");
+  }, HOST_TIMEOUT_MS);
+
+  it.skipIf(!PROBE_BUILT)("testProvider 指向不可达地址时回 ok:false 且 error 非空", async () => {
+    const home = await tempHome();
+    const baseUrl = unreachableBaseUrl();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "testProvider", baseUrl },
+      ],
+      {
+        until: (all) => all.some((event) => event.type === "provider_test"),
+        timeoutMs: 30_000,
+      },
+    );
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event).toBeDefined();
+    // A refused connection is not a working gateway; claiming `ok` without a
+    // probe would put a green card on a dead address (R3).
+    expect(event.ok).toBe(false);
+    expect(event.baseUrl).toBe(baseUrl);
+    expect(typeof event.error).toBe("string");
+    expect(event.error.trim()).not.toBe("");
+    // And the failure has to be the gateway's, not "the probe was never
+    // compiled": the degraded answer is a different fact, and letting it stand
+    // in here would leave this test green with no probe implemented at all.
+    expect(event.error).not.toContain("未编译");
+    expect(event.models).toBeUndefined();
+  }, HOST_TIMEOUT_MS);
+
+  it.runIf(!PROBE_BUILT)("probe 未编译时回 ok:false 并说明先 npm run build", async () => {
+    // The degraded path is a supported state during the window where the host
+    // ships ahead of the kernel: the rest of the host keeps working and the
+    // one command that cannot run says why, instead of killing the process at
+    // import time.
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "testProvider", baseUrl: "http://127.0.0.1:1/v1" },
+      ],
+      {
+        until: (all) => all.some((event) => event.type === "provider_test"),
+        timeoutMs: 30_000,
+      },
+    );
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event).toMatchObject({
+      type: "provider_test",
+      ok: false,
+      baseUrl: "http://127.0.0.1:1/v1",
+    });
+    expect(event.error).toContain("npm run build");
+    // The handshake still completed: a missing optional module is not fatal.
+    expect(events.some((entry) => entry.type === "ready")).toBe(true);
+  }, HOST_TIMEOUT_MS);
+
+  it("testProvider 缺少 baseUrl 时回 ok:false，不去探测", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "testProvider", baseUrl: "" },
+      ],
+      {
+        until: (all) => all.some((event) => event.type === "provider_test"),
+        timeoutMs: 30_000,
+      },
+    );
+    const event = events.find((entry) => entry.type === "provider_test");
+    expect(event.ok).toBe(false);
+    expect(event.baseUrl).toBe("");
+    expect(event.error).toContain("baseUrl");
   }, HOST_TIMEOUT_MS);
 
   it("getArtifacts 在没有打开的会话时回空数组", async () => {

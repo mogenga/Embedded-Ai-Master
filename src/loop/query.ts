@@ -1,3 +1,4 @@
+import { resolveContextWindow, resolveMaxOutput } from "../config/providers.js";
 import type { ModelCfg } from "../config/providers.js";
 import { buildMessages } from "../context/build.js";
 import type { TokenMeter } from "../context/token-meter.js";
@@ -345,7 +346,7 @@ export async function* query(
       try {
         response = await ctx.model.complete(messages, toolSchemas, {
           signal: ctx.signal,
-          maxOutputTokens: ctx.modelCfg.maxOutput,
+          maxOutputTokens: resolveMaxOutput(ctx.modelCfg),
           onDelta: (text) => deltaWriter.push(text),
         });
       } catch (error) {
@@ -384,18 +385,19 @@ export async function* query(
         // the window is (D-165).
         try {
           const measured = ctx.budget(buildMessages(session.events()));
+          // The window is the kernel's estimate when the user did not configure
+          // one; the event carries whichever value was actually used so the UI
+          // never has to guess which of the two it is looking at.
+          const window = resolveContextWindow(ctx.modelCfg);
           // A zero measurement is not "an empty context" — it is a transcript
           // the meter could not read. Reporting it would paint a 0% window.
-          if (measured.tokens > 0 && ctx.modelCfg.contextWindow > 0) {
+          if (measured.tokens > 0 && window > 0) {
             payload.context = {
               tokens: measured.tokens,
               // One decimal keeps small movements visible; the UI rounds for
               // display but the event is the fact.
-              percent: Math.min(
-                100,
-                Math.round((measured.tokens / ctx.modelCfg.contextWindow) * 1000) / 10,
-              ),
-              window: ctx.modelCfg.contextWindow,
+              percent: Math.min(100, Math.round((measured.tokens / window) * 1000) / 10),
+              window,
             };
           }
         } catch {

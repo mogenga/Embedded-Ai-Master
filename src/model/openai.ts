@@ -113,7 +113,15 @@ function toFiniteNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-function resolveChatCompletionsUrl(baseUrl: string): string {
+/**
+ * 校验 provider 的 baseUrl，返回解析后的 URL。
+ *
+ * 导出是为了让「测试连接」探测（`model/probe.ts`）复用同一套规则：
+ * 探测和真正发请求时必须接受/拒绝同样的地址，否则用户会看到
+ * 「测试通过但发消息失败」这种自相矛盾的结论。改这里的规则会同时
+ * 改变两处行为，这是有意的。
+ */
+export function parseProviderBaseUrl(baseUrl: string): URL {
   let url: URL;
   try {
     url = new URL(baseUrl);
@@ -126,6 +134,11 @@ function resolveChatCompletionsUrl(baseUrl: string): string {
   if (url.search || url.hash) {
     throw new TypeError("baseUrl must not contain a query or hash");
   }
+  return url;
+}
+
+function resolveChatCompletionsUrl(baseUrl: string): string {
+  const url = parseProviderBaseUrl(baseUrl);
   url.pathname = `${url.pathname.replace(/\/+$/, "")}/chat/completions`;
   return url.toString();
 }

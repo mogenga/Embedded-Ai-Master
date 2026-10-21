@@ -469,7 +469,24 @@ describe("ConfigApi 错误映射", () => {
     expect(readJson(path.join(home, "providers.json"))).toEqual(providers);
   });
 
-  it("putProviders 模型缺 contextWindow → 400 invalid_config 且原文件不变", async () => {
+  it("putProviders 模型不写 contextWindow/maxOutput 时写入成功", async () => {
+    const home = makeHome();
+    const providers = {
+      "local-gw": {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        models: { flash: {} },
+      },
+    };
+    const api = createConfigApi({ harnessHome: home });
+
+    const result = await api.putProviders({ providers });
+
+    expect(result).toEqual({ providers });
+    expect(readJson(path.join(home, "providers.json"))).toEqual(providers);
+  });
+
+  it("putProviders 模型 contextWindow 非法 → 400 invalid_config 且原文件不变", async () => {
     const home = makeHome();
     const before = {
       "local-gw": {
@@ -487,7 +504,7 @@ describe("ConfigApi 错误映射", () => {
           "local-gw": {
             protocol: "openai-chat-completions",
             baseUrl: "http://127.0.0.1:8080/v1",
-            models: { flash: { maxOutput: 4096 } },
+            models: { flash: { contextWindow: 0 } },
           },
         },
       }),

@@ -1537,6 +1537,31 @@
 - **修复建议**: 1 让 runner 透传 `trustProjectConfig`（默认仍为 false，由设置页显式开启，因为项目配置是仓库内容）；2 需要 `main.js` 支持第二个窗口并处理会话锁；4 在 bridge 形态下隐藏连接页（或把它做成只读展示）。
 - **状态**: 大部分解决（2026-10-21 第四轮后，第 3 项仅剩 `@` 提及的文件名搜索，第 4 项已完成；第 1、2 项仍是内核/外壳能力缺口）。
 
+### D-173 · `contextWindow` / `maxOutput` 是估算值，不是从服务商读到的真实上限
+
+- **发现**: 2026-10-21，用户原话：「contextWindow和maxOutput不能直接获取吗，这种东西不好让用户来填，尤其是maxOutput」→「直接删掉」。
+- **事实**: OpenAI 兼容协议**没有**标准途径查询这两个值。`GET /v1/models` 只保证返回模型 id；部分实现会附带 `max_model_len`（vLLM）或 `context_window`（LiteLLM），但不可依赖，且各家键名不一致。`maxOutput` 更是完全没有对应字段。
+- **决定**: 表单不再要求用户填这两个值（第九轮已从设置页删除），改为内核具名常量兜底：`DEFAULT_CONTEXT_WINDOW = 128_000`、`DEFAULT_MAX_OUTPUT = 4_096`（`src/config/providers.ts`，唯一定义处，配 `resolveContextWindow` / `resolveMaxOutput` 两个读值 helper）。
+- **影响与风险**: 这两个默认值是**估算**。真实上下文窗口小于 128k 的模型，内核会以为还剩空间，可能触发服务端 `context_length_exceeded`；真实单次输出上限小于 4096 的模型，`max_tokens: 4096` 可能被网关拒绝。用户仍可在 `providers.json` 里手写真实值覆盖——写入优先。
+- **不是缺陷的部分**: 删掉必填项本身是对的；用户不该被要求知道一个协议不提供的数字。
+- **触发升级条件**: 出现因估算默认值导致的实际失败；或用户要求「探测真实上下文长度」。
+- **修复建议**: ①若要更准，可在 `probeProvider` 成功时尝试解析 `GET /v1/models` 的 `max_model_len` / `context_window` 非标准字段并回填建议值（**只在存在时**，不要编造）；②遇到 `context_length_exceeded` 类的服务端错误时，可在错误文案里提示「该模型的真实上下文可能小于 128000，请在 providers.json 中填写 contextWindow」。
+- **状态**: 已知限制，已记录。默认值有意集中在一处，便于将来改成按模型查表。
+
+### D-172 · 浏览器形态的设置页「模型服务」既叫错了名字，也画不出表单
+
+- **发现**: 2026-10-21，用户原话：「模型配置为什么叫连接？而且也无法进行配置操作」。
+- **现象一（命名）**: 设置页 rail 与标题写作「连接 / Connection」，而同一功能在别处一律叫「模型服务」——宿主 `init` 的提示是「请在设置 → 模型服务中填写」，README 写「设置页有「模型服务」…」，页面自己的空状态标题是 `connEmptyTitle: 还没有配置模型服务`。用户看到提示去找「模型服务」，在设置里只找到「连接」。来源是 `95457db` 从 Prometheus 前端整体移植时的原样文案，第四轮恢复了页面但没有改名。
+- **现象二（不可配置，且与命名无关）**: 浏览器形态下该页永远只有一行 `connUnsupported`，没有卡片、没有「添加模型服务」、没有「保存」。原因：`buildConnectionPage` 要求 `state.settings.providerConfig`，而 `bridge.emitSettings()` 只发 `providers: []`（写死的空数组），从不下发 `providerConfig`，于是走「这个宿主没有提供可在这里编辑的模型配置」分支直接 return。桌面宿主 `configEvent()` 发这个字段，但 Electron 未安装（`desktop/node_modules/electron/dist` 不存在），**实际能跑的只有浏览器形态**，所以用户看到的必然是空页。
+- **连带缺口**: `bridge` 也从不广播 `models` 事件，`stateEvent()` 里 `models: []` 写死；即使 `providers.json` 有模型，选单也一直停在「正在加载模型…」，而 `README` 声称模型列表来自 providers。第四轮的 `dev-notes` 把 `emitSettings` 的 `providers: []` 记为「契约缺口，未修」，但它同时导致了整页不可用，严重性被低估。
+- **影响**: 用户无法通过任何可用形态配置模型服务——唯一的界面入口是空页，只剩手编 `$HARNESS_HOME/providers.json` 一条路。这是「功能闭环」的直接反例（点了没反应的控件 / 空页），违反 R3 的诚实要求（页面没有谎称保存成功，但它也没给出可行的下一步）。
+- **修复**（2026-10-21 第五轮）:
+  - 命名统一为「模型服务 / Model services」，`pageConnectionDesc` 改为描述多个服务与各自模型；首启的 `setupTitle`/`setupBody`/`setupHint` 一并改掉「填 API 密钥」的旧说法（应用只存环境变量名，不存密钥）；删掉无人引用的 `settingsConnection` 键。内部 id `connection` 保留——它不进界面。
+  - 新增 `desktop/renderer/protocol.js` 的 `providersEvent(config)` 与 `modelsOf(config)`：一次把 `providers.json` 拆成两个不可互换的形状（`providers` 扁平列表给选单、`providerConfig` 文件本体给设置页），并跨 provider 展开 `provider/model` 引用。
+  - `bridge.emitSettings()` 改用两者并带上 `providersError` 与 `configPaths.providers`；`refreshConfig()` 与 `putConfig("providers")` 之后都调 `emitModels()` 广播 `models` + `state`，保存后选单与表单同步跟上。
+- **验证**: `tests/desktop/protocol.test.js` 新增 3 例（两种形状、`provider/model` 展开、非对象输入不编造条目），`tests/desktop/bridge.test.js` 新增 4 例（`providerConfig` 到达、`providersError` 到达且表单仍可画、读过配置后广播 `models`、保存后选单跟进）。真机验证：对 `npm run serve:ui` 起的服务 `PUT /api/config` 写入 `providers` 后磁盘出现该文件、`GET` 可读回，随后删除探针文件并确认真实 `~/.harness` 只剩 `sessions/`。
+- **遗留**: 桌面形态（Electron）仍未实机验证（D-163），宿主侧 `configEvent()` 逻辑未改，仅由既有 `host.test.js` 覆盖。
+
 ### D-170 · 配置写入曾落到真实 `~/.harness`（D-125 的配置文件版本）
 
 - **发现**: 2026-10-21，第七轮排查「模型配置没有」时，在真实 home 中发现两份从未被用户创建的配置文件。
@@ -1545,7 +1570,7 @@
 - **与既有用例的关系**: `tests/server/api.test.ts` 的配置用例都显式传了 `harnessHome: makeHome()`，`tests/desktop/host.test.js` 都传了 `HARNESS_HOME: home`。经实测（`USERPROFILE` 重定向到空目录跑全量，75 files / 2029 passed），**当前测试套件不再写入默认 home**。因此这两个文件最可能来自本轮某次未设 `HARNESS_HOME` 的手工冒烟（直接向 `desktop/host/host.js` 管道喂 `saveMcpServer` / `saveRunLimits`），而非 `npm test` 本身。**无法从产物反推确切来源，这一点如实记录为不确定。**
 - **触发升级条件**: 再次在真实 home 出现非用户创建的配置；CI 与开发者共用 home。
 - **修复建议**: ①`resolveHarnessHome()` 在 `NODE_ENV === "test"` 或检测到 vitest（`process.env.VITEST`）时拒绝返回默认 home 并抛错——让「忘了隔离」变成硬失败而不是静默写穿；②给 `writeMcpServers`/`writeRunLimits`/`writeProviders` 加一条「路径必须在 `$HARNESS_HOME` 之内」的自检；③手工冒烟一律带 `HARNESS_HOME`（本轮三个配置写命令都是在宿主进程里执行的，宿主默认用真实 home）。
-- **状态**: 已清理（2026-10-21，两个文件在核对内容后删除）；根因未修复，建议 ① 优先做。
+- **状态**: **已解决**（2026-10-21 第九轮）。建议 ① 已实施：`resolveHarnessHome()` 在 `VITEST` 非空或 `NODE_ENV === "test"` 且没有显式 `HARNESS_HOME` 时**抛错**，错误信息点明检测到的标记、缺少的变量和后果。显式 `HARNESS_HOME` 仍然最优先，非测试环境行为逐字未变。实测：`VITEST=1` 且不设 `HARNESS_HOME` 时抛错；加 guard 后全量跑出 1 条**真实**漏隔离用例（`tests/integration.test.ts` 的「无效模型引用抛 ModelReferenceError」），已补 `vi.stubEnv("HARNESS_HOME", …)`，**没有**弱化 guard。建议 ②③ 未做（② 与 ① 重叠，③ 是操作纪律）。已验证真实 `~/.harness` 只剩 `sessions/`。
 
 ### D-171 · `createUiServer` 绑定失败会崩溃，且 43 个测试调用点硬编码 5174
 
@@ -1554,7 +1579,7 @@
 - **影响**: 只要本机开着 `npm run serve:ui`，`npm test` 就会整份 `api.test.ts` 崩溃；失败原因（端口冲突）与代码无关，容易被误判成被测逻辑有问题。
 - **触发升级条件**: 已有修改（子代理改为 `freePort()` + `startUi()`，与 `approvals-api.test.ts`、`api-unreadable.test.ts` 的既有做法一致）。
 - **修复建议**: ①让 `createUiServer` 暴露绑定结果（返回一个 `listening: Promise<void>`，或在函数内部挂 `error` 并转成 reject），调用方不必猜；②`createApiHandler` 之外再加一层「端口被占」的显式错误码，而不是让进程崩。当前只做了测试侧的规避。
-- **状态**: 部分解决（2026-10-21，`tests/server/api.test.ts` 改用临时端口；`createUiServer` 的崩溃行为未改，因为 `serve.ts` 已自带处理）。
+- **状态**: **已解决**（2026-10-21 第九轮）。`createUiServer` 返回值新增 `listening: Promise<void>` 并在 `server` 上挂常驻 `error` 监听：绑定失败时 reject 该 promise，进程不再崩；绑定成功后该监听退化为「确保 error 永远有人接」。向后兼容——`{ server, port, close }` 全部保留，6 个既有调用点一行未改；创建时立即 `listening.catch(() => undefined)`，不 await 它的调用点不会收到 `unhandledRejection`（有专门用例守着）。`serve.ts` 的 `exitCode = 1` 语义实测未变（占用端口后跑 `dist/server/serve.js` 仍是 `UI server failed: …` + 退出码 1）。测试见 `tests/server/ui-server-bind.test.ts`。
 
 ---
 
@@ -1631,3 +1656,5 @@
 | 2026-10-21 | 功能闭环第二批:新增 `src/config/app-config.ts` + `src/server/config-api.ts`,`GET/PUT /api/config` 读写 `mcp.json`/`permissions.json`/`run.json`(原子写,非法输入 400 且原文件不变);设置页恢复「MCP 服务器」与「行为(权限/运行上限)」两页;`ActionInput` 与 `POST /api/actions` 新增 `maxTurns`/`maxCostUsd`/`timeoutMs`/`systemPrompt`(400 `invalid_run_limits`);新增 `src/session/metadata.ts`(旁挂 `meta.json`)与 `src/server/session-admin.ts`,HTTP 侧 `PATCH`/`DELETE /api/sessions/:id` 与 `POST /api/sessions/:id/fork`,前端改名/置顶/归档/删除/分叉全部接上;`usage` 事件带 `context{tokens,percent,window}` 与 `costUsd`(D-165 标记已解决);产物入口与 Markdown 导出(宿主 `exportSession`、bridge 读日志渲染);宿主命令改为串行执行(修 `loadSession → exportSession` 竞态);顶栏「⋯」菜单改为可见并删掉无外壳支持的新窗口/分屏两行;D-169 更新为部分解决 |
 | 2026-10-21 | 功能闭环第三轮:工具注解写入 `tool_started` 并在工具行画徽标(只转发 true 键);新增 `src/server/files-api.ts` + `GET /api/file`(只读预览,256 KiB / 二进制判定 / realpath 边界)与 `GET /api/sessions/:id/artifacts`,宿主补 `getFile`/`getArtifacts`/`getArtifact`,工作台恢复 File 与 Artifact 两个 tab;`listSessions` 的 `includeArchived`/`cwd`/`limit` 真正生效且 `total` 改为过滤后总数,宿主记住筛选条件供推送复用,`searchSessions` 同步过滤归档;`setEffort` 两端改为如实拒绝(不发 `state`);`saveSettings` 收窄为只认 `locale`;`D-167` 第 5 条与 `D-169` 第 2/3 项标记已解决 |
 | 2026-10-21 | 功能闭环第四轮(用户「模型配置没有、无法打开本地文件夹」):新增 `readProviders`/`writeProviders`(`src/config/app-config.ts`),`AppConfigSnapshot` 带 `providers`/`providersPath`/`providersError`,providers 读失败时降级而非中断整份快照;`PUT /api/config` 加第四段 `providers`;`src/server/files-api.ts` 加 `listDirectory`(目录在前、大小写不敏感排序、500 项截断、跳过符号链接)与 `registerWorkspaceRoot`(进程内登记,并入 `allowedRoots`);`ActionInput.cwd` + `RunnerError("invalid_cwd")`,校验先于会话创建;`GET /api/tree`、`POST /api/workspace`,`POST /api/actions` 接受 `cwd`;宿主 `saveProviders`/`setWorkspace`/真实 `getTree`,**init 的致命路径改为不短路**(providers 缺失只发 dim 提示并继续握手,否则设置页永远打不开);bridge 的 `pickDirectory` 不再静默返回 null 而是说明原因,补 `getTree`/`setWorkspace`/`saveProviders`;设置页恢复「模型服务」页并接 `saveProviders`(显式说明 `apiKeyEnv` 是环境变量名而应用不存密钥、未定价时成本显示「未知」而非 0);渲染器把 mention 路径真正拼进消息文本(此前弹「已添加」却丢弃,违反 R3)、顶栏工作区改发 `setWorkspace` 并支持手输路径、`SUPPORTED_PANES` 加入 `files` 且 `#more-button` 提供入口、修 `treeRow` 在浏览器形态下先发后设 `pendingTreeTarget` 导致子目录画进根部的 bug。录入 D-170(配置曾落到真实 home,已清理)与 D-171(`createUiServer` 绑定失败崩溃 + 43 个测试调用点硬编码 5174) |
+| 2026-10-21 | 功能闭环第五轮(用户「模型配置为什么叫连接？而且也无法进行配置操作」):设置页「连接」统一为「模型服务」(含首启提示与删掉死键 `settingsConnection`);根因是 `bridge.emitSettings()` 只发写死的 `providers: []`、从不下发 `providerConfig`,导致浏览器形态的设置页走 `connUnsupported` 分支只有一行字,而 Electron 未安装、实际能跑的只有浏览器形态。新增 `protocol.providersEvent()`/`modelsOf()`,bridge 据此下发 `providerConfig`+`providersError`+`configPaths.providers` 并广播 `models`(选单不再停在「正在加载模型…」)。录入 D-172 |
+| 2026-10-21 | 功能闭环第九轮(用户「contextWindow和maxOutput直接删掉」「每百万Token价格这个不需要，直接删掉」「缺少测试连接（模型服务）功能」「选择本地文件夹应该在侧边栏也可进行」,并发 5 个子代理):①`ModelConfigSchema` 的 `contextWindow`/`maxOutput` 改可选,新增 `DEFAULT_CONTEXT_WINDOW`/`DEFAULT_MAX_OUTPUT` 与 `resolveContextWindow`/`resolveMaxOutput`,预算/压缩/请求全部走 helper(录入 D-173:这是估算值,协议不提供真实值);②设置页删掉这两个输入框与整个「每百万 token 价格」区,**旧文件里的值保存时原样透传**(模型级 `carried`、provider 级 `extra`);③新增 `src/model/probe.ts`(`probeProvider`)+ `POST /api/providers/test`(失败探测也是 200),`parseProviderBaseUrl` 从 `openai.ts` 提取共用,宿主与 bridge 接 `testProvider` → `provider_test` 事件,设置页每张卡片一个「测试连接」按钮(15s 超时、按 baseUrl 匹配回包、build 快照防写已移除节点);④侧边栏新增工作区入口,与顶栏共用同一个 `chooseWorkspace()`;⑤**D-170 已解决**(`resolveHarnessHome` 在 vitest 下缺 `HARNESS_HOME` 抛错),**D-171 已解决**(`createUiServer` 返回 `listening` promise + 常驻 error 监听)。**主控补接缝**:`app.js` 的 `handleEvent` 原本没有 `provider_test` 分支,事件会被静默丢弃、按钮只能靠超时收场,已补 |

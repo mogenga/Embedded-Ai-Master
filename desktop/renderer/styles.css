@@ -421,6 +421,67 @@ body.resizing-sidebar .sidebar {
   color: var(--text-secondary);
 }
 
+/* The workspace entry sits directly under the new-chat button: choosing where
+   the next session runs belongs to starting it, not to the top bar alone.
+   Two lines — label above, folder name below — because a sidebar narrows to
+   200px and one long line would either clip the name or push the icon out. */
+.sidebar-workspace {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  text-align: left;
+  min-width: 0;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.sidebar-workspace:hover {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.sidebar-workspace svg {
+  width: 14px;
+  height: 14px;
+  color: var(--text-secondary);
+}
+
+.sidebar-workspace-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.35;
+}
+
+.sidebar-workspace-label {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+}
+
+.sidebar-workspace-name {
+  font-size: var(--text-sm);
+  color: var(--text);
+  /* A workspace name is often longer than the rail; the full path is in the
+     tooltip, so the row truncates rather than wraps and pushes the session
+     list down. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* No folder yet: the entry is the only way to pick one from here, and a
+   muted row reads as "empty slot to fill", not as disabled. */
+.sidebar-workspace.empty .sidebar-workspace-name {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
 .sidebar-section-head {
   display: flex;
   align-items: center;
