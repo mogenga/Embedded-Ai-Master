@@ -2,6 +2,14 @@
 
 输入是 ``runner`` 产出的逐查询记录，输出是逐查询得分与分组汇总。
 导航文件过滤已在方案出口做过（T11），这里不重复过滤，避免两处规则漂移。
+
+**多 gold 的边界（spec §7.3 第 5 条）**：「主判定只用导入的原始 gold」。
+多 gold 补标是**增强项**，**只影响 nDCG@5**；Recall@k / Hit@1 / MRR 一律用
+`queries.jsonl` 的原始单 gold。这样做的理由是主判定口径不能被补标改动——
+补标是「回答这个问题还需要读哪些文件」，用它改 Recall@2 会让
+「top-2 里放 2 个正确答案」被误判成未命中，而 top-2 本来就只能放 2 个。
+
+没提供多 gold 时，nDCG@5 **退化成单 gold 计算**并标记低置信——不是不报。
 """
 
 from __future__ import annotations
@@ -34,6 +42,8 @@ class ScoredQuery:
     mrr: float
     ndcg5: float
     latency_ms: float
+    # 该条是否用了多 gold 算 nDCG。False = 退化成单 gold（低置信）。
+    ndcg5_from_multi_gold: bool = False
 
     def as_row(self) -> dict[str, object]:
         return {
@@ -48,6 +58,7 @@ class ScoredQuery:
             "hit@1": self.hit1,
             "mrr": self.mrr,
             "ndcg@5": self.ndcg5,
+            "ndcg@5_from_multi_gold": self.ndcg5_from_multi_gold,
             "latency_ms": self.latency_ms,
         }
 
@@ -59,10 +70,21 @@ def score_one(
     status: str,
     paths: Sequence[str],
     latency_ms: float,
+    multi_gold: Sequence[str] | None = None,
 ) -> ScoredQuery:
-    """单查询评分；``status != ok`` 由 metrics 层统一记为 miss（ITT）。"""
+    """单查询评分；``status != ok`` 由 metrics 层统一记为 miss（ITT）。
+
+    ``multi_gold`` 只影响 **nDCG@5**（spec §7.3 第 5 条：主判定只用原始 gold）。
+    没给或给了空 → nDCG 用原始单 gold 算，并标记 ``ndcg5_from_multi_gold=False``
+    （低置信）。
+    """
 
     scores = score_query(status=status, paths=paths, gold=query.gold, ks=(2, 5))
+
+    # nDCG 用多 gold（若提供）。**其余指标一律用 query.gold**——
+    # 主判定的口径不能被补标改动。
+    use_multi = bool(multi_gold)
+    ndcg_gold = tuple(multi_gold) if use_multi else query.gold
     return ScoredQuery(
         query_id=query.id,
         scheme=scheme,
@@ -74,8 +96,9 @@ def score_one(
         recall5=bool(scores["recall@5"]),
         hit1=bool(scores["hit@1"]),
         mrr=float(scores["mrr"]),
-        ndcg5=ndcg_at_k(status, paths, query.gold, 5),
+        ndcg5=ndcg_at_k(status, paths, ndcg_gold, 5),
         latency_ms=latency_ms,
+        ndcg5_from_multi_gold=use_multi,
     )
 
 
@@ -142,8 +165,14 @@ def read_results_jsonl(path: str | Path) -> list[dict[str, object]]:
 def score_records(
     records: Iterable[Mapping[str, object]],
     queries: Mapping[str, Query],
+    multi_gold: Mapping[str, Sequence[str]] | None = None,
 ) -> list[ScoredQuery]:
-    """把逐查询记录评分；未知 query_id 直接失败（防止漏导入）。"""
+    """把逐查询记录评分；未知 query_id 直接失败（防止漏导入）。
+
+    ``multi_gold`` 是 ``query_id -> gold 路径列表`` 的映射，来自
+    ``data/annotation_multi_gold.jsonl``。**只影响 nDCG@5**（见 ``score_one``）。
+    没给这张表时全部退化成单 gold——行为与接线前完全一致。
+    """
 
     scored: list[ScoredQuery] = []
     for record in records:
@@ -166,6 +195,7 @@ def score_records(
                 status=str(record.get("status", "error")),
                 paths=paths,
                 latency_ms=float(record.get("latency_ms", 0.0) or 0.0),
+                multi_gold=(multi_gold or {}).get(query_id),
             )
         )
     return scored

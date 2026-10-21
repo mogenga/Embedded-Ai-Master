@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -187,6 +188,85 @@ def load_multi_gold(data_dir: str | Path) -> tuple[list[Any], IntakeReport]:
     return _parse_each(records, parse_multi_gold, label="multi_gold", report=report), report
 
 
+def multi_gold_map(
+    data_dir: str | Path,
+) -> tuple[dict[str, tuple[str, ...]], IntakeReport]:
+    """多 gold 标注 → ``query_id -> gold 路径列表`` 的映射。
+
+    评分层要的是这张映射（``scoring.score_records`` 的 ``multi_gold`` 参数）。
+    缺失文件时返回空映射 + 一条 warning——**不是错误**：多 gold 是增强项。
+
+    **同时做一致性检查**（这些是「标注写错了」而不是「标注不全」）：
+    - query_id 必须���在查询集里（否则这条标注永远用不上，白写）；
+    - gold 路径必须在语料里存在（否则 nDCG 会给一个不存在的文件算分）；
+    - 同一 query_id 不得重复出现（重复会让「覆盖了多少条」算错）。
+    """
+
+    report = IntakeReport()
+    path = Path(data_dir) / MULTI_GOLD_FILE
+    if not path.is_file():
+        report.warnings.append(
+            f"未提供 {MULTI_GOLD_FILE}：nDCG@5 将以单 gold 计并标记低置信"
+        )
+        return {}, report
+
+    entries, load_report = load_multi_gold(data_dir)
+    report.errors.extend(load_report.errors)
+    report.warnings.extend(load_report.warnings)
+
+    mapping: dict[str, tuple[str, ...]] = {}
+    for entry in entries:
+        query_id = entry.query_id
+        if query_id in mapping:
+            report.errors.append(
+                f"{MULTI_GOLD_FILE} 中 {query_id} 重复出现："
+                "同一查询只能有一条多 gold 标注"
+            )
+            continue
+        mapping[query_id] = tuple(entry.gold)
+    return mapping, report
+
+
+def check_multi_gold_coverage(
+    *,
+    mapping: dict[str, tuple[str, ...]],
+    query_ids: Sequence[str],
+    corpus_root: str | Path,
+) -> list[str]:
+    """多 gold 的 G0 门禁（spec §7.3 第 5 条 + §7.5）。
+
+    返回**问题清单**（空 = 全部通过）。三条：
+
+    1. **query_id 必须存在**：不存在的 id 是白写的标注，且会让「覆盖率」的分母算错。
+    2. **gold 路径必须在语料里**：给不存在的文件算分是错的。
+    3. **覆盖率**：spec 说「若提供，必须覆盖 172 条 index case 才进入 nDCG 计算」。
+       我们没有 172 条（自建集只有 50 条 index），所以按**全部 index 轨查询**为分母。
+       **未覆盖全���时 nDCG@5 标记低置信，但不阻塞主实验**——spec 明确说它是增强项。
+    """
+
+    problems: list[str] = []
+    corpus = Path(corpus_root)
+
+    known = set(query_ids)
+    for query_id, gold in mapping.items():
+        if query_id not in known:
+            problems.append(f"多 gold 标注的 query_id 不在查询集内：{query_id}")
+            continue
+        for path in gold:
+            if not (corpus / path).is_file():
+                problems.append(f"{query_id} 的多 gold 路径在语料中不存在：{path}")
+
+    index_ids = [q for q in query_ids if q.startswith("idx-")]
+    covered = [q for q in index_ids if q in mapping]
+    missing = [q for q in index_ids if q not in mapping]
+    if index_ids and len(covered) < len(index_ids):
+        problems.append(
+            f"多 gold 只覆盖 {len(covered)}/{len(index_ids)} 条 index 查询"
+            f"（缺 {len(missing)} 条，如 {missing[:3]}）→ nDCG@5 标低置信"
+        )
+    return problems
+
+
 def run_intake(
     *,
     corpus_dir: str | Path,
@@ -265,7 +345,28 @@ def run_intake(
     report.errors.extend(multi_gold_report.errors)
     report.counts["multi_gold"] = len(multi_gold)
 
-    # 索引覆盖诊断（T12/T13）：gold 不在 index.yaml 中的查询，方案 C 结构性无法命中。
+    # 多 gold 的 G0 门禁（§7.3 第 5 条 + §7.5）。
+    # **标注写错了**（id 不存在 / 路径不存在）是错误；**覆盖不全**只是低置信，
+    # 不是错误——spec 明确说多 gold 是增强项，不阻塞主实验。
+    if multi_gold:
+        mapping = {entry.query_id: tuple(entry.gold) for entry in multi_gold}
+        problems = check_multi_gold_coverage(
+            mapping=mapping,
+            query_ids=[q.id for q in queries],
+            corpus_root=corpus_root,
+        )
+        for problem in problems:
+            if "标低置信" in problem:
+                report.warnings.append(problem)
+            else:
+                report.errors.append(problem)
+        report.counts["multi_gold_covered_index"] = sum(
+            1 for q in queries if q.track == "index" and q.id in mapping
+        )
+
+    # 索引覆盖诊断（T12/T13）：gold 不在 index.yaml 中的查询，方案 C 的 lookup 分支
+    # 结构性无法命中。措辞只说 lookup：2026-10-20 实测 11 条里仍有 1 条经 search 分支
+    # 命中（srch-011，rank=0），所以不能写成"C 无法命中"。
     # 这是**口径事实**而非资产错误，必须写进报告供分层判读，不能静默。
     unindexed = unindexed_gold_queries(corpus_root, queries)
     report.counts["queries_with_unindexed_gold"] = len(unindexed)
@@ -273,7 +374,7 @@ def run_intake(
         sample = ", ".join(unindexed[:5])
         report.warnings.append(
             f"{len(unindexed)}/{len(queries)} 条查询的 gold 不在 index.yaml 中"
-            f"（方案 C 结构性无法命中，须分层报告）：{sample}"
+            f"（方案 C 的 lookup 分支结构性无法命中，须分层报告）：{sample}"
         )
 
     return report

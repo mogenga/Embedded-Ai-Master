@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -42,10 +43,73 @@ class Usage:
 
 
 @dataclass(frozen=True)
+class ToolCall:
+    """模型发起的一次工具调用。``arguments`` 已解析为 dict（解析失败时为空 dict）。"""
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ChatResult:
     content: str
     usage: Usage
     raw: dict[str, Any]
+    tool_calls: tuple[ToolCall, ...] = ()
+    finish_reason: str | None = None
+    # 实测该网关会返回 reasoning_content；它不是答案，不进 content，但保留以便排查。
+    reasoning: str | None = None
+
+    @property
+    def wants_tools(self) -> bool:
+        return bool(self.tool_calls)
+
+
+def _as_str(value: Any) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _parse_tool_calls(message: dict[str, Any]) -> tuple[ToolCall, ...]:
+    """解析 ``choices[0].message.tool_calls``。
+
+    **参数 JSON 解析失败不抛错**：把它当作空参数交给调用方，由工具层返回结构化错误，
+    让模型有机会自我纠正。抛异常会直接中断整轮循环。
+    """
+
+    raw_calls = message.get("tool_calls")
+    if not isinstance(raw_calls, list):
+        return ()
+
+    parsed: list[ToolCall] = []
+    for index, item in enumerate(raw_calls):
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        arguments_raw = function.get("arguments")
+        arguments: dict[str, Any] = {}
+        if isinstance(arguments_raw, dict):
+            arguments = arguments_raw
+        elif isinstance(arguments_raw, str) and arguments_raw.strip():
+            try:
+                loaded = json.loads(arguments_raw)
+            except json.JSONDecodeError:
+                loaded = None
+            if isinstance(loaded, dict):
+                arguments = loaded
+        parsed.append(
+            ToolCall(
+                id=str(item.get("id") or f"call_{index}"),
+                name=name,
+                arguments=arguments,
+            )
+        )
+    return tuple(parsed)
 
 
 class OpenAIClient:
@@ -139,7 +203,21 @@ class OpenAIClient:
             output_tokens=int(usage_raw.get("completion_tokens", 0) or 0),
             estimated=False,
         )
-        return ChatResult(content=content, usage=usage, raw=data)
+
+        finish_reason = None
+        try:
+            finish_reason = data["choices"][0].get("finish_reason")
+        except (KeyError, IndexError, TypeError):
+            pass
+
+        return ChatResult(
+            content=content,
+            usage=usage,
+            raw=data,
+            tool_calls=_parse_tool_calls(message),
+            finish_reason=finish_reason if isinstance(finish_reason, str) else None,
+            reasoning=_as_str(message.get("reasoning_content")),
+        )
 
     def embed(self, texts: Sequence[str], *, model: str) -> list[list[float]]:
         payload = {"model": model, "input": list(texts)}

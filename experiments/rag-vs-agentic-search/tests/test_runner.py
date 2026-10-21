@@ -8,6 +8,8 @@ from pathlib import Path
 from raglab.assets import Candidate, Query, QueryResult
 from raglab.runner import (
     MAX_CONSECUTIVE_GATEWAY_ERRORS,
+    append_result,
+    read_completed_query_ids,
     run_queries,
     summarize_status,
     write_results_jsonl,
@@ -103,3 +105,88 @@ def test_query_result_paths_follow_candidate_order() -> None:
         candidates=(Candidate("b.md"), Candidate("a.md")),
     )
     assert result.paths == ("b.md", "a.md")
+
+
+# ---- 逐条落盘与断点续跑（B 的全量跑批要 1.7–2.7 小时，不能一次中断全丢）----
+
+
+def test_append_result_writes_one_line_per_result(tmp_path: Path) -> None:
+    target = tmp_path / "B.jsonl"
+    for index in (1, 2):
+        append_result(
+            QueryResult(
+                query_id=f"idx-{index:03d}",
+                scheme="B",
+                status="ok",
+                candidates=(Candidate("a.md", 1.0),),
+            ),
+            target,
+        )
+    lines = target.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    first = json.loads(lines[0])
+    assert first["query_id"] == "idx-001"
+    assert first["candidates"] == [{"path": "a.md", "score": 1.0}]
+
+
+def test_append_result_appends_rather_than_truncates(tmp_path: Path) -> None:
+    """续跑时已写好的行必须还在——截断就等于把断点续跑变成重跑。"""
+
+    target = tmp_path / "B.jsonl"
+    target.write_text('{"query_id": "idx-001"}\n', encoding="utf-8")
+    append_result(QueryResult(query_id="idx-002", scheme="B", status="ok"), target)
+    assert read_completed_query_ids(target) == {"idx-001", "idx-002"}
+
+
+def test_read_completed_query_ids_ignores_blank_lines(tmp_path: Path) -> None:
+    target = tmp_path / "B.jsonl"
+    target.write_text(
+        '{"query_id": "idx-001"}\n\n{"query_id": "idx-002"}\n',
+        encoding="utf-8",
+    )
+    assert read_completed_query_ids(target) == {"idx-001", "idx-002"}
+
+
+def test_read_completed_query_ids_on_missing_file_is_empty(tmp_path: Path) -> None:
+    assert read_completed_query_ids(tmp_path / "nope.jsonl") == set()
+
+
+def test_read_completed_query_ids_rejects_corrupt_line(tmp_path: Path) -> None:
+    """坏行意味着文件写坏了：静默跳过会让人以为那条查询已完成。"""
+
+    target = tmp_path / "B.jsonl"
+    target.write_text('{"query_id": "idx-001"}\nnot json\n', encoding="utf-8")
+    try:
+        read_completed_query_ids(target)
+    except ValueError as exc:
+        assert "not json" in str(exc) or "不是合法 JSON" in str(exc)
+    else:
+        raise AssertionError("坏行必须报错，不能静默跳过")
+
+
+def test_on_result_is_called_for_every_query(tmp_path: Path) -> None:
+    """逐条落盘靠这个回调：漏调一条，那条结果就白跑了。"""
+
+    seen: list[str] = []
+    run_queries(
+        _ScriptedScheme(["ok", "boom", "ok"]),
+        _queries(3),
+        run_id="r6",
+        on_result=lambda result: seen.append(result.query_id),
+    )
+    assert seen == ["idx-001", "idx-002", "idx-003"]
+
+
+def test_query_spacing_sleeps_between_queries_not_before_first() -> None:
+    """查询之间的间隔：方案自身的 spacing 只管查询内部的轮次。"""
+
+    slept: list[float] = []
+    run_queries(
+        _ScriptedScheme(["ok"] * 3),
+        _queries(3),
+        run_id="r7",
+        query_spacing_seconds=15.0,
+        sleep=slept.append,
+    )
+    assert slept == [15.0, 15.0], "第一条查询之前不睡，之后每条之前睡一次"
+

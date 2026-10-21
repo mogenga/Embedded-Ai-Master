@@ -22,6 +22,28 @@ from .errors import ConfigurationError
 
 SCHEMES = ("A", "B", "C", "C_prime", "D")
 
+# 方案名 → config/schemes/ 下的文件名。新增方案必须同时在此登记，
+# 否则 `raglab run` 会因为找不到参数文件而静默用默认值——那会让"用了哪套参数"不可判定。
+SCHEME_FILES: dict[str, str] = {
+    "A": "vector.yaml",
+    "B": "agentic.yaml",
+    "C": "index_grep.yaml",
+    "C_prime": "bm25_grep.yaml",
+    "D": "hybrid.yaml",
+}
+
+# 已有实现的方案。**这份清单必须与 schemes 包里的实际类同步**：
+# 写在这里而不靠"能不能构造出实例"来判断，是因为后者会让未实现方案先报
+# 参数错误，提示信息是假的。测试断言两者一致。
+IMPLEMENTED_SCHEMES: frozenset[str] = frozenset({"A", "B", "C", "C_prime", "D"})
+
+# 本轮不参与结论的方案。实现保留（D 的 H5 门槛与种子接线都是有效工作），
+# 但**不跑全量**——D1 冒烟显示其种子召回等于 C′ 全量水平，增益空间有限。
+#
+# 这个清单会写进报告，避免"跑批结果里出现了 D"被误读成"D 参与了结论"。
+# **B 已于 2026-10-20 补跑全量**（用户要求），故不在此列。
+SKIPPED_THIS_ROUND: frozenset[str] = frozenset({"D"})
+
 # 可选依赖组 → 用于探测的模块名。用于判断本地候选是否真的能跑。
 # 当前没有本地候选在用（见 models.yaml 说明），但 spec §6.3 的 embedder 网格
 # 保留了"本地候选"这一档，能力留在代码里，删掉会让该档无法恢复。
@@ -256,6 +278,10 @@ class SchemeConfig:
     name: str
     params: dict[str, Any] = field(default_factory=dict)
     prompt_path: str | None = None
+    # 顶层 `variants`（方案 D 的 D1/D2 定义）。它不是超参，是**互斥的变体**，
+    # 所以单列而不是塞进 params——`params` 里的键会被 `_resolved_params`
+    # 当成"仍需选择的网格"检查。
+    variants: dict[str, Any] = field(default_factory=dict)
 
 
 def load_scheme(name: str, path: str | Path) -> SchemeConfig:
@@ -270,4 +296,9 @@ def load_scheme(name: str, path: str | Path) -> SchemeConfig:
     prompt_path = data.get("prompt_path")
     if prompt_path is not None and not isinstance(prompt_path, str):
         raise ConfigurationError(f"{path} prompt_path 必须是字符串")
-    return SchemeConfig(name=name, params=params, prompt_path=prompt_path)
+    variants = data.get("variants") or {}
+    if not isinstance(variants, dict):
+        raise ConfigurationError(f"{path} variants 必须是映射")
+    return SchemeConfig(
+        name=name, params=params, prompt_path=prompt_path, variants=variants
+    )

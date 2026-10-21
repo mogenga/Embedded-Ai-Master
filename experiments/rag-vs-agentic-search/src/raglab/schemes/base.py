@@ -118,43 +118,37 @@ class _Placeholder(RetrievalScheme):
         )
 
 
-class SchemeA(_Placeholder):
-    key = "A"
-    display_name = "向量 RAG"
+# 五个方案都已有实现（A/B/C/C′/D），本文件只保留基类与注册表。
+# 各方案的真实实现分别在 vector_rag.py / agentic.py / index_grep.py /
+# bm25_grep.py / hybrid.py；此处延迟导入避免循环依赖
+# （那些模块都要 import 本文件的 RetrievalScheme）。
+def _scheme_registry() -> dict[str, type[RetrievalScheme]]:
+    from .agentic import SchemeB
+    from .bm25_grep import SchemeCPrime
+    from .hybrid import SchemeD
+    from .index_grep import SchemeC
+    from .vector_rag import SchemeA
 
-
-class SchemeB(_Placeholder):
-    key = "B"
-    display_name = "Agentic search"
-
-
-class SchemeC(_Placeholder):
-    key = "C"
-    display_name = "现状基线（index + grep）"
-
-
-class SchemeCPrime(_Placeholder):
-    key = "C_prime"
-    display_name = "BM25 + grep"
-
-
-class SchemeD(_Placeholder):
-    key = "D"
-    display_name = "混合（条件启用）"
-
-
-_REGISTRY: dict[str, type[RetrievalScheme]] = {
-    scheme.key: scheme
-    for scheme in (SchemeA, SchemeB, SchemeC, SchemeCPrime, SchemeD)
-}
+    return {
+        scheme.key: scheme
+        for scheme in (SchemeA, SchemeB, SchemeC, SchemeCPrime, SchemeD)
+    }
 
 
 def scheme_class(key: str) -> type[RetrievalScheme]:
+    registry = _scheme_registry()
     try:
-        return _REGISTRY[key]
+        return registry[key]
     except KeyError as exc:
-        raise ValueError(f"未知方案：{key!r}，可选 {sorted(_REGISTRY)}") from exc
+        raise ValueError(f"未知方案：{key!r}，可选 {sorted(registry)}") from exc
 
 
-def get_scheme(key: str, *, navigation_files: Iterable[str] = ()) -> RetrievalScheme:
-    return scheme_class(key)(navigation_files=navigation_files)
+def get_scheme(
+    key: str,
+    *,
+    navigation_files: Iterable[str] = (),
+    **kwargs: object,
+) -> RetrievalScheme:
+    """构造方案实例；额外参数原样透传给具体方案（如 C 的 `corpus_root`）。"""
+
+    return scheme_class(key)(navigation_files=navigation_files, **kwargs)
