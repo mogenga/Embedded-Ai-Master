@@ -26,6 +26,24 @@ const PriceSchema = z.number().nonnegative().finite();
 const ProviderConfigSchema = z.object({
   protocol: z.literal("openai-chat-completions"),
   baseUrl: z.string().url(),
+  /**
+   * 直接写在配置文件里的 API 密钥（明文）。
+   *
+   * 为什么允许明文：这是用户本机的配置文件，威胁模型与 `~/.ssh/id_*`、
+   * `~/.git-credentials` 同级——能读这个文件的人本来就能读用户的一切。
+   * 桌面应用的用户装好软件后不可能为了填一个密钥去设系统环境变量再重启，
+   * 强制 `apiKeyEnv` 只会把用户挡在门外（真实事故：用户把密钥填进了
+   * 「环境变量名」字段，应用既没保存也没使用）。
+   *
+   * 与 `apiKeyEnv` 的关系：两者**可以并存**，此时 `apiKey` 优先（显式值
+   * 覆盖环境变量）；两者都没有时请求不带 Authorization 头。空字符串等于
+   * 没有——绝不会把空值当密钥发出去。判定统一走 `resolveProviderApiKey`。
+   *
+   * **安全**：这个值只允许出现在出站请求的 Authorization 头里，禁止写入
+   * 日志、错误信息、事件流或任何对外输出。回显给用户时一律脱敏。
+   */
+  apiKey: z.string().optional(),
+  /** 密钥所在的环境变量**名**（不是密钥本身）；`apiKey` 缺省时才用它。 */
   apiKeyEnv: z.string().optional(),
   models: z.record(z.string(), ModelConfigSchema),
   requestTimeoutMs: z.number().int().positive().optional(),
@@ -56,6 +74,33 @@ export function resolveContextWindow(modelCfg: ModelCfg): number {
 /** 取模型实际使用的单次输出上限；语义同 `resolveContextWindow`。 */
 export function resolveMaxOutput(modelCfg: ModelCfg): number {
   return modelCfg.maxOutput ?? DEFAULT_MAX_OUTPUT;
+}
+
+/**
+ * 取 provider 实际使用的 API 密钥；返回 trim 后的值，未配置时 `undefined`。
+ *
+ * 优先级：`apiKey`（直接写在配置里的明文密钥）> `apiKeyEnv` 指向的环境变量。
+ * 显式值覆盖间接值——用户既然直接填了密钥，就不该被一个旧的环境变量名盖住。
+ *
+ * 空值语义（三层都一致）：`apiKey` 为空串/纯空白等于「没填」，此时**回落**到
+ * `apiKeyEnv`；两者都拿不到非空值就返回 `undefined`，调用方据此**不发**
+ * Authorization 头。空串和纯空白从不算有效密钥——发一个 `Bearer ` 只会换来
+ * 一个看似「密钥错误」的 401，掩盖真正的配置问题。
+ *
+ * 这个函数只做解析，不做任何日志：返回值只允许进请求头。
+ */
+export function resolveProviderApiKey(
+  provider: { apiKey?: string | undefined; apiKeyEnv?: string | undefined },
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const direct = provider.apiKey?.trim();
+  if (direct !== undefined && direct !== "") return direct;
+
+  const envName = provider.apiKeyEnv?.trim();
+  if (envName === undefined || envName === "") return undefined;
+  const fromEnv = env[envName]?.trim();
+  if (fromEnv === undefined || fromEnv === "") return undefined;
+  return fromEnv;
 }
 
 export class ConfigValidationError extends Error {

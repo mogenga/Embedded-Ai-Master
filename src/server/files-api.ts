@@ -1,4 +1,5 @@
 import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import path from "node:path";
 import { isValidSessionId } from "../session/handle.js";
 import { readSessionHeader } from "../session/persistence.js";
@@ -417,4 +418,213 @@ export async function registerWorkspaceRoot(rawPath: unknown): Promise<string> {
 /** 仅供测试重置进程内登记；生产代码不应调用。 */
 export function __resetWorkspaceRootsForTests(): void {
   registeredWorkspaceRoots.clear();
+}
+
+/**
+ * 本次运行登记过的工作区根（只读快照）。
+ *
+ * `/api/workspace/resolve` 用它把「上次打开过的工作区」纳入候选搜索范围：
+ * 浏览器只给裸文件夹名，而这个进程知道操作员刚才打开过哪些目录。
+ */
+export function listRegisteredWorkspaceRoots(): string[] {
+  return [...registeredWorkspaceRoots];
+}
+
+/** 与 `allowedRoots` 同一份已知根的只读快照，供候选搜索取「上次的工作目录」。 */
+export async function listKnownReadableRoots(harnessHome: string): Promise<string[]> {
+  return allowedRoots(harnessHome);
+}
+
+/*
+ * `/api/workspace/resolve`：把浏览器拿到的裸文件夹名换成本机绝对路径候选。
+ *
+ * 浏览器的 `showDirectoryPicker` 只给 `FileSystemDirectoryHandle.name`（如
+ * `myproject`），绝不暴露绝对路径；而 `/api/tree` 与 `/api/file` 要绝对路径。
+ * 服务端替它做一次**有界**的名字查找：只读目录名、不读文件内容、不跟随符号
+ * 链接、不进以 `.` 开头的目录（`.git` / `.cache` / `$HARNESS_HOME` 都在这一类），
+ * 并受深度、条目数与总时长三重预算约束。
+ *
+ * 找到候选不等于授权：候选只是一串路径，真正让它可读的仍然是
+ * `POST /api/workspace` 与 `registerWorkspaceRoot`。这里绝不登记、不读内容。
+ */
+
+/** 候选搜索的默认深度上限（根的直接子目录为第 1 层）。 */
+export const RESOLVE_MAX_DEPTH = 4;
+
+/** 一次搜索最多检查的目录条目数；超出即停止并标记 `truncated`。 */
+export const RESOLVE_MAX_ENTRIES = 20000;
+
+/** 一次搜索的总时长预算（毫秒）；到点返回已找到的，不阻塞请求。 */
+export const RESOLVE_TIMEOUT_MS = 300;
+
+/** 返回给前端的候选上限：再多就没法在一个列表里挑了。 */
+export const MAX_RESOLVE_CANDIDATES = 10;
+
+/** 单个文件夹名的长度上限（大多数文件系统的上限是 255）。 */
+const MAX_RESOLVE_NAME_LENGTH = 255;
+
+export interface WorkspaceCandidate {
+  path: string;
+  name: string;
+}
+
+export interface ResolveWorkspaceOptions {
+  /** 搜索起点（绝对路径）。不存在的根安静跳过。 */
+  roots: string[];
+  /** 不进入的目录前缀（`$HARNESS_HOME` 之类）；按 realpath 比较。 */
+  exclude?: string[];
+  maxDepth?: number;
+  maxEntries?: number;
+  timeoutMs?: number;
+}
+
+export interface ResolveWorkspaceResult {
+  candidates: WorkspaceCandidate[];
+  /** 预算（深度之外的条目/时长/候选上限）是否截断了搜索。 */
+  truncated: boolean;
+  /** 实际检查过的目录条目数，测试与诊断用。 */
+  scanned: number;
+}
+
+/**
+ * 校验「文件夹名」。
+ *
+ * 候选搜索只接受一个名字，不接受路径：一旦允许分隔符或 `..`，这个端点就变成
+ * 「任意路径探测」，而它存在的理由恰恰相反。`name` 是外部输入，全部按不可信处理。
+ */
+function assertSearchName(rawName: unknown): string {
+  if (typeof rawName !== "string") {
+    throw new HttpError(400, "invalid_name", "name 必须是字符串");
+  }
+  const name = rawName.trim();
+  if (name === "") {
+    throw new HttpError(400, "invalid_name", "name 不能为空");
+  }
+  if (name.length > MAX_RESOLVE_NAME_LENGTH) {
+    throw new HttpError(400, "invalid_name", `name 不能超过 ${MAX_RESOLVE_NAME_LENGTH} 个字符`);
+  }
+  if (name.includes("\0")) {
+    throw new HttpError(400, "invalid_name", "name 含非法字符");
+  }
+  if (name.includes("/") || name.includes("\\")) {
+    throw new HttpError(400, "invalid_name", "name 只能是文件夹名，不能包含路径分隔符");
+  }
+  if (name === "." || name === "..") {
+    throw new HttpError(400, "invalid_name", "name 不能是 . 或 ..");
+  }
+  return name;
+}
+
+/** 以 `.` 开头的目录一律不进入，也不作为候选：噪声（`.git`）与配置目录（`$HARNESS_HOME`）。 */
+function isDotName(name: string): boolean {
+  return name.startsWith(".");
+}
+
+/**
+ * 候选搜索用的 realpath：任何失败都只是「这个根用不了」，不是请求错误。
+ *
+ * `realpathOrNull` 只吞 ENOENT/ENOTDIR；搜索的根来自用户主目录与登记的
+ * 工作区，路径上任何一段没有权限（EACCES）都会让它抛错，而一次名字查找
+ * 不该因此 500。
+ */
+async function realpathQuietly(value: string): Promise<string | null> {
+  try {
+    return await realpath(value);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 按文件夹名在给定根下查找同名目录。
+ *
+ * 广度优先：候选天然按层数从浅到深排列，浅层（更可能是用户指的那个）先返回。
+ * 预算用尽时返回已经找到的，并用 `truncated` 说明搜索被截断——「没找到」与
+ * 「没找完」是两件事，调用方要分得清（R3）。
+ */
+export async function resolveWorkspaceCandidates(
+  rawName: unknown,
+  options: ResolveWorkspaceOptions,
+): Promise<ResolveWorkspaceResult> {
+  const name = assertSearchName(rawName);
+  const maxDepth = options.maxDepth ?? RESOLVE_MAX_DEPTH;
+  const maxEntries = options.maxEntries ?? RESOLVE_MAX_ENTRIES;
+  const deadline = Date.now() + (options.timeoutMs ?? RESOLVE_TIMEOUT_MS);
+  const wanted = normalizeForCompare(name);
+  const excluded: string[] = [];
+  for (const entry of options.exclude ?? []) {
+    const real = await realpathQuietly(entry);
+    if (real !== null && real !== "") excluded.push(real);
+  }
+
+  const matches: Array<{ path: string; name: string; depth: number }> = [];
+  /** 已入队的物理路径：同一个目录被多个根扫到时不重复展开。 */
+  const seen = new Set<string>();
+  const queue: Array<{ dir: string; depth: number }> = [];
+  let scanned = 0;
+  let truncated = false;
+
+  for (const rawRoot of options.roots) {
+    const real = await realpathQuietly(rawRoot);
+    if (real === null) continue;
+    const key = normalizeForCompare(real);
+    if (seen.has(key) || excluded.some((entry) => isInside(entry, real))) continue;
+    seen.add(key);
+    queue.push({ dir: real, depth: 0 });
+  }
+
+  for (let index = 0; index < queue.length; index += 1) {
+    if (Date.now() >= deadline) {
+      truncated = true;
+      break;
+    }
+    const current = queue[index];
+    if (current === undefined) break;
+    const base = path.basename(current.dir);
+    if (!isDotName(base) && normalizeForCompare(base) === wanted) {
+      matches.push({ path: current.dir, name: base, depth: current.depth });
+    }
+    if (current.depth >= maxDepth) continue;
+    let entries: Dirent[];
+    try {
+      entries = await readdir(current.dir, { withFileTypes: true });
+    } catch {
+      // 无权限、已消失、不是目录：跳过这个分支，不能让整次搜索失败。
+      continue;
+    }
+    for (const entry of entries) {
+      if (scanned >= maxEntries) {
+        truncated = true;
+        break;
+      }
+      scanned += 1;
+      if (isDotName(entry.name)) continue;
+      // 符号链接一律不跟随：跟着它就能走出搜索根，这条规则与 listDirectory 一致。
+      if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+      const child = path.join(current.dir, entry.name);
+      const key = normalizeForCompare(child);
+      if (seen.has(key) || excluded.some((excludedRoot) => isInside(excludedRoot, child))) continue;
+      seen.add(key);
+      queue.push({ dir: child, depth: current.depth + 1 });
+    }
+    if (truncated) break;
+  }
+
+  matches.sort(
+    (left, right) => left.depth - right.depth || compareEntryNames(left.path, right.path),
+  );
+  const unique: WorkspaceCandidate[] = [];
+  const paths = new Set<string>();
+  for (const match of matches) {
+    const key = normalizeForCompare(match.path);
+    if (paths.has(key)) continue;
+    paths.add(key);
+    unique.push({ path: match.path, name: match.name });
+  }
+  if (unique.length > MAX_RESOLVE_CANDIDATES) truncated = true;
+  return {
+    candidates: unique.slice(0, MAX_RESOLVE_CANDIDATES),
+    truncated,
+    scanned,
+  };
 }

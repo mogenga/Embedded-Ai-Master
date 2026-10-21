@@ -248,6 +248,58 @@ describe("createSessionRunner", () => {
     expect(call === undefined ? true : "cwd" in call).toBe(false);
   });
 
+  it("新建会话时本次传入的 model 优先于构造时的模型与环境变量", async () => {
+    const home = makeHome();
+    vi.stubEnv("HARNESS_WEB_MODEL", "alpha/m1");
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl, model: "alpha/m1" });
+
+    await runner.start({ text: "hi", model: "alpha/m2" });
+
+    // 选择模型的下拉框就在 composer 上：本次选择必须真的传到这一次运行。
+    expect(fake.calls[0]?.model).toBe("alpha/m2");
+  });
+
+  it("本次传入的 model 不在 providers 中时抛 model_unavailable 且不启动会话", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+    const error = await startError(runner, { text: "hi", model: "alpha/nope" });
+    expect(error.code).toBe("model_unavailable");
+    // 引用无效必须在建会话之前失败，不能留下一场跑错模型的运行。
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("本次传入的 model 不是字符串时抛 invalid_model 且不启动会话", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+    for (const bad of [42 as never, null as never, { id: "alpha/m2" } as never]) {
+      const error = await startError(runner, { text: "hi", model: bad });
+      expect(error.code).toBe("invalid_model");
+    }
+    // 类型错误是调用方的 bug：不能靠内核的默认模型把它盖过去。
+    expect(fake.calls).toHaveLength(0);
+  });
+
+  it("续聊时 header.model 优先于本次传入的 model", async () => {
+    const home = makeHome();
+    const sessionId = "model-pinned-session";
+    const sessionDir = path.join(home, "sessions", sessionId);
+    const handle = await createSession(sessionDir, { id: sessionId, model: "alpha/m1" });
+    await handle.close();
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+    await runner.start({ text: "again", sessionId, model: "alpha/m2" });
+
+    // 会话模型固定在 header 里（内核自己会抛 model_mismatch）：续聊时
+    // 本次传入的选择不能改写既有会话，否则这场对话会换一个模型继续。
+    expect(fake.calls[0]?.model).toBe("alpha/m1");
+  });
+
   it("同一会话运行中再次 start 抛 session_busy，结束后可再启动", async () => {
     const home = makeHome();
     const fake = createFakeRunSession({ hang: true });

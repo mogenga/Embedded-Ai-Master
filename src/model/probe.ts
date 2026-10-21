@@ -1,3 +1,4 @@
+import { resolveProviderApiKey } from "../config/providers.js";
 import { parseProviderBaseUrl } from "./openai.js";
 
 /**
@@ -15,6 +16,8 @@ import { parseProviderBaseUrl } from "./openai.js";
 
 export interface ProviderProbeOptions {
   baseUrl: string;
+  /** 直接填写的 API 密钥；给了就优先于 `apiKeyEnv`（见 `resolveProviderApiKey`）。 */
+  apiKey?: string;
   apiKeyEnv?: string;
   model?: string;
   fetchImpl?: typeof fetch;
@@ -139,10 +142,42 @@ function invalidBaseUrlMessage(baseUrl: string): string {
   return `模型服务地址无效：${baseUrl}。必须是以 http:// 或 https:// 开头的绝对地址，且不能带查询串或片段。`;
 }
 
+/**
+ * 判断一个「环境变量名」的值看起来是不是**密钥本身**。
+ *
+ * 用途只有一个：改进错误文案。真实事故是用户把 32 位十六进制密钥填进了
+ * 「密钥环境变量名」字段，探测却回答「环境变量 X 未设置」——用户完全不知道
+ * 错在哪个字段。这里识别出来后，文案可以直接指出「这是密钥，不是变量名」。
+ *
+ * **不得**用这个判断做任何「自动转换」（比如偷偷把它当密钥发出去）：
+ * 启发式必然有误判，误判的代价是把不该发的字符串当凭据发给服务端。
+ * 拿不准时保持「按变量名处理」的既有语义，只在文案上多说一句。
+ *
+ * 判据（任一成立即为「像密钥」）：
+ * - 32 位及以上的十六进制串（各家 token 最常见形态）；
+ * - `sk-` 开头的常见厂商密钥前缀；
+ * - 长度 > 40 且不含环境变量命名特征（下划线/点/斜杠，或全大写）。
+ */
+export function looksLikeSecret(value: string): boolean {
+  const text = value.trim();
+  if (text === "") return false;
+  if (/^[0-9a-f]{32,}$/i.test(text)) return true;
+  if (/^sk-/i.test(text)) return true;
+  // 长的无分隔串：环境变量名几乎总用下划线分段（DEEPSEEK_API_KEY）；纯字母
+  // 数字的 40+ 长串没有任何命名特征，按密钥处理。
+  if (text.length > 40 && !/[_./-]/.test(text) && !/^[A-Z0-9]+$/.test(text)) return true;
+  return false;
+}
+
 interface KeyContext {
+  /** 配置里的 `apiKeyEnv` 原文（trim 后）；未配置时为空串。 */
   apiKeyEnv: string;
+  /** `apiKeyEnv` 的值看起来像密钥本身，而不是变量名。 */
+  envLooksLikeSecret: boolean;
   envConfigured: boolean;
   envMissing: boolean;
+  /** 有直接填写的 `apiKey`（不记录值本身）。 */
+  directConfigured: boolean;
 }
 
 function describeHttpFailures(failures: AttemptFailure[]): string {
@@ -169,21 +204,41 @@ function failureMessage(
   );
   if (authFailure !== undefined) {
     const status = authFailure.status;
+    // 密钥原文一律不进文案：错误会进事件流、日志和前端，一旦回显就等于泄露。
+    // 只说「哪个来源被拒」，不重复值本身。
+    if (ctx.directConfigured) {
+      return {
+        code: "unauthorized",
+        error: `鉴权失败（HTTP ${status}）：服务端拒绝了配置的 API 密钥（apiKey），请检查密钥是否正确、是否已过期。`,
+      };
+    }
+    // 误填提示必须排在「环境变量未设置／值被拒」之前：用户把密钥填进了变量名
+    // 字段时，那句「环境变量 d07d… 未设置」正是让人一头雾水的原因。此时既不是
+    // 「变量没设」也不是「变量值被拒」，而是填错了字段。
+    if (ctx.envLooksLikeSecret) {
+      return {
+        code: "unauthorized",
+        error: `鉴权失败（HTTP ${status}）：apiKeyEnv 里填的值看起来是密钥本身，不是环境变量名（为安全起见不在此回显）。`
+          + "请把密钥改填到「API 密钥」（apiKey）字段，或把 apiKeyEnv 改成真正的环境变量名后重试。",
+      };
+    }
     if (ctx.envMissing) {
       return {
         code: "unauthorized",
-        error: `鉴权失败（HTTP ${status}）：环境变量 ${ctx.apiKeyEnv} 未设置，请求未携带 API Key。请先在启动本服务的环境里设置该变量后重试。`,
+        error: `鉴权失败（HTTP ${status}）：环境变量 ${ctx.apiKeyEnv} 未设置，请求未携带 API 密钥。`
+          + "可以设置该变量后重启，或直接在「API 密钥」（apiKey）字段填写密钥。",
       };
     }
     if (ctx.envConfigured) {
       return {
         code: "unauthorized",
-        error: `鉴权失败（HTTP ${status}）：服务端拒绝了 API Key，请检查环境变量 ${ctx.apiKeyEnv} 的值。`,
+        error: `鉴权失败（HTTP ${status}）：服务端拒绝了 API 密钥，请检查环境变量 ${ctx.apiKeyEnv} 的值。`,
       };
     }
     return {
       code: "unauthorized",
-      error: `鉴权失败（HTTP ${status}）：服务端要求 API Key，但该模型服务没有配置 apiKeyEnv。`,
+      error: `鉴权失败（HTTP ${status}）：服务端要求 API 密钥，但该模型服务未配置任何密钥。`
+        + "请在「API 密钥」（apiKey）字段填写密钥，或填写存放密钥的环境变量名（apiKeyEnv）。",
     };
   }
 
@@ -237,18 +292,29 @@ export async function probeProvider(options: ProviderProbeOptions): Promise<Prov
     ? configuredTimeout
     : DEFAULT_TIMEOUT_MS;
 
-  const rawApiKeyEnv = options.apiKeyEnv ?? "";
-  const apiKeyEnv = rawApiKeyEnv.trim();
+  const apiKeyEnv = (options.apiKeyEnv ?? "").trim();
   const envConfigured = apiKeyEnv !== "";
-  const rawKey = envConfigured ? process.env[apiKeyEnv] : undefined;
-  const apiKey = rawKey === undefined ? undefined : rawKey.trim();
-  const envMissing = envConfigured && (apiKey === undefined || apiKey === "");
+  // 与主适配器同一条解析规则（apiKey 优先，空值回落/视为未配置），
+  // 保证「测试连接」通过而发消息失败不会源自两条不同的密钥读取路径。
+  const apiKey = resolveProviderApiKey({ apiKey: options.apiKey, apiKeyEnv: options.apiKeyEnv });
+  const directConfigured = (options.apiKey ?? "").trim() !== "";
+  const envLooksLikeSecret = envConfigured && looksLikeSecret(apiKeyEnv);
+  // 「环境变量没设置」只在没有直接密钥、且 apiKeyEnv 确实指向一个变量名时才成立。
+  // 用户把密钥填进 apiKeyEnv 时不属此列：那不是「变量没设」，是填错了字段。
+  const envMissing = !directConfigured && envConfigured && !envLooksLikeSecret && apiKey === undefined;
+  const keyContext: KeyContext = {
+    apiKeyEnv,
+    envLooksLikeSecret,
+    envConfigured,
+    envMissing,
+    directConfigured,
+  };
   const model = (options.model ?? "").trim();
 
   const headers: Record<string, string> = {};
-  // 环境变量没设置时不发 Authorization：发一个空 Bearer 只会让服务端
+  // 没有可用密钥时不发 Authorization：发一个空 Bearer 只会让服务端
   // 回一个看似「key 错误」的 401，掩盖真正的配置问题。
-  if (apiKey !== undefined && apiKey !== "") headers.Authorization = `Bearer ${apiKey}`;
+  if (apiKey !== undefined) headers.Authorization = `Bearer ${apiKey}`;
 
   // 超时是整个探测的总预算：/models 与 chat 兜底共用一个计时器，
   // 避免「先等 10 秒、再等 10 秒」。
@@ -355,7 +421,7 @@ export async function probeProvider(options: ProviderProbeOptions): Promise<Prov
       return {
         ok: false,
         baseUrl,
-        ...failureMessage(failures, { apiKeyEnv, envConfigured, envMissing }, {
+        ...failureMessage(failures, keyContext, {
           fallbackSkipped: model === "",
         }),
       };
@@ -365,7 +431,7 @@ export async function probeProvider(options: ProviderProbeOptions): Promise<Prov
     return {
       ok: false,
       baseUrl,
-      ...failureMessage([modelsAttempt], { apiKeyEnv, envConfigured, envMissing }, {
+      ...failureMessage([modelsAttempt], keyContext, {
         fallbackSkipped: false,
       }),
     };

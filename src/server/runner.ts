@@ -36,6 +36,13 @@ export interface ActionInput {
   /** 本次运行的工作目录（新会话写入 header.workdir；续聊时内核以 header 为准）。
    *  必须是已存在的绝对路径目录，否则 RunnerError("invalid_cwd")。 */
   cwd?: string;
+  /**
+   * 本次（新建）会话使用的模型引用，形如 `provider/modelName`。
+   *
+   * 内核把会话模型固定在 header 里，续聊换模型会抛 `model_mismatch`，所以
+   * 这里只在没有 header 的新会话上生效；续聊时以 header 为准，与 `cwd` 同理。
+   */
+  model?: string;
 }
 
 /** The subset of `ActionInput` that has to survive validation. */
@@ -137,6 +144,7 @@ export type RunnerErrorCode =
   | "invalid_mode"
   | "invalid_run_limits"
   | "invalid_cwd"
+  | "invalid_model"
   | "unknown_session"
   | "session_busy"
   | "session_corrupt"
@@ -274,10 +282,16 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
     }
   }
 
-  function resolveModel(providers: ProvidersConfig, sessionModel: string | undefined): string {
+  function resolveModel(
+    providers: ProvidersConfig,
+    sessionModel: string | undefined,
+    requestedModel: string | undefined,
+  ): string {
     const envModel = process.env.HARNESS_WEB_MODEL;
     const fallback = envModel !== undefined && envModel !== "" ? envModel : firstReference(providers);
-    const modelRef = sessionModel ?? opts.model ?? fallback;
+    // `sessionModel` 是续聊会话 header 里的模型：内核只允许用同一个模型续聊，
+    // 所以它的优先级最高；新建会话没有 header 时，本次传入的选择才轮到。
+    const modelRef = sessionModel ?? requestedModel ?? opts.model ?? fallback;
     if (modelRef === undefined || modelRef === "") {
       throw new RunnerError(
         "model_unavailable",
@@ -302,6 +316,10 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
       // A typo must not silently run under the constructor's preset: the
       // operator believes they selected something else.
       throw new RunnerError("invalid_mode", `非法的权限预设: ${String(input.mode)}`);
+    }
+    if (input?.model !== undefined && typeof input.model !== "string") {
+      // 与 `invalid_mode` 同理：类型错是调用方的 bug，不能悄悄退回默认模型。
+      throw new RunnerError("invalid_model", `模型引用必须是字符串: ${String(input.model)}`);
     }
     const limits = readRunLimits(input);
     // 先于会话创建：拼错的目录不能留下一个 workdir 已经写错的会话。
@@ -330,7 +348,7 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
     }
 
     const providers = resolveProviders();
-    const modelRef = resolveModel(providers, sessionModel);
+    const modelRef = resolveModel(providers, sessionModel, input.model);
     const sessionId = requestedId ?? randomUUID();
 
     const controller = new AbortController();

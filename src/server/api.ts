@@ -2,6 +2,7 @@ import { statSync } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import { createServer } from "node:http";
 import type { Dirent } from "node:fs";
+import os from "node:os";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import path from "node:path";
 import { resolveHarnessHome } from "../config/harness-home.js";
@@ -24,9 +25,12 @@ import { createConfigApi } from "./config-api.js";
 import { createEventStreamHandler } from "./event-stream.js";
 import {
   listDirectory,
+  listKnownReadableRoots,
+  listRegisteredWorkspaceRoots,
   listSessionArtifacts,
   readFilePreview,
   registerWorkspaceRoot,
+  resolveWorkspaceCandidates,
 } from "./files-api.js";
 import { HttpError, sendError, sendJson } from "./http.js";
 import { createSessionAdmin } from "./session-admin.js";
@@ -42,6 +46,13 @@ export interface ApiOptions {
   runner?: SessionRunner;
   model?: string;
   fetchImpl?: typeof fetch;
+  /**
+   * `POST /api/workspace/resolve` 的搜索起点；不传时用用户主目录加已知工作区根。
+   *
+   * 存在的唯一理由是测试：用例必须把搜索限制在临时目录，绝不能让端点去扫
+   * 真实主目录（那既慢又不可重复）。
+   */
+  workspaceSearchRoots?: string[];
 }
 
 export interface SessionSummary {
@@ -205,6 +216,7 @@ function mapRunnerError(error: RunnerError): HttpError {
     case "invalid_mode":
     case "invalid_run_limits":
     case "invalid_cwd":
+    case "invalid_model":
       return new HttpError(400, error.code, error.message);
     case "unknown_session":
       return new HttpError(404, error.code, error.message);
@@ -240,9 +252,14 @@ async function handleAction(
   if (body.cwd !== undefined && typeof body.cwd !== "string") {
     throw new HttpError(400, "invalid_cwd", "cwd 必须是字符串");
   }
+  // 同上：只判类型，「引用的模型存不存在」由 runner 判定并抛 model_unavailable。
+  if (body.model !== undefined && typeof body.model !== "string") {
+    throw new HttpError(400, "invalid_model", "model 必须是字符串");
+  }
   const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
   const mode = typeof body.mode === "string" ? body.mode : undefined;
   const cwd = typeof body.cwd === "string" ? body.cwd : undefined;
+  const model = typeof body.model === "string" ? body.model : undefined;
   const limits = readRunLimitsBody(body);
   let outcome: Awaited<ReturnType<SessionRunner["start"]>>;
   try {
@@ -251,6 +268,7 @@ async function handleAction(
       ...(sessionId === undefined ? {} : { sessionId }),
       ...(mode === undefined ? {} : { mode: mode as PermissionPreset }),
       ...(cwd === undefined ? {} : { cwd }),
+      ...(model === undefined ? {} : { model }),
       ...limits,
     });
   } catch (error) {
@@ -413,7 +431,10 @@ async function handleApproval(
  *
  * 探测失败（连不上、401、404）是**正常答案**，一律 200 + `ProviderProbeResult`：
  * 它是用户点「测试连接」想要的信息，不是服务端错误。只有请求体形状非法
- * （baseUrl 缺失/不是字符串）才 400。
+ * （baseUrl 缺失/不是字符串，或可选字段类型不对）才 400。
+ *
+ * 可选字段 `apiKey` 是用户直接填写的密钥：它只透传给 `probeProvider`，
+ * 不落盘、不写日志、不进返回体；失败原因由探测侧给，且不含密钥原文。
  *
  * 这里只用 `readJsonBody` 收敛字段类型，地址合法性交给内核的
  * `probeProvider`（与真正发消息时同一套规则，见 `parseProviderBaseUrl`）：
@@ -427,7 +448,7 @@ async function handleProviderProbe(
   if (typeof body.baseUrl !== "string") {
     throw new HttpError(400, "invalid_base_url", "baseUrl 必须是字符串");
   }
-  const optionalString = (key: "apiKeyEnv" | "model"): string | undefined => {
+  const optionalString = (key: "apiKey" | "apiKeyEnv" | "model"): string | undefined => {
     const value = body[key];
     if (value === undefined) return undefined;
     if (typeof value !== "string") {
@@ -435,14 +456,47 @@ async function handleProviderProbe(
     }
     return value;
   };
+  const apiKey = optionalString("apiKey");
   const apiKeyEnv = optionalString("apiKeyEnv");
   const model = optionalString("model");
+  // `apiKey` 只进入下一次出站请求的 Authorization 头：不写日志、不进
+  // `ProviderProbeResult`、不随错误文本回显。空串等于「没填」，与探测侧
+  // 的判定一致（见 `resolveProviderApiKey`）。
   const result: ProviderProbeResult = await probeProvider({
     baseUrl: body.baseUrl,
+    ...(apiKey === undefined ? {} : { apiKey }),
     ...(apiKeyEnv === undefined ? {} : { apiKeyEnv }),
     ...(model === undefined ? {} : { model }),
   });
   sendJson(res, 200, result);
+}
+
+/**
+ * `POST /api/workspace/resolve`：把浏览器给的裸文件夹名换成本机路径候选。
+ *
+ * 搜索范围默认是「用户主目录 + 本次运行登记过/读过的工作区根」，并且永远排除
+ * `$HARNESS_HOME` 子树。它是**只读的名字查找**：不登记工作区、不读文件内容，
+ * 候选是否可读仍由 `POST /api/workspace` 决定。空数组表示没找到，不是错误。
+ *
+ * `workspaceSearchRoots` 只为测试注入：没有它，用例就得去扫真实主目录。
+ */
+async function handleWorkspaceResolve(
+  req: IncomingMessage,
+  res: ServerResponse,
+  harnessHome: string,
+  searchRoots: string[] | undefined,
+): Promise<void> {
+  const body = await readJsonBody(req);
+  const roots =
+    searchRoots
+    ?? [os.homedir(), ...listRegisteredWorkspaceRoots(), ...(await listKnownReadableRoots(harnessHome))];
+  const result = await resolveWorkspaceCandidates(body.name, {
+    roots,
+    exclude: [harnessHome],
+  });
+  // `truncated` 要一起返回：它区分「真的没有这个文件夹」与「没找完」，
+  // 前端据此决定是让用户手输，还是提示「找到 N 个，可能不全」。
+  sendJson(res, 200, { candidates: result.candidates, truncated: result.truncated });
 }
 
 function isPermissionError(error: unknown): boolean {
@@ -783,6 +837,14 @@ export function createApiHandler(
         }
         const listing = await listDirectory(harnessHome, rawPath);
         sendJson(res, 200, listing);
+        return;
+      }
+      if (pathname === "/api/workspace/resolve") {
+        // 浏览器的目录选择器只给裸文件夹名；这个端点把它换成本机绝对路径候选。
+        // **只返回候选，不登记**：登记仍然只能走 POST /api/workspace，边界只有一处。
+        requireMethod(method, "POST");
+        requireWriteRequest(req, opts.port);
+        await handleWorkspaceResolve(req, res, harnessHome, opts.workspaceSearchRoots);
         return;
       }
       if (pathname === "/api/workspace") {

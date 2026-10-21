@@ -3,7 +3,12 @@ import { existsSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { resolveHarnessHome } from "./config/harness-home.js";
-import { loadProviders, parseProviders, resolveModelRef } from "./config/providers.js";
+import {
+  loadProviders,
+  parseProviders,
+  resolveModelRef,
+  resolveProviderApiKey,
+} from "./config/providers.js";
 import { checkBudgetForModel, checkBudgetTokensForModel } from "./context/budget.js";
 import {
   assertCompactionRatios,
@@ -436,14 +441,15 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     opts.providersText === undefined ? loadProviders(home) : parseProviders(opts.providersText);
   const { providerName, provider, modelName, model } = resolveModelRef(providers, opts.model);
 
-  const apiKeyEnv = provider.apiKeyEnv;
-  const rawApiKey = apiKeyEnv === undefined ? undefined : process.env[apiKeyEnv];
-  const apiKey = rawApiKey === undefined ? undefined : rawApiKey.trim();
+  // 密钥来源：配置文件里的明文 `apiKey` 优先，其次是 `apiKeyEnv` 指向的环境变量
+  // （见 resolveProviderApiKey）。两者都没有时不传 apiKey，适配器就不发
+  // Authorization 头。这里拿到的是密钥原文，只能交给适配器，不得记入日志或事件。
+  const apiKey = resolveProviderApiKey(provider);
   const modelProtocol = createOpenAIProvider({
     baseUrl: provider.baseUrl,
     model: modelName,
     fetchImpl: opts.fetchImpl,
-    ...(apiKey !== undefined && apiKey !== "" ? { apiKey } : {}),
+    ...(apiKey !== undefined ? { apiKey } : {}),
     ...(provider.requestTimeoutMs !== undefined
       ? { requestTimeoutMs: provider.requestTimeoutMs }
       : {}),
