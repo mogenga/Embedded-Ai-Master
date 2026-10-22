@@ -1,0 +1,25 @@
+﻿?<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<ProjectOpt xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="project_optx.xsd">
+
+  <SchemaVersion>1.0</SchemaVersion>
+
+  <Header>### uVision Project, (C) Keil Software</Header>
+
+  <Extensions>
+  </Extensions>
+
+  <Target>
+    <TargetName>TOUCH</TargetName>
+    <ToolsetNumber>0x4</ToolsetNumber>
+    <TargetOption>
+      <TargetCommonOption>
+        <Device>STM32F429IGTx</Device>
+        <Vendor>STMicroelectronics</Vendor>
+        <PackID>Keil.STM32F4xx_DFP.2.15.0</PackID>
+        <uSim>0</uSim>
+        <nTsel>6</nTsel>
+        <pMon>STLink\ST-LINKIII-KEIL_SWO.dll</pMon>
+      </TargetCommonOption>
+    </TargetOption>
+  </Target>
+</ProjectOpt>
