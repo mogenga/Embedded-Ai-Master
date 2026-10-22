@@ -62,7 +62,15 @@ try {
     // corrupt here rather than as an empty conversation.
     { readSessionDir, readSessionSnapshot, readSessionHeader },
     { resolveHarnessHome },
-    { loadProviders, resolveModelRef },
+    // `supportsReasoning` / `isReasoningEffort` are the kernel's own rules for
+    // the reasoning parameter; the host reads them rather than keeping a second
+    // copy that could drift from what the request actually sends.
+    {
+      isReasoningEffort,
+      loadProviders,
+      resolveModelRef,
+      supportsReasoning,
+    },
     { isValidSessionId },
     { readSessionMeta },
     {
@@ -75,6 +83,8 @@ try {
     },
     { createSessionAdmin },
     filesApi,
+    skillsModule,
+    backgroundModule,
     protocol,
   ] = await Promise.all([
     import(dist("server/runner.js")),
@@ -90,6 +100,16 @@ try {
     // are newer exports, and a stale `dist/` must not take the whole host down
     // at import time — the handlers report the gap instead.
     import(dist("server/files-api.js")),
+    // Same namespace rule, plus a `catch`: `dist/skills/store.js` is newer than
+    // most `dist/` trees in the wild, and an un-rebuilt kernel must still boot
+    // — the settings page is where the operator fixes that, and it cannot open
+    // in a process that exited during startup. The handlers answer "run npm run
+    // build" instead of pretending there are no skills.
+    import(dist("skills/store.js")).catch(() => undefined),
+    // Same namespace rule, plus a `catch`: a `dist/` built before the
+    // background terminal landed must still boot — the pump reports the gap
+    // instead of the host dying at import time.
+    import(dist("tools/background.js")).catch(() => undefined),
     import("../renderer/protocol.js"),
   ]);
   kernel = {
@@ -105,12 +125,16 @@ try {
     readSessionMeta,
     readAppConfig,
     readProviders,
+    isReasoningEffort,
+    supportsReasoning,
     writeMcpServers,
     writePermissionConfig,
     writeProviders,
     writeRunLimits,
     createSessionAdmin,
     filesApi,
+    skills: skillsModule,
+    background: backgroundModule,
     protocol,
   };
 } catch (error) {
@@ -189,6 +213,15 @@ let ctx = kernel.protocol.createContext();
 let followAbort;
 /** Resolves when the pump ends; kept so tests can await a turn. */
 let followTask;
+/**
+ * Timer that drains finished background jobs into the log.
+ *
+ * A background job by definition outlives the turn that started it, so this
+ * cannot be driven by `follow`: the pump has already returned by the time the
+ * job ends. It polls while the host is alive and stops on the same paths that
+ * stop following (`stopFollow`, `shutdown`, stdin close).
+ */
+let backgroundPump;
 /**
  * The in-flight `/compact`, if any.
  *
@@ -341,6 +374,40 @@ const sessions = (() => {
 // Models
 // ---------------------------------------------------------------------------
 
+/**
+ * The reasoning levels this kernel can send, in menu order.
+ *
+ * Not `REASONING_EFFORTS` from the kernel: `none` is a real protocol value but
+ * a confusing menu row ("no thinking" reads like turning the feature off, and
+ * for most models `minimal` is the practical floor), so the picker offers the
+ * four levels a model is chosen between. `auto` is the renderer's own sentinel
+ * and is not listed here.
+ */
+const EFFORT_LEVELS = ["minimal", "low", "medium", "high"];
+
+/** The `provider/model` reference the host is currently pointed at. */
+function currentModelCfg() {
+  try {
+    return kernel.resolveModelRef(providers, modelRef).model;
+  } catch {
+    // No model, or a reference that no longer resolves: nothing is declared.
+    return undefined;
+  }
+}
+
+/**
+ * Whether the selected model accepts a reasoning parameter.
+ *
+ * Delegated to the kernel so the host and the request agree on one rule:
+ * `supportsReasoning` is true only when the config says so (`supportsReasoning:
+ * true`, or a default `reasoningEffort`), otherwise false. The host's job is to
+ * report that answer, not to guess a second one.
+ */
+function currentModelSupportsReasoning() {
+  const cfg = currentModelCfg();
+  return cfg === undefined ? false : kernel.supportsReasoning(cfg);
+}
+
 function buildModelList(config) {
   const out = [];
   for (const [providerName, provider] of Object.entries(config)) {
@@ -350,7 +417,10 @@ function buildModelList(config) {
         name: modelName,
         contextLength: model.contextWindow,
         supportsTools: true,
-        supportsReasoning: false,
+        // The file is the only source for this: `GET /v1/models` does not
+        // report it, so an undeclared model is honestly "not known to accept
+        // one" rather than an assumed true.
+        supportsReasoning: kernel.supportsReasoning(model),
         supportsVision: false,
       });
     }
@@ -367,7 +437,69 @@ function baseUrlOf(ref) {
 }
 
 /** Saved run limits, re-read whenever the settings save handler runs. */
-let runLimits = { maxTurns: null, maxCostUsd: null, timeoutMs: null, systemPrompt: "" };
+let runLimits = {
+  maxTurns: null,
+  maxCostUsd: null,
+  timeoutMs: null,
+  systemPrompt: "",
+  reasoningEffortByModel: {},
+};
+
+/**
+ * The effort choice the operator made for the current model, or "auto".
+ *
+ * Read from `run.json` (per model reference) rather than localStorage: the
+ * choice is part of what a run does, it has to survive a restart, and the
+ * renderer's storage is per-window. `auto` is the absence of a record — see
+ * `AppRunLimits.reasoningEffortByModel`.
+ */
+function currentEffort() {
+  if (modelRef === "") return "auto";
+  const stored = runLimits.reasoningEffortByModel?.[modelRef];
+  return typeof stored === "string" ? stored : "auto";
+}
+
+/**
+ * The effort table, creating it when the loaded config predates the field.
+ *
+ * A `dist/` built before `AppRunLimits.reasoningEffortByModel` existed returns
+ * a `run` object without it, and the host must not crash on that: the settings
+ * page is where a stale build gets noticed, and a `setEffort` that throws would
+ * take the composer down instead. A missing table is also the honest state —
+ * nobody has chosen a level yet.
+ */
+function effortTable() {
+  if (runLimits.reasoningEffortByModel === undefined) {
+    runLimits.reasoningEffortByModel = {};
+  }
+  return runLimits.reasoningEffortByModel;
+}
+
+/**
+ * What the effort popover may offer for the selected model.
+ *
+ * `levels: []` means "auto only" — the renderer prepends `auto` itself. A model
+ * that does not declare reasoning support gets that, plus a note saying why:
+ * the alternative is a menu of levels whose parameter the request would drop.
+ * `default` is the level `auto` will actually send, so the menu can say what
+ * the model will do without the operator having to read providers.json.
+ */
+function effortChoices() {
+  const choices = { levels: [], default: "", fixed: "", note: "" };
+  const cfg = currentModelCfg();
+  if (cfg === undefined) {
+    choices.note = "没有可用模型，无法调整推理强度";
+    return choices;
+  }
+  if (!kernel.supportsReasoning(cfg)) {
+    // Name the field, because the fix is a providers.json edit.
+    choices.note = `${modelRef} 未声明支持推理强度（providers.json 里该模型的 supportsReasoning 不是 true），请求不会携带该参数`;
+    return choices;
+  }
+  choices.levels = [...EFFORT_LEVELS];
+  if (typeof cfg.reasoningEffort === "string") choices.default = cfg.reasoningEffort;
+  return choices;
+}
 
 /**
  * The limits to hand this run.
@@ -387,6 +519,9 @@ function runLimitOptions() {
     ...(runLimits.maxCostUsd === null ? {} : { maxCostUsd: runLimits.maxCostUsd }),
     ...(runLimits.timeoutMs === null ? {} : { timeoutMs: runLimits.timeoutMs }),
     ...(runLimits.systemPrompt === "" ? {} : { systemPrompt: runLimits.systemPrompt }),
+    // Omitted for "auto": the runner would turn it into "no override" anyway,
+    // and a field that never travels is one less thing to misread downstream.
+    ...(currentEffort() === "auto" ? {} : { reasoningEffort: currentEffort() }),
   };
 }
 
@@ -496,7 +631,7 @@ function stateEvent() {
   // The cached measure belongs to the session that produced it; showing it
   // over a different conversation would be a fabricated number.
   const extra = sessionId !== "" && sessionId === lastSessionId ? lastSessionMeasure : {};
-  return kernel.protocol.initialState({
+  const state = kernel.protocol.initialState({
     sessionId,
     cwd,
     locale,
@@ -507,6 +642,17 @@ function stateEvent() {
     baseUrl: baseUrlOf(modelRef),
     ...extra,
   });
+  // Both fields describe the selected model, so they are rebuilt from the
+  // config on every event: a model switch changes what the menu may offer, and
+  // a cached list would keep offering levels the new model drops.
+  //
+  // Assigned here rather than passed as options because the shared protocol
+  // module still emits its own `auto` for them; until that module grows the
+  // same option handling, overwriting is what keeps this event honest instead
+  // of announcing `auto` right after the operator picked `high`.
+  state.effort = currentEffort();
+  state.effortChoices = effortChoices();
+  return state;
 }
 
 /**
@@ -881,6 +1027,82 @@ function stopFollow() {
   followTask = undefined;
 }
 
+// ---------------------------------------------------------------------------
+// Background terminal results
+// ---------------------------------------------------------------------------
+
+/** How often a finished background job is turned into a log event. */
+const BACKGROUND_PUMP_MS = 1_000;
+
+/**
+ * Write every finished background job as a `background_result` event.
+ *
+ * The log is the single source of truth in this app: a reopened session has to
+ * show what that ten-minute build ended up doing, and an out-of-band message
+ * would be gone the moment the window closed. So the completion goes through
+ * `takeBackgroundCompletions` → an appended event → the normal event pump,
+ * which is already watching the log.
+ *
+ * The append needs a session handle, and the run's own handle is closed when
+ * its turn ends — precisely the case this feature exists for. Opening one here
+ * mirrors `handleCompact`: briefly take the lock, append, release. If the lock
+ * is busy (the user is mid-turn in another window) the entry is dropped rather
+ * than retried forever; the job's own `check` command still reports it, and
+ * `background_result` is a notification, not the only record.
+ */
+async function pumpBackgroundResults() {
+  if (sessionId === "") return;
+  const modules = kernel.background;
+  if (modules === undefined || typeof modules.takeBackgroundCompletions !== "function") return;
+  const pending = modules.takeBackgroundCompletions(sessionId);
+  if (pending.length === 0) return;
+  const id = sessionId;
+  let handle;
+  try {
+    handle = await kernel.resumeSession(path.join(sessionsRoot, id));
+  } catch (error) {
+    // Lock held by a live run: that run's own pump will not see these either,
+    // so say so once instead of swallowing them (R3).
+    send({
+      type: "notice",
+      level: "dim",
+      text: `后台作业已结束，但会话被占用，结果未能写入日志：${messageOf(error)}`,
+    });
+    return;
+  }
+  try {
+    for (const payload of pending) {
+      await handle.append({ type: "background_result", payload });
+    }
+  } catch (error) {
+    send({
+      type: "notice",
+      level: "warn",
+      text: `后台作业结果写入失败：${messageOf(error)}`,
+    });
+  } finally {
+    void handle.close().catch(() => undefined);
+  }
+}
+
+/** Start the drain loop. Idempotent: a second call does not stack timers. */
+function startBackgroundPump() {
+  if (backgroundPump !== undefined) return;
+  backgroundPump = setInterval(() => {
+    void pumpBackgroundResults().catch(() => undefined);
+  }, BACKGROUND_PUMP_MS);
+  // Never a reason to keep the app alive on its own; a real run has its own
+  // handles.
+  backgroundPump.unref?.();
+}
+
+function stopBackgroundPump() {
+  if (backgroundPump !== undefined) {
+    clearInterval(backgroundPump);
+    backgroundPump = undefined;
+  }
+}
+
 /**
  * Deliver every event newer than `since` and then keep following.
  *
@@ -938,8 +1160,221 @@ function startFollow(id, since) {
 }
 
 // ---------------------------------------------------------------------------
-// Commands
+// Skills and the slash-command catalogue
 // ---------------------------------------------------------------------------
+
+/**
+ * The built-in slash commands this form can actually run.
+ *
+ * All three have a real handler here: `/clear` maps to `newSession`,
+ * `/context` is answered by the renderer from the kernel's own measurement,
+ * and `/compact` runs the kernel's compaction. A verb with no route behind it
+ * would be a menu row that fails on click (R3), so the list is short on
+ * purpose.
+ *
+ * One function, called by both `init` and `listCommands`: the boot push and
+ * the answer to the renderer's own request have to be the same list, and two
+ * literals for one catalogue is exactly how they drift apart.
+ */
+function builtinCommands() {
+  return [{ name: "clear" }, { name: "context" }, { name: "compact" }];
+}
+
+/** What the settings page and the transcript show when the store is absent. */
+const SKILLS_MISSING = "内核未导出技能存储，请重新执行 npm run build";
+
+/**
+ * A skill failure, tagged so the renderer can route it to the settings page.
+ *
+ * Every one of these is answered while the settings dialog is open, and the
+ * dialog is a `showModal()` on top of the transcript: a bare `notice` drawn
+ * behind it is a failure the user never sees (R3). `domain` is the routing
+ * key — the renderer keeps a plain `notice` in the transcript, and puts a
+ * `skills` one in the page that asked for it.
+ */
+function skillNotice(text) {
+  send({ type: "notice", level: "warn", text, domain: "skills" });
+}
+
+/**
+ * The compiled skill store, or `undefined` when this `dist/` has none.
+ *
+ * The import is namespaced and `catch`-ed (see the startup block): a kernel
+ * built before `skills/store.js` landed boots normally, and every skill
+ * command reports the gap instead. The check is on the namespace member, not
+ * on the import: a module that exists but does not yet export `readSkills` is
+ * the same unsupported state, and only the namespace can see that.
+ */
+function skillStore() {
+  const store = kernel.skills;
+  if (store === null || typeof store !== "object") return undefined;
+  return typeof store.readSkills === "function" ? store : undefined;
+}
+
+/**
+ * Where the store should look, as `{ home, workdir, agentsHome }`.
+ *
+ * An empty `cwd` is "no workspace open" and is omitted rather than sent as
+ * `""`: a defined workdir means "also read project skills underneath it", and
+ * the empty string would resolve against the host process's own directory —
+ * making an unrelated folder's `.harness/skills` count as this workspace's.
+ *
+ * `agentsHome` is skill-CLI's root (`~/.agents` by default). It is passed
+ * explicitly rather than left to the store's default so that `AGENTS_HOME`
+ * reaches it — the same override `HARNESS_HOME` has — and so the value the app
+ * reads is the one this host resolved, not a second lookup inside the kernel.
+ */
+function skillsLocation() {
+  const agentsHome = process.env.AGENTS_HOME?.trim();
+  return {
+    home: harnessHome,
+    ...(cwd === "" ? {} : { workdir: cwd }),
+    ...(agentsHome === undefined || agentsHome === "" ? {} : { agentsHome }),
+  };
+}
+
+/** One skill exactly as the renderer consumes it — no extra fields. */
+function skillRow(skill) {
+  return {
+    name: String(skill?.name ?? ""),
+    description: typeof skill?.description === "string" ? skill.description : "",
+    argumentHint: typeof skill?.argumentHint === "string" ? skill.argumentHint : "",
+    // The renderer draws `project` vs `user` and nothing else; a store that
+    // ever grows a third scope must be taught here before it can be drawn.
+    scope: skill?.scope === "project" ? "project" : "user",
+    body: typeof skill?.body === "string" ? skill.body : "",
+  };
+}
+
+/**
+ * Read the whole skill library, or `undefined` when the kernel has no store.
+ *
+ * `problems` is kept apart from `skills` on purpose: a file whose front matter
+ * does not close is a file the operator can fix, and dropping it silently
+ * would make the library read as "nothing here" (R3). A store that throws is
+ * turned into a problem with the reason instead of taking the command down —
+ * the settings page still has to open so the file can be repaired by hand.
+ *
+ * Every caller re-reads from disk. There is no cache to invalidate: the files
+ * are hand-editable, and a cached list would describe a folder nobody
+ * re-listed.
+ */
+function readSkillsSnapshot() {
+  const store = skillStore();
+  if (store === undefined) return undefined;
+  let result;
+  try {
+    result = store.readSkills(skillsLocation());
+  } catch (error) {
+    return { skills: [], problems: [{ file: "", message: messageOf(error) }] };
+  }
+  return {
+    skills: (Array.isArray(result?.skills) ? result.skills : []).map(skillRow),
+    problems: (Array.isArray(result?.problems) ? result.problems : []).map((problem) => ({
+      file: String(problem?.file ?? ""),
+      message: String(problem?.message ?? ""),
+    })),
+  };
+}
+
+/**
+ * Everything the `/` menu may offer: the builtins, then one row per skill.
+ *
+ * Built-in entries stay `{ name }` — the renderer supplies their localized
+ * description from its own catalogue and treats a missing `source` as
+ * `"builtin"`. Skill rows carry what the file says, tagged `source: "skill"`,
+ * which is what makes the palette insert `/name ` for arguments instead of
+ * running it as a builtin verb.
+ *
+ * A skill that shadows a builtin is still listed: the renderer merges rows by
+ * name and the first one (the builtin) wins, so the file is unreachable from
+ * `/` without this list having to hide it — and hiding it here would not stop
+ * the settings page from showing it, because that page reads `skills`.
+ */
+function commandCatalogue(snapshot = readSkillsSnapshot()) {
+  const commands = builtinCommands();
+  if (snapshot === undefined) return commands;
+  for (const skill of snapshot.skills) {
+    if (skill.name === "") continue;
+    commands.push({
+      name: skill.name,
+      description: skill.description,
+      argumentHint: skill.argumentHint,
+      source: "skill",
+    });
+  }
+  return commands;
+}
+
+/**
+ * Push the fresh library and the refreshed palette, in that order.
+ *
+ * Both, always: the settings page draws from `skills` and the composer's `/`
+ * menu from `commands`, and a save that refreshed only one would leave the two
+ * views disagreeing about which skills exist.
+ *
+ * The runner is deliberately not rebuilt. Skills do not change the kernel's
+ * tool set, and rebuilding would discard the session state that outlives one
+ * conversation for a file that only affects the palette.
+ */
+function broadcastSkills() {
+  const snapshot = readSkillsSnapshot();
+  if (snapshot === undefined) {
+    send({ type: "notice", level: "warn", text: SKILLS_MISSING });
+    return;
+  }
+  send({ type: "skills", ...snapshot });
+  send({ type: "commands", commands: commandCatalogue(snapshot) });
+}
+
+/**
+ * Write the current effort table back to `run.json`, keeping the other limits.
+ *
+ * `saveRunLimits` replaces the whole file, so the table is sent together with
+ * the limits already loaded — otherwise a click on the popover would erase the
+ * operator's `maxTurns` / `systemPrompt`. The local copy is updated before the
+ * write (the callers do that) and restored from disk only when the write
+ * actually fails, because an optimistic local value that outlived a failed
+ * write would be a level the next run uses but the file does not record.
+ *
+ * Failures are reported, not swallowed (R3): the caller already sent the
+ * `state`, and the notice is what stops that from being the last word.
+ */
+let effortWrite = Promise.resolve(true);
+
+/**
+ * @returns whether the file now records the current table.
+ */
+function persistEffort() {
+  const wanted = {
+    maxTurns: runLimits.maxTurns,
+    maxCostUsd: runLimits.maxCostUsd,
+    timeoutMs: runLimits.timeoutMs,
+    systemPrompt: runLimits.systemPrompt,
+    reasoningEffortByModel: { ...effortTable() },
+  };
+  // Serialized: two menu clicks in one tick must not race to rename two
+  // different temp files over the same target, and the last click must win.
+  effortWrite = effortWrite
+    .then(() => kernel.writeRunLimits(harnessHome, wanted))
+    .then(
+      (written) => {
+        runLimits = written;
+        return true;
+      },
+      (error) => {
+        // Reported, never swallowed (R3). The caller puts the in-memory value
+        // back, so the next run cannot use a level the file does not record.
+        send({
+          type: "notice",
+          level: "warn",
+          text: `推理强度未保存：${messageOf(error)}`,
+        });
+        return false;
+      },
+    );
+  return effortWrite;
+}
 
 async function handlePrompt(text) {
   if (typeof text !== "string" || text.trim() === "") {
@@ -1000,6 +1435,9 @@ async function handlePrompt(text) {
   // The follow must start after `start` so a brand-new log exists; `since`
   // was captured before it, so the first events of this run are included.
   startFollow(sessionId, since);
+  // A background job outlives this turn, so its result cannot ride `follow`.
+  // The pump outlives it too — started here, stopped only when the host is.
+  startBackgroundPump();
   send(sessionsEvent());
 }
 
@@ -1084,10 +1522,17 @@ async function handleCompact() {
     const providers = modules.loadProviders(harnessHome);
     const { provider, modelName, model: modelCfg } = modules.resolveModelRef(providers, model);
     const apiKey = modules.resolveProviderApiKey(provider);
+    // The summary is a real completion on the same model, so it carries the
+    // same effort the operator selected: a compaction that quietly ran at a
+    // different level than the conversation would be a second, invisible
+    // setting. Keyed by the *session's* model (`model`), not `modelRef` —
+    // `handleCompact` already resolves the header's model for the same reason.
+    const summaryEffort = runLimits.reasoningEffortByModel?.[model];
     const modelProtocol = modules.createOpenAIProvider({
       baseUrl: provider.baseUrl,
       model: modelName,
       ...(apiKey === undefined ? {} : { apiKey }),
+      ...(summaryEffort === undefined ? {} : { reasoningEffort: summaryEffort }),
       ...(provider.requestTimeoutMs === undefined
         ? {}
         : { requestTimeoutMs: provider.requestTimeoutMs }),
@@ -1283,7 +1728,11 @@ function handleNewSession() {
   // `cwd` here is the folder the topbar currently names — including one adopted
   // from a conversation that was just opened. A new session starting where the
   // topbar points is the intended meaning of that switch.
-  send({ type: "session_loaded", messages: [], cwd, mode, effort: "auto" });
+  //
+  // The effort is the host's current choice for the selected model, not a
+  // literal `auto`: a new conversation runs under the same model, so the
+  // popover must keep showing what the next request will actually send.
+  send({ type: "session_loaded", messages: [], cwd, mode, effort: currentEffort() });
   send(stateEvent());
   send(sessionsEvent());
 }
@@ -1372,15 +1821,18 @@ async function handleLoadSession(id) {
   ctx.lastSeq = lastSeq;
   lastSessionId = id;
   lastSessionMeasure = lastMeasure(detail.events);
-  send(
-    kernel.protocol.sessionLoadedEvent(detail.events, {
-      // The record's own workdir, even when it no longer exists: the replay is
-      // describing that conversation, and `adoptSessionWorkdir` has already
-      // said why the topbar is not moving there.
-      cwd: detail.header.workdir ?? sessionCwd,
-      mode,
-    }),
-  );
+  const loaded = kernel.protocol.sessionLoadedEvent(detail.events, {
+    // The record's own workdir, even when it no longer exists: the replay is
+    // describing that conversation, and `adoptSessionWorkdir` has already
+    // said why the topbar is not moving there.
+    cwd: detail.header.workdir ?? sessionCwd,
+    mode,
+  });
+  // The shared protocol module emits a literal `auto` here. Overwritten with
+  // the real choice so the transcript's header and the `state` that follows
+  // do not disagree about what the next request will carry.
+  loaded.effort = currentEffort();
+  send(loaded);
   // The runner is deliberately not rebuilt here. Rebuilding would discard
   // state that outlives one conversation, and it is not needed for the cwd:
   // `handlePrompt` passes the current `cwd` in its start options for every
@@ -1587,13 +2039,19 @@ const handlers = {
     send(stateEvent());
     send({ type: "ready" });
     send(sessionsEvent());
+    // The skills are read once here and the same snapshot feeds both pushes,
+    // so the settings page and the `/` menu cannot describe two different
+    // libraries within one handshake. A kernel without the store still answers
+    // with an empty list and no warning: boot is not a place to complain about
+    // a module nobody asked for yet, and `getSkills` is where the operator
+    // learns it is missing. The empty event is still required — the settings
+    // page may open before the store's answer would ever arrive.
+    const skills = readSkillsSnapshot();
+    send({ type: "skills", ...(skills ?? { skills: [], problems: [] }) });
     // The same catalogue `listCommands` answers with: the popup must be usable
     // before the renderer's own `listCommands` arrives, and two sources for one
     // list is how they drift apart.
-    send({
-      type: "commands",
-      commands: [{ name: "clear" }, { name: "context" }, { name: "compact" }],
-    });
+    send({ type: "commands", commands: commandCatalogue(skills) });
     send({ type: "setup_checklist", checks: [] });
     send({ type: "locale", locale });
     if (missing) {
@@ -2027,8 +2485,16 @@ const handlers = {
       send({ type: "notice", level: "warn", text: "缺少 run 对象" });
       return;
     }
+    // The settings page writes the file whole and does not know about the
+    // effort table (it is filled by the composer's popover, not by that form).
+    // Carrying the host's copy through means saving `maxTurns` cannot silently
+    // erase which level each model was set to; a caller that does send the
+    // field still wins, because its value is what is being written.
+    const merged = wanted.reasoningEffortByModel === undefined
+      ? { ...wanted, reasoningEffortByModel: { ...effortTable() } }
+      : wanted;
     try {
-      runLimits = await kernel.writeRunLimits(harnessHome, wanted);
+      runLimits = await kernel.writeRunLimits(harnessHome, merged);
     } catch (error) {
       send({ type: "notice", level: "warn", text: `运行参数未保存：${messageOf(error)}` });
       return;
@@ -2247,14 +2713,75 @@ const handlers = {
   },
 
   /**
-   * Reasoning effort is not a kernel capability.
+   * Choose the reasoning effort for the next run of the selected model.
    *
-   * The model adapter sends a plain chat completion; there is no reasoning
-   * parameter to set. Answering with a `state` carrying the new level would
-   * show the operator a setting that does nothing.
+   * The value is real: it lands in `run.json` (keyed by model reference, so a
+   * later restart and a model switch both keep their own choice) and
+   * `handlePrompt` hands it to the kernel, which puts it on the wire as
+   * `reasoning_effort`.
+   *
+   * Refusals are specific rather than generic. A model that never declared
+   * `supportsReasoning` gets a warning naming the field to edit; an unknown
+   * level gets the accepted set. Either way nothing is written and no `state`
+   * is sent — a `state` is the host's claim that the value now applies, and
+   * that would be false.
    */
-  setEffort() {
-    send({ type: "notice", level: "warn", text: "内核不支持调整推理强度" });
+  async setEffort(payload = {}) {
+    const wanted = typeof payload.effort === "string" ? payload.effort : "";
+    const cfg = currentModelCfg();
+    if (cfg === undefined) {
+      send({ type: "notice", level: "warn", text: "没有可用模型，无法设置推理强度" });
+      return;
+    }
+    if (!kernel.supportsReasoning(cfg)) {
+      // `auto` is still accepted: it means "send nothing", which is exactly
+      // what this model's requests do, so refusing it would be false. Anything
+      // else is refused, naming the model and the field to edit — "unsupported"
+      // alone sends the operator hunting.
+      if (wanted === "auto") {
+        delete effortTable()[modelRef];
+        if (!(await persistEffort())) return;
+        send(stateEvent());
+        return;
+      }
+      send({
+        type: "notice",
+        level: "warn",
+        text: `${modelRef} 不接受推理强度参数（providers.json 里该模型未声明 supportsReasoning），当前只支持 auto`,
+      });
+      return;
+    }
+    if (wanted !== "auto" && !kernel.isReasoningEffort(wanted)) {
+      send({
+        type: "notice",
+        level: "warn",
+        text: `不支持的推理强度：${JSON.stringify(wanted)}；该模型支持 auto, ${EFFORT_LEVELS.join(", ")}`,
+      });
+      return;
+    }
+    const table = effortTable();
+    const previous = table[modelRef];
+    if (wanted === "auto") {
+      // "auto" is the absence of a choice, not a level: remove the entry so a
+      // future default in providers.json applies again.
+      delete table[modelRef];
+    } else {
+      table[modelRef] = wanted;
+    }
+    // Awaited, not fired and forgotten: the command queue runs one command at a
+    // time, so awaiting here means the `state` below is only sent after the
+    // value is on disk. A write that failed has already put the old value back
+    // and said so, and this returns without claiming success.
+    if (!(await persistEffort())) {
+      if (previous === undefined) delete table[modelRef];
+      else table[modelRef] = previous;
+      return;
+    }
+    send(stateEvent());
+    // The settings page keeps its own copy of `run.json` and writes it back
+    // whole on every control it owns. Without this push that copy still has the
+    // pre-click table, and the next `maxTurns` edit would revert this choice.
+    configEvent();
   },
 
   /**
@@ -2337,19 +2864,126 @@ const handlers = {
   },
 
   /**
-   * The built-in slash commands this form can actually run.
+   * The slash commands this form can actually run.
    *
-   * All three have a real handler here: `/clear` maps to `newSession`,
-   * `/context` is answered by the renderer from the kernel's own measurement,
-   * and `/compact` runs the kernel's compaction. A verb with no route behind
-   * it would be a menu row that fails on click (R3), so the list is short on
-   * purpose.
+   * The three builtins have a real handler here: `/clear` maps to
+   * `newSession`, `/context` is answered by the renderer from the kernel's own
+   * measurement, and `/compact` runs the kernel's compaction. A verb with no
+   * route behind it would be a menu row that fails on click (R3), so the
+   * builtin list is short on purpose.
+   *
+   * Saved skills follow as `source: "skill"` rows. They are read from disk on
+   * every call — the files are hand-editable, and a remembered list would
+   * answer a question about a folder nobody re-read.
    */
   listCommands() {
-    send({
-      type: "commands",
-      commands: [{ name: "clear" }, { name: "context" }, { name: "compact" }],
-    });
+    send({ type: "commands", commands: commandCatalogue() });
+  },
+
+  /**
+   * The whole skill library, for the settings page.
+   *
+   * A kernel without the store is answered, not ignored: a warn notice names
+   * the fix and the empty `skills` event releases the renderer's pending
+   * request, which would otherwise wait for a library that cannot arrive.
+   */
+  getSkills() {
+    const snapshot = readSkillsSnapshot();
+    if (snapshot === undefined) {
+      skillNotice(SKILLS_MISSING);
+      send({ type: "skills", skills: [], problems: [] });
+      return;
+    }
+    send({ type: "skills", ...snapshot });
+  },
+
+  /**
+   * Write one skill file, then answer from the disk.
+   *
+   * The payload is an input, not a record: `writeSkill` validates the name
+   * (the file name is the skill's name, so a bad name is a path, not a typo)
+   * and decides where the file lands from `scope`. A failed save broadcasts
+   * nothing — a `skills` event after a refusal would redraw the page as if the
+   * edit had landed, and the next read would silently undo it.
+   *
+   * On success the library is re-read rather than echoed back from the input:
+   * the store normalizes what it writes (front matter order, body trimming),
+   * and the page has to show what a later boot would show.
+   */
+  async saveSkill(payload = {}) {
+    const wanted = payload.skill;
+    if (typeof wanted !== "object" || wanted === null || Array.isArray(wanted)) {
+      skillNotice("技能未保存：缺少 skill 对象");
+      return;
+    }
+    const store = skillStore();
+    if (store === undefined || typeof store.writeSkill !== "function") {
+      skillNotice(SKILLS_MISSING);
+      return;
+    }
+    // The name is handed over as sent, not trimmed or pre-validated:
+    // `SKILL_NAME_PATTERN` belongs to the store, and it is the one rule that
+    // decides both the file name and whether `/name` can ever address the
+    // skill. A second copy here would be a second opinion the palette does not
+    // share; the store's rejection reaches the operator through the `catch`
+    // below, worded by the component that owns the constraint.
+    try {
+      await store.writeSkill(skillsLocation(), {
+        name: String(wanted.name ?? ""),
+        description: String(wanted.description ?? ""),
+        argumentHint: String(wanted.argumentHint ?? ""),
+        // Passed through, not coerced. The store rejects an unknown scope with
+        // a message naming the two it accepts; mapping `"projct"` to `"user"`
+        // here would write the skill into the wrong library and tell nobody.
+        scope: wanted.scope,
+        body: String(wanted.body ?? ""),
+      });
+    } catch (error) {
+      skillNotice(`技能未保存：${messageOf(error)}`);
+      return;
+    }
+    broadcastSkills();
+  },
+
+  /**
+   * Delete one skill file.
+   *
+   * `false` from the store is "nothing was deleted" and is answered as such
+   * (R3): the row the operator clicked may have been removed from disk by hand
+   * a moment earlier, and a redraw with no notice would look like the delete
+   * worked. The name and scope travel back in the notice so the operator knows
+   * which of the two libraries was searched — the same skill name may exist in
+   * both, and only one of them was asked about.
+   */
+  async removeSkill(payload = {}) {
+    const name = String(payload.name ?? "").trim();
+    // Same rule as `saveSkill`: the store owns what a valid scope is, and a
+    // coerced default here would search one library while the operator meant
+    // the other. `removeSkill` has no "remember the last scope" fallback on
+    // purpose — deleting is not a place to guess.
+    const scope = payload.scope;
+    if (name === "") {
+      skillNotice("技能未删除：名称不能为空");
+      return;
+    }
+    const store = skillStore();
+    if (store === undefined || typeof store.removeSkill !== "function") {
+      skillNotice(SKILLS_MISSING);
+      return;
+    }
+    let removed;
+    try {
+      removed = await store.removeSkill(skillsLocation(), { name, scope });
+    } catch (error) {
+      skillNotice(`技能未删除：${messageOf(error)}`);
+      return;
+    }
+    if (removed !== true) {
+      const where = scope === "project" ? "项目" : "用户";
+      skillNotice(`技能未删除：${where}技能里没有 ${name}（可能已被删除）`);
+      return;
+    }
+    broadcastSkills();
   },
 
   /**
@@ -2504,6 +3138,20 @@ const handlers = {
 
   shutdown() {
     stopFollow();
+    stopBackgroundPump();
+    // Detached builds must not survive the window that started them: they are
+    // `unref`-ed on purpose (so a finished one cannot hold the process open),
+    // which also means nothing else will reap a running one. The kernel sends
+    // the kill signal; it cannot confirm death from a shutdown path, and the
+    // notice says exactly that rather than claiming they exited.
+    const signalled = kernel.background?.killAllBackgroundJobs?.() ?? 0;
+    if (signalled > 0) {
+      send({
+        type: "notice",
+        level: "dim",
+        text: `已终止 ${signalled} 个后台作业（仅发出终止信号，未能确认退出）`,
+      });
+    }
     void runner?.close().finally(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
   },
@@ -2579,6 +3227,8 @@ rl.on("line", (line) => {
 
 rl.on("close", () => {
   stopFollow();
+  stopBackgroundPump();
+  kernel.background?.killAllBackgroundJobs?.();
   void runner?.close().finally(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();
 });

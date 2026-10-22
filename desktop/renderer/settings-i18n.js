@@ -18,7 +18,7 @@ export const settingsStrings = {
     pageBehavior: "Behavior",
     pageBehaviorDesc: "The permission preset, approval rules, and run limits the next conversation starts with.",
     pageSessions: "Sessions",
-    pageSessionsDesc: "Notifications, retention, and where isolated worktrees live.",
+    pageSessionsDesc: "Notifications and how long inactive sessions are kept.",
     pageMcp: "MCP servers",
     pageMcpDesc: "Model Context Protocol servers add tools from outside this app.",
     pageKb: "Knowledge base",
@@ -95,8 +95,6 @@ export const settingsStrings = {
     suggestionsPrefDesc: "Offer a follow-up in an empty composer after a turn.",
     updateCheckPref: "Check for updates at launch",
     updateCheckPrefDesc: "Look for a newer version in the background.",
-    isolateByDefault: "Isolate new sessions",
-    isolateByDefaultDesc: "Open each new session in its own git worktree, so edits never mix.",
     interfaceScale: "Interface scale",
     interfaceScaleDesc: "Scales the sidebar, tabs, and dialogs. The transcript has its own size above.",
     groupTranscript: "Transcript",
@@ -280,10 +278,6 @@ export const settingsStrings = {
     archiveInactiveDesc: "Sessions untouched for this long move out of the main list.",
     never: "Never",
     days: (n) => `${n} days`,
-    branchPrefix: "Branch prefix",
-    branchPrefixDesc: "Branches created for isolated worktrees start with this.",
-    worktreeLocation: "Worktree location",
-    worktreeLocationDesc: "Inside the repository, ignored by git.",
 
     mcpEmptyTitle: "No MCP servers yet",
     mcpEmptyBody: "Add a command and the agent gains the tools that server publishes. The kernel starts it over stdio on the next run.",
@@ -363,10 +357,19 @@ export const settingsStrings = {
     skillNewTitle: "New skill",
     skillEditTitle: (name) => `Edit /${name}`,
     skillNoDescription: "No description",
+    /* Skill files the store could not read. Listed by file, because the fix is
+       an edit to that file; keeping them off the page would make a broken
+       library look like a short one. */
+    problemsTitle: "Skill files that could not be read",
+    skillProblemLine: (file, message) =>
+      file ? `${file}: ${message || "unreadable"}` : message || "unreadable",
     skillNameDesc: "Lowercase letters, digits, - and _.",
     skillDescriptionPlaceholder: "Review the current diff",
     argumentHint: "Argument hint",
     argumentHintDesc: "Shown after the command in the composer.",
+    /* The hint is a bare fragment ("[path]"), so the chip carries the whole
+       call as its tooltip: the fragment alone does not say what it belongs to. */
+    argumentHintShown: (hint) => `Typed after the command, as /name ${hint}`,
     prompt: "Prompt",
     skillPromptDesc: "Use $ARGUMENTS where the text typed after the command should go.",
     skillBodyPlaceholder: "Review the changes in $ARGUMENTS and list anything risky.",
@@ -420,7 +423,7 @@ export const settingsStrings = {
     pageBehavior: "行为",
     pageBehaviorDesc: "下一段对话开始时使用的权限预设、审批规则与运行上限。",
     pageSessions: "会话",
-    pageSessionsDesc: "通知、保留策略，以及隔离工作区的位置。",
+    pageSessionsDesc: "通知，以及闲置会话的保留时长。",
     pageMcp: "MCP 服务器",
     pageMcpDesc: "通过 Model Context Protocol 接入外部工具。",
     pageKb: "知识库",
@@ -495,8 +498,6 @@ export const settingsStrings = {
     suggestionsPrefDesc: "回合结束后在空输入框里给一条后续建议。",
     updateCheckPref: "启动时检查更新",
     updateCheckPrefDesc: "在后台检查是否有新版本。",
-    isolateByDefault: "新会话默认隔离",
-    isolateByDefaultDesc: "每个新会话在自己的 git worktree 中打开，改动互不干扰。",
     interfaceScale: "界面缩放",
     interfaceScaleDesc: "缩放侧栏、标签栏与对话框；正文大小由上面的选项控制。",
     groupTranscript: "对话显示",
@@ -680,10 +681,6 @@ export const settingsStrings = {
     archiveInactiveDesc: "超过这个时间没有更新的会话会移出主列表。",
     never: "从不",
     days: (n) => `${n} 天`,
-    branchPrefix: "分支前缀",
-    branchPrefixDesc: "隔离工作区创建的分支以此为前缀。",
-    worktreeLocation: "工作区位置",
-    worktreeLocationDesc: "位于仓库内部，已被 git 忽略。",
 
     mcpEmptyTitle: "还没有 MCP 服务器",
     mcpEmptyBody: "填一条命令，Agent 就能用上这个服务器提供的工具。内核会在下一次运行时用 stdio 把它启动起来。",
@@ -760,10 +757,17 @@ export const settingsStrings = {
     skillNewTitle: "新建技能",
     skillEditTitle: (name) => `编辑 /${name}`,
     skillNoDescription: "没有描述",
+    /* 读不出来的技能文件。按文件列出，因为要修的就是那个文件；把它们藏起来，
+       一个坏掉的库看起来就像一个很短的库。 */
+    problemsTitle: "读不出来的技能文件",
+    skillProblemLine: (file, message) =>
+      file ? `${file}：${message || "无法读取"}` : message || "无法读取",
     skillNameDesc: "小写字母、数字、- 和 _。",
     skillDescriptionPlaceholder: "审查当前的改动",
     argumentHint: "参数提示",
     argumentHintDesc: "显示在输入框的命令后面。",
+    /* 提示本身是个片段（"[path]"），单独看不知道挂在哪；悬停时给出完整写法。 */
+    argumentHintShown: (hint) => `跟在命令后面输入，如 /name ${hint}`,
     prompt: "提示词",
     skillPromptDesc: "在需要插入命令后文字的位置写 $ARGUMENTS。",
     skillBodyPlaceholder: "审查 $ARGUMENTS 的改动，列出有风险的地方。",
