@@ -26,15 +26,33 @@ export interface PolicyEvaluation {
   access: ToolAccess;
 }
 
+// workspace-write 的语义是「工作区内写免审批」,所以三个写工具各给一条 allow。
+// 之所以不合并成一条 tool:"*" 通配:那会顺带放行 shell(以及将来任何新增工具),
+// 把「工作区写」偷换成「任意命令」。三条并列的代价只是规则表长两行。
 export function builtinRules(preset: PermissionPreset): SourcedRule[] {
   if (preset !== "workspace-write") return [];
   return [
     {
       rule: {
-        tool: "fs",
-        params: [{ key: "op", in: ["write", "edit"] }],
+        tool: "write",
         action: "allow",
-        reason: "preset:workspace-write:fs-write",
+        reason: "preset:workspace-write:write",
+      },
+      source: "builtin",
+    },
+    {
+      rule: {
+        tool: "edit",
+        action: "allow",
+        reason: "preset:workspace-write:edit",
+      },
+      source: "builtin",
+    },
+    {
+      rule: {
+        tool: "multiedit",
+        action: "allow",
+        reason: "preset:workspace-write:multiedit",
       },
       source: "builtin",
     },

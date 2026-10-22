@@ -1,14 +1,14 @@
 # Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 内核，附带一个可运行的诊断工作台。当前交付 P0 内核（主循环与模型接入、会话事实源、内置工具、headless demo）与桌面/浏览器双形态前端（会话、转录、工具卡、审批、板卡与串口面板、设置）。
+面向嵌入式调试场景的 agent 内核，附带一个可运行的诊断工作台。当前交付 P0 内核（主循环与模型接入、会话事实源、内置工具、headless demo）与桌面前端（会话、转录、工具卡、审批、板卡与串口面板、设置）。
 
 ## 技术栈
 
 - TypeScript + Node.js >= 24（ESM-only）
 - Zod v4
 - Vitest v4
-- 前端：纯 ES 模块（无框架、无打包器），桌面态由 Electron 承载，浏览器态由 `src/server` 静态托管
-- 实时通道：SSE + HTTP POST；桌面态为 NDJSON over stdio
+- 前端：纯 ES 模块（无框架、无打包器），由 Electron 承载
+- 实时通道：NDJSON over stdio（桌面宿主与渲染器之间）
 
 ## 安装
 
@@ -25,7 +25,6 @@ npm run lint        # 当前为 tsc --noEmit
 npm run typecheck   # tsc --noEmit（内核）
 npm run build       # 编译到 dist/
 
-npm run serve:ui      # 浏览器形态：静态托管 desktop/renderer 并运行 API（默认 5174）
 npm run test:desktop  # 桌面宿主与协议层测试（tests/desktop）
 ```
 
@@ -48,14 +47,14 @@ src/
 ├── mcp/          MCP stdio 客户端：配置合并、连接生命周期、工具适配
 ├── model/        模型协议、OpenAI 兼容适配器、重试、token 估算
 ├── session/      append-only JSONL 会话
-├── server/       只读 HTTP API（会话 / 知识库 / 设备）与静态资源服务
-├── tools/        工具契约、注册表、echo/fs/shell/glob/grep、五阶段执行管线
+├── server/       宿主调用的库层：会话运行器、审批桥、会话管理、文件与知识库扫描
+├── tools/        工具契约、注册表、echo/read/write/edit/multiedit/shell/glob/grep、五阶段执行管线
 └── index.ts      runSession 装配
 desktop/
 ├── main.js       Electron 主进程（窗口、IPC、宿主生命周期）
 ├── preload.cjs   contextBridge 桥
 ├── host/host.js  桌面宿主：NDJSON 分发器，复用 dist/ 下的内核模块
-└── renderer/     纯 ES 模块前端（app.js / bridge.js / protocol.js / 样式与 i18n）
+└── renderer/     纯 ES 模块前端（app.js / protocol.js / 样式与 i18n）
 scripts/          端到端脚本（probe、diagnosis、kb 回归与审核）
 tests/            Vitest 测试（tests/desktop 为桌面宿主与协议层）
 docs/             设计、计划与已知问题
@@ -89,29 +88,38 @@ docs/             设计、计划与已知问题
 |---|---|
 | `mcp.json` | `{ "mcpServers": { "<name>": { "command", "args", "env", "cwd", "timeoutMs", "disabled" } } }` |
 | `permissions.json` | `{ "version": 1, "preset", "rules": [{ "tool", "params", "action", "reason" }], "approvalTimeoutMs" }` |
-| `run.json` | `{ "maxTurns", "maxCostUsd", "timeoutMs", "systemPrompt" }`；`null` 表示不限，`systemPrompt: ""` 表示用默认 |
+| `run.json` | `{ "maxTurns", "maxCostUsd", "timeoutMs", "systemPrompt" }`；`null` 表示不限（`maxTurns` 的默认值就是 `null`，2026-10-22 起不再有默认轮数上限），`systemPrompt: ""` 表示用默认 |
 
 三份文件都由「临时文件 + rename」原子替换；内容非法时报错并保留原文件，不会写坏。
 
 ## 内置工具
 
-`runSession` 默认注册 `echo` / `fs` / `shell` / `glob` / `grep` 五个工具（`createBuiltinTools()`，顺序固定）。工具根（`ToolCtx.cwd`）为 `opts.cwd ?? header.workdir ?? process.cwd()`：创建会话时 `opts.cwd`（缺省 `process.cwd()`）同时写入 `header.workdir`；resume 未传 `opts.cwd` 时沿用 `header.workdir`，两者都提供且不一致时抛 `SessionResumeError("workdir_mismatch")`，失败不写 header/日志。所有相对路径按工具根解析。
+`runSession` 默认注册 `echo` / `read` / `ls` / `todo_write` / `write` / `edit` / `multiedit` / `shell` / `glob` / `grep` 十个工具（`createBuiltinTools()`，顺序固定）。工具根（`ToolCtx.cwd`）为 `opts.cwd ?? header.workdir ?? process.cwd()`：创建会话时 `opts.cwd`（缺省 `process.cwd()`）同时写入 `header.workdir`；resume 未传 `opts.cwd` 时沿用 `header.workdir`，两者都提供且不一致时抛 `SessionResumeError("workdir_mismatch")`，失败不写 header/日志。所有相对路径按工具根解析。
 
 | 工具 | 能力 | 注解 |
 |---|---|---|
 | `echo` | 回显输入，用于连通性验证 | 只读 |
-| `fs` | `read` / `write` / `edit` 文本文件 | 非只读、destructive |
+| `read` | 读取文本文件（带行号，可分页） | 只读 |
+| `ls` | 列一个目录的直接子项（目录在前、不递归） | 只读 |
+| `todo_write` | 替换整份待办列表（多步骤任务的计划） | 无注解，判为 read |
+| `write` | 写入文本文件（覆盖，自动建父目录） | 非只读、destructive |
+| `edit` | 单处唯一替换 | 非只读、destructive |
+| `multiedit` | 同一文件多处替换（全成或全不改） | 非只读、destructive |
 | `shell` | 执行 shell 命令（非沙箱） | 非只读、destructive |
 | `glob` | 按 glob 模式查找文件 | 只读 |
 | `grep` | 按正则搜索文件内容 | 只读 |
 
-### `fs`
+### `read` / `ls` / `todo_write` / `write` / `edit` / `multiedit`
 
 - `read`：`path` + 可选 `offset`（0 起行号）/`limit`（≤2000 行）；单次最多 2000 行、256 KiB，超出以 `[truncated]` 标记，`detail.nextOffset` 给出继续读取的位置；`offset` 越界返回 `(no lines at offset)`。
-- `write`：`path` + `content`，自动创建父目录。
+- `todo_write`：`items`（0–50 条 `{content, status}`，`status` ∈ `pending` / `in_progress` / `completed`）。**替换整份列表，不是追加**；空数组表示「没有待办了」。它只写一条 `todos` 会话事件、不碰任何文件，所以判为 `read`——判成 `write` 会让 `read-only` / `diagnose` 预设下的计划功能直接不可用，换不来任何安全收益。该事件是界面状态、不进模型上下文，渲染器据它画计划卡并在执行中原地打勾。
+- `ls`：`path` 可选（缺省工具根）。逐行输出 `d  <name>/` / `f  <size>  <name>` / `l  <name>`（符号链接只标记**不跟随**）/ `?  <name>`，目录在前、文件在后、组内按名排序。最多 500 条，超出置 `detail.truncated` 并追加 `[truncated]`；空目录返回 `(empty directory)`（**不是空字符串**，否则与失败无法区分）。`detail.entries[].size` 是原始字节数，人类可读单位只在文本层。**刻意不套 `glob`/`grep` 的忽略清单**——那是给大范围扫描用的，`ls` 是点名要看这个目录，`node_modules` 也如实列出。`not_found` / `not_a_directory` / `read_failed` / `aborted`，单个文件 `lstat` 失败时该行大小写 `-` 而不是 0。
+- `write`：`path` + `content`，自动创建父目录；`content: ""` 会写出空文件，这是合法写入而不是错误。
 - `edit`：`path` + 非空 `oldText` + `newText`；`oldText` 必须唯一命中，否则 `edit_not_found` / `edit_not_unique`；按文件现有 CRLF/LF 风格写入。
-- workdir 限制：解析到工具根之外（含 `..`、绝对路径、symlink/junction 逃逸）→ `path_outside_workdir`；Windows 保留设备名 → `reserved_name`；`read` / `edit` 目标不是普通文件 → `not_a_file`；`write` 目标为目录或底层写入失败 → `write_failed`。
-- `fs` 响应 `AbortSignal`：read 的流、write/edit 的 `readFile`/`writeFile` 都接 signal；取消返回 `aborted`，write/edit 会提示可能留下部分文件。
+- `multiedit`：`path` + `edits`（1–50 条 `{oldText, newText}`）。按顺序应用，后一条在前一条的替换结果里查找；**要么全部成功、要么一个字节都不改**——任一 `oldText` 为空 / 找不到 / 不唯一就在内存里中止，文件从不打开写入，返回 `edit_not_found` 或 `edit_not_unique` 并带 `detail.index` 指明第几处。全部命中时只写一次盘，返回 `detail.occurrences` 为总替换数。
+- workdir 限制：解析到工具根之外（含 `..`、绝对路径、symlink/junction 逃逸）→ `path_outside_workdir`；Windows 保留设备名 → `reserved_name`；`read` / `edit` / `multiedit` 目标不是普通文件 → `not_a_file`；`write` 目标为目录或底层写入失败 → `write_failed`。
+- 四者都响应 `AbortSignal`：`read` 的流、`write`/`edit`/`multiedit` 的 `readFile`/`writeFile` 都接 signal；取消返回 `aborted`，写类工具会提示可能留下部分文件。
+- **`fs` 已删除，不保留别名。** 旧版单一 `fs` 工具用 `op` 参数分派 `read`/`write`/`edit`，权限规则只能靠 `params` 里的 `op` 区分读写；一旦规则漏写 `params`，一条读规则就会顺带放行写，而写规则也可能被 `fs op=write` 绕过——那是静默绕过权限边界。拆成四个工具后按工具名匹配，最坏情况是旧的 `fs` 规则不再命中、退回预设行为（`workspace-write` 下写变成 `ask`），方向是可见且更严的。迁移：把规则里的 `{"tool": "fs", "params": [{"key": "op", "eq": "write"}]}` 改成 `{"tool": "write"}`；`edit` / `multiedit` 各自同理。
 
 ### `shell`
 
@@ -287,7 +295,7 @@ npm run diagnosis:e2e
 
 ## 权限与审批
 
-权限层在工具执行前判定 `allow` / `ask` / `deny`，默认预设为 `diagnose`。判定只决定是否调用工具；`allow` 后仍会经过 `shell` 危险命令黑名单与 `fs` 路径边界检查。权限规则是声明式匹配而非沙箱（D-114）。
+权限层在工具执行前判定 `allow` / `ask` / `deny`，默认预设为 `diagnose`。判定只决定是否调用工具；`allow` 后仍会经过 `shell` 危险命令黑名单与 `read`/`write`/`edit`/`multiedit` 的路径边界检查。权限规则是声明式匹配而非沙箱（D-114）。
 
 **配置路径与 trust 语义**
 
@@ -300,7 +308,7 @@ npm run diagnosis:e2e
 | 预设 | 只读 | 写 | 未知 |
 |---|---|---|---|
 | `read-only` | allow | deny | deny |
-| `workspace-write` | allow | ask（`fs` 的 `write`/`edit` 内置 allow） | deny |
+| `workspace-write` | allow | allow（`write`/`edit`/`multiedit` 各有内置 allow；其余写工具仍 ask） | deny |
 | `diagnose`（默认） | allow | ask | deny |
 | `danger-full-access` | allow | allow | allow |
 
@@ -329,8 +337,7 @@ npm run diagnosis:e2e
       "action": "allow"
     },
     {
-      "tool": "fs",
-      "params": [{ "key": "op", "eq": "write" }],
+      "tool": "write",
       "action": "ask"
     },
     { "tool": "mcp__probe__reset", "action": "deny", "reason": "无人值守禁止复位" }
@@ -346,7 +353,7 @@ for await (const event of runSession({
   model: "local-gw/flash",
   permissions: {
     preset: "diagnose",
-    rules: [{ tool: "fs", params: [{ key: "op", eq: "read" }], action: "allow" }],
+    rules: [{ tool: "read", action: "allow" }],
     approvalTimeoutMs: 60000,
     prompter: { request: async () => "deny" },
   },
@@ -362,7 +369,7 @@ for await (const event of runSession({
 - `ask` 且提供 `prompter` 时等待审批，默认 120000 ms，超时按拒绝；同一 gate 内审批串行，按进入队列顺序执行。每次审批由 gate 生成独立 UUID `requestId`，`callId` 保持模型原值；`requestId` 是审批与决策的唯一配对键。
 - `ask` 且没有 `prompter`（headless demo、未注入审批器的库调用）一律 `effective: "deny"`、`reason: "approval_unavailable"`，工具不执行。
 - 审批结果映射：批准 → `effective: "allow"`（理由追加 `approval_granted`）；拒绝 → `approval_denied`；超时 → `approval_timeout`；取消 → `approval_aborted`；审批器异常 → `approval_error: ...`（限长）。
-- Web 工作台由服务进程注入审批桥，经 `POST /api/approvals` 回传决策，见「Web 会话与审批」；headless 仍是 `ask` → deny。
+- 桌面宿主由会话运行器注入审批桥，经 `runner.decide()` 回传决策，见「会话运行器与审批」；headless 仍是 `ask` → deny。
 
 **审计事件**
 
@@ -380,7 +387,7 @@ MCP 工具参数 schema 为 `z.unknown()`，不会应用 server `inputSchema` �
 npm test -- tests/permissions-integration.test.ts
 ```
 
-覆盖 diagnose 拒绝 `fs` 写、`danger-full-access` 放行，以及项目配置未 trust 时跳过。
+覆盖 diagnose 拒绝 `write`、`danger-full-access` 放行，以及项目配置未 trust 时跳过。
 
 live 演示需要用户自备 OpenAI 兼容网关与模型：
 
@@ -450,166 +457,114 @@ demo 不读取 `HARNESS_COMPAT_API_KEY`（该变量仅 live 测试使用）；de
 | 码 | 含义 |
 |---|---|
 | 0 | 正常完成（模型无工具调用） |
-| 1 | 熔断（`maxTurns` / `maxCostUsd`） |
+| 1 | 熔断（`maxTurns` / `maxCostUsd`；`maxTurns` 默认不限制，只有显式配置时才会触发） |
 | 130 | 取消（SIGINT/SIGTERM） |
 | 2 | 用法或装配错误（含运行期未恢复错误：模型 4xx/网络/响应非法/会话写入失败） |
 
 会话写入 `$HARNESS_HOME/sessions/<id>/`：`header.json`、`session.v1.jsonl`、按需生成 `session.vN.jsonl` 与 `artifacts/`。
 
-## 工作台（桌面 / 浏览器双形态）
+## 工作台（桌面）
 
-前端是 `desktop/renderer/` 下的一套纯 ES 模块，同一份代码跑在两种形态：
+前端是 `desktop/renderer/` 下的一套纯 ES 模块，只跑在 Electron 里：Electron 窗口 + `desktop/host/host.js` 宿主进程（NDJSON over stdio），宿主复用 `dist/` 下的内核模块。渲染器的 `window.prometheus` 由 `desktop/preload.cjs` 注入。
 
-- **桌面**：Electron 窗口 + `desktop/host/host.js` 宿主进程（NDJSON over stdio），宿主复用 `dist/` 下的内核模块。
-- **浏览器**：`src/server` 静态托管同一目录，`desktop/renderer/bridge.js` 在没有 preload 时注入 `window.prometheus`，把协议映射到 `/api/*`。
+> 2026-10-22：浏览器形态已下线，`desktop/renderer/bridge.js`、`src/server` 的 HTTP 层与 `serve:ui` 脚本一并删除。
 
 ```bash
-npm run build          # 内核产物 dist/server/serve.js（桌面宿主也依赖它）
-npm run serve:ui       # 浏览器形态，默认 http://127.0.0.1:5174/
+npm run build          # 内核产物，桌面宿主依赖它
 
 npm --prefix desktop install   # 桌面形态的一次性依赖安装（由用户执行）
 npm --prefix desktop run desktop
 ```
 
-- **环境变量**：`HARNESS_UI_PORT` 改监听端口（默认 `5174`）；`HARNESS_HOME` 指定会话与知识库根目录（默认 `~/.harness`）；`HARNESS_UI_STATIC` 指定静态目录（默认 `desktop/renderer`）；`HARNESS_WEB_MODEL` 指定默认模型引用。服务只监听 `127.0.0.1`。
-- **本机边界**：`/api/*` 校验 `Host` / `Origin` 必须为 `127.0.0.1` / `localhost` / `::1` 且端口等于监听端口；跨源返回 403 `forbidden_host` / `forbidden_origin`，用于阻断 DNS rebinding 与跨源读取（D-067 已解决）。写端点额外拒绝浏览器自动发送的 `Sec-Fetch-Site: cross-site`（403 `forbidden_origin`），覆盖真正的跨站页面；同 site 但不同端口（如 `localhost:5173` 页面写 `127.0.0.1:5174`）通常标记为 `same-site`，由 `Origin` 的 loopback + 端口一致性校验拦截。非浏览器客户端不发送该头，仍以 `Origin` 为准（D-146）。
-- **协议层**：`desktop/renderer/protocol.js` 把内核 `SessionEvent` 翻译成渲染器认识的事件（`assistant` → `start/delta/end`、`tool_started`+`tool_result` → 工具行、`approval_request` → 审批条等）。桌面宿主与浏览器 bridge 共用这一层，两种形态对同一份日志给出同一套 UI。
-- **API**：
-
-  | 方法 | 路径 | 行为 |
-  |---|---|---|
-  | GET | `/api/sessions` | `{ sessions: [{ id, createdAt, updatedAt, status, model?, workdir?, title?, pinned?, archived? }], errors: [{ dir, code }] }`；坏会话目录进 `errors` 而不是中断列表，符号链接 / junction 目录记 `skipped_link` |
-  | GET | `/api/sessions/:id` | `{ header, events }`；非法 id 400，不存在 404，损坏会话 500 `session_corrupt` |
-  | PATCH | `/api/sessions/:id` | 写 `{ title?, pinned?, archived? }`，200 回合并后的摘要；标题等元数据存旁挂 `meta.json`（header 校验会丢弃未知字段），会话被占用时 409 |
-  | DELETE | `/api/sessions/:id` | 删除会话目录，200 `{ id, deleted: true }`；被占用 409 |
-  | POST | `/api/sessions/:id/fork` | 从日志末尾（或 body 的 `atSeq`）分叉，201 `{ sessionId }` |
-  | GET | `/api/config` | `{ mcpServers, permissions, run, providers, mcpPath, permissionsPath, runPath, providersPath, providersError? }`——四份配置文件的当前内容。`providers.json` 读失败时其余三份照常返回，原因放 `providersError`（设置页要靠它把用户带去修文件） |
-  | PUT | `/api/config` | 整份写其中一份：`{ mcpServers }` / `{ permissions }` / `{ run }` / `{ providers }`；400 `invalid_config` 带具体字段原因 |
-  | POST | `/api/providers/test` | 探测一个模型服务：`{ baseUrl, apiKeyEnv?, model? }` → **200** `{ ok, baseUrl, models?, error?, code?, latencyMs? }`。探测失败是正常答案不是 HTTP 错误，所以 `ok:false` 也回 200；只有 `baseUrl` 形状非法才 400 `invalid_base_url`。先请求 `GET {baseUrl}/models`；非 2xx 且给了 `model` 时退一步发一次 `max_tokens: 1` 的极小请求。`code` ∈ `invalid_base_url` / `unreachable` / `unauthorized` / `http_error`。`models` 拿不到时字段不存在（不是空数组）。走 `requireWriteRequest`，与其它写端点一致 |
-  | GET | `/api/kb` | `{ root, source, note?, fileCount, indexPresent, truncated, tree, error? }`。根解析优先级：`KB_ROOT` 环境变量 → `$HARNESS_HOME/mcp.json` 里任一 server 的 `env.KB_ROOT` → 仓库默认 `mcp-servers/kb/kb`；`source` ∈ `env` / `mcp.json` / `default` / `none` 如实回报来自哪一级，`note` 说明理由。根不存在不是错误：`root` 保留候选路径、`tree: []`、`note` 含「目录不存在」。`fileCount` 只数 `.md`；`truncated` 表示触顶（深度 8 / 条目 2000 / 文件数 20000），此时 `fileCount` 是下界而非精确值。读取失败（权限/IO）仍回 200，原因在 `error` |
-  | GET | `/api/device` | 当前恒为 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` |
-  | GET | `/api/file?path=…` | `{ path, content, truncated, binary }`；只读，256 KiB 上限。只允许读会话目录、会话工作目录与已登记工作区内的路径（`realpath` 后判定），越界 400 `invalid_path`、不存在 404、目录/非普通文件 400。含 NUL 字节按二进制返回 `content: ""` |
-  | GET | `/api/tree?path=…` | `{ path, entries: [{ name, path, type }], truncated }`；列一层直接子项，边界同上。目录在前、各自按名排序（大小写不敏感），跳过符号链接，超过 500 项截断并置 `truncated`。缺 `path` 400 `invalid_path` |
-  | POST | `/api/workspace` | `{ path }` → `{ path }`；把一个已存在的目录登记为可浏览的工作区根（进程内，重启失效）。文件或缺失路径 400 `invalid_path`。需写请求头 |
-  | GET | `/api/sessions/:id/artifacts` | `{ artifacts: [{ path, name, kind, size }] }`；列 `artifacts/` 下的普通文件，跳过目录与符号链接，目录不存在回空数组 |
-  | POST | `/api/actions` | 发起会话或追加输入，202 `{ sessionId, created }`；可选 `mode` / `cwd` / `maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`。错误码见「Web 会话与审批」 |
-  | POST | `/api/abort` | 中止运行中的会话，202 `{ sessionId, aborted }`；会话不在运行时 `aborted:false`（幂等，不报 404） |
-  | POST | `/api/approvals` | 回传审批决策，202/200；错误码见「Web 会话与审批」 |
-  | GET | `/api/events` | SSE 单会话事件流，见「实时事件流」；非法 id/cursor 400，不存在 404，损坏 500 |
-
-- **配置**：设置页有「模型服务」「MCP 服务器」「行为」三页。模型服务读写 `$HARNESS_HOME/providers.json`（provider / `baseUrl` / `apiKeyEnv` / 模型名），首次启动缺这份文件时会提示去这里填，**不会**因它缺失而拒绝启动。「`apiKeyEnv` 填的是环境变量名，不是密钥」——应用本身不保存密钥，只在调用时从自己的运行环境读该变量。每张服务卡片有**「测试连接」**：请求 `GET {baseUrl}/models` 列出可用模型，非 2xx 且填了模型名时退一步打一次极小请求（`max_tokens: 1`）；失败原因分「地址不通 / 鉴权失败 / HTTP 错误 / 地址非法」并说清楚，鉴权失败还会区分「环境变量没设置」和「密钥被拒」。`contextWindow` 与 `maxOutput` 不在表单里——OpenAI 兼容协议不提供真实值，内核按估算默认值处理（128000 / 4096），需要精确值时在 `providers.json` 里手写，**写入优先**。价格同理不再出现在界面，旧文件里已有的 `pricePerMillion` 保存时原样保留。桌面宿主直接写盘，浏览器形态走 `PUT /api/config` 的 `providers` 段；`getSettings` 同时给出 `providers`（选单用的扁平列表）与 `providerConfig`（文件本体，设置页据此画表单并整份写回），文件读坏时带 `providersError` 说明原因，表单仍可编辑——保存即覆盖。MCP 页读写 `mcp.json`；行为页读写 `permissions.json`（预设 / 审批超时 / 审批规则）与 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`）。运行上限随每次 `POST /api/actions` 下发；桌面宿主同样从 `run.json` 读取。改动在下一回合生效，不手编文件也能接上探针与模型。
+- **环境变量**：`HARNESS_HOME` 指定会话与知识库根目录（默认 `~/.harness`）；`HARNESS_WEB_MODEL` 指定默认模型引用。
+- **协议层**：`desktop/renderer/protocol.js` 把内核 `SessionEvent` 翻译成渲染器认识的事件（`assistant` → `start/delta/end`、`tool_started`+`tool_result` → 工具行、`approval_request` → 审批条等）。宿主与渲染器是两个进程，这一层是它们共用的映射。
+- **输入框里的两个前缀**（2026-10-22）：`@` 打开文件名补全（内核 `searchFilesByName`，按「基名全等 → 前缀 → 包含 → 路径包含」分层排序，目录不在结果里）；`/` 打开命令补全，实到三个——`/clear`（新建会话）、`/context`（报当前上下文占用，未知时明说没测量而不是打印 0）、`/compact`（立即压缩，一律执行、不看阈值）。三个命令都**不接受参数**：内核压缩没有 focus / keep 选项。敲一个不认识的名字只会得到一条提示，草稿留在输入框里，不会被当成提示词发给模型。
+- **配置**：设置页有「模型服务」「MCP 服务器」「行为」三页。模型服务读写 `$HARNESS_HOME/providers.json`（provider / `baseUrl` / `apiKeyEnv` / 模型名），首次启动缺这份文件时会提示去这里填，**不会**因它缺失而拒绝启动。「`apiKeyEnv` 填的是环境变量名，不是密钥」——应用本身不保存密钥，只在调用时从自己的运行环境读该变量。每张服务卡片有**「测试连接」**：请求 `GET {baseUrl}/models` 列出可用模型，非 2xx 且填了模型名时退一步打一次极小请求（`max_tokens: 1`）；失败原因分「地址不通 / 鉴权失败 / HTTP 错误 / 地址非法」并说清楚，鉴权失败还会区分「环境变量没设置」和「密钥被拒」。结果区（2026-10-22 重做）是一条状态行（勾选图标 + 「连接正常 · N 个模型可用」+ 单独的延迟数字），下面是「可用模型」标题与计数，再下面是可以直接点的模型 chip——**卡片上已经列出的模型不再被静默丢弃**，而是画成禁用态的「已添加」chip，否则结果块会少掉一半答案（R3）。端点可达但一个模型都没列出来时，勾选图标用警告色而不是成功色。`contextWindow` 与 `maxOutput` 不在表单里——OpenAI 兼容协议不提供真实值，内核按估算默认值处理（128000 / 4096），需要精确值时在 `providers.json` 里手写，**写入优先**。价格同理不再出现在界面，旧文件里已有的 `pricePerMillion` 保存时原样保留。桌面宿主直接写盘；`getSettings` 同时给出 `providers`（选单用的扁平列表）与 `providerConfig`（文件本体，设置页据此画表单并整份写回），文件读坏时带 `providersError` 说明原因，表单仍可编辑——保存即覆盖。MCP 页读写 `mcp.json`；行为页读写 `permissions.json`（预设 / 审批超时 / 审批规则）与 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`）。运行上限由宿主从 `run.json` 读取后随每次 prompt 下发。改动在下一回合生效，不手编文件也能接上探针与模型。
 - **会话管理**：侧栏右键可改名、置顶、归档、删除、复制为新会话；标题存 `meta.json`，与内核的 `header.json` 分离。列表按 `updatedAt` 倒序，改过名的会话不会被埋在新建会话下面。
 - **导出**：顶栏「⋯」菜单导出当前对话为 Markdown，内容由会话日志渲染（不是抓 DOM），工具输出按 2000 字符截断。
-- **工作区**：顶栏的工作区按钮可切换目录。桌面形态弹系统目录选择框；浏览器形态拿不到目录的绝对路径（`showDirectoryPicker` 只给句柄，没有路径），因此会说明原因并让你直接粘贴路径，而不是静默失败。选中的目录同时被登记为文件树的浏览边界，文件树（顶栏「⋯」→ 浏览工作区文件）只列已登记工作区、会话目录与会话工作目录内的路径。
-- **诚实边界**：写端点必须带 loopback `Origin`；提交失败在转录中显示可读错误，不伪造成功。202 只表示受理/送达，工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准。内核没有的能力（git/PR、终端、worktree、packs、skills/memory/instructions/hooks、subagents、goals、`@` 提及的文件名搜索、检查点恢复）在前端隐藏入口，宿主/bridge 收到对应命令时回显式 `notice`，不静默吞掉（R3）。目录列不出来时会先说明原因再给空树——空树是「渲染器可以收尾了」的信号，不是「这个目录是空的」的断言。
+- **工作区**：顶栏的工作区按钮可切换目录，弹系统目录选择框。选中的目录同时被登记为文件树的浏览边界，文件树（顶栏「⋯」→ 浏览工作区文件）只列已登记工作区、会话目录与会话工作目录内的路径。
+- **诚实边界**：提交失败在转录中显示可读错误，不伪造成功。内核没有的能力（git/PR、终端、worktree、packs、skills/memory/instructions/hooks、subagents、goals、`@` 提及的文件名搜索、检查点恢复）在前端隐藏入口，宿主收到对应命令时回显式 `notice`，不静默吞掉（R3）。目录列不出来时会先说明原因再给空树——空树是「渲染器可以收尾了」的信号，不是「这个目录是空的」的断言。
 - **审批**：内核按单次请求审批，没有「始终允许」的持久规则；该按钮不渲染。审批条展示 `approval_request` 携带的 `paramsPreview`（这次调用要写入/执行的参数），并按 `deadlineAt` 显示剩余秒数——批准一次写操作时能看见写的是什么（R2）。审批超时/中止时由 `permission_decision` 触发 `permission_closed`，审批条自动收起。
 - **空态**：无会话显示「暂无会话」；设备字段为 `unknown` 时显示「未接入」。
 - **主题**：`light` / `system` / `dark` 三态，`localStorage` 键 `prometheus.theme`，默认 `dark`；所有颜色经 CSS 变量，图标为内联 SVG sprite。
-- **验收**：`npm test` 覆盖协议层、bridge 与宿主；浏览器形态可用无头 Chromium 经 CDP 冒烟（`npm run serve:ui` 后打开页面，确认无控制台错误、`window.prometheus.send` 存在、未支持面板不可见）。桌面形态需本机安装 Electron 后手动验证。
+- **验收**：`npm test` 覆盖协议层与宿主；桌面形态需本机安装 Electron 后手动验证。
 - **安全边界**：写内存/复位需显式确认，确认后仅显示「等待工具结果」，不会在前端伪造「已执行」（R2）；工具失败显式展示错误码与文本（R3）。
 
 ## 实时事件流
 
-Web 工作台通过 SSE 订阅单个会话的日志投影。实时流与回放共用同一份 `SessionEvent`，不维护第二套事件模型；所有实时事件必须先成功落会话日志再被投影。
+工作台的实时事件来自会话日志本身：宿主用 `LogTailEventSource` 跟随当前会话的日志文件，经 NDJSON over stdio 推给渲染器。实时流与回放共用同一份 `SessionEvent`，不维护第二套事件模型；所有实时事件必须先成功落会话日志再被投影。
 
-- **端点**：`GET /api/events?sessionId=<id>&since=<seq>`。`sessionId` 必填（规则同 `isValidSessionId`）；`since` 为不小于 `-1` 的整数，缺省时读取 `Last-Event-ID`，两者都缺省按 `-1` 从头补播；query 优先于 header。`since` 大于会话当前最大 `seq` 时按该 `seq` 夹紧（等价于从尾部继续跟随），不报错。非法 id / cursor 返回 400（`invalid_session_id` / `invalid_cursor`），会话不存在 404 `session_not_found`，日志损坏 500 `session_corrupt`。
-- **单会话绑定**：每条连接只跟随一个会话；切换会话必须关闭旧流，并以新会话的 `lastSeq` 重新建流。多会话复用与全局流未实现（D-133）。
-- **帧格式**：普通事件为 `id: <seq>` + `data: <SessionEventEnvelope JSON>`；`retry: 3000`；每 15s 一条注释心跳 `: ping`；会话已关闭且补播完成后发 `event: stream_end`（`data: {"lastSeq":N}`）；异常发 `event: stream_error`（`data: {"code","lastSeq"}`）后关闭。
 - **事件类型**：`approval_request`（参数摘要与截止时间，不含参数原文）、`tool_started`（`{callId,tool,access?}`）、`tool_result`、`permission_decision`、`mcp_status`、`device_status`，以及既有 `system/user/assistant/usage/checkpoint/status/interrupted/compaction`。`tool_call` 仅用于旧日志回放，新代码不再产生。`permission_decision` 中 `action=ask,effective=deny` 表示最终未获批准且工具未执行（原因可能是 `approval_unavailable` / `approval_denied` / `approval_timeout` / `approval_aborted`，需看 `reason`）；`mcp_status` 的 `kind` 覆盖 `connected/connect_failed/tools_changed/tools_refresh_failed/tool_invalid_schema/listener_failed/call_failed/config_failed/config_warning/project_config_skipped/tool_name_renamed`。
 - **流式回答**：模型适配层默认请求 OpenAI 流式响应（`stream:true` + `stream_options.include_usage`），按 SSE 帧解析 `delta.content` 与 `delta.tool_calls`；网关拒绝流式时自动降级为一次性响应，该 provider 后续不再试探。内核把增量写进 `assistant_delta` 事件（`{text}`，按批落盘：默认 60ms 或 400 字符），`assistant` 事件仍承载这一轮的完整内容，投影层忽略 delta、只用 `assistant` 重建模型上下文。
 - **设备状态契约**：MCP 工具在**成功**结果（`isError !== true`）的 `structuredContent.deviceStatus` 返回普通 JSON 对象；序列化后 ≤ 8 KiB、深度 ≤ 4。内核校验后写 `device_status`，payload 为 `{callId, server, tool, state}`。`state` 的键与值完全由 MCP server 决定，内核与 UI 不解释、不补全、不推断；UI 只 patch 已知字符串字段 `probe/serial/cpu/backend`，未知键与非字符串值忽略。失败、权限拒绝、超时/取消不产生 `device_status`；`deviceStatus` 存在但解析失败（非普通对象、超限、访问器/循环等）时写 `status {status:"device_status_invalid", tool, message}` 显式审计；`structuredContent` 非对象或缺少 `deviceStatus` 键时静默跳过，不猜测状态。
-- **断线续传**：客户端独占游标 `lastSeq`，按 `seq` 去重（协议层丢弃 `seq <= lastSeq` 的事件）。服务端 `retry: 3000`；`stream_end` 表示本轮结束，不再重连。浏览器 bridge 另有两层恢复：**缺口检测**（新事件 `seq > lastSeq + 1` → 关闭旧流、整量重拉 `GET /api/sessions/:id` 重建转录，最多 3 次）与 **`stream_error` 续接**（从实际到达的游标重开流，最多 3 次，用尽后显式提示「已停止重试」）。桌面宿主没有缺口检测——它按 `headSeq` 游标跟随本地日志。
-- **慢客户端**：服务端实时队列上限 500 条；实时阶段单帧写超时（默认同补播超时，30s）到期即视为慢客户端，或队列溢出时同样处理：发 `stream_error {code:"slow_consumer", lastSeq}` 并关闭连接，客户端凭游标重连续传。补播阶段每帧也有写超时，完全不读响应体的连接会被关闭；大日志 / 长断线补播的性能上限未压测（D-136）。
-- **延迟与证据**：当前由 200ms 日志轮询跟随，实际延迟还受文件读取与事件循环调度影响，无硬上限，也未压测；进程内低延迟适配器未实现（D-134）。证据由 `tool_result.payload` 的 `evidence/artifactPath/detail` 承载，没有独立 `evidence` 事件（D-135）。
-- **审批事件**：`approval_request` 由审批桥在等待前写入日志，再由 SSE 投影为待审批卡片；决策与执行结果见「Web 会话与审批」。
+- **断线续传**：客户端独占游标 `lastSeq`，按 `seq` 去重（协议层丢弃 `seq <= lastSeq` 的事件）。桌面宿主按 `headSeq` 游标跟随本地日志，一轮结束（`status.done` 或日志被关闭）即收尾。**原先浏览器 bridge 的两层恢复——缺口检测（整量重拉会话）与 `stream_error` 续接——已随浏览器形态一起移除**；SSE 端点、帧格式、心跳与慢客户端处理（`slow_consumer`）同样不再存在，也不再需要。
+- **延迟与证据**：宿主以 200ms 轮询日志跟随，实际延迟还受文件读取与事件循环调度影响，无硬上限，也未压测；进程内低延迟适配器未实现（D-134）。证据由 `tool_result.payload` 的 `evidence/artifactPath/detail` 承载，没有独立 `evidence` 事件（D-135）。
+- **审批事件**：`approval_request` 由审批桥在等待前写入日志，再由宿主投影为待审批卡片；决策与执行结果见「会话运行器与审批」。
 
-## Web 会话与审批
+## 会话运行器与审批
 
-Web 进程内运行最小会话运行器：`POST /api/actions` 发起会话或追加输入，`ask` 工具产生 `approval_request`，浏览器经 `POST /api/approvals` 回传决策。
-
-```bash
-npm run build && npm run serve:ui
-# 打开 http://127.0.0.1:5174/
-```
-
-浏览器形态同源加载页面与 `/api`，写端点需要的 `Origin` 由浏览器自动携带；没有单独的开发服务器或代理。
+> 2026-10-22：浏览器形态已下线，`src/server` 的 HTTP 层随之删除。本节保留会话运行器与审批的契约（模型回退、运行器语义、错误码、审批配对与失败语义）；桌面宿主经 `runner.start()` / `runner.decide()` 调用，错误以 `RunnerError.code` / `RunnerDecideOutcome.kind` 表达。
 
 **模型**
 
 - 读取 `$HARNESS_HOME/providers.json`；模型引用按 `HARNESS_WEB_MODEL` → providers 中第一个 `<provider>/<model>` 的顺序回退（运行器显式 `model` 选项优先）。
 - 追加输入时优先使用会话 `header.model`；`header` 无模型时与新建会话相同，回退到 `HARNESS_WEB_MODEL` 与 providers 第一个引用。
-- providers 缺失、JSON/schema 错误或引用无效统一返回 503 `model_unavailable`，message 说明检查 `HARNESS_HOME/providers.json` 与 `HARNESS_WEB_MODEL`，且不包含本机绝对路径（home 路径脱敏为 `HARNESS_HOME`）；`session_unreadable` 只返回「会话不可读」。
+- providers 缺失、JSON/schema 错误或引用无效统一以 `model_unavailable` 失败，message 说明检查 `HARNESS_HOME/providers.json` 与 `HARNESS_WEB_MODEL`，且不包含本机绝对路径（home 路径脱敏为 `HARNESS_HOME`）；`session_unreadable` 只给出「会话不可读」。
 
 **运行器语义**
 
-- 同一会话同一时间只允许一次运行；运行期间再次提交返回 409 `session_busy`。
-- 202 返回前会话 `header.json` 必须已落盘；默认 10s 内未就绪则 abort 并返回 503 `session_start_timeout`。
-- 运行错误写入 stderr 并留在会话日志，不回传 HTTP 响应。
+- 同一会话同一时间只允许一次运行；运行期间再次启动返回 `session_busy`（桌面宿主在前端就拦住并提示「当前回合尚未结束」）。
+- 启动返回前会话 `header.json` 必须已落盘；默认 10s 内未就绪则 abort 并以 `session_start_timeout` 结束。
+- 运行错误留在会话日志，由宿主推给渲染器；不再有 HTTP 响应可回传。
 
-### POST /api/actions
+### 运行请求
 
 请求：
 
 ```json
 { "text": "读取 0x20000000 的 4 字节", "sessionId": "可选", "mode": "可选",
-  "maxTurns": 10, "maxCostUsd": 0.5, "timeoutMs": 60000, "systemPrompt": "可选" }
+  "maxTurns": null, "maxCostUsd": 0.5, "timeoutMs": 60000, "systemPrompt": "可选" }
 ```
 
-缺省 `sessionId` 新建会话；带 `sessionId` 时向该会话追加输入（使用 `header.model` 与 `header.workdir`）。`mode` 是本次运行的权限预设（`read-only` / `workspace-write` / `diagnose` / `danger-full-access`），覆盖运行器构造时的预设，仅对这一次 run 生效——浏览器形态的权限模式菜单就是靠它下发的。
+缺省 `sessionId` 新建会话；带 `sessionId` 时向该会话追加输入（使用 `header.model` 与 `header.workdir`）。`mode` 是本次运行的权限预设（`read-only` / `workspace-write` / `diagnose` / `danger-full-access`），覆盖运行器构造时的预设，仅对这一次 run 生效。
 
-`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt` 是本次运行的上限，缺省时用内核默认值（`maxTurns` 10、无成本上限、provider 的 `requestTimeoutMs`、默认系统提示词）。`maxCostUsd` 只在 provider 配了 `pricePerMillion` 时生效。
+`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt` 是本次运行的上限，缺省时用内核默认值（**`maxTurns` 默认不限制**、无成本上限、provider 的 `requestTimeoutMs`、默认系统提示词）。`maxCostUsd` 只在 provider 配了 `pricePerMillion` 时生效。
 
-202 响应：
+**`maxTurns` 默认不限制，填了才生效**（D-183 补充，2026-10-22）：给一个正整数就按它截断，这一次运行以 `interrupted{reason:"max_turns"}` 结束，下一条消息重新从 1 开始；`null` 或不传等于不检查。**刻意没有默认上限**——任何隐式数字都会在长诊断里静默截断一次本来能跑完的运行，而用户真实遇到过 10 轮之后连提问都发不出去的会话。0 / 负数 / 非整数一律以 `invalid_run_limits` 拒绝，不静默当成「不限」。会话级的 `checkpoint.turn` 仍然跨消息单调递增（D-045）。`maxCostUsd` 相反——它是**会话总预算**，会把历史 `usage` 算进去，所以一次会话的花费越过上限后，后续消息会在首次模型调用之前就以 `max_cost_usd` 结束。
 
-```json
-{ "sessionId": "uuid", "created": true }
-```
+成功时运行器返回 `{ sessionId, created }`（`created` 表示这次新建了会话）。
 
-| 状态 | code | 条件 |
-|---|---|---|
-| 400 | `invalid_body` | 非 JSON 对象、缺 `text`、`text` 非字符串 |
-| 400 | `invalid_text` | `text` 为空/纯空白、超过 8000 字符 |
-| 400 | `invalid_session_id` | `sessionId` 非法 |
-| 400 | `invalid_mode` | `mode` 非字符串，或不是四个预设之一 |
-| 400 | `invalid_run_limits` | `maxTurns` / `maxCostUsd` / `timeoutMs` 非数字或非正，`systemPrompt` 非字符串 |
-| 404 | `unknown_session` | 指定会话不存在 |
-| 409 | `session_busy` | 同会话正在运行 |
-| 500 | `session_corrupt` | 追加会话的 header 损坏 |
-| 500 | `session_unreadable` | 追加会话的 header 不可读（EACCES/EPERM） |
-| 503 | `model_unavailable` | providers 缺失/无效/引用无效 |
-| 503 | `session_start_timeout` | 就绪超时（运行器已 abort） |
-| 503 | `runner_unavailable` | 运行器已关闭或未注入 |
+调用失败时抛 `RunnerError`，`code` 取值与触发条件：
 
-### POST /api/approvals
+| code | 条件 |
+|---|---|
+| `invalid_text` | `text` 为空/纯空白、超过 8000 字符 |
+| `invalid_session_id` | `sessionId` 非法 |
+| `invalid_mode` | `mode` 不是四个预设之一 |
+| `invalid_run_limits` | `maxTurns` 不是正整数（`null` 合法，表示不限）/ `maxCostUsd` / `timeoutMs` 非数字或非正，`systemPrompt` 非字符串 |
+| `invalid_cwd` | `cwd` 不是已存在的绝对路径目录 |
+| `invalid_model` | `model` 不是字符串 |
+| `unknown_session` | 指定会话不存在 |
+| `session_busy` | 同会话正在运行 |
+| `session_corrupt` | 追加会话的 header 损坏 |
+| `session_unreadable` | 追加会话的 header 不可读（EACCES/EPERM） |
+| `model_unavailable` | providers 缺失/无效/引用无效 |
+| `session_start_timeout` | 就绪超时（运行器已 abort） |
+| `runner_unavailable` | 运行器已关闭或未注入 |
 
-请求：
+### 审批决策
 
-```json
-{ "sessionId": "uuid", "requestId": "6f1c2b0e-...", "decision": "allow" }
-```
+宿主经 `runner.decide(sessionId, requestId, "allow" | "deny")` 回传决策，结果 `kind` 为 `accepted` / `duplicate` / `unknown_request` / `expired` / `already_decided` / `unknown_session` / `runner_unavailable`。
 
 `requestId` 是权限 gate 为每次审批生成的独立 UUID，与模型工具调用 `callId` 解耦：同一 `callId` 跨轮复用时两次审批的 `requestId` 不同，迟到决策不会命中更新的审批。
 
-| 状态 | body | 条件 |
-|---|---|---|
-| 202 | `{ requestId, decision }` | 首次受理，决策已送达等待中的 gate |
-| 200 | `{ requestId, decision, duplicate: true }` | 同决策重复提交 |
-| 400 | `invalid_body` / `invalid_session_id` / `invalid_decision` | 字段缺失或类型错误、id 非法、`requestId` 不是 1..200 个可打印 ASCII 字符、决策不是 `allow`/`deny` |
-| 404 | `unknown_session` / `unknown_request` | 会话不在运行器注册表 / 运行中但从未见过该 `requestId` |
-| 408 | `request_timeout` | 读取请求体超过 5s（返回响应后丢弃剩余 body） |
-| 409 | `already_decided` | 已用相反决策结束 |
-| 410 | `approval_expired` | 已超时或中断，不可再决 |
-| 503 | `runner_unavailable` | 运行器已关闭或未注入 |
+**受理语义**：`accepted` 只表示决策已送达 gate，不表示工具已执行；最终结果以会话日志的 `permission_decision` 为准（批准为 `effective: "allow"` 且 reason 含 `approval_granted`，拒绝为 deny）。渲染器不本地伪造终态，等 `permission_closed` 收起审批条。
 
-**202 语义**：只表示决策已送达 gate，不表示工具已执行；最终结果以会话日志的 `permission_decision` 为准（批准为 `effective: "allow"` 且 reason 含 `approval_granted`，拒绝为 deny）。HTTP 不返回 `effective`，前端也不本地伪造终态，等待 SSE 更新。
+**前端发送语义**：追加输入成功后只刷新会话列表，保持当前视图与事件跟随，不重载会话；只有新建会话（提交前没有 `activeSessionId`）才按返回的 `sessionId` 切换。
 
-**写端点通用约束**：`POST /api/actions` 与 `POST /api/approvals` 必须携带 `Origin`，且为 loopback、端口等于监听端口，否则 403 `forbidden_origin`；浏览器带 `Sec-Fetch-Site: cross-site`（不同 site）时同样 403；同 site 不同端口由 `Origin` 的端口一致性校验拦截，非浏览器客户端仍以 `Origin` 为准。`Content-Type` 必须为 `application/json` 或 `application/json;` 前缀（接受 `charset` 等参数，415），body 上限 64 KiB（413），读取超时 5s（408 `request_timeout`）。超时只返回 408，不销毁连接；handler 丢弃剩余 body。`text` 仍保留 8000 字符上限；64 KiB 足以覆盖其最坏 JSON 转义（约 48 KiB）。只读端点仍只校验 `Host` / `Origin`。
+**失败语义**：审批超时（`approvalTimeoutMs`，默认 120000ms）、用户拒绝、会话中断均不执行工具，日志以 `permission_decision` deny 收尾；迟到决策返回 `expired`，会话结束后返回 `unknown_session`。服务重启后未决审批丢失，`resumeSession` 会补 `approval_aborted: crash_recovery` 审计（按事件顺序配对：`requestId` 优先，旧日志无 `requestId` 时按 `callId` 配对最早一条待决；同 `callId` 的已决审批不会重复补写）。`query` 启动前的失败会写 `interrupted`（`reason: "start_failed"`）。headless demo 与未注入审批桥的库调用仍是 `ask` → deny（`approval_unavailable`）。
 
-**前端发送语义**：追加输入成功后只刷新会话列表，保持当前视图与 SSE 连接，不重载会话；只有新建会话（提交前没有 `activeSessionId`）才按返回的 `sessionId` 切换并订阅。
-
-**失败语义**：审批超时（`approvalTimeoutMs`，默认 120000ms）、用户拒绝、会话中断均不执行工具，日志以 `permission_decision` deny 收尾；迟到决策在运行中返回 410，会话结束后返回 404。服务重启后未决审批丢失，`resumeSession` 会补 `approval_aborted: crash_recovery` 审计（按事件顺序配对：`requestId` 优先，旧日志无 `requestId` 时按 `callId` 配对最早一条待决；同 `callId` 的已决审批不会重复补写）。`query` 启动前的失败会写 `interrupted`（`reason: "start_failed"`）。headless demo 与未注入审批桥的库调用仍是 `ask` → deny（`approval_unavailable`）。
-
-**演示**：启动后在输入栏发送需要 `ask` 的指令（默认 `diagnose` 下让 `shell` 执行无害命令，或让 `fs` 写临时文件），页面出现审批卡片；批准后工具执行，拒绝后不执行。过程记录见 `dev-notes/M2-Web审批.md`。
+**演示**：启动桌面形态后在输入栏发送需要 `ask` 的指令（默认 `diagnose` 下让 `shell` 执行无害命令，或让 `write` 写临时文件），页面出现审批卡片；批准后工具执行，拒绝后不执行。过程记录见 `dev-notes/M2-Web审批.md`。
 
 ## 会话管理
 
@@ -719,7 +674,7 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 
 MCP：
 
-- 超时/取消会终止 transport、轮询 PID 确认退出后再允许重连；终止未确认时返回 `mcp_uncertain` 并拒绝重连。内置 `fs`/`glob`/`grep`/`shell` 均已响应 signal；剩余风险仅限自定义/第三方 in-process 工具故意忽略 signal（D-022 已缓解，D-071/D-077 已解决）。
+- 超时/取消会终止 transport、轮询 PID 确认退出后再允许重连；终止未确认时返回 `mcp_uncertain` 并拒绝重连。内置 `read`/`write`/`edit`/`multiedit`/`glob`/`grep`/`shell` 均已响应 signal；剩余风险仅限自定义/第三方 in-process 工具故意忽略 signal（D-022 已缓解，D-071/D-077 已解决）。
 - 默认 env 白名单可通过 `inheritEnv: true` 或 `envAllowlist` 放宽；放开后第三方 server 可读取相应父进程变量（D-102 已解决，配置方需知悉）。
 - 配置未知字段（含 typo）静默忽略（D-103）；刷新失败保留旧缓存且不自动重试（D-104）。
 - 工具名消歧依赖 server 返回顺序，跨会话稳定性未保证（D-100）；会话结束与 list_changed 重叠时可能丢失最后一条 status 审计（D-101）。
@@ -727,14 +682,22 @@ MCP：
 
 前端工作台：
 
-- SSE 实时事件流已实现（单会话、`since`/`Last-Event-ID` 续传）；写操作与审批已落地，见「Web 会话与审批」（D-137/D-139 已解决；D-051 的 action 契约已收敛为 `text` + 可选 `sessionId`）。
-- 实时总线只做日志投影：延迟约 200-250ms，无进程内低延迟适配器（D-134）；只支持单会话流（D-133）。
-- 浏览器形态的缺口重拉是整篇重建（`session_loaded`），期间转录会被替换一次；桌面宿主没有对应的缺口检测。
-- 设备面板只消费 MCP 显式发布的 `device_status`（板卡面板的「设备」段）；无该事件时 `/api/device` 仍恒为 `unknown`，缺少显式连接状态枚举（D-052、D-058）。
-- 内核不支持的能力仍无前端入口：MCP 配置、权限规则、系统提示词、fork、会话改名/删除等需手编配置文件或直接调用内核；见 `docs/deferred-issues.md` D-169。
-- 前端未覆盖的能力（git/PR、终端、worktree、导出、回放等）在 UI 隐藏入口，宿主/bridge 回显式 `notice`；清单见 `desktop/MATRIX.md`（D-166）。
+- 实时事件由宿主跟随会话日志（NDJSON over stdio）推送，审批见「会话运行器与审批」。
+- 日志跟随是 200ms 轮询投影：延迟约 200-250ms，无进程内低延迟适配器（D-134）。原先的单会话 SSE 流已随浏览器形态移除（D-133 一并作废）。
+- 宿主按 `headSeq` 游标跟随本地日志，没有缺口检测与整量重拉。
+- 设备面板只消费 MCP 显式发布的 `device_status`（板卡面板的「设备」段）；无该事件时设备字段恒为 `unknown`，缺少显式连接状态枚举（D-052、D-058）。
+- 内核不支持的能力仍无前端入口：git/PR、终端、worktree、packs、浏览器、skills/memory/hooks、goals、subagents、检查点恢复、会话回放；清单见 `desktop/MATRIX.md` 与 `docs/deferred-issues.md` D-166。
+- **已登记的、用户会直接撞到的缺口**（2026-10-22 复核，D-184 ~ D-193）：
+  - Board 面板是唯一常驻的工作台页签，但它发的 `getBoardState` 在桌面宿主里**没有 handler**（D-193）——点开只得到「暂不支持该命令」。板卡信息实际经 `device_status` 事件下发。
+  - 运行中给发送按钮标的「排队」是**假的**：气泡显示「排队中」，消息仍被宿主拒绝并丢弃（D-186）。
+  - 图片附件会被静默丢弃：缩略图留在输入框上，`submit()` 不读 `state.attachments`，内核也不支持图片输入（D-188）。
+  - About 页的「检查更新」调用的 `api.checkUpdate` 桌面宿主没有提供，点一下必崩（D-187）。
+  - 上下文弹层的「用了多少 / 被什么占的」已接通（`usage` 事件同时带 `context` 与 `contextBreakdown`，分段条与图例不再是死代码）。**D-195 修掉的那条要认真看**：占用率原先在 `usage` 落盘时重新投影日志来测，那一刻工具批次未闭合、必然抛错被吞，所以**每一条带工具调用的回合都没有占用率**——而本仓库几乎每轮都在调工具。现在测量移到发请求之前，量的是即将送出去的消息。
+  - 快捷键表里的 `Ctrl+Shift+D`（Changes）不做事、`Ctrl+Shift+E`（Files）打开的是 Board、`` Ctrl+` ``（Terminal）被 `SUPPORTED_PANES` 挡掉（D-192）。
+  - MCP 客户端只支持 stdio（D-190）；`timeoutMs` 只作用于单次工具调用，**没有整跑墙钟超时**（D-189）。
+  - `@` 搜索不返回目录（D-184）；`kb_grep` / `kb_glob` 仍无拒答机制（D-179）。
 - 会话列表的坏目录进 `errors`，界面在会话面板底部显示「N 个会话目录不可读」（D-065 已解决）。
-- 知识库扫描深度上限 8、条目上限 2000、文件计数上限 20000；触顶时 `GET /api/kb` 置 `truncated`，`fileCount` 只作「至少 N」读（D-064 的静默截断已在此端点消除，`scanKb` 的旧实现一并移除）。
+- 知识库扫描深度上限 8、条目上限 2000、文件计数上限 20000；触顶时 `getKb` 返回的 `truncated` 为真，`fileCount` 只作「至少 N」读（D-064 的静默截断已消除，旧 `scanKb` 实现一并移除）。
 
 ## 设计文档
 

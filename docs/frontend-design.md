@@ -30,7 +30,7 @@ v1.4 描述的是一套**从未按此实现**的设计基线（Preact + Vite、�
 2. **证据优先**：工具调用不是"正在调用某工具"的黑盒，而是可核对的读数，支撑「可证伪」的诊断结论。
 3. **诚实优先于完整**：内核没有的能力**隐藏入口**而不是伪造一个假的。点不动的按钮比会骗人的按钮好。
 4. **专业、克制、可长时间注视**：以仪器面板的克制语言为主，不用装饰性图形、不用 emoji、不用大面积高饱和色。
-5. **两种形态、同一套 UI**：Electron 桌面与浏览器形态跑**同一份** renderer 代码，对同一份会话日志给出同一套界面。
+5. **一套 UI**：renderer 只跑在 Electron 里（2026-10-22 起浏览器形态下线），对同一份会话日志给出同一套界面。
 
 ### 1.2 范围内
 
@@ -50,9 +50,11 @@ v1.4 描述的是一套**从未按此实现**的设计基线（Preact + Vite、�
 
 ### 1.4 明确不在范围内的能力（内核无后端，已隐藏）
 
-以下入口在 DOM 中保留但带 `hidden`，宿主/bridge 收到对应命令时回显式 `notice`（R3，不静默吞掉）。逐条见 `desktop/MATRIX.md`：
+以下入口在 DOM 中保留但带 `hidden`，宿主收到对应命令时回显式 `notice`（R3，不静默吞掉）。逐条见 `desktop/MATRIX.md`：
 
-git / PR、终端、worktree、packs、browser、skills / memory / instructions / hooks、subagents、goals、文件树、导出、检查点恢复、附件与 @ 补全、斜杠命令、会话 fork/删除/改名、压缩、工作目录切换、板卡/串口的写操作、模型与 effort 直设。
+git / PR、终端、worktree、packs、browser、skills / memory / instructions / hooks、subagents、goals、检查点恢复、附件（图片）、板卡/串口的写操作、`effort` 直设（内核适配层不发该参数，如实拒绝而不是假装生效）。
+
+> **已从本文档移出的能力**（2026-10-21 起陆续接通，此处列表曾长期未同步）：文件树、导出、会话 fork / 删除 / 改名、工作目录切换、模型直选、`@` 文件补全、斜杠命令（`/clear` `/context` `/compact`）、压缩（桌面形态）。它们现在在本文件 §7、§8 与 `desktop/MATRIX.md` 里按「已支持」描述。
 
 > **「始终允许」按钮不渲染**：内核审批桥只有单次 allow/deny，没有持久规则。渲染出来就是一句兑现不了的承诺。
 
@@ -71,7 +73,7 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 
 ### 2.1 前端技术栈（2026-10-20 移植定案）
 
-- **无框架、无打包器、无构建步骤**：renderer 是原生 ES 模块，浏览器与 Electron 直接加载 `index.html` 里的两个 `<script type="module">`。
+- **无框架、无打包器、无构建步骤**：renderer 是原生 ES 模块，Electron 直接加载 `index.html` 里的 `<script type="module">`。
 - **渲染层语言是 JavaScript，不是 TypeScript**：TypeScript 只用于内核 `src/` 与 MCP server。`desktop/renderer/*.js` 是 `.js` 文件，靠 `protocol.d.ts` 提供协议层的类型提示。**这条与 v1.4 相反**。
 - **无 UI 框架、无组件系统**：`app.js`（5853 行）是命令式 DOM 操作（`addUserTurn` / `addAssistantTurn` / `addToolRow` / `attachToolOutput` …），状态在一个 `state` 对象里，没有 `TranscriptView` 那样的纯函数归约层。
 - **样式**：手写 CSS 变量体系，两张表（`styles.css` 5473 行 + `settings.css` 1243 行），无 CSS 预处理器。
@@ -81,21 +83,21 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 
 > 根 `package.json` 的 `devDependencies` 里 `vite` 已是死依赖（仓库内无任何引用，`vite.config.ts` 已删），可清理；`vitest` 自身仍需要它。
 
-### 2.2 实时通道（双形态不同）
+### 2.2 实时通道
 
 | 形态 | 传输 | 客户端动作 | 事件推送 |
 |---|---|---|---|
-| 浏览器 | HTTP + SSE | `fetch` POST | `EventSource`（`GET /api/events`） |
 | 桌面 | NDJSON over stdio | Electron IPC → 宿主 stdin | 宿主 stdout → IPC → 渲染器 |
 
-两种形态**共用** `desktop/renderer/protocol.js` 这一层纯函数映射，保证同一份会话日志在两侧给出同一套 UI。
+宿主与渲染器**共用** `desktop/renderer/protocol.js` 这一层纯函数映射，保证同一份会话日志给出同一套 UI。
+
+> 2026-10-22：浏览器形态下线，原先的 HTTP + SSE 通道（`EventSource` 订阅 `GET /api/events`）随 `desktop/renderer/bridge.js` 与 `src/server` 的 HTTP 层一并删除，此表只剩桌面一行。
 
 ### 2.3 安全边界落到界面
 
 - 写内存 / 复位类操作在界面上必须呈现"待确认"状态；确认后只显示"等待工具结果"，**不得**在前端伪造"已执行"（R2）。
 - 只读工具不得渲染为危险操作。
 - 工具失败必须显式展示错误码与文本，不得以空值或全 0 读数伪装成正常（R3）。
-- 浏览器形态的写端点要求 loopback `Origin`；同源部署时浏览器自动携带。
 - CSP：`default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'; connect-src 'self'`。**无 `unsafe-inline` 脚本、无 `unsafe-eval`**。
 
 ---
@@ -104,7 +106,7 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ TopBar  侧栏切换 │ cwd │ worktree │ 状态点 · 状态文本 │ 设置 │ 窗口控件(仅桌面) │ 48
+│ TopBar  侧栏切换 │ cwd │ 状态点 · 状态文本 │ 设置 │ 窗口控件(仅桌面) │ 48
 ├────────────────────┬─────────────────────────────────────┬───────────────────┤
 │ Sidebar 264px      │ Transcript（滚动）                  │ Workbench 420px   │
 │  可拖拽调宽         │  find-bar（sticky）                 │  可拖拽 320–560   │
@@ -152,14 +154,13 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 
 ### 3.3 脚本加载顺序
 
-`index.html:576-577`：
+`index.html:596`：
 
 ```html
-<script type="module" src="bridge.js"></script>
 <script type="module" src="app.js"></script>
 ```
 
-`bridge.js` 必须在 `app.js` 之前：`app.js` 在模块顶层读 `window.prometheus`，而 bridge 在 Electron 下会因 preload 已提供该对象而跳过安装。模块脚本按顺序执行，`app.js` 看到的必然是 bridge 装好的对象。
+只有一个模块脚本。`app.js` 在模块顶层读 `window.prometheus`，该对象由 `desktop/preload.cjs` 的 `contextBridge` 在页面脚本执行前注入。原先排在它之前的 `bridge.js` 已于 2026-10-22 随浏览器形态删除。
 
 ---
 
@@ -370,7 +371,7 @@ prometheus.expandedProjects  collapsedProjects
 
 ### 7.1 TopBar 顶栏
 
-- 高 48px。左侧：侧栏切换按钮、cwd 按钮、worktree 按钮；中间：goal 徽标（隐藏）、状态点 + 状态文本；右侧：changes / terminal / more（**均隐藏**）、设置按钮、窗口控件（**仅桌面**，`hidden`）。
+- 高 48px。左侧：侧栏切换按钮、cwd 按钮；中间：goal 徽标（隐藏）、状态点 + 状态文本；右侧：changes / terminal / more（**均隐藏**）、设置按钮、窗口控件（**仅桌面**，`hidden`）。**worktree 按钮与面板已于 2026-10-22 整块删除**——内核没有 worktree 能力，点它只得到「桌面宿主暂不支持该命令」。
 - 状态文本取值来自 `status` 事件与运行状态（如"starting"）。
 - 主题与语言切换在 more 菜单里（`index.html:135-150`），但 more 按钮本身 `hidden` —— **该菜单当前无法打开**；设置页是它们的实际入口。
 
@@ -381,7 +382,7 @@ prometheus.expandedProjects  collapsedProjects
 - **只有会话列表，没有知识库检索与厂商树**（v1.4 §7.2 整节作废）。
 - 会话按 `cwd` 分组，可折叠（`prometheus.expandedProjects` / `collapsedProjects`）。**不是** v1.4 的「进行中 / 历史」分组。
 - 会话状态二态：`working`（当前活动会话运行时）/ `ready`（其余）。**不是** v1.4 的三态。
-- 标题：桌面宿主扫日志取首条 `user` 事件（截 80 字符，缓存 key = `id@createdAt`，最多扫 30 条）；浏览器 bridge 逐个拉会话详情取首条 user 事件（最多 30 个）。
+- 标题：桌面宿主扫日志取首条 `user` 事件（截 80 字符，缓存 key = `id@createdAt`，最多扫 30 条）。
 
 ### 7.3 Transcript 转录
 
@@ -423,9 +424,14 @@ prometheus.expandedProjects  collapsedProjects
 - 控件行：模式选择器、模型选择器、用量胶囊（`#usage-meter`）。
 - **模式选择器 = 内核四个权限预设**：`diagnose` / `read-only` / `workspace-write` / `danger-full-access`（`app.js:1452`）。默认 `diagnose`。
 - 用量胶囊点击弹出 `usage-popover`：按输入 / 缓存 / 输出分段的色条 + 分类明细 + 本会话合计。
-  > 上下文**占用百分比被隐藏**（`#context-label` 带 `hidden`）：内核只给花费不给占用，编一个百分比就是撒谎（D-165）。
+  > **上下文占用百分比自 2026-10-22 起可见**：内核早在 D-165 就随 `usage` 事件下发 `context{tokens,percent,window}`，但前端把 `#context-label` 写死成 `hidden` 且无人移除，百分比从未显示过。现在 `protocol.measuredContext()` 只在 `tokens` 与 `percent` 都是有限数时才认，否则 `null`（显式「未知」哨兵，**不是 0%**）；`updateMeter` 的三种输入各有语义——`undefined` 保留原值（`state` 事件只是换模式）、`null` 清除并隐藏、真实测量才显示。
+  > **同日：D-195 修掉一个更要紧的问题。** `usage` 事件落盘时重新投影日志来测占用率，那一刻 assistant 已写、`tool_result` 未写，`buildMessages` 必然抛「工具批次未闭合」，被空 `catch` 吞掉——**每一条带工具调用的回合都没有占用率**（D-165 起即如此，而本仓库几乎每轮都在调工具）。现在测量移到**发请求之前**，量的是即将送出去的那份消息，这个数字也才真正表达它该表达的东西。
+  > `contextBreakdown`（按类别拆分）同日起有生产者：`src/context/breakdown.ts` 的纯函数按 `systemPrompt` / `messages` / `toolResults` / `mcpTools` 分桶，各桶之和强制等于 `used`（等比缩放 + 余数补给最大桶），随同一条 `usage` 事件下发。分段条与图例不再是死代码。
 - 文本域高度 `Math.min(220, scrollHeight)`（`app.js:4454`），无内部滚动条。
-- 附件（图片）、@ 文件提及、斜杠命令、`+` 菜单**均已隐藏**（无后端）。**语音输入（麦克风）已于 2026-10-22 整块删除**：按钮、`setupVoice`/`stopVoice`、录音动画、`voiceStart`/`voiceStop` 文案与 `#i-mic` 图标都不在了（Web Speech API 在 Electron 里通常不可用，留着一个永不出现的 `hidden` 空壳只是噪音）。`searchFiles` 仍会发（`app.js:1188`），但返回空匹配且**不刷警告** —— 每按键一次就警告会把整个转录埋掉。
+- 附件（图片）、`+` 菜单**均已隐藏**（无后端）。**语音输入（麦克风）已于 2026-10-22 整块删除**：按钮、`setupVoice`/`stopVoice`、录音动画、`voiceStart`/`voiceStop` 文案与 `#i-mic` 图标都不在了（Web Speech API 在 Electron 里通常不可用，留着一个永不出现的 `hidden` 空壳只是噪音）。
+  > 图片粘贴/拖入的代码**仍在**（`addAttachment` / `renderAttachments`）且会画出缩略图，但 `submit()` 不读 `state.attachments`、内核 `ModelChatMessage.content` 也只是 `string`——所以图片在发送时被静默丢弃。这是 R3 缺口，登记为 **D-188**，不是「已支持」。
+- **`@` 文件提及自 2026-10-22 起可用**：内核 `searchFilesByName` + 宿主 `searchFiles` 命令，沿用同一套遍历与边界规则（复用 D-181 的惰性 BFS 与 24 项忽略清单），按「基名全等 → 基名前缀 → 基名包含 → 路径包含」分层排序，层内短路径优先。目录不在结果里（D-184）。
+- **斜杠命令自 2026-10-22 起可用**：`/clear`、`/context`、`/compact`；纯模块 `desktop/renderer/commands.js`（`mergeCommands` / `parseSlashText` / `contextReport`），`submit()` 先解析再决定发给模型还是本地执行。**命令执行时原文会作为一条用户消息留在转录里**；未知命令只提示、草稿留在框里，**不会**被当成提示词，也**不会**先留一条消息再报错。细节见 §8.3。
 
 ### 7.7 审批条
 
@@ -467,7 +473,7 @@ prometheus.expandedProjects  collapsedProjects
 
 - 无会话：侧栏显示「暂无会话」；设备字段为 `unknown` 时显示「未接入」。
 - 提交失败：在转录中显示可读错误，**不伪造成功**。
-- 202 只表示受理；工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准。
+- 宿主接受 prompt 只表示发起了一次运行；工具是否执行以会话日志的 `permission_decision` 与 `tool_result` 为准。
 
 ---
 
@@ -507,7 +513,7 @@ interface SessionEventEnvelope extends SessionEvent {
 
 ### 8.2 协议层：内核事件 → 渲染器事件
 
-`desktop/renderer/protocol.js` 是**纯函数**层，不碰 DOM、文件系统与网络。桌面宿主与浏览器 bridge 共用它，保证两种形态对同一份日志给出同一套 UI。
+`desktop/renderer/protocol.js` 是**纯函数**层，不碰 DOM、文件系统与网络。宿主与渲染器是两个进程，这一层是它们共用的映射，保证同一份日志给出同一套 UI。
 
 导出：
 
@@ -559,7 +565,9 @@ interface SessionEventEnvelope extends SessionEvent {
 
 NDJSON over stdio，Electron 主进程以 `ELECTRON_RUN_AS_NODE=1` spawn。宿主只从编译后的 `dist/` 导入内核模块；`dist/` 缺失时发 `fatal` 并 `exit(1)`。
 
-**命令**：`init`、`prompt`、`abort`、`permission`、`newSession`、`loadSession`、`listSessions`、`setMode`、`setLocale`、`setUiPreference`、`getSettings`、`getUsage`、`getSetupChecklist`、`listCommands`、`getTree`、`searchFiles`、`searchSessions`、`shutdown`。
+**命令**：`init`、`prompt`、`abort`、`permission`、`newSession`、`loadSession`、`listSessions`、`setMode`、`setLocale`、`setUiPreference`、`getSettings`、`getUsage`、`getSetupChecklist`、`listCommands`、`getTree`、`searchFiles`、`searchSessions`、`compact`、`shutdown`。
+
+**斜杠命令**（2026-10-22）：`listCommands` 回 `clear` / `context` / `compact` 三个。**命令真正执行时，敲进去的原文会作为一条普通用户消息留在转录里**（`/clear` 也一样，虽然它紧接着的 `session_loaded` 会清空转录）；未知命令与「带了参数被拒」的命令**不 echo**——先留一条消息再报错，会让人以为它跑过。`/clear` 在渲染器侧直接发 `newSession`；`/context` 由渲染器从内核自己的测量回答，逐行给出「用了多少 / 窗口 / 百分比」、每个类别占窗口的份额、剩余空间与压缩前余量，未知时明说「没有测量」而不是打印一页 0；`/compact` 走宿主的 `handleCompact`——用 `resumeSession` 打开会话、调内核 `compactSession({…, force: true})`。**不再看阈值**：用户显式要求压缩时，`force` 跳过软阈值提前返回与 microcompact 阶段，直接产出摘要；随后把新追加的 `compaction` 事件经 `sessionEventToHostEvents` 投影（复用既有的 `compacted` 标记），给出压缩前后的实测 token 数，并用新的测量刷新 `state.context` 与 `contextBreakdown`。压缩期间持有 `run_start`/`run_end` 与一个独立的 `AbortController`，`abort` 会先中止它。**三个命令都不接受参数**：内核 `compactSession` 没有 focus / keep 选项，`--keep N` 会是一个没人兑现的承诺（原 `parseCompactArgs` 已删）。`dist/` 缺 `context/compact.js` 或 `context/breakdown.js` 时回「请先 npm run build」而不是崩宿主。
 
 **未列入的命令**统一回 `notice{level:"warn", text:"桌面宿主暂不支持该命令：<cmd>"}`。
 
@@ -567,7 +575,9 @@ NDJSON over stdio，Electron 主进程以 `ELECTRON_RUN_AS_NODE=1` spawn。宿�
 
 **providers 缺失**：`init` 中 `loadProviders` 抛错 → 发 `fatal` 并停止，**不发 `ready`/`state`/`sessions`**，渲染器停在"连接中"。
 
-### 8.4 浏览器 bridge（`desktop/renderer/bridge.js`）
+### 8.4 浏览器 bridge（`desktop/renderer/bridge.js`）——已删除，仅历史留档
+
+> **2026-10-22 起本节描述的形态不存在。** `desktop/renderer/bridge.js`、`src/server` 的 HTTP 层（`api.ts` / `serve.ts` / `http.ts` / `body.ts` / `config-api.ts` / `event-stream.ts`）、`tests/desktop/bridge.test.js`、`tests/events-e2e.test.ts` 与 `tests/server/` 下的 HTTP 用例全部删除。`window.prometheus` 现在只有一个来源——`desktop/preload.cjs` 的 `contextBridge`。以下内容保留以便追溯，不要据此实施。
 
 仅当 `window.prometheus === undefined` 时安装（Electron 下 preload 已提供，bridge 不覆盖）。
 
@@ -588,9 +598,13 @@ NDJSON over stdio，Electron 主进程以 `ELECTRON_RUN_AS_NODE=1` spawn。宿�
 
 不在白名单内的命令回 `notice{level:"warn", text:"浏览器形态暂不支持该命令：<cmd>"}`。
 
-**`searchFiles` 特判**：虽不在白名单，但单独拦截并返回 `file_matches{query, files:[]}` —— 补全弹窗每按一次键请求一次，按通用路径每字符回一条 warn 会把整个转录埋掉。
+**`searchFiles`**（2026-10-22 起真实实现）：不在 `supportedCommands` 里，但在 `send()` 的 switch 之前单独拦截，走 `GET /api/files/search?path=<currentCwd>&query=<q>`，把 `{files, truncated, scanned}` 映射成 `file_matches`。仍然不每字符回警告——补全弹窗每按一次键请求一次，按通用路径每字符一条 warn 会把整个转录埋掉；请求失败时安静回空（桌面宿主则在边界拒绝时发 `notice`）。
 
-### 8.5 两种形态的差异
+**`listCommands`** 回 `clear` / `context` 两个。**`/compact` 在浏览器形态刻意缺席**：HTTP 层没有压缩路由，伪造一条成功会违反 R3；用户仍能敲 `/compact`（`compact` 在白名单里，好让请求走到 switch 而不是落进「暂不支持」的通用文案），得到一条说明「浏览器形态无法压缩」的 warn，且**不发任何请求**（有用例断言 `/api/actions` 调用数为 0）。
+
+### 8.5 两种形态的差异——已作废，仅历史留档
+
+> 浏览器形态下线后这些维度只剩桌面一种取值，差异表失去对象。桌面侧行为即 `desktop/host/host.js` 的行为，见 §8.3。
 
 | 维度 | 桌面 | 浏览器 |
 |---|---|---|
@@ -607,17 +621,17 @@ NDJSON over stdio，Electron 主进程以 `ELECTRON_RUN_AS_NODE=1` spawn。宿�
 | `platform` / `windowControl` / `notify` | 有 | 无 |
 | 缺 provider | `fatal`，不发 `ready` | 无 providers 概念，恒空列表 |
 
-> 浏览器形态的 `setMode` 不改变内核权限预设，是一个**已知的语义缺口**：用户在界面上切了模式，实际跑的仍是服务端那个预设。修法是让 `POST /api/actions` 接受权限预设，或加一个 `POST /api/permissions` 端点。
+> 表中「浏览器」列的 `setMode` 语义缺口（只改本地状态、内核预设不变）**已随 bridge 删除而不存在**；桌面宿主的 `setMode` 会 `runner.close()` 后重建 runner，下一次运行按新预设走。
 
-### 8.6 实时事件流
+### 8.6 实时事件流——SSE 端点已删除，仅历史留档
+
+> 原先的 SSE 端点、`Last-Event-ID` 补播、`retry: 3000`、15s 心跳、`stream_end` / `stream_error`、500 条实时队列与 `slow_consumer` 单帧写超时全部随浏览器形态删除，不存在要遵守的协议。桌面侧实时链路见 §8.3「会话游标」——宿主跟随本地日志、按 `seq` 去重，**没有**缺口检测与整量重拉。
 
 - 端点：`GET /api/events?sessionId=<id>&since=<seq>`。`since` 缺省读 `Last-Event-ID`，都缺省按 `-1` 从头补播；`since` 大于会话当前最大 `seq` 时按该 `seq` 夹紧。
 - 帧格式：普通事件 `id: <seq>` + `data: <SessionEventEnvelope JSON>`；`retry: 3000`；每 15s 一条注释心跳 `: ping`；会话已关闭且补播完成后发 `event: stream_end`（`{"lastSeq":N}`）；异常发 `event: stream_error`（`{"code","lastSeq"}`）后关闭。
 - 慢客户端：实时队列上限 500 条；实时阶段单帧写超时（默认 30s）或队列溢出 → `stream_error {code:"slow_consumer"}` 并关闭。
 
-> **已知偏差（待修）**：`README.md:481` 承诺的"缺口检测 → 整量重拉（每次订阅最多 3 次）"与"连续 3 次未成功建流后报错"在 `bridge.js` 中**并未实现**。bridge 没有主动重连逻辑，重连依赖 `EventSource` 自身的浏览器自动重连（服务端 `retry: 3000`），且重连时 URL 里的 `since` 仍是建流时的固定值 —— 重复事件由协议层的 `ctx.lastSeq` 去重兜住，不会污染 UI，但"缺口重拉"这条保护实际不存在。桌面宿主侧同样没有缺口检测。
->
-> 这条偏差应作为 deferred issue 登记，并同步修正 README 的措辞。
+> **历史偏差记录（已无对象）**：当时 README 承诺的「缺口检测 → 整量重拉（每次订阅最多 3 次）」在 `bridge.js` 中一度不存在，后来补上；这些机制与桌面宿主都无关，现已随 bridge 一并删除。
 
 ### 8.7 工具语义标记
 
@@ -650,10 +664,10 @@ interface ToolAnnotations {
 | 发送消息 | Enter 发送；空输入禁用发送按钮。**成功后不重载会话** —— 渲染器已回显用户消息，只有切换会话才重建转录 |
 | 切换会话 | `session_loaded{messages}` → 清空转录 DOM 并按骨架重建 |
 | 新建会话 | 清空活动会话与转录，关闭旧流 |
-| 审批决定 | 卡片按钮提交 `POST /api/approvals`（桌面走宿主）；终态只由 `permission_closed` 更新 |
+| 审批决定 | 卡片按钮经宿主 `permission` 命令走 `runner.decide`；终态只由 `permission_closed` 更新 |
 | 权限拒绝 | 协议层发 `notice{level:"warn"}`，工具行保留失败标记 |
-| 中止 | 「停止」按钮或 Esc → `POST /api/abort`（桌面走 `runner.abort`） |
-| 权限模式 | 切换时若正在运行则拒绝并说明原因；桌面态会重建 runner |
+| 中止 | 「停止」按钮或 Esc → 宿主 `abort` → `runner.abort` |
+| 权限模式 | 切换时若正在运行则拒绝并说明原因；切换会重建 runner |
 | 滚动 | 距底 <140px 自动跟随，>220px 显示「滚动到底部」按钮 |
 | 命令面板 | Ctrl/Cmd+K；查找 Ctrl/Cmd+F |
 
@@ -711,7 +725,7 @@ interface ToolAnnotations {
 | V12 | 拒绝留痕 | 被拒绝的工具调用在转录里仍有一行可见的工具行 |
 | V13 | 审批诚实 | 审批条只出现 Allow / Deny；内核自动拒绝后审批条自动收起 |
 | V14 | 写操作确认 | 复位/写内存未确认时，界面不显示"已执行" |
-| V15 | 诚实降级 | 内核未支持的能力入口不可见；宿主/bridge 收到对应命令时给出显式 notice |
+| V15 | 诚实降级 | 内核未支持的能力入口不可见；宿主收到对应命令时给出显式 notice |
 
 > v1.4 的 V1–V14 是基于三栏 Preact 布局的几何断言（栏头 y=48 h=40、主区 = 视口 − 668、知识库树 717px 可见、回放一致性 `transcript-consistency` 等），**已随旧实现整体作废**。旧 `scripts/verify-ui.mjs` 验收脚本随 `src/ui` 删除，本清单目前靠人工核对，尚无自动化脚本守护。
 
@@ -723,14 +737,14 @@ interface ToolAnnotations {
 |---|---|---|---|
 | OPEN-UI-01 | ~~**Preact + Vite**~~ → **作废** | 2026-10-18 | 2026-10-20 前端移植后被取代：改为纯 ES 模块，无框架、无打包器、无构建步骤（§2.1） |
 | OPEN-UI-02 | ~~扩展 `LoopEvent.tool_result`~~ → **失去对象** | 2026-10-18 | 前端不再消费 `LoopEvent`，只消费 `SessionEvent`（§8.1、§8.2） |
-| OPEN-UI-03 | **SSE + HTTP POST**（浏览器形态）；桌面形态为 NDJSON over stdio | 2026-10-18 | 事件单向、低频；自动重连、可 curl 调试（§2.2、§8.6） |
+| OPEN-UI-03 | ~~**SSE + HTTP POST**（浏览器形态）；桌面形态为 NDJSON over stdio~~ → **只剩桌面半条（2026-10-22 浏览器形态下线）** | 2026-10-18 | 事件单向、低频；自动重连、可 curl 调试。SSE 端点与 HTTP POST 已随 `bridge.js` 与 `src/server` HTTP 层删除（§2.2） |
 | OPEN-UI-04 | **不做**实时波形与仪器联锁 | 2026-10-18 | R1 禁止 LLM 直接控制仪器；信号物理层诊断属人工执行域 |
 | OPEN-UI-05 | 暂不做虚拟滚动；触发条件：单会话 DOM 节点 > 5000 或渲染帧 > 50ms | 2026-10-18 | 消息流 append-only；避免破坏查找、折叠与可访问性 |
 | OPEN-UI-06 | M3 只做**派生入口 + 来源标记**，树形导航后置 | 2026-10-18 | `SessionEvent.parent` 已具备，无需提前设计树形 UI |
-| OPEN-UI-07 | **前端为纯 ES 模块**，无框架无打包器 | 2026-10-20 | 前端移植；`desktop/renderer/` 直接被浏览器与 Electron 加载，零构建 |
-| OPEN-UI-08 | **内核不支持的能力隐藏入口**，宿主/bridge 回显显式 notice | 2026-10-20 | R3 工具必须诚实：渲染一个只会报错的按钮比没有按钮更糟 |
+| OPEN-UI-07 | **前端为纯 ES 模块**，无框架无打包器 | 2026-10-20 | 前端移植；`desktop/renderer/` 直接由 Electron 加载，零构建 |
+| OPEN-UI-08 | **内核不支持的能力隐藏入口**，宿主回显显式 notice | 2026-10-20 | R3 工具必须诚实：渲染一个只会报错的按钮比没有按钮更糟 |
 | OPEN-UI-09 | **不渲染「始终允许」** | 2026-10-20 | 内核审批桥只有单次 allow/deny，无持久规则；按钮即失信的承诺 |
-| OPEN-UI-10 | **上下文占用百分比隐藏** | 2026-10-20 | 内核只报花费不报占用（D-165），编百分比是撒谎 |
+| OPEN-UI-10 | ~~**上下文占用百分比隐藏**~~ → **作废（2026-10-22）** | 2026-10-20 | 原理由「内核只报花费不报占用」早在 D-165 就已不成立（`usage` 事件带 `context{tokens,percent,window}`）；本轮才把 `#context-label` 的 `hidden` 真正解除。`null` 表示未知，**不是 0%** |
 
 > 后续新增前端决策沿用 `OPEN-UI-xx` 编号；已关闭项保留在本表，不删除。
 
@@ -746,6 +760,7 @@ interface ToolAnnotations {
 | v1.3 | 2026-10-20 | 事件总线：事件模型补 `tool_started` / `mcp_status` / `device_status` / `permission_decision` 与对应 payload；明确统一事件数组、游标去重、缺口整量重拉、断线上限；设备面板按 `device_status` patch 并在重载时从历史重建 |
 | v1.4 | 2026-10-20 | Web 审批：新增 `approval_request` 事件与 `ApprovalRequestPayload`，补 §7.16 审批卡片字段与状态机；明确新会话按钮与发送失败展示 |
 | **v2.0** | **2026-10-20** | **前端移植后整体重写**：前端由 Preact 工作台（`src/ui/`，31 文件）替换为 Prometheus 渲染器（`desktop/renderer/`，纯 ES 模块）。作废 v1.4 的 §2 技术约束、§3 信息架构、§4 布局、§5 令牌、§6 主题、§7 组件规格、§11 响应式、§12 验收清单，改以实现为准重写；保留 §8.1 事件模型、§8.3 工具语义标记与 §13 中未失效的决策。新增 §7.4 流式渲染路径（D-164 修复）、§8.2 协议层映射表、§8.5 双形态差异表；登记 4 条已知偏差（bridge 无缺口重拉、浏览器形态 setMode 不改内核预设、`system` 主题在 boot 后被固化、图标按钮用 title 而非 aria-label）与 1 条死依赖（`vite`）** |
+| **v2.1** | **2026-10-22** | **只保留桌面形态**：删除 `desktop/renderer/bridge.js` 与 `src/server` 的 HTTP 层（`api.ts` / `serve.ts` / `http.ts` / `body.ts` / `config-api.ts` / `event-stream.ts`），`serve:ui` 脚本移除。本文件相应改写：§1.1 第 5 条与 §2.1 / §2.2 去掉浏览器形态；§1.4 与 §2.3 去掉 bridge 与写端点 `Origin` 要求；§3.3 只剩一个 `<script type="module">`；§7.2 / §7.6 / §7.11 去掉 bridge 专属行为与「202 受理」措辞；§8.2 改为「宿主与渲染器共用」；§8.4 / §8.5 / §8.6 标注为历史留档；§9 / §12 V15 / §13 OPEN-UI-03·07·08 / §15 第 1·2·9 条同步。`/compact` 不再有「浏览器形态缺席」这一说 |
 
 ---
 
@@ -753,15 +768,15 @@ interface ToolAnnotations {
 
 | # | 项 | 位置 | 建议 |
 |---|---|---|---|
-| 1 | ~~bridge 无缺口检测与重连上限~~ **已修（2026-10-21）** | `bridge.js` | `seq > lastSeq + 1` 触发整量重拉（≤3 次）；`stream_error` 从实际游标续接（≤3 次）后明说停止 |
-| 2 | ~~浏览器形态的 `setMode` 只改本地状态~~ **已修（2026-10-21）** | `bridge.js` + `POST /api/actions` | 预设随 prompt 下发，runner 覆盖本次运行；未知值 400 `invalid_mode` |
+| 1 | ~~bridge 无缺口检测与重连上限~~ **已修（2026-10-21），后随浏览器形态下线作废（2026-10-22）** | `bridge.js`（已删除） | `seq > lastSeq + 1` 触发整量重拉（≤3 次）；`stream_error` 从实际游标续接（≤3 次）后明说停止。桌面宿主自始至终没有这套机制，按 `headSeq` 跟随本地日志 |
+| 2 | ~~浏览器形态的 `setMode` 只改本地状态~~ **已修（2026-10-21），后随浏览器形态下线作废（2026-10-22）** | `bridge.js`（已删除） | 预设随 prompt 下发，runner 覆盖本次运行；未知值报 `invalid_mode`。桌面宿主由 `setMode` 重建 runner |
 | 3 | ~~`system` 主题一次启动后被固化~~ **已修（2026-10-21）** | `app.js` `setTheme` / boot | `setTheme(theme, {remember:false})`：推导值不写回存储 |
 | 4 | 图标按钮用 `title` 而非 `aria-label` 承载可访问名 | `index.html` 大量 `data-i18n-title` | 补 `aria-label`，与 i18n 键一起补 |
 | 5 | ~~工具注解 `readOnly` / `evidence` / `destructive` 未被 UI 消费~~ **已修（2026-10-21）** | `src/loop/query.ts` → `protocol.js` → `app.js` `toolAnnotationBadges` | 注解随 `tool_started` 下发（只带 true 键），工具行在名字后画徽标；缺省不画徽标，因为「未声明」不等于「已确认安全」 |
 | 6 | 视觉验收无自动化守护 | —— | 旧 `scripts/verify-ui.mjs` 已随 `src/ui` 删除；按 §12 新清单重写 |
 | 7 | `vite` 是死依赖 | `package.json` devDependencies | 移除（`vitest` 自带所需版本） |
 | 8 | 阶段 4 交互层（回放 / 导出 / 设备控制）未落地 | `docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` §7-§9 | 该 spec 的 §7-§9 依赖已删除的 `src/ui`（12 文件、约 30 个导出符号），需按本前端重写；详见 D-166 |
-| 9 | ~~MCP / 权限规则 / 运行参数（systemPrompt、maxTurns、maxCostUsd、timeoutMs）无前端入口~~ **已修（2026-10-21）** | 内核 `GET/PUT /api/config` + `settings.js` | 设置页「MCP 服务器」与「行为」两页读写 `mcp.json` / `permissions.json` / `run.json`；运行上限随每次 `POST /api/actions` 下发 |
+| 9 | ~~MCP / 权限规则 / 运行参数（systemPrompt、maxTurns、maxCostUsd、timeoutMs）无前端入口~~ **已修（2026-10-21）** | 内核 `src/config/app-config.ts` + 宿主命令 + `settings.js` | 设置页「MCP 服务器」与「行为」两页读写 `mcp.json` / `permissions.json` / `run.json`；运行上限由宿主从 `run.json` 读取后随每次 prompt 下发（原 `GET/PUT /api/config` 端点已随 HTTP 层删除） |
 | 10 | 串口监视器已从工作台移除（工作台现有 Board / File / Artifact 三个 tab） | `index.html` 工作台 | `serialOpen`/`serialStatus`/`serialRead` 无宿主实现，内核只经 MCP 工具暴露串口；探针的串口状态在板卡面板「设备」段显示。恢复需要先给内核补串口命令 |
 
 ---

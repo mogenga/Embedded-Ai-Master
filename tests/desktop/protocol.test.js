@@ -12,6 +12,7 @@ import {
   sessionMarkdown,
   sessionsEvent,
   summarizeToolCall,
+  todosEvent,
 } from "../../desktop/renderer/protocol.js";
 
 function ev(seq, type, payload, parent) {
@@ -362,6 +363,112 @@ describe("运行状态", () => {
   });
 });
 
+describe("usage 的分类拆分", () => {
+  const breakdown = {
+    used: 42000,
+    window: 128000,
+    percent: 32.8,
+    compactAt: 102400,
+    parts: [
+      { key: "systemPrompt", tokens: 3200 },
+      { key: "messages", tokens: 28900 },
+      { key: "toolResults", tokens: 7000 },
+      { key: "mcpTools", tokens: 2900 },
+    ],
+  };
+
+  it("有生产者时原样透传拆分", () => {
+    const { out } = translate([
+      ev(0, "usage", { promptTokens: 10, completionTokens: 2, contextBreakdown: breakdown }),
+    ]);
+    expect(out[0].contextBreakdown).toStrictEqual(breakdown);
+  });
+
+  it("没有拆分字段的老日志不带这个字段（缺席不是 null）", () => {
+    const { out } = translate([ev(0, "usage", { promptTokens: 10, completionTokens: 2 })]);
+    expect(out[0]).not.toHaveProperty("contextBreakdown");
+    expect(Object.keys(out[0])).toStrictEqual(["type", "usage"]);
+  });
+
+  it("逐项丢掉坏类别，其余保留", () => {
+    const { out } = translate([
+      ev(0, "usage", {
+        promptTokens: 1,
+        contextBreakdown: {
+          ...breakdown,
+          parts: [
+            { key: "messages", tokens: 100 },
+            { key: "", tokens: 5 },
+            { key: "toolResults", tokens: 0 },
+            { key: "mcpTools", tokens: -1 },
+            { key: "systemPrompt", tokens: "3200" },
+            { key: "systemPrompt", tokens: Number.POSITIVE_INFINITY },
+            { key: 3, tokens: 5 },
+            null,
+            "messages",
+          ],
+        },
+      }),
+    ]);
+    expect(out[0].contextBreakdown.parts).toStrictEqual([{ key: "messages", tokens: 100 }]);
+  });
+
+  it("四个数字缺一个或不是有限数就整条不算拆分", () => {
+    const invalid = [
+      { ...breakdown, used: undefined },
+      { ...breakdown, used: "42000" },
+      { ...breakdown, used: Number.NaN },
+      { ...breakdown, window: 0 },
+      { ...breakdown, window: -128000 },
+      { ...breakdown, window: Number.POSITIVE_INFINITY },
+      { ...breakdown, percent: null },
+      { ...breakdown, compactAt: undefined },
+      { ...breakdown, compactAt: "102400" },
+      { ...breakdown, parts: [] },
+      { ...breakdown, parts: "x" },
+      { ...breakdown, parts: [{ key: "", tokens: 1 }] },
+    ];
+    for (const contextBreakdown of invalid) {
+      const { out } = translate([
+        ev(0, "usage", { promptTokens: 1, contextBreakdown }),
+      ]);
+      // The field is present in the payload, so the answer travels — it is
+      // `null`, which says "reported, not drawable", not "never reported".
+      expect(out[0].contextBreakdown).toBeNull();
+    }
+    // A payload without the field keeps the field off the message entirely.
+    const { out } = translate([ev(0, "usage", { promptTokens: 1, contextBreakdown: "x" })]);
+    expect(out[0]).not.toHaveProperty("contextBreakdown");
+  });
+});
+
+describe("compaction failed 的两种非失败原因", () => {
+  it("no_progress 是 dim 提示，不是红色失败", () => {
+    const { out } = translate([
+      ev(0, "compaction", { kind: "failed", reason: "no_progress", stage: "summary" }),
+    ]);
+    expect(out).toStrictEqual([
+      { type: "notice", level: "dim", text: "压缩没有进展（上一次摘要已经覆盖到这里）" },
+    ]);
+  });
+
+  it("no summarizable content 同样是 dim", () => {
+    const { out } = translate([
+      ev(0, "compaction", { kind: "failed", reason: "no summarizable content", stage: "summary" }),
+    ]);
+    expect(out).toStrictEqual([{ type: "notice", level: "dim", text: "没有可压缩的内容" }]);
+  });
+
+  it("其他原因仍然是带阶段的 warn", () => {
+    const { out } = translate([
+      ev(0, "compaction", { kind: "failed", reason: "provider_error", stage: "summary" }),
+    ]);
+    expect(out).toStrictEqual([
+      { type: "notice", level: "warn", text: "压缩失败（summary）: provider_error" },
+    ]);
+  });
+});
+
 describe("其他事件", () => {
   it("device_status → device_status 携带原始 state", () => {
     const { out } = translate([
@@ -458,6 +565,98 @@ describe("sessionEventsToMessages", () => {
     expect(sessionEventsToMessages([])).toStrictEqual([]);
     expect(sessionEventsToMessages(undefined)).toStrictEqual([]);
   });
+
+  it("todos 不变成对话消息", () => {
+    // The plan is interface state, not conversation content: turning it into a
+    // bubble would show the task list twice (once as chat, once as the card)
+    // and would also put it in the exported transcript.
+    const withTodos = sessionEventsToMessages([
+      ...events,
+      ev(5, "todos", { callId: "c2", items: [{ content: "读 datasheet", status: "completed" }] }),
+    ]);
+    expect(withTodos).toStrictEqual(sessionEventsToMessages(events));
+    expect(withTodos).toHaveLength(3);
+  });
+});
+
+describe("todos 计划", () => {
+  it("todosEvent 是导出的纯函数，坏 payload 返回 null", () => {
+    expect(typeof todosEvent).toBe("function");
+    expect(todosEvent(null)).toBeNull();
+    expect(todosEvent({})).toBeNull();
+    expect(todosEvent({ items: null })).toBeNull();
+  });
+
+  it("todos 事件翻译成 {type:'todos', items}，不产生未识别类型 notice", () => {
+    const { out } = translate([
+      ev(0, "assistant", { content: "", toolCalls: [{ id: "c1", name: "todo_write", arguments: {} }] }),
+      ev(1, "todos", { callId: "c1", items: [{ content: "读 datasheet", status: "in_progress" }] }, 0),
+    ]);
+    // `todos` must be in KNOWN_TYPES: otherwise every plan update turns into a
+    // "未识别的事件类型" warning stacked on top of the plan card.
+    expect(out.filter((item) => item.type === "notice")).toStrictEqual([]);
+    expect(out).toStrictEqual([
+      { type: "assistant_start" },
+      { type: "assistant_end" },
+      { type: "todos", items: [{ content: "读 datasheet", status: "in_progress" }] },
+    ]);
+  });
+
+  it("坏项被丢弃，状态非法则保留文字并按 pending", () => {
+    const { out } = translate([
+      ev(0, "todos", {
+        items: [
+          null,
+          {},
+          { content: "" },
+          { content: "   " },
+          { content: 123 },
+          "读 datasheet",
+          { content: "复位时序", status: "weird" },
+          { content: "写测试", status: "completed" },
+        ],
+      }),
+    ]);
+    // A row with no usable text is not a plan item at all; a row with a broken
+    // status is still the text the model meant to say, so it survives as
+    // `pending` rather than vanishing.
+    expect(out).toStrictEqual([
+      {
+        type: "todos",
+        items: [
+          { content: "复位时序", status: "pending" },
+          { content: "写测试", status: "completed" },
+        ],
+      },
+    ]);
+  });
+
+  it("items 不是数组时不产出任何事件", () => {
+    expect(translate([ev(0, "todos", { callId: "c1" })]).out).toStrictEqual([]);
+    expect(translate([ev(0, "todos", { items: "读 datasheet" })]).out).toStrictEqual([]);
+    expect(translate([ev(0, "todos", null)]).out).toStrictEqual([]);
+  });
+
+  it("空 items 是清空计划的合法指令，翻译为空数组而不是丢弃", () => {
+    const { out } = translate([ev(0, "todos", { callId: "c1", items: [] })]);
+    // The renderer removes the card when it receives an empty list; returning
+    // `null` here would leave a stale plan on screen forever.
+    expect(out).toStrictEqual([{ type: "todos", items: [] }]);
+  });
+
+  it("超长 content 截断到 500 字符并带省略号", () => {
+    const long = "x".repeat(600);
+    const { out } = translate([ev(0, "todos", { items: [{ content: long, status: "pending" }] })]);
+    const content = out[0].items[0].content;
+    expect(content).toHaveLength(501);
+    expect(content.endsWith("…")).toBe(true);
+    expect(content.slice(0, 500)).toBe("x".repeat(500));
+    // 500 is the kernel schema's own limit (defensive for older logs only).
+    const exact = translate([
+      ev(0, "todos", { items: [{ content: "y".repeat(500), status: "pending" }] }),
+    ]).out[0].items[0].content;
+    expect(exact).toBe("y".repeat(500));
+  });
 });
 
 describe("state / sessions / session_loaded", () => {
@@ -481,18 +680,106 @@ describe("state / sessions / session_loaded", () => {
     expect(state.models).toHaveLength(1);
   });
 
-  it("initialState 只在有真数据时带上下文占用与成本", () => {
+  it("initialState 没有上下文测量时 context 为 null，不是 0%", () => {
+    // R3: unknown is not zero. A `{tokens: 0, percent: 0}` default painted
+    // "0%" for a session nobody had measured.
     const bare = initialState({ sessionId: "s1" });
-    expect(bare.context).toStrictEqual({ tokens: 0, percent: 0 });
+    expect(bare.context).toBeNull();
     expect(bare).not.toHaveProperty("costUsd");
+    expect(bare.contextBreakdown).toBeNull();
+  });
 
+  it("initialState 原样带上真实的上下文占用与成本", () => {
     const measured = initialState({
       sessionId: "s1",
-      context: { tokens: 3000, percent: 36.6, window: 8192 },
+      context: { tokens: 1234, percent: 12.3, window: 128000 },
       costUsd: 0.42,
     });
-    expect(measured.context).toStrictEqual({ tokens: 3000, percent: 36.6, window: 8192 });
+    expect(measured.context).toStrictEqual({ tokens: 1234, percent: 12.3, window: 128000 });
     expect(measured.costUsd).toBe(0.42);
+  });
+
+  it("initialState 透传调用方给的分类拆分", () => {
+    const contextBreakdown = {
+      used: 42000,
+      window: 128000,
+      percent: 32.8,
+      compactAt: 102400,
+      parts: [{ key: "messages", tokens: 42000 }],
+    };
+    const state = initialState({ sessionId: "s1", contextBreakdown });
+    expect(state.contextBreakdown).toStrictEqual(contextBreakdown);
+    // The split and the total are independent fields: a caller with only a
+    // split still gets no fabricated `context`.
+    expect(state.context).toBeNull();
+  });
+
+  it("initialState 拒绝残缺的拆分，降级为 null", () => {
+    const valid = {
+      used: 10,
+      window: 100,
+      percent: 10,
+      compactAt: 80,
+      parts: [{ key: "messages", tokens: 10 }],
+    };
+    const invalid = [
+      undefined,
+      null,
+      "x",
+      [],
+      { ...valid, used: undefined },
+      { ...valid, window: 0 },
+      { ...valid, percent: Number.NaN },
+      { ...valid, compactAt: null },
+      { ...valid, parts: [] },
+      { ...valid, parts: [{ key: "nope", tokens: 0 }] },
+    ];
+    for (const contextBreakdown of invalid) {
+      expect(initialState({ contextBreakdown }).contextBreakdown).toBeNull();
+    }
+  });
+
+  it("initialState 只在 window 有限且为正时带上它", () => {
+    expect(initialState({ context: { tokens: 10, percent: 1 } }).context).toStrictEqual({
+      tokens: 10,
+      percent: 1,
+    });
+    for (const window of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, "8192", null]) {
+      expect(initialState({ context: { tokens: 10, percent: 1, window } }).context).toStrictEqual({
+        tokens: 10,
+        percent: 1,
+      });
+    }
+  });
+
+  it("initialState 拒绝残缺或非数值的上下文，降级为 null", () => {
+    // A record missing either half is not a measurement: filling the other
+    // with 0 would show a figure the kernel never reported.
+    const invalid = [
+      { tokens: 10 },
+      { percent: 1 },
+      { tokens: "10", percent: 1 },
+      { tokens: 10, percent: "1" },
+      { tokens: Number.NaN, percent: 1 },
+      { tokens: 10, percent: Number.POSITIVE_INFINITY },
+      {},
+    ];
+    for (const context of invalid) {
+      expect(initialState({ context }).context).toBeNull();
+    }
+    expect(initialState({ context: [] }).context).toBeNull();
+    expect(initialState({ context: "3000" }).context).toBeNull();
+    expect(initialState({ context: null }).context).toBeNull();
+  });
+
+  it("initialState 接受真实的 0 测量：0 是数字，缺字段才是未知", () => {
+    // The kernel never writes a zero measurement (query.ts skips it), but
+    // when a caller does hand over one it is a reported figure, not a gap:
+    // the "unknown" sentinel is `null`, not a magic zero.
+    expect(initialState({ context: { tokens: 0, percent: 0 } }).context).toStrictEqual({
+      tokens: 0,
+      percent: 0,
+    });
   });
 
   it("sessionsEvent 把 workdir 映射为 cwd 并给出 renderer 需要的字段", () => {
@@ -549,6 +836,8 @@ describe("state / sessions / session_loaded", () => {
     expect(event).toStrictEqual({
       type: "session_loaded",
       messages: [{ role: "user", text: "hi", index: 0, images: 0 }],
+      // This log has no `todos` event, so the field says "never had a plan".
+      todos: null,
       cwd: "E:/p",
       mode: "read-only",
       effort: "auto",
@@ -568,6 +857,51 @@ describe("state / sessions / session_loaded", () => {
     // No priced call at all: the field is absent, so the renderer can hide the
     // row instead of printing "$0.00" for a provider that has no price.
     expect(sessionLoadedEvent([ev(0, "usage", { promptTokens: 1 })])).not.toHaveProperty("costUsd");
+  });
+
+  it("sessionLoadedEvent 取最后一条 todos 的 items", () => {
+    const event = sessionLoadedEvent([
+      ev(0, "user", { content: "hi" }),
+      ev(1, "todos", { callId: "c1", items: [{ content: "旧计划", status: "pending" }] }),
+      ev(2, "todos", { callId: "c2", items: [{ content: "新计划", status: "in_progress" }] }),
+    ]);
+    // The latest plan wins: reopening a session must show where the work
+    // actually stopped, not the first list the model ever wrote.
+    expect(event.todos).toStrictEqual([{ content: "新计划", status: "in_progress" }]);
+  });
+
+  it("sessionLoadedEvent 没有 todos 时为 null", () => {
+    expect(sessionLoadedEvent([ev(0, "user", { content: "hi" })]).todos).toBeNull();
+    expect(sessionLoadedEvent([]).todos).toBeNull();
+    expect(sessionLoadedEvent(undefined).todos).toBeNull();
+  });
+
+  it("sessionLoadedEvent 只有坏 todos 时也为 null", () => {
+    const event = sessionLoadedEvent([ev(0, "todos", { callId: "c1" })]);
+    // A `todos` event that carried no list is not a plan; `null` says the
+    // session never had one, which is what the renderer acts on.
+    expect(event.todos).toBeNull();
+  });
+
+  it("sessionLoadedEvent 跳过坏事件，保留最后一条可翻译的计划", () => {
+    const event = sessionLoadedEvent([
+      ev(0, "todos", { callId: "c1", items: [{ content: "读 datasheet", status: "pending" }] }),
+      ev(1, "todos", { callId: "c2" }),
+    ]);
+    // A malformed line is one this module cannot read, not an instruction to
+    // forget the plan: `null` here would claim the session never had one.
+    expect(event.todos).toStrictEqual([{ content: "读 datasheet", status: "pending" }]);
+  });
+
+  it("sessionLoadedEvent 的最后一条是清空指令时保留空数组", () => {
+    const event = sessionLoadedEvent([
+      ev(0, "todos", { callId: "c1", items: [{ content: "旧计划", status: "pending" }] }),
+      ev(1, "todos", { callId: "c2", items: [] }),
+    ]);
+    // Unlike "no plan ever", this is "the model cleared it": the two are
+    // different states and the renderer draws neither card, but keeping the
+    // distinction honest costs nothing.
+    expect(event.todos).toStrictEqual([]);
   });
 });
 

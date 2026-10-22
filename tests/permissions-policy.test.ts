@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { builtinRules, evaluatePolicy, toolAccess } from "../src/permissions/policy.js";
 import type { PolicyEvaluation } from "../src/permissions/policy.js";
 import type { SourcedRule } from "../src/permissions/types.js";
-import { fsTool as realFsTool } from "../src/tools/fs.js";
+import {
+  editTool as realEditTool,
+  multieditTool as realMultieditTool,
+  readTool as realReadTool,
+  writeTool as realWriteTool,
+} from "../src/tools/fs.js";
 import { shellTool as realShellTool } from "../src/tools/shell.js";
 import type { ToolDef } from "../src/tools/types.js";
 
@@ -18,10 +23,9 @@ function tool(partial: Partial<ToolDef<any>>): ToolDef<any> {
 const readTool = tool({ name: "grep", annotations: { readOnly: true } });
 const shell = tool({ name: "shell", annotations: { destructive: true } });
 const unknownTool = tool({ name: "mcp__x__y", annotations: {} });
-const fsTool = tool({
-  name: "fs",
-  access: (input: any) => (input.op === "read" ? "read" : "write"),
-});
+const writeTool = tool({ name: "write", access: () => "write" });
+const editTool = tool({ name: "edit", access: () => "write" });
+const multieditTool = tool({ name: "multiedit", access: () => "write" });
 
 function rule(
   source: SourcedRule["source"],
@@ -101,9 +105,13 @@ describe("toolAccess", () => {
   });
 
   it("passes args to access", () => {
-    expect(toolAccess(fsTool, { op: "read" })).toBe("read");
-    expect(toolAccess(fsTool, { op: "write" })).toBe("write");
-    expect(toolAccess(fsTool, { op: "edit" })).toBe("write");
+    const opTool = tool({
+      name: "op_tool",
+      access: (input: any) => (input.op === "read" ? "read" : "write"),
+    });
+    expect(toolAccess(opTool, { op: "read" })).toBe("read");
+    expect(toolAccess(opTool, { op: "write" })).toBe("write");
+    expect(toolAccess(opTool, { op: "edit" })).toBe("write");
   });
 
   it("throws on access returning an invalid value", () => {
@@ -128,11 +136,15 @@ describe("toolAccess", () => {
 });
 
 describe("real tool access declarations", () => {
-  it("fsTool reports read only for op=read", () => {
-    expect(toolAccess(realFsTool, { op: "read", path: "a.txt" })).toBe("read");
-    expect(toolAccess(realFsTool, { op: "write", path: "a.txt", content: "x" })).toBe("write");
+  it("readTool reports read, the three write tools report write", () => {
+    expect(toolAccess(realReadTool, { path: "a.txt" })).toBe("read");
+    expect(toolAccess(realWriteTool, { path: "a.txt", content: "x" })).toBe("write");
+    expect(toolAccess(realEditTool, { path: "a.txt", oldText: "a", newText: "b" })).toBe("write");
     expect(
-      toolAccess(realFsTool, { op: "edit", path: "a.txt", oldText: "a", newText: "b" }),
+      toolAccess(realMultieditTool, {
+        path: "a.txt",
+        edits: [{ oldText: "a", newText: "b" }],
+      }),
     ).toBe("write");
   });
 
@@ -142,29 +154,51 @@ describe("real tool access declarations", () => {
   });
 
   it("evaluates the real tools against presets", () => {
-    expect(evaluate("diagnose", [], realFsTool, { op: "write", path: "a.txt", content: "x" }).action).toBe(
-      "ask",
-    );
     expect(
-      evaluate("workspace-write", [], realFsTool, { op: "write", path: "a.txt", content: "x" }).action,
+      evaluate("diagnose", [], realWriteTool, { path: "a.txt", content: "x" }).action,
+    ).toBe("ask");
+    expect(
+      evaluate("workspace-write", [], realWriteTool, { path: "a.txt", content: "x" }).action,
     ).toBe("allow");
     expect(evaluate("read-only", [], realShellTool, { command: "node -v" }).action).toBe("deny");
   });
 });
 
 describe("builtinRules", () => {
-  it("returns the fs write/edit allow rule for workspace-write", () => {
+  it("returns one allow rule per write tool for workspace-write", () => {
     expect(builtinRules("workspace-write")).toEqual([
       {
         rule: {
-          tool: "fs",
-          params: [{ key: "op", in: ["write", "edit"] }],
+          tool: "write",
           action: "allow",
-          reason: "preset:workspace-write:fs-write",
+          reason: "preset:workspace-write:write",
+        },
+        source: "builtin",
+      },
+      {
+        rule: {
+          tool: "edit",
+          action: "allow",
+          reason: "preset:workspace-write:edit",
+        },
+        source: "builtin",
+      },
+      {
+        rule: {
+          tool: "multiedit",
+          action: "allow",
+          reason: "preset:workspace-write:multiedit",
         },
         source: "builtin",
       },
     ]);
+  });
+
+  it("does not use a wildcard that would also cover shell", () => {
+    const patterns = builtinRules("workspace-write").map((entry) => entry.rule.tool);
+
+    expect(patterns).toEqual(["write", "edit", "multiedit"]);
+    expect(patterns.some((pattern) => pattern.includes("*") || pattern.includes("?"))).toBe(false);
   });
 
   it.each(["read-only", "diagnose", "danger-full-access"] as const)(
@@ -182,11 +216,14 @@ describe("evaluatePolicy preset matrix", () => {
     expect(evaluate("diagnose", [], unknownTool).action).toBe("deny");
   });
 
-  it("diagnose asks for fs writes", () => {
-    const result = evaluate("diagnose", [], fsTool, { op: "write" });
-    expect(result.action).toBe("ask");
-    expect(result.access).toBe("write");
-    expect(result.reason).toBe("preset:diagnose:write");
+  it("diagnose asks for every file write tool", () => {
+    for (const writeCandidate of [writeTool, editTool, multieditTool]) {
+      const result = evaluate("diagnose", [], writeCandidate);
+      expect(result.action).toBe("ask");
+      expect(result.access).toBe("write");
+      expect(result.reason).toBe("preset:diagnose:write");
+    }
+    expect(evaluate("diagnose", [], readTool).action).toBe("allow");
   });
 
   it("read-only allows reads and denies writes and unknown", () => {
@@ -195,14 +232,21 @@ describe("evaluatePolicy preset matrix", () => {
     expect(evaluate("read-only", [], unknownTool).action).toBe("deny");
   });
 
-  it("workspace-write allows fs writes through the builtin rule and asks for shell", () => {
-    const write = evaluate("workspace-write", [], fsTool, { op: "write" });
-    expect(write.action).toBe("allow");
-    expect(write.source).toBe("builtin");
-    expect(write.ruleIndex).toBe(0);
-    expect(write.reason).toBe("preset:workspace-write:fs-write");
-    expect(evaluate("workspace-write", [], fsTool, { op: "edit" }).action).toBe("allow");
+  it("workspace-write allows write/edit/multiedit through the builtin rules and still asks for shell", () => {
+    const expected = [
+      [writeTool, "preset:workspace-write:write", 0],
+      [editTool, "preset:workspace-write:edit", 1],
+      [multieditTool, "preset:workspace-write:multiedit", 2],
+    ] as const;
+    for (const [candidate, reason, ruleIndex] of expected) {
+      const result = evaluate("workspace-write", [], candidate);
+      expect(result.action).toBe("allow");
+      expect(result.source).toBe("builtin");
+      expect(result.ruleIndex).toBe(ruleIndex);
+      expect(result.reason).toBe(reason);
+    }
     expect(evaluate("workspace-write", [], readTool).action).toBe("allow");
+    // shell 没有被通配符顺带放行:它仍是 ask,不是 allow。
     expect(evaluate("workspace-write", [], shell).action).toBe("ask");
     expect(evaluate("workspace-write", [], unknownTool).action).toBe("deny");
   });
@@ -266,36 +310,26 @@ describe("evaluatePolicy user rules", () => {
 
   it("counts builtin rules appended after configured rules in ruleIndex", () => {
     const configured = [rule("user", "shell", "allow")];
-    const result = evaluate("workspace-write", configured, fsTool, { op: "write" });
+    const result = evaluate("workspace-write", configured, writeTool);
     expect(result.action).toBe("allow");
     expect(result.source).toBe("builtin");
     expect(result.ruleIndex).toBe(1);
   });
 
   it("lets an earlier configured allow beat the builtin allow", () => {
-    const configured = [rule("user", "fs", "allow", { params: [{ key: "op", eq: "write" }] })];
-    const result = evaluate("workspace-write", configured, fsTool, { op: "write" });
+    const configured = [rule("user", "write", "allow")];
+    const result = evaluate("workspace-write", configured, writeTool);
     expect(result.source).toBe("user");
     expect(result.ruleIndex).toBe(0);
   });
 
   it("lets a configured deny or ask beat the workspace-write builtin allow", () => {
-    const denied = evaluate(
-      "workspace-write",
-      [rule("user", "fs", "deny")],
-      fsTool,
-      { op: "write" },
-    );
+    const denied = evaluate("workspace-write", [rule("user", "write", "deny")], writeTool);
     expect(denied.action).toBe("deny");
     expect(denied.source).toBe("user");
     expect(denied.ruleIndex).toBe(0);
 
-    const asked = evaluate(
-      "workspace-write",
-      [rule("user", "fs", "ask")],
-      fsTool,
-      { op: "write" },
-    );
+    const asked = evaluate("workspace-write", [rule("user", "write", "ask")], writeTool);
     expect(asked.action).toBe("ask");
     expect(asked.source).toBe("user");
     expect(asked.ruleIndex).toBe(0);

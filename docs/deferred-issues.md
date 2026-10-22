@@ -460,7 +460,7 @@
 - **影响**: 真实后端接入时端点路径与 schema 仍需重新约定;UI 无法区分「已受理 / 参数拒绝 / 网络失败」,也无法安全重试或去重。
 - **触发升级条件**: 接入首个真实 action 端点;需要失败重试、幂等或前端可观测的提交状态。
 - **修复建议**: 定义 action 请求/响应 schema(`requestId`、`sessionId`、`text`;202 受理、4xx 校验失败、5xx 可重试),前端落提交中/失败态,并按 `requestId` 去重。
-- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`,见 D-139):`POST /api/actions` 已落地并定义 `{ text, sessionId? }` 与 202/400/404/409/500/503 契约;`/api/events` 见 D-063;审批端点与 UI 见 D-137。旧稿中的 action `requestId` 字段未采用,去重只保留在审批端点。
+- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`,见 D-139):`POST /api/actions` 已落地并定义 `{ text, sessionId? }` 与 202/400/404/409/500/503 契约;`/api/events` 见 D-063;审批端点与 UI 见 D-137。旧稿中的 action `requestId` 字段未采用,去重只保留在审批端点。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：`POST /api/actions` 端点随 `src/server/api.ts` 一并移除；同一套启动语义现在由 `runner.start()` 的 `RunnerError.code`（`invalid_text` / `invalid_session_id` / `session_busy` / …）承载。
 
 ### D-052 · StatusBar 状态点由 props 是否有值推断
 
@@ -536,7 +536,7 @@
 ### D-060 · SSE 无后端时输入处理
 
 - **发现**: 2026-10-18,Task 11 第一轮整体审查修复。
-- **状态**: 已解决(2026-10-18,Task 14/15)。
+- **状态**: 已解决(2026-10-18,Task 14/15)。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：`VITE_ACTION_URL` / `VITE_EVENT_STREAM_URL` 与 SSE 通道早已随 Preact 工作台删除，本轮再随 bridge 与 HTTP 层彻底移除。
 - **原现象**: `main.tsx` 中 `VITE_ACTION_URL` 未配置时 `console.warn` 后返回;配置了 `VITE_EVENT_STREAM_URL` 但无 action 端点时,Composer 仍清空输入且界面无失败提示。D-053 记录的是输入被清空,这里记录的是 SSE 与 action 两条通道不同步时的处理缺口。
 - **修复**: 未配置 `VITE_ACTION_URL` 时 `onSend` 不传入,`Composer` 发送按钮禁用并显示「未配置提交端点,输入不会发送」;当时未配置 `VITE_EVENT_STREAM_URL` 时不建立实时流。2026-10-20 事件总线后默认连接 `/api/events`,两条通道仍不互相暗示已提交。
 - **残余**: action 已实现(2026-10-20,见 D-139);事件流见 D-063;审批见 D-137(均已解决)。
@@ -564,7 +564,7 @@
 - **影响**: 工作台只能读取既有会话与知识库,不能发起新对话、接收实时 LoopEvent 或回传写操作结果;复位提示会停留在「执行中,等待工具结果」。
 - **触发升级条件**: 接入 `runSession`/`query` 或 MCP 事件;需要提交、重试、中断;真机调试写入。
 - **修复建议**: 定义 action schema(`requestId`、`sessionId`、`text`,202 受理/4xx/5xx)与 SSE 事件(`LoopEvent` JSON、`id`/`Last-Event-ID` 重放);501 迁移为真实实现并补端到端测试。
-- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus`):`/api/events` 固定 501 已替换为真实 SSE 单会话事件流,支持 `since`/`Last-Event-ID` 补播、`tool_started`/`mcp_status`/`device_status` 投影、心跳/背压/`stream_end`/`stream_error`;契约见 README「实时事件流」,端到端覆盖见 `tests/events-e2e.test.ts`。`/api/actions` 已于 2026-10-20 落地(见 D-139),Web 写操作与审批见 D-051/D-137。
+- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus`):`/api/events` 固定 501 已替换为真实 SSE 单会话事件流,支持 `since`/`Last-Event-ID` 补播、`tool_started`/`mcp_status`/`device_status` 投影、心跳/背压/`stream_end`/`stream_error`;契约见 README「实时事件流」,端到端覆盖见 `tests/events-e2e.test.ts`。`/api/actions` 已于 2026-10-20 落地(见 D-139),Web 写操作与审批见 D-051/D-137。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：SSE 端点、`event-stream.ts` 与 `tests/events-e2e.test.ts` 均已删除；桌面侧改由宿主 `LogTailEventSource` 跟随本地日志并经 NDJSON 推送。
 
 ### D-064 · 知识库扫描深度与条目上限静默截断
 
@@ -573,7 +573,7 @@
 - **影响**: 大型或深层知识库会被静默裁剪,界面看起来像完整索引;V6 只覆盖小规模 fixture,无法暴露该边界。
 - **触发升级条件**: 知识库超过 2000 条目或目录深度超过 8;需要完整索引或性能上限提示。
 - **修复建议**: 响应增加 `truncated` / `limits` 字段并在知识库面板提示「已截断」;上限可配置或改为按需懒加载子目录。
-- **状态**: **已解决**(2026-10-22,`src/server/kb-locate.ts`):扫描迁出 `api.ts`,旧 `scanKb` 删除。`GET /api/kb` 现返回 `truncated`(深度 8 / 条目 2000 / 文件数 20000 任一触顶即为真);触顶时 `fileCount` 只作「至少 N」读。子目录读不动时也置 `truncated`——静默空 `children` 会被读成「该目录是空的」,那是不诚实的。上限仍不可配置,`truncated` 让前端能如实提示,故本项关闭;「按需懒加载」未做,若语料规模继续增长再议。
+- **状态**: **已解决**(2026-10-22,`src/server/kb-locate.ts`):扫描迁出 `api.ts`,旧 `scanKb` 删除。`GET /api/kb` 现返回 `truncated`(深度 8 / 条目 2000 / 文件数 20000 任一触顶即为真);触顶时 `fileCount` 只作「至少 N」读。子目录读不动时也置 `truncated`——静默空 `children` 会被读成「该目录是空的」,那是不诚实的。上限仍不可配置,`truncated` 让前端能如实提示,故本项关闭;「按需懒加载」未做,若语料规模继续增长再议。**2026-10-22 补充**:`GET /api/kb` 端点已随 HTTP 层删除,同一份扫描逻辑（`src/server/kb-locate.ts`）改由宿主 `getKb` 命令调用,`truncated` / `fileCount` 的语义未变,本条的结论仍然成立。
 
 ### D-065 · 会话列表坏目录进 errors 但界面未展示
 
@@ -599,7 +599,7 @@
 - **影响**: 会话、知识库目录结构与事件内容可能被同机浏览器中的其他页面读取;未来 `/api/actions` 实现后风险升级为写操作。
 - **触发升级条件**: 实现 `/api/actions`;或需要在浏览器中承载不可信来源页面。
 - **修复建议**: 校验 `Host` 仅为 `127.0.0.1:<port>` / `localhost:<port>`,拒绝跨源 `Origin`;或引入启动时生成的一次性 token。
-- **状态**: **已解决**(2026-10-19,fix/p0-a-tier): API 请求校验 Host/Origin 必须为 loopback 且端口与监听端口一致;跨源返回 403 `forbidden_host`/`forbidden_origin`;补 raw Host/Origin 集成测试。
+- **状态**: **已解决**(2026-10-19,fix/p0-a-tier): API 请求校验 Host/Origin 必须为 loopback 且端口与监听端口一致;跨源返回 403 `forbidden_host`/`forbidden_origin`;补 raw Host/Origin 集成测试。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：HTTP 层与其 Host/Origin 校验一并移除，桌面形态没有跨源入口，这条加固不再有对象。
 
 ### D-068 · Windows 尾随点目录名与实测行为不一致
 
@@ -996,7 +996,7 @@
 - **影响**: 默认 `diagnose` 下写工具在 headless/Web 无法经人工批准执行,只能改预设或配置放行;审批记录只能从会话日志离线查看。
 - **触发升级条件**: 阶段 2 接入 Web 审批/SSE;需要人工在 UI 中批准工具调用;需要实时展示待审批请求。
 - **修复建议**: 定义审批请求/响应事件与 HTTP API,与 `permission_decision` 同源;前端展示工具名、参数摘要与原因并回传 allow/deny;保持“审计先于执行”和超时/取消语义。
-- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`,Web 部分):Web 进程注入审批桥,`ask` 经 `approval_request` + `POST /api/approvals` 完成人工批准或拒绝,`/api/actions` 不再返回 501;headless demo 与未注入 prompter 的库调用仍按 `approval_unavailable` deny(设计如此)。实现见 D-137。
+- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`,Web 部分):Web 进程注入审批桥,`ask` 经 `approval_request` + `POST /api/approvals` 完成人工批准或拒绝,`/api/actions` 不再返回 501;headless demo 与未注入 prompter 的库调用仍按 `approval_unavailable` deny(设计如此)。实现见 D-137。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：其中 Web/SSE/HTTP 那一半已无对象——审批桥改由 `SessionRunner` 内建并经 `runner.decide()` 回传决策，不再有 `POST /api/approvals`。**headless 下 `ask` 一律 deny（`approval_unavailable`）这半条仍然成立**，见 README「ask 与审批」。
 
 ### D-113 · `paramsPreview` 可能保留最多 120 字符的敏感参数片段
 
@@ -1185,7 +1185,7 @@
 - **影响**: 同时观察多个会话需要多个连接/标签页;无法在单一连接上做全局活动列表或跨会话聚合。连接数随并发会话线性增长。
 - **触发升级条件**: 需要同时实时观察多个会话、全局事件面板,或连接数成为瓶颈。
 - **修复建议**: 在保持单会话帧语义的前提下增加多路复用协议(订阅/退订帧或每帧带 `sessionId`),或提供全局流并对客户端按会话过滤;复用现有 `SessionEventSource` 接口,避免另造事件模型。
-- **状态**: 未解决;本轮按 spec 明确只做单会话流。
+- **状态**: 未解决;本轮按 spec 明确只做单会话流。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：`GET /api/events` 与多连接/多路复用的话题随 SSE 通道一起消失，桌面宿主本就只跟随一个会话。
 
 ### D-134 · 进程内低延迟适配器未实现,当前依赖 200ms 日志轮询
 
@@ -1212,7 +1212,7 @@
 - **影响**: 首屏或长时间断线后的恢复可能很慢;慢客户端会长期占住连接;未量化 CPU/内存/背压表现,无法给出容量承诺。
 - **触发升级条件**: 会话日志达到数十 MB、断线跨越大量事件,或实测补播超过可接受时延。
 - **修复建议**: 压测并记录基准;补播增加总预算/分批让出事件循环、可选分页或快照压缩;对超长补播返回明确的可恢复错误并让客户端换用分页游标。
-- **状态**: 未解决;本轮只保证正确性与单帧超时有界。
+- **状态**: 未解决;本轮只保证正确性与单帧超时有界。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：SSE 补播路径与 `event-stream.ts` 已删除，不再有「补播占用连接」这回事。注意 D-134 的 200ms 轮询延迟仍成立。
 
 ### D-137 · Web 审批 API/UI 未实现;`approval_request` 仅为保留类型
 
@@ -1221,7 +1221,7 @@
 - **影响**: 在 Web 工作台无法响应 `ask` 审批;交互式审批仍依赖库层 `PermissionPrompter`(CLI/宿主)。Web 只能事后看到允许/拒绝结果,无法在诊断过程中操作。
 - **触发升级条件**: Web 工作台发起需要 `ask` 审批的会话,或需要浏览器内完成批准/拒绝。
 - **修复建议**: 定义 `approval_request` 事件与 `POST /api/approvals`(requestId/decision/超时/abort 语义),UI 在守卫区提供批准/拒绝并回显最终 `permission_decision`;复用现有审批队列与审计,不新造权限模型。
-- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`):新增 `approval_request` 事件(`src/session/types.ts`、`src/session/persistence.ts`);审批桥 `src/server/approvals.ts` 负责写入事件、等待决策并区分首次/重复/相反/超时;`src/server/runner.ts` 注入 `PermissionPrompter`、`home` 与 `onSession`;`POST /api/approvals`(`src/server/api.ts`)回传 `{ sessionId, requestId, decision }`;前端 `ApprovalNotice`(`src/ui/components/conversation/approval-notice.tsx`)经 `permission_decision` 投影终态;崩溃恢复在 `src/session/session.ts` 补 `approval_aborted: crash_recovery`。测试:`tests/approvals-bridge.test.ts`、`tests/server/approvals-api.test.ts`、`tests/web-approval-e2e.test.ts`、`tests/ui/components/approval-notice.test.tsx`、`tests/ui/transcript.test.ts`、`tests/session-persistence.test.ts`。headless 无 prompter 时仍是 `ask` → deny(`approval_unavailable`);本轮残余边界见 D-145 ~ D-152。
+- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`):新增 `approval_request` 事件(`src/session/types.ts`、`src/session/persistence.ts`);审批桥 `src/server/approvals.ts` 负责写入事件、等待决策并区分首次/重复/相反/超时;`src/server/runner.ts` 注入 `PermissionPrompter`、`home` 与 `onSession`;`POST /api/approvals`(`src/server/api.ts`)回传 `{ sessionId, requestId, decision }`;前端 `ApprovalNotice`(`src/ui/components/conversation/approval-notice.tsx`)经 `permission_decision` 投影终态;崩溃恢复在 `src/session/session.ts` 补 `approval_aborted: crash_recovery`。测试:`tests/approvals-bridge.test.ts`、`tests/server/approvals-api.test.ts`、`tests/web-approval-e2e.test.ts`、`tests/ui/components/approval-notice.test.tsx`、`tests/ui/transcript.test.ts`、`tests/session-persistence.test.ts`。headless 无 prompter 时仍是 `ask` → deny(`approval_unavailable`);本轮残余边界见 D-145 ~ D-152。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：其中 `POST /api/approvals` 端点、`tests/server/approvals-api.test.ts`、`tests/web-approval-e2e.test.ts` 与 Preact 侧的 `ApprovalNotice` 均已删除；审批桥本身（`src/server/approvals.ts`）与 `runner.decide()` 保留，桌面宿主改走这条路径。
 
 ### D-138 · 实时事件流的慢客户端检测依赖单帧写超时,写超时前不感知停读
 
@@ -1230,7 +1230,7 @@
 - **影响(残余)**: 停读客户端在写超时(默认 30s)前仍占一个连接与有界队列;超时值可配置,未按会话/带宽自适应。
 - **触发升级条件**: 需要秒级发现停读客户端;并发连接数成为瓶颈;需要按带宽预算而非固定超时判断慢客户端。
 - **修复建议**: 用 `res.socket` 的 `writableLength`/`drain` 事件驱动的心跳探测替代固定超时,或在心跳帧上也加超时判定;补跨平台(Windows/macOS)的真实 socket 停读用例进回归。
-- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus` 复验修复):新增 `liveWriteTimeoutMs`(默认沿用 `replayTimeoutMs`),实时单帧写超时映射为 `slow_consumer` 并关闭;`tests/server/event-stream.test.ts` 新增「实时阶段完全不读的客户端在写超时后收到 slow_consumer 并关闭」。残余的「超时前仍占连接」按本条目保留。
+- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus` 复验修复):新增 `liveWriteTimeoutMs`(默认沿用 `replayTimeoutMs`),实时单帧写超时映射为 `slow_consumer` 并关闭;`tests/server/event-stream.test.ts` 新增「实时阶段完全不读的客户端在写超时后收到 slow_consumer 并关闭」。残余的「超时前仍占连接」按本条目保留。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：慢客户端判定属于 SSE 服务端逻辑，随 `event-stream.ts` 与 `tests/server/event-stream.test.ts` 一并移除。
 
 ### D-139 · `POST /api/actions` 仍为 501,Web 提交通道未实现
 
@@ -1239,7 +1239,7 @@
 - **影响**: Web 工作台只读:可以订阅实时事件与回放,但不能发起新会话、追加输入或响应审批。
 - **触发升级条件**: 需要从 Web 发起 runSession 或提交审批决定。
 - **修复建议**: 见 D-051 的 action schema(`requestId`/`sessionId`/`text`、202/4xx/5xx)与 D-137 的审批端点;两者共用同一套请求去重与错误映射。
-- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`):`POST /api/actions` 已落地(`src/server/api.ts` + `src/server/runner.ts`),接受 `{ text, sessionId? }`,缺省新建会话、带 id 追加输入,返回 202 `{ sessionId, created }`;错误码为 400 `invalid_body`/`invalid_text`/`invalid_session_id`、404 `unknown_session`、409 `session_busy`、503 `model_unavailable`/`session_start_timeout`;写端点强制 loopback `Origin`。测试:`tests/server/runner.test.ts`、`tests/server/api.test.ts`、`tests/server/approvals-api.test.ts`、`tests/web-approval-e2e.test.ts`。旧 D-051 中的 `requestId` 字段未采用,去重只保留在审批端点。
+- **状态**: **已解决**(2026-10-20,`feat/m2-web-approval`):`POST /api/actions` 已落地(`src/server/api.ts` + `src/server/runner.ts`),接受 `{ text, sessionId? }`,缺省新建会话、带 id 追加输入,返回 202 `{ sessionId, created }`;错误码为 400 `invalid_body`/`invalid_text`/`invalid_session_id`、404 `unknown_session`、409 `session_busy`、503 `model_unavailable`/`session_start_timeout`;写端点强制 loopback `Origin`。测试:`tests/server/runner.test.ts`、`tests/server/api.test.ts`、`tests/server/approvals-api.test.ts`、`tests/web-approval-e2e.test.ts`。旧 D-051 中的 `requestId` 字段未采用,去重只保留在审批端点。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：`src/server/api.ts` 与 `tests/server/api.test.ts` / `approvals-api.test.ts` / `web-approval-e2e.test.ts` 已删除；运行器（`src/server/runner.ts`）与 `tests/server/runner.test.ts` 保留，`session_busy` / `model_unavailable` 等 code 现由宿主直接消费。
 
 ### D-140 · 会话列表与 `isValidSessionId` 的 id 规则已统一,但大小写别名(Windows)未处理
 
@@ -1248,7 +1248,7 @@
 - **影响**: 列表不再给出不可打开的 id;大小写别名与尾随点语义(D-068/D-069)不受本次改动影响。
 - **触发升级条件**: 需要跨平台一致的 id 字符串语义。
 - **修复建议**: 按 D-069 处理。
-- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus` 复验修复):`/api/sessions` 改用 `isValidSessionId`,`tests/server/api.test.ts` 新增「列表与详情使用同一 id 规则」用例。
+- **状态**: **已解决**(2026-10-20,`feat/m2-event-bus` 复验修复):`/api/sessions` 改用 `isValidSessionId`,`tests/server/api.test.ts` 新增「列表与详情使用同一 id 规则」用例。**2026-10-22 补充**:该 HTTP 端点与 `tests/server/api.test.ts` 已随浏览器形态删除;id 规则现由宿主 `listSessions` / `loadSession` 与 `src/server/session-admin.ts` 共用 `isValidSessionId`,结论不变。
 
 ### D-141 · `readSessionHeader` 曾重复实现,列表与详情校验规则可能漂移
 
@@ -1293,7 +1293,7 @@
 - **影响**: 重启期间页面卡片停留在 pending,只能等 `deadlineAt` 到点后本地显示已过期;日志在 resume 前不完整。不会误执行工具。
 - **触发升级条件**: 需要跨重启保留待审批状态,或重启后继续同一次审批。
 - **修复建议**: 以 `approval_request` 为源恢复待审批队列并重新等待,或明确重启即失效、在服务启动时批量补 deny 审计。
-- **状态**: 未解决;本轮按「重启即失效、resume 补审计」处理。
+- **状态**: 未解决;本轮按「重启即失效、resume 补审计」处理。（2026-10-22 说明：浏览器形态下线后不再有「重启前未完成的 HTTP 请求」，「重启即失效」这条结论对桌面宿主同样成立——宿主进程重启时 pending 审批一样丢失，`resumeSession` 的 `approval_aborted: crash_recovery` 补偿是唯一恢复路径。）
 
 ### D-146 · 写端点只有 loopback Origin 校验,无 token/CSRF
 
@@ -1302,7 +1302,7 @@
 - **影响**: 同机其他进程或非浏览器客户端只要能以 loopback Origin 发请求,就能提交动作或审批;`Sec-Fetch-Site` 只覆盖浏览器真正跨站的请求,同 site 不同端口的页面(如 `localhost:5173` 写 `127.0.0.1:5174`)标记为 `same-site`,由 `Origin` 的 loopback + 端口校验拦截;不覆盖非浏览器客户端或同源页面内的脚本。该机制只阻断跨源网页(DNS rebinding / 跨源 POST),不是本机攻击者隔离。
 - **触发升级条件**: 多用户、远程访问,或需要防本机其他应用。
 - **修复建议**: 引入一次性 token / 会话 cookie + CSRF 头,或改用 Unix socket / 命名管道并做 OS 级鉴权。
-- **状态**: 未解决;按 2026-10-20 决策不引入 token;浏览器跨源面已由 `Sec-Fetch-Site` 检查收紧。
+- **状态**: 未解决;按 2026-10-20 决策不引入 token;浏览器跨源面已由 `Sec-Fetch-Site` 检查收紧。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：写端点与整套 `Host`/`Origin`/`Sec-Fetch-Site` 校验随 HTTP 层移除，本机进程经 HTTP 提交动作/审批的通道不再存在。同一类风险（本机其他进程能读到明文配置）另见 D-174。
 
 ### D-147 · 审批摘要可能在页面上暴露敏感片段
 
@@ -1311,7 +1311,7 @@
 - **影响**: 设备序列号、绝对路径、令牌片段会出现在页面与日志中;截图、投屏或共享时泄露。
 - **触发升级条件**: 接入含凭据的工具;审批界面需要共享或合规审查。
 - **修复建议**: 按 D-113 增加键级脱敏或默认关闭 preview;卡片仅展示 `paramsKeys` 与 `paramsDigest`。
-- **状态**: 未解决;与 D-113 同根因,此处只登记 Web 审批的展示面。
+- **状态**: 未解决;与 D-113 同根因,此处只登记 Web 审批的展示面。（2026-10-22 说明：浏览器形态虽已下线，但审批条在桌面形态同样渲染 `paramsPreview`，本条描述的展示面风险仍然成立。）
 
 ### D-148 · 单会话串行运行,运行中不能追加或取消
 
@@ -1320,7 +1320,7 @@
 - **影响**: 长工具调用期间无法追加输入或纠正指令,只能等待结束或重启服务;前端没有取消按钮。
 - **触发升级条件**: 需要中途取消/插话/排队,或工具执行时长成为交互瓶颈。
 - **修复建议**: 增加取消端点(暴露 `AbortController`)与有界队列,并在 UI 显示运行中状态与取消入口。
-- **状态**: 未解决;本轮按 spec 显式拒绝并发。
+- **状态**: 未解决;本轮按 spec 显式拒绝并发。**2026-10-22 说明**：`POST /api/actions` 已删除，但同一约束在 `runner.start()` 里原样保留（`session_busy`），桌面宿主在 prompt 前就拦住并提示「当前回合尚未结束」。中止入口是有的（`abort` → `runner.abort`），缺的仍是排队与插话，本条继续有效；「重启服务」现在应读作「重启宿主进程」。
 
 ### D-149 · 审批卡片受 SSE 200ms 轮询延迟影响
 
@@ -1329,7 +1329,7 @@
 - **影响**: 审批交互不是即时反馈;极端调度下延迟更长。正确性不受影响(日志仍是事实源)。
 - **触发升级条件**: 需要亚 100ms 交互,或审批频次显著提高。
 - **修复建议**: 按 D-134 增加进程内低延迟适配器,保持 SSE 协议不变。
-- **状态**: 未解决;与 D-134 同根因,此处登记审批链路的可见延迟。
+- **状态**: 未解决;与 D-134 同根因,此处登记审批链路的可见延迟。（2026-10-22 说明：浏览器形态下线后 SSE 已不存在，但桌面宿主同样以 200ms 轮询跟随日志，审批卡片出现与终态更新的延迟量级未变，本条按「与 D-134 同根因」继续有效。）
 
 ### D-150 · 会话结束后迟到决策返回 404,运行中已超时返回 410
 
@@ -1338,7 +1338,7 @@
 - **影响**: 同一语义(不可再决)对应两种状态码;会话结束后点击审批显示 404 文案,重复提交也可能从 200 变为 404。调用方需同时处理。
 - **触发升级条件**: 前端需要统一「已过期」提示,或外部调用方按状态码做重试/告警。
 - **修复建议**: 短期保留「已结束会话 + requestId → expired」映射,或前端把 404/410 统一映射为已过期。
-- **状态**: 未解决;当前优先保持 HTTP 状态语义准确。
+- **状态**: 未解决;当前优先保持 HTTP 状态语义准确。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：HTTP 状态码不复存在，同一语义现由 `RunnerDecideOutcome` 的 `unknown_session` / `expired` 两个 kind 表达（语义分歧本身仍在，只是不再叫 404/410）。
 
 ### D-151 · 就绪超时后未响应 abort 的 generator 可能长期占用 `session_busy`
 
@@ -1356,7 +1356,7 @@
 - **影响**: 用户的手动选择被覆盖,需要再次切换;不产生错误数据。
 - **触发升级条件**: 发送延迟明显(模型响应慢)或用户频繁切换会话。
 - **修复建议**: 在 `selectSession` 递增 epoch,或在发送完成时校验当前 `activeSessionId` 是否仍等于提交前值。
-- **状态**: 未解决;已知交互边界。
+- **状态**: 未解决;已知交互边界。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：本条描述的 `main.tsx` 与 `POST /api/actions` 返回后切会话的路径都已删除，桌面渲染器不存在这条竞态。
 
 ### D-153 · `createUiServer({ port: 0 })` 时写端点全部 403
 
@@ -1365,7 +1365,7 @@
 - **影响**: 仅影响以 `port: 0` 嵌入并依赖系统分配端口的调用方;CLI/生产入口使用固定端口,测试用 `freePort()` 绕开。
 - **触发升级条件**: 需要把 UI server 嵌入其他进程并动态取端口。
 - **修复建议**: 监听 `listening` 后读取 `server.address().port`,回填给 handler;或把端口校验改为按实际监听端口。
-- **状态**: 未解决;本轮未改端口获取方式。
+- **状态**: 未解决;本轮未改端口获取方式。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：`createUiServer` 与 `requireLocalRequest` 随 HTTP 层删除，不存在「端口比对与实际监听端口不一致」这条路径。
 
 ### D-154 · runner 关闭后审批决策返回 404 而非 503
 
@@ -1452,15 +1452,15 @@
 
 - **发现**: 2026-10-20,前端移植(Prometheus → 当前内核)。
 - **现象**: `desktop/` 的 Electron 主进程、preload 桥与自绘窗口控件已实现,但本机未安装 Electron,`npm --prefix desktop install` 按依赖安装禁令由用户执行,因此窗口、preload/IPC、`ELECTRON_RUN_AS_NODE` 下的宿主运行时都未经真机验证。宿主逻辑本身已用系统 Node 通过 NDJSON 端到端测试(`tests/desktop/host.test.js`)。
-- **影响**: 桌面形态的启动、窗口标题栏与文件对话框未确证;浏览器形态不受影响(已用无头 Chromium 实测)。
-- **触发升级条件**: 用户安装 Electron 后即可验证;或需要把桌面形态作为交付形态。
+- **影响**: 桌面形态的启动、窗口标题栏与文件对话框未确证。**2026-10-22 更新**：浏览器形态已下线，原先「浏览器形态不受影响」的退路不复存在——桌面是唯一形态，本条目从「另一形态可用」变成整个前端都未实机验证。
+- **触发升级条件**: 用户安装 Electron 后即可验证；或需要把桌面形态作为交付形态。
 - **修复建议**: 执行 `npm --prefix desktop install && npm run build && npm --prefix desktop run desktop`,按 `desktop/MATRIX.md` 的清单逐项核对。
 - **状态**: 未解决。
 
 ### D-164 · 内核无 token 级流式事件,回答整段出现
 
 - **发现**: 2026-10-20,前端移植(Prometheus → 当前内核)。
-- **现象**: 内核在模型调用**返回后**才写一条完整 `assistant` 事件(`src/loop/query.ts`),不落盘 token 增量。桌面/浏览器前端的协议层据此合成 `assistant_start` / `assistant_delta` / `assistant_end`,其中 delta 一次带出整段文字。
+- **现象**: 内核在模型调用**返回后**才写一条完整 `assistant` 事件(`src/loop/query.ts`),不落盘 token 增量。前端的协议层据此合成 `assistant_start` / `assistant_delta` / `assistant_end`,其中 delta 一次带出整段文字。
 - **影响**: 回答不逐字出现,长回答的等待观感与流式不同;内容本身完整,不影响证据与结论。
 - **触发升级条件**: 需要逐字输出;或大回答的等待体验成为主要抱怨。
 - **修复建议**: 在内核的模型适配层加可选的增量事件并落盘,协议层直接映射;需同时确定 `tool_call` 增量与最终消息的关系。
@@ -1478,7 +1478,7 @@
 ### D-166 · 前端未覆盖的能力被隐藏,能力清单以 desktop/MATRIX.md 为准
 
 - **发现**: 2026-10-20,前端移植(Prometheus → 当前内核)。
-- **现象**: Prometheus 前端原有 102 条命令、9 个工作台面板与 14 个设置页;当前内核只支撑其中一部分。移植时按“不伪造”原则隐藏了 git/PR、终端、worktree、packs、browser、skills/memory/instructions/hooks、subagents、goals、文件树、导出、检查点恢复、附件与 @ 补全等入口;宿主与 bridge 收到这些命令时回显式 `notice`。
+- **现象**: Prometheus 前端原有 102 条命令、9 个工作台面板与 14 个设置页;当前内核只支撑其中一部分。移植时按“不伪造”原则隐藏了 git/PR、终端、worktree、packs、browser、skills/memory/instructions/hooks、subagents、goals、文件树、导出、检查点恢复、附件与 @ 补全等入口;宿主收到这些命令时回显式 `notice`（原先 bridge 也这么做，该文件已随浏览器形态删除）。
 - **影响**: 前端功能面小于原版;`docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` 的 §7-§9(回放、导出、设备控制)原设计基于已删除的 `src/ui`,需按新前端重写。
 - **触发升级条件**: 需要上述任一能力;或阶段 4 交互层落地。
 - **修复建议**: 逐项在 `desktop/MATRIX.md` 标记“已支持/隐藏/待接”,新增能力时先补内核后端再放开前端入口。
@@ -1495,7 +1495,7 @@
 - **影响**: (1) 事件流出现缺口时 UI 可能静默拼接错误;(2) 浏览器形态的权限模式选择是**假控件**,用户以为生效了其实没有 —— 涉及安全边界,比前一项更重;(3) 主题体验退化但不丢数据;(4) 键盘/读屏用户的可访问名缺失。
 - **触发升级条件**: (1) 长会话或频繁断线;(2) 浏览器形态需要按界面选择调整权限(而非改服务端配置);(3) 用户在设置里选「跟随系统」后抱怨主题不跟随;(4) 无障碍审查。
 - **修复建议**: (1) 在 `bridge.js` 补 `seq > lastSeq + 1` 检测 + 整量重拉(≤3 次) + 建流失败上限(≤3 次),与 `src/events/log-tail.ts` 的补播语义对齐;(2) 让 `POST /api/actions` 接受权限预设,或新增 `POST /api/permissions` 端点,bridge 据此下发;(3) boot 阶段不要用 `setTheme` 写回 localStorage,或让 `state.theme` 与存储的原始选择解耦;(4) 补 `aria-label`,与 i18n 键一起补。
-- **状态**: **前两项已解决(2026-10-21)**。① bridge 补了 `seq > lastSeq + 1` 缺口检测:命中即关闭旧流、整量重拉会话并重建转录,上限 3 次;`stream_error` 从实际游标续接,上限 3 次后停止并明说。② `POST /api/actions` 接受 `mode`,runner 用它覆盖本次运行的权限预设(未知值在启动前拒绝),bridge 的 `setMode` 随下一条 prompt 下发,运行中拒绝切换。③④ 未修:主题固化已随「boot 不写回推导值」修正;`title` 仍需补 `aria-label`。
+- **状态**: **前两项已解决(2026-10-21)，随后随浏览器形态下线作废（2026-10-22）**。① bridge 补了 `seq > lastSeq + 1` 缺口检测:命中即关闭旧流、整量重拉会话并重建转录,上限 3 次;`stream_error` 从实际游标续接,上限 3 次后停止并明说。② `POST /api/actions` 接受 `mode`,runner 用它覆盖本次运行的权限预设(未知值在启动前拒绝),bridge 的 `setMode` 随下一条 prompt 下发,运行中拒绝切换。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：第 1、2 项的对象（`bridge.js`、SSE 流、`POST /api/actions`）都已删除；桌面宿主从一开始就没有缺口检测，`setMode` 走重建 runner。③④ 未修:主题固化已随「boot 不写回推导值」修正;`title` 仍需补 `aria-label`（这两项与浏览器形态无关，继续有效）。
 - **注**: `README.md:481` 与「前端工作台」已知限制段此前按实际实现改写措辞,现已成立;`docs/frontend-design.md` v2.0 §15 第 1-3 条同步失效。
 
 ### D-168 · 阶段 4 交互层 spec 的 §7-§9 依赖已删除的 `src/ui`,需按新前端重写
@@ -1504,7 +1504,7 @@
 - **现象**: `docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` 的 §7(回放)、§8(导出)、§9(设备控制)建立在 `src/ui/` 的 12 个文件、约 30 个导出符号之上(`transcriptFromSession`、`WorkbenchState`、`applySessionEvent`、`RequestGate`、`createSessionEventStream`、`postAction`、`deviceFromSession`、`main.tsx` 的定时器持有、`app.tsx` 的 `onSend` …),这些已随前端移植整体删除。该 spec 的 §10(外部验证)与 §5/§6 的内核侧约束仍然有效。
 - **影响**: 阶段 4 的回放/导出/设备控制**当前无法按 spec 直接实施**;spec 顶部已加显著失效声明,防止照旧文实施。
 - **触发升级条件**: 阶段 4 交互层落地(即 D-166 中「回放/导出/设备控制」三项被需要时)。
-- **修复建议**: 按 `docs/frontend-design.md` v2.0 与 `desktop/MATRIX.md` 重写 spec 的 §7-§9:回放改为按 `seq` 截断后重放 `sessionEventToHostEvents`;导出改用已有的 `GET /api/sessions/:id` 与 `saveFile`;设备指令改为经 `api.send({cmd:"prompt"})` 下发预置文本(浏览器形态走 `POST /api/actions`);验收脚本重写为 §12 的 V1–V15。
+- **修复建议**: 按 `docs/frontend-design.md` v2.0 与 `desktop/MATRIX.md` 重写 spec 的 §7-§9:回放改为按 `seq` 截断后重放 `sessionEventToHostEvents`;导出改用宿主已有的 `loadSession` 读日志与 `saveFile`;设备指令改为经 `api.send({cmd:"prompt"})` 下发预置文本;验收脚本重写为 §12 的 V1–V15。
 - **状态**: 未解决(已知边界,spec 顶部已标注失效与重写方向)。
 
 ### D-169 · 前后端联调核查:内核已有但前端未接的能力(2026-10-21 修复第一批)
@@ -1532,12 +1532,160 @@
 - **仍未修**:
   1. **项目权限配置恒被跳过**:runner 不传 `trustProjectConfig`,每个 run 都写 `permissions_project_config_skipped`。
   2. **分屏/多窗口**:`desktop/main.js` 单实例单窗口（preload 无 `newWindow`/`splitWindow`，入口已删）。
-  3. ~~**文件树与 `@` 提及**:`getTree` / `searchFiles` 仍是空实现；本次只做了单文件预览。~~ **部分解决**(2026-10-21 第四轮)：`getTree` 接 `listDirectory`，文件树与 `files` 面板可用；`searchFiles`（`@` 提及的文件名搜索）仍为空，已注明内核无文件名搜索 API。
+  3. ~~**文件树与 `@` 提及**:`getTree` / `searchFiles` 仍是空实现；本次只做了单文件预览。~~ **已解决**(2026-10-21 第四轮 / 2026-10-22 第十四轮)：`getTree` 接 `listDirectory`；`searchFiles` 接内核新增的 `searchFilesByName`（见 D-184），桌面与浏览器两端走同一套遍历与边界规则。
   4. ~~**浏览器形态的配置页**：`settings.js` 的「连接」页仍会发 `saveSettings` 带 `provider`/`model`/`apiKey`,浏览器侧一律落到「该设置没有后端」。~~ **已解决**(2026-10-21 第四轮)：改为整份写 `providers.json`（`saveProviders` → `PUT /api/config`），不再走 `saveSettings`。
 - **影响**: 1 是安全边界上的一个静默跳过（会以 `notice` 显示）；2-4 是体验缺口。
 - **触发升级条件**: 要求项目级权限配置生效；要求分屏；要求文件树。
 - **修复建议**: 1 让 runner 透传 `trustProjectConfig`（默认仍为 false，由设置页显式开启，因为项目配置是仓库内容）；2 需要 `main.js` 支持第二个窗口并处理会话锁；4 在 bridge 形态下隐藏连接页（或把它做成只读展示）。
-- **状态**: 大部分解决（2026-10-21 第四轮后，第 3 项仅剩 `@` 提及的文件名搜索，第 4 项已完成；第 1、2 项仍是内核/外壳能力缺口）。
+- **状态**: 大部分解决（2026-10-22 第十四轮后：第 3 项 `@` 提及已接通、第 4 项已完成；第 1、2 项仍是内核/外壳能力缺口）。第十四轮另把**斜杠命令**接上（`/clear` `/context` `/compact`），此前它在本条清单里只被笼统写作「无后端」。**2026-10-22 补充**：本条记录的是当时那一轮的修复清单，其中涉及 bridge / 浏览器下载 / `PUT /api/config` 的描述均已随浏览器形态下线失去对象（`/compact` 现在三个命令在桌面全部可用）；保留原文以便追溯，未逐句改写。
+
+### D-193 · Board 面板是唯一可见的工作台页签，但它发的 `getBoardState` 两端都没有 handler
+
+- **发现**: 2026-10-22（第十四轮复核「还有什么没做完」时逐个命令交叉核对）。
+- **现象**: `app.js:116` 只允许恢复 `board` 一个 pane（`pane: ["board"].includes(savedPane) ? savedPane : "board"`），Board 页签是 `aria-selected="true"` 且不隐藏；打开它就会执行 `app.js:3518` 的 `api.send({ cmd: "getBoardState" })`。`grep getBoardState desktop/host/host.js` 为 0 处，`bridge.js` 也没有 —— 用户点开唯一可见的面板，收到的是一条「桌面宿主暂不支持该命令：getBoardState」。扳手、刷新按钮（`app.js:4068`/`4083`）与 `embed_build` 之后的自动刷新（`app.js:2886`）发的是同一条死命令。
+- **根因**: 板卡面板的另一条数据来源 `device_status` 是通的（`src/loop/query.ts:288` 会写、`protocol.js` 会映射、`app.js:2304` 会渲染），所以这不是能力缺口，是**上一轮把 `getBoardState` 的入口隐藏了、却漏掉了这句命令本身**。
+- **影响**: 唯一常驻的页签点开即报错；用户会以为整个工作台不可用，而实际上 File / Files / Artifact 三个页签（由动作打开）是能工作的。
+- **触发升级条件**: 用户报告板卡面板打不开；或阶段 4 设备控制落地。
+- **修复建议**: 二选一——①删掉 `getBoardState` 的四处调用与 Board 页签的常驻，把面板改成由 `device_status` 事件驱动（工具行点击时打开）；②给 host 与 bridge 补 `getBoardState`，如实回 `{ probe: "unknown", serial: "unknown" }`（`GET /api/device` 已经这么做了，`src/server/api.ts:884`）。按 R3 应选 ①：没有扫描器就不要画一个需要扫描器才能填的面板。
+- **状态**: 未解决（已登记）。**2026-10-22 补充**：`bridge.js` 已删除，「两端都没有 handler」现在只剩桌面宿主一端的缺口（`getBoardState` 仍无 handler）；修复建议 ② 里提到的 `GET /api/device` 也已随 HTTP 层删除，若选 ② 只能让宿主直接回 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }`。
+
+- **发现**: 2026-10-22（同上）。
+- **现象**: 快捷键弹窗（`app.js:6666-6668`）列了 `Ctrl+Shift+D`（Changes）、`Ctrl+Shift+E`（Files）、`Ctrl+\``（Terminal），实际行为分别是：前者绑定了但什么都不做（只剩一个空的 `preventDefault()`）；后者打开的是 **board**；`` Ctrl+` `` 调 `openWorkbench("terminal")`，而 `SUPPORTED_PANES = {board, file, files, artifact}`（`app.js:3424`）不含 terminal，函数第一行就 return。另有 `Ctrl+E`（`effort`）每次发 `setEffort`，两端都如实回一条 warn（`setEffort` 是有意的拒绝实现），于是每按一次多一条警告。
+- **影响**: 快捷键表是「可发现性」的唯一来源，列出的键按下去没反应，比不列更糟（R3 的同一类问题：界面承诺了一件不会发生的事）。
+- **触发升级条件**: 用户反馈快捷键无反应；或无障碍/快捷键审查。
+- **修复建议**: 从快捷键表删掉三条（或改成实际可用的键）；`Ctrl+E` 在 `effortChoices.levels` 为空时不发命令也不弹警告（控件已经隐藏，快捷键应同样沉默）；`Ctrl+\`` 改为 `closeWorkbench` 的别名或直接删除。
+- **状态**: 未解决（已登记）。
+
+### D-196 · `todos` / `ask_user` / `thinking_start` / `tool_delta` / `assistant_discard` 五个事件渲染器都有 handler，全链路没有生产者（`todos` 已解决）
+
+- **发现**: 2026-10-22（新增 `ls` 工具时核对渲染器的事件处理面）。
+- **现象**: `desktop/renderer/app.js` 里五个 `case` 分支完整（`todos` 走 `renderPlan` 画出整张计划卡、`ask_user` 走审批条样式、其余三个各有处理），但 `grep '"todos"' src/ desktop/host/ desktop/renderer/bridge.js` 只在渲染器命中；`todo_write` 工具在内核里也不存在（`TOOL_LABELS` 与 `toolGlyph` 都给它留了位置）。也就是说计划卡那张「卡片建一次、原地打勾」的实现从上线起就没被点亮过。
+- **影响**: 五个 handler 是死代码，但**不是死 UI**——用户看不到任何入口，所以不构成假承诺。真正的问题是：模型没有「先列计划再执行」的手段，长诊断的中途状态只能靠正文散文表达。
+- **触发升级条件**: 需要让模型显式列出待办并在执行中打勾；或需要模型主动向用户提问（`ask_user`）。
+- **修复建议**: `todos` 最直接——加一个 `todo_write` 工具，输入 `{items:[{content,status}]}`，在 `tool_result` 之后写一条 `todos` 会话事件，宿主把它投影成 `todos` 事件即可（渲染器零改动）。`ask_user` 需要一个与审批条共用但语义不同的通道（审批是 allow/deny，提问是自由文本），要做就得改权限管线，不建议顺手做。`thinking_start` / `tool_delta` / `assistant_discard` 对应的能力内核都没有（模型适配层只有 `assistant_delta`），**建议直接删掉这三个 handler**——留着它们等于留着三条永远走不通的路径。
+- **修复**: 2026-10-22，`todos` 一项**已解决**——新增 `todo_write` 工具（`src/tools/todos.ts`）与 `todos` 会话事件（`src/session/types.ts`），`src/loop/query.ts` 的 `appendTodos` 在 `tool_result` 落盘之后写该事件。`todo_write` 判成 `access: "read"`：权限门控关心的是对工作区的副作用，而它只写会话日志——这件事每次工具调用都在做（`tool_started` / `tool_result`），它连一个字节的文件都不碰；判成 `write` 会让 `read-only` / `diagnose` 预设下的计划功能直接不可用，换不来任何安全收益。**`persistence.ts` 的 `EVENT_TYPES` 是读取时白名单不是写盘过滤器**：漏登记不会让写入失败，而会让下一次读盘抛 `unknown_event_type`、整份日志一起不可用（已用「写一条再读回来」的测试钉住）。渲染器侧 `protocol.js` 的 `KNOWN_TYPES` 同理——漏了每条计划更新都会变成一条「未识别的事件类型」警告。
+- **仍未解决**: `ask_user` / `thinking_start` / `tool_delta` / `assistant_discard` 四个 handler 仍无生产者，见下。
+- **状态**: **部分解决**（2026-10-22）：`todos` 已接通；其余四项未动。
+
+### D-195 · 每一条带工具调用的回合都没有上下文占用率（`usage` 事件在工具批次闭合前测量，必然抛错被吞）
+
+- **发现**: 2026-10-22（实现 `contextBreakdown` 时子代理报告「有工具调用的轮次拿不到 `context`」，我核实后确认它比子代理描述的更严重）。
+- **现象**: `src/loop/query.ts` 在 `assistant` 事件落盘之后、`tool_result` 之前写 `usage` 事件；同一处调用 `buildMessages(session.events())` 重新投影整份日志来测占用率。此刻工具批次尚未闭合，`buildMessages` 会抛 `tool batch for assistant event N is incomplete`，被外层 `catch {}` 静默吞掉。结果是**每一次带工具调用的回合，`payload.context` 都不存在**——占用率与分段条都是空白。D-165 起即如此。
+- **影响**: 本仓库是嵌入式调试 agent，几乎每轮都在调工具，也就是说这个数字**在最该出现的时候从不出现**。配合第十四轮刚把 `#context-label` 的 `hidden` 解除，用户会看到百分比在纯聊天回合出现、一调工具就消失，比一直不显示更容易被误读为「归零了」。
+- **修复**: 测量移到**发请求之前**（新增 `measureRequestContext`），量的是即将送出去的 `messages`——那一刻日志是闭合的、可投影的。这也正是这个数字真正要表达的东西：这次请求携带了多少。`softLimit` 一并从这次测量带出，避免为拿阈值再投影一遍。崩溃时返回 `undefined` 而不是 0（R3：量不出来就不报，不用 0 冒充空上下文）。
+- **回归**: `tests/query.test.ts` → `带工具调用的那一轮也报占用率与分类拆分`。RED 证据：修复前 `expected undefined to be defined`（`usage.payload.context` 不存在）。
+- **状态**: **已解决**（2026-10-22）。
+
+### D-197 · 会话标题被「负缓存」冻住：侧栏一直显示 UUID，直到宿主进程重启
+
+- **发现**: 2026-10-22（用户「会话名称缺少实时渲染」）。
+- **现象**: 当时两个宿主都有。桌面 `host.js` 的 `titleFor` 把「读不到标题」这个结果写进了 `titleCache`；浏览器 `bridge.js` 的 `titles` 映射同样存了空串（该文件已随浏览器形态删除，桌面侧是唯一需要看守的路径）。
+- **根因**: `runner.start()` 在 `onSession` 回调就返回——那一刻 header 已写、**user 事件还没写**。宿主紧接着推 `sessions` 事件，`titleFor` 读日志自然读不到首条 user 消息，于是把「空」当成结果缓存下来。user 事件几毫秒后落盘，但缓存再也不会失效（键是 `id@createdAt`，`createdAt` 不变），**行就永远停在 UUID 上**。浏览器形态同源：`refreshSessions` 在 prompt 之后立刻跑，`missing` 列表把该会话标为已处理，下次刷新 `.filter(id => !titles.has(id))` 直接跳过。
+- **影响**: 用户看到的现象是「新会话建好了，名字却不出现」——而标题是侧栏唯一能把会话区分开的东西，一排 UUID 等于没有侧栏。这不是慢，是不再更新。
+- **修复**: **只缓存命中，不缓存落空**。`titleFor` 在 `titleOf` 回落到 id 或返回空串时直接返回 `""` 且不写缓存；`sessionsEvent` 里 `alreadyCached` 改用新的 `titleKey(entry)` 且同样只在有标题时算「已缓存」。逻辑后果：一个真的没有消息的会话每次列表推送多读一次日志——这是「这一行还可能变化」应付的代价。浏览器侧 `titles.set` 的三处（列表刷新、打开会话、导出回退）统一加 `if (title !== "")`。
+- **顺带修掉**: `deleteSession` 的 `titleCache.delete(id)` 用的是**裸 id**，而缓存键是 `id@createdAt`——那条 delete 一直是空操作，删掉会话后条目永远留着。
+- **回归**: `tests/desktop/host.test.js` → `同一宿主进程内，会话名在首轮结束后就出现（不缓存空标题）`。RED 证据：修复前 `expected '' to be '串口没输出'`。
+- **状态**: **已解决**（2026-10-22）。
+
+### D-191 · `contextBreakdown` 全链路没有生产者，用量弹层的分段条与分类明细永远为空
+
+- **发现**: 2026-10-22（用户问「上下文情况的获取」后逐个字段核对）。
+- **现象**: `protocol.js:592` 写死 `contextBreakdown: null`；`grep -rc contextBreakdown src/` 为 **0**；`app.js:1654` 起那整块「按消息 / 工具结果 / MCP 工具 / 系统提示词 / 记忆 / 项目指令分段」的色条、图例与百分比永远不会执行。弹层里真实可用的只有输入 / 缓存 / 输出 / 合计与成本。
+- **影响**: 上下文占用率（D-165 已解决）能显示「用了多少」，但**不能显示「被什么占的」**——而后者才是用户决定「清哪些东西」的依据。标题行永远显示「—」，分段条永远空。
+- **触发升级条件**: 需要按类别判断上下文构成；或压缩策略需要按类别设阈值。
+- **修复建议**: 在 `src/context/` 加一个纯函数，按 `buildMessages` 的消息来源分类估算 token（system 事件 / user / assistant / tool_result / MCP 工具结果可按工具名前缀分），随 `usage` 事件的 `context` 一起下发 `{parts, used, window, compactAt}`。**不要**用真实 tokenizer 之外的猜测冒充精确值，分类之和与 `context.tokens` 不一致时要如实标 `windowAssumed` 同级的「估算」标记。
+- **修复**: 2026-10-22，`src/context/breakdown.ts` 的 `buildContextBreakdown(messages, { window, used, compactAt, measure? })`。`used` 原样采用调用方那一份实测值（它就是压缩阈值比较的那个数），**不是**各桶之和——逐桶测量的整数取整会和总量差几个 token，所以各桶按等比缩放、余数补给最大桶，强制 `sum(parts) === used`。四个桶：`systemPrompt`（system 消息）/ `messages`（user + assistant）/ `toolResults`（tool 消息）/ `mcpTools`（工具名以 `mcp__` 开头者，靠 `tool_call_id → tool_calls[].function.name` 查表）。随 `usage` 事件下发（`src/loop/query.ts`），渲染器 `protocol.measuredBreakdown()` 校验后进弹层。
+- **仍未覆盖**: 原设计的另外四个类别（`systemTools` / `memory` / `instructions` / `rules`）**没有生产者**——内核没有对应的消息来源，i18n 里留着这几个 key 但实际不会出现。分类是**启发式估算**（`heuristicCountTokens`，按字符数/4），不是真实 tokenizer；`percent` 的分子分母都由这个估算得出，绝对值会有偏差，但内部比例可用。
+- **状态**: **已解决**（2026-10-22）。D-195 是它的前置缺陷（占用率本身在有工具调用的回合上缺失），同日一并修掉。
+
+### D-190 · 内核 MCP 客户端只支持 stdio，没有 HTTP transport
+
+- **发现**: 2026-10-22（同上）。
+- **现象**: `src/mcp/manager.ts:4` 只 import `StdioClientTransport`；`McpServerConfig`（`src/mcp/config.ts:5-16`）的字段只有 `command`/`args`/`env`/`envAllowlist`/`inheritEnv`/`cwd`/`timeoutMs`/`disabled`，没有 `url` 或 `transport`。BRD PLAT-4 写的是「stdio/HTTP transport」。
+- **影响**: 任何以 HTTP/SSE 形式提供的 MCP server（远程工具、共享服务）都无法挂载；`settings.js` 的 MCP 表单也只能填 `command`。
+- **触发升级条件**: 需要接入远程或共享的 MCP server；或探针服务改成常驻进程。
+- **修复建议**: 在 `McpServerConfig` 加 `url`（与 `command` 互斥），`McpManager` 按字段选 `StreamableHTTPClientTransport`；配置校验要给出「同时给了 command 与 url」的明确错误。须先在 Context7 核实 SDK v2 的 transport 名称与用法。
+- **状态**: 未解决（已登记）。
+
+### D-189 · 没有整跑墙钟超时，`timeoutMs` 只管单次工具调用
+
+- **发现**: 2026-10-22（同上）。
+- **现象**: `RunOptions.timeoutMs` 一路传到 `LoopCtx.timeoutMs`（`src/index.ts:705`），最终只用于 `executeBatch` 的单次工具超时（`src/tools/pipeline.ts:415`）。`grep wallClock|runTimeout|setTimeout.*abort src/` 无命中。BRD PLAT-7 要求「单轮整跑超时」。
+- **影响**: 夜批与无人值守场景下，一次 run 只有在 `maxTurns`（现已默认不限制）或 `maxCostUsd` 触发时才停；一个卡在模型网关慢响应上的 run 可以无限期占用会话锁。`src/demo/run.ts` 的外部超时只能靠外层管线。
+- **触发升级条件**: 出现一次 run 长时间不结束；或夜批管线落地。
+- **修复建议**: `RunOptions` 加 `deadlineMs`（整跑上限），`runSession` 起一个 `AbortSignal.timeout` 与外部 signal 合并，到时写 `interrupted{reason:"deadline"}`——**不是** `max_turns`，原因要说真话。README 的 `run.json` 字段表同步。
+- **状态**: 未解决（已登记；与 D-022「超时≠强制终止」是同一根因的两个层次）。
+
+### D-188 · 图片附件静默丢弃：缩略图留在输入框上，发送后无声消失
+
+- **发现**: 2026-10-22（同上）。
+- **现象**: 粘贴或拖入图片 → `addAttachment()` 把 data URL 放进 `state.attachments` 并渲染缩略图条（`app.js:5508` 起）→ **`submit()` 完全不读 `state.attachments`**（函数体内 0 处引用）。`i18n.js` 的 `imageOnlyPrompt`（「（请看附带的图片）」）没有任何使用点，正是它本该出现的地方。
+- **根因**: 内核 `ModelChatMessage.content` 是 `string`（`src/model/protocol.ts:3-5`），OpenAI 适配层不发 `image_url`。模型侧本来就看不到图片。
+- **影响**: 用户以为图片发出去了；模型只收到文字，回答与图片无关。这是 R3 意义上的「把失败伪装成成功」——而且丢的是用户输入。
+- **触发升级条件**: 用户贴图提问；或需要视觉诊断（示波器截图、PCB 照片）。
+- **修复建议**: 短期按 R3 在 `addAttachment` 处就拒绝并说明「内核不支持图片输入」（或直接删掉附件条与 `handleImageFiles` 的图片分支）；长期在内核加多模态消息（`content: string | ContentPart[]`），成本远高于短期方案，须单独立项。
+- **状态**: 未解决（已登记）。
+
+### D-187 · About 页的「检查更新」按钮调用一个两个宿主都不提供的 API
+
+- **发现**: 2026-10-22（同上）。
+- **现象**: `settings.js:3321` 直接 `await api.checkUpdate()`，没有存在性判断。`grep -c checkUpdate desktop/preload.cjs desktop/renderer/bridge.js` 为 **0 / 0**。`app.js` 的启动检查有 `if (!api.checkUpdate ...) return;` 保护，所以启动时安静；About 页这一处没有，点击即 TypeError，提示行永远停在「正在检查…」。
+- **影响**: 一个按钮点下去必崩，且失败方式与「没有更新」在界面上无法区分（都停在检查中）。
+- **触发升级条件**: 用户点它；或需要真正的版本检查。
+- **修复建议**: 二选一——①删掉这个按钮与 `updateCheck` 偏好项（没有更新源，留着就是死控件）；②按 `app.js` 启动检查的写法加保护并如实显示「当前构建不提供更新检查」。按 R3 建议 ①。
+- **状态**: 未解决（已登记）。同类还有 `api.browserOpen`（四处无保护调用，preload 没有该成员；`bridge.js` 已随浏览器形态删除，此处原本是「两端都没有」），只是那四个入口目前被 `SUPPORTED_PANES` 挡住，暂不可达。
+
+### D-186 · 「排队」是假的：气泡显示「排队中」，消息实际被两端拒绝并丢弃
+
+- **发现**: 2026-10-22（同上）。
+- **现象**: `app.js:1005` 在运行中把发送按钮标成「排队到本轮（Enter）」；`app.js:441` 因 `state.busy` 给用户气泡加 `<span class="queued-tag">排队中</span>`。但 `submit()` 照旧 `api.send({ cmd: "prompt" })`，而宿主在运行中**直接拒绝**：`desktop/host/host.js` 的 `handlePrompt` 回「当前回合尚未结束，请先停止或等待」（原先 `desktop/renderer/bridge.js` 的 `startPrompt` 也回同一句，该文件已随浏览器形态删除）。`queued` / `user_queued_delivered` 两个事件在 host、bridge、protocol 中**合计 0 个 producer**，`setQueuedBadge` 与 `markQueuedDelivered` 是死代码。
+- **影响**: 界面承诺「排队」，实际是**丢弃**。用户以为自己说的话会在本轮结束后被处理，而它永远不会被投递——丢的是用户输入，且事后没有任何痕迹。
+- **触发升级条件**: 用户在运行中追加消息；或实现中断式追加（内核 `session_busy` 的语义改动）。
+- **修复建议**: 二选一——①删掉排队标签与 `queueSend` 文案，运行中发送即如实提示「回合结束再发」（最小、最诚实）；②在渲染器实现真正的队列：`run_end` 后自动投递下一条，队列非空时显示计数。内核 `session_busy` 的约束不改也能做，队列放在渲染器侧。按 R3 建议先做 ①，把 ② 作为独立功能。
+- **状态**: 未解决（已登记）。
+
+### D-185 · 图片附件之外的两处「死 UI 大块」：goals / subagents / 检查点
+
+- **发现**: 2026-10-22（同上）。
+- **现象**: 渲染器里这三套 UI 是**完整实现**，但没有任何 producer：
+  - goals：`case "goal_start"/"goal_round"/"goal_end"`、`renderGoalBadge`、`#goal-badge`、`startAutonomous`（`app.js:5609`）——`startAutonomous` 只被自己调用，没有入口；`stopGoal` / `resumeGoal` 两端无 handler。
+  - subagents：`case "subagent_start"/"subagents"/"subagent_activity"/"subagent_end"`、`renderSubagents`、`stopSubagent`（无 handler）。
+  - 检查点：`renderCheckpoints` 只由 `case "checkpoints"` 调用，该事件无 producer；`restoreCheckpoint` / `restoreFile` / `redo` 无 handler；`history` 不在 `SUPPORTED_PANES`。
+- **影响**: 目前不可达（入口已隐藏），但它们是**约 400 行渲染器代码 + 数十个 i18n 键**，且会误导后续维护者以为内核支持。上一轮删 worktree 时正是因为同类判断。
+- **触发升级条件**: 实现子代理或自主循环；或做一次前端死代码清理。
+- **修复建议**: 与 worktree 同一处理原则——先确认内核确实没有对应能力（`grep -rn "subagent\|goal" src/` 为空），然后整块删除 UI 与 i18n；若计划实现，则登记为功能项而不是缺陷。**不要**保留「以后可能用」的半成品。
+- **状态**: 未解决（已登记，未删）。
+
+### D-184 · `@` 文件搜索的两处已知限制：目录不出现在结果里，`dist/` 过期时只有第一条请求告警
+
+- **发现**: 2026-10-22（第十四轮实现 `searchFilesByName` 时由实现方主动上报）。
+- **现象**: ①`walkFiles` 只访问**文件**（`src/tools/fs-walk.ts` 的 visit 只在 `entry.isFile()` 时触发），所以 `@src` 这类目录目标搜不到，而目录往往是比文件更有用的 `@` 目标。②桌面宿主在 `dist/` 缺 `searchFilesByName` 时**每进程只 warn 一次**（`desktop/host/host.js` 的 `searchUnavailableWarned`），之后每条查询都静默回空——这是为了不让每按键一条警告埋掉转录，但用户如果错过了第一条，就会以为「这个项目里没有匹配的文件」。
+- **影响**: ①目录不能用 `@` 引用（可用文件树代替）；②旧 `dist/` 下 `@` 搜索静默失效，与「真的没匹配」在界面上无法区分。
+- **触发升级条件**: 用户报告 `@` 搜不到某个目录；或出现「搜不到但文件确实存在」的反馈。
+- **修复建议**: ①给 `walkFiles` 加一个可选的 `visitDirectory` 回调（或单独的 `searchEntriesByName`），预算口径要一并定义——目录不计入 `MAX_SCANNED_FILES` 会让截断语义变模糊。②宿主在设置页或启动 notice 里常驻一条「文件搜索不可用，请重新 build」，而不是只发一次 warn。
+- **状态**: 未解决（已登记）。本轮实现的功能本身可用，这两条是边界。
+
+### D-183 · `maxTurns` 按整段会话累计，用满 10 轮后每条新消息都立刻熔断
+
+- **发现**: 2026-10-22，用户原话「达到最大回合数是什么鬼」。
+- **现象**: 一次会话里累计发生 10 次模型调用之后，**之后再发任何消息**都立刻以 `interrupted{reason:"max_turns"}` 结束——界面显示「达到最大回合数」，模型一次都没有被调用，会话从此不可用。用户真实会话日志（`~/.harness/sessions/803d2749…/session.v1.jsonl`）可复现：`checkpoint` 的 `turn` 一路涨到 10，随后一条 `user` 事件后面直接跟 `interrupted{reason:"max_turns"}`，中间没有任何 `assistant`。
+- **根因**: `src/loop/query.ts` 里 `turn` 同时充当两个角色——会话级检查点序号（`lastCheckpointTurn()` 恢复，D-045 要求跨消息单调递增）与 `maxTurns` 的比较对象。`assertBreakers(cfg, turn, …)` 拿会话累计值去比「每条消息的轮数上限」。设置项标签写的是「每条消息的轮数上限 / Turns per message」，描述是「模型调用达到这个次数就停下」——标签与实现相反。
+- **为什么一直没被发现**: 默认 `maxTurns` 是 10，而正常一轮诊断通常远用不到 10 次模型调用；只有在一段长会话里累积用满之后，**后续的每一条消息**才暴露出来。单元测试里的用例都是单次 `query()` 调用，第二次调用的用例（D-045 那条）只断言 `checkpoint.turn` 递增，从不断言「第二次调用还能真的调用模型」。
+- **修复**: 拆成两个变量。`turn` 仍是会话级检查点序号，`runTurn` 是**本次运行**已发起的模型调用数，`assertBreakers` 只收 `runTurn`。`checkpoint.turn` 的单调递增语义不变（D-045 的用例仍然通过）。
+- **`maxCostUsd` 为什么**不**跟着改**: 它是有意累计的——设置项写的是「花费上限（USD）」，描述是「估算花费达到这个数就停止」，语义就是整段会话的总预算；`tests/query.test.ts` 的「历史 usage 计入 maxCostUsd,首轮前即熔断」从 2026-10-18 起就锁定了这个行为。两者的区别不是疏漏：轮数按「每条消息」算，预算按「整段会话」算，标签各自说得清。README 已把这条差别写明。
+- **验证**: 新增用例「maxTurns 按本次运行计，不累计整段会话」——两次 `query(..., {maxTurns: 1})`，第二次必须有 `model_message` 且以 `no_tool_calls` 正常结束，同时 `checkpoint.turn` 仍是 `[1, 2]`。RED 阶段失败在 `expected [] to have a length of 1`（第二次一次模型调用都没有），修复后通过。`tests/query.test.ts`（58）+ `tests/integration.test.ts` + `tests/demo.test.ts` 共 165 例全绿。
+- **状态**: **已解决**（2026-10-22）。
+
+- **2026-10-22 补充（第十四轮，用户「取消最大轮数限制」）**: 上一轮只是把计数口径改对了，**默认上限 10 本身还在**——任何需要长取证的诊断仍会在第 10 次模型调用时被截断，只是不再「整段会话累计」。本轮把默认上限整个删掉：
+  - `BreakerLimits.maxTurns` 改为可选；`assertBreakers` 只在字段存在时才校验、才抛 `LoopBroke("max_turns")`。缺省 = **不检查**，不是「检查一个更大的数」——任何隐式上限都会以同样方式咬人。
+  - `src/index.ts` 不再 `opts.maxTurns ?? 10`，改为有值才下发。
+  - `AppRunLimits.maxTurns` 改为 `number | null`，`DEFAULT_RUN_LIMITS.maxTurns = null`；`parseRunLimits` 接受 `null` 或正整数，**仍拒绝 0 / 负数 / 非整数**——静默把笔误当成「不限」会让用户以为上限生效了。
+  - `ActionInput.maxTurns?: number | null`；`readRunLimits` 与 `readRunLimitsBody` 都把 `null` 规范化成「字段缺席」，内核看到的东西与「没传」完全一致。
+  - 宿主 `runLimitOptions()` 只在 `typeof === "number" && isFinite && > 0` 时才带 `maxTurns`。
+  - 设置页：留空 = 不限制（`placeholder` 用既有的 `behaviorUnlimited`），`behaviorMaxTurnsDesc` 两种语言都改成「留空表示不限制」。
+  - **`maxCostUsd` 不动**：它本来就是会话总预算，与轮数是两件事（见上）。
+  - 新增集成用例「不传 maxTurns 时没有默认上限」：12 轮工具调用 + 1 轮收尾，模型必须被调用 **13** 次，日志里不得出现任何 `interrupted`，结束时 `done(no_tool_calls)`。RED 阶段失败在 `expected 13, received 10` —— 旧默认值正好在第 10 次掐断。该用例 13 次真实落盘，全量并发下会超过 vitest 的 5s 默认值，已加 20s 超时并注明「测的是没有上限，不是绝对耗时」。
+  - 同时被改的快照断言：`tests/server/config-api.test.ts`、`tests/server/api.test.ts`、`tests/app-config-providers.test.ts`、`tests/desktop/host.test.js` 里的 `maxTurns: 10` 默认值断言全部改为 `null`／「字段缺席」。
 
 ### D-182 · 桌面宿主打开会话时顶栏被改回启动目录（`state.cwd` 与 `session_loaded.cwd` 打架）
 
@@ -1547,8 +1695,8 @@
 - **连带症状**（同一根因）：①`getTree` 用 `cwd` 解析相对路径，文件树停在旧项目；②`getFile` 的 `allowedReadRoots()` 只含 `cwd` + 会话目录，打开别的项目的会话后预览该会话工作目录里的文件被拒。`src/server/files-api.ts` 的 `allowedRoots()` 本来就把每个会话 header 的 workdir 算作可读根，所以内核侧不缺边界，只是宿主没跟上。对照 `desktop/renderer/bridge.js`：`currentCwd = header.workdir` 在 `emit(stateEvent())` 之前执行，所以浏览器形态正确。
 - **修复**: 新增 `adoptSessionWorkdir(workdir)`：单个 `statSync` 判定目录存在（不 `exists` 再 `stat`，两步之间目录可能消失；`stat` 跟随符号链接，与 `registerWorkspaceRoot` 的 realpath 语义一致）→ 存在则 `cwd = resolved` 并 `pendingRoot = registerRoot(cwd)`；不存在/不是目录/读不了则**不改 `cwd`** 并发 warn `notice`，措辞按 errno 区分（`ENOENT`/`ENOTDIR` → 「已不存在」，非目录 → 「不是目录」，其他 → 「无法访问（EACCES）」）——把「读不了」说成「不存在」同样是 R3 问题。`handleLoadSession` 用它返回的 cwd 重建 ctx，并在 `stateEvent()` 之前 `await settleRoot()`。**不重建 runner**：`handlePrompt` 新建会话时显式传 `cwd`（覆盖 runner 构造默认值），续聊不传 cwd（内核读 header），所以采纳的目录就是下一个新会话的目录，而重建 runner 会丢状态。
 - **验证**: `tests/desktop/host.test.js` 新增 2 例，RED 阶段分别失败在「`session_loaded` 之后那条 `state` 带的是启动目录」与「完全没有 warn notice」。用例 A 顺带断言 `getTree` 的 `.` 与 `getFile` 的相对路径都解析到会话目录。该文件 **47 passed | 2 skipped**（连跑三次一致）。
-- **仍未统一**: `bridge.js` 对**已消失**的 workdir 不做校验就直接采纳，浏览器形态因此会把 cwd 指向一个不存在的目录（顶栏显示已删除的项目）。两端在这一个边角上行为不一致，桌面端现在更严格。触发升级条件：出现浏览器形态因已消失目录导致的连续报错。
-- **状态**: **已解决**（2026-10-22）。`bridge.js` 一侧的严格化未做。
+- **仍未统一**: `bridge.js` 对**已消失**的 workdir 不做校验就直接采纳，浏览器形态因此会把 cwd 指向一个不存在的目录（顶栏显示已删除的项目）。两端在这一个边角上行为不一致，桌面端现在更严格。触发升级条件：出现浏览器形态因已消失目录导致的连续报错。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：`bridge.js` 已删除，「两端不一致」不再存在，只剩桌面端这一套更严格的语义。
+- **状态**: **已解决**（2026-10-22）。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：`bridge.js` 一侧的严格化未做，该文件已删除，此项无需再做。
 
 ### D-181 · `glob` / `grep` 从缓存目录里起扫，5000 文件预算耗尽后根目录的 `README.md` 从未被访问
 
@@ -1619,7 +1767,7 @@
   - `bridge.js`：`setModel` 校验引用存在于 `providers.json`、运行中拒绝、合法则更新并发 `models` + `state`；有打开会话时额外一条 dim notice 说明只对新建会话生效（文案与桌面宿主一致）。`refreshModels` 转调已有的 `refreshConfig()`。
   - **`lastModel` 与 `sessionModel` 拆成两个变量**：前者是「下一个新建会话用什么」，后者是「当前会话 header 里是什么」，`shownModel()` 按有无会话取值。合并成一个会导致「选好模型 → 点开旧会话 → 新建会话时用了没选过的模型」，或者 chip 显示新模型而当前会话还在跑旧模型。
 - **验证**: 端到端打真服务：`POST /api/actions {model: 42}` → 400 `invalid_model`；`{model: "gw/nope"}` → 503 `model_unavailable`。离线测试：`tests/server/runner.test.ts` 4 条 + `tests/desktop/bridge.test.js` 7 条，RED 阶段分别有 3 条 / 7 条真实失败。
-- **状态**: **已解决**（2026-10-22）。桌面宿主的 `setModel` 仍走「重建 runner + `opts.model`」的老路（行为正确，只是路径不同），本轮未统一。
+- **状态**: **已解决**（2026-10-22）。桌面宿主的 `setModel` 仍走「重建 runner + `opts.model`」的老路（行为正确，只是路径不同），本轮未统一。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：`bridge.js` 与 `POST /api/actions` 已删除，本条中「浏览器形态的模型选择器」这半已无对象；内核侧新增的 `ActionInput.model` 与 `invalid_model` 保留，桌面宿主继续走 `opts.model`。
 
 ### D-175 · 模型选择器弹层被祖先的 `overflow: hidden` 整块裁掉
 
@@ -1639,7 +1787,7 @@
 - **为什么不在本轮直接改**: 设置页从 `providerConfig.apiKey` 回填表单，改成一味掩码会让保存时把掩码写回文件（数据损坏）。正确做法需要三处同时改：①服务端回传掩码（例如 `sk-…abcd`）；②渲染层识别掩码、**不把它当真值保存**（留空 = 不改，明确清除另设按钮）；③宿主 `configEvent()` 同步。这是产品交互决策，不是一行改动。
 - **触发升级条件**: 应用要在多用户机器上运行；或出现「本机进程读取密钥」的实际顾虑；或密钥改为由系统凭据管理器托管。
 - **修复建议**: 见上三处；届时 `tests/server/config-api.test.ts` 与 `tests/desktop/host.test.js` 里断言 `providerConfig.gw.apiKey === key` 的用例需同步改成断言掩码形状。
-- **状态**: 已知限制，已记录。当前密钥在**磁盘上本就是明文**（`providers.json`），所以这条不是把明文引入了系统，而是让明文多了一个本机 HTTP 出口。**未修复**。
+- **状态**: 已知限制，已记录。当前密钥在**磁盘上本就是明文**（`providers.json`），所以这条不是把明文引入了系统，而是让明文多了一个本机 HTTP 出口。**未修复**。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：`GET /api/config` 端点与 `tests/server/config-api.test.ts` 已删除，「本机进程经 HTTP 读明文密钥」这条出口随之消失。桌面侧 `configEvent()` 仍把 `providerConfig` 下发给渲染层（设置页要回填表单），但那是进程内的 IPC，不是网络出口——若要继续收敛，剩下的对象只有这一处。
 
 ### D-173 · `contextWindow` / `maxOutput` 是估算值，不是从服务商读到的真实上限
 
@@ -1665,6 +1813,7 @@
   - `bridge.emitSettings()` 改用两者并带上 `providersError` 与 `configPaths.providers`；`refreshConfig()` 与 `putConfig("providers")` 之后都调 `emitModels()` 广播 `models` + `state`，保存后选单与表单同步跟上。
 - **验证**: `tests/desktop/protocol.test.js` 新增 3 例（两种形状、`provider/model` 展开、非对象输入不编造条目），`tests/desktop/bridge.test.js` 新增 4 例（`providerConfig` 到达、`providersError` 到达且表单仍可画、读过配置后广播 `models`、保存后选单跟进）。真机验证：对 `npm run serve:ui` 起的服务 `PUT /api/config` 写入 `providers` 后磁盘出现该文件、`GET` 可读回，随后删除探针文件并确认真实 `~/.harness` 只剩 `sessions/`。
 - **遗留**: 桌面形态（Electron）仍未实机验证（D-163），宿主侧 `configEvent()` 逻辑未改，仅由既有 `host.test.js` 覆盖。
+- **状态**: 2026-10-21 第五轮的修复已落地（命名统一 + `providersEvent`/`modelsOf` + `emitSettings` 补齐），但本条此前没有状态行。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：「现象二」与「连带缺口」的对象（`bridge.emitSettings`、`tests/desktop/bridge.test.js`、`PUT /api/config`、`npm run serve:ui`）已全部删除；桌面宿主 `configEvent()` 一直就发 `providerConfig`，设置页现在只有这一条路径。命名统一与 `providersEvent`/`modelsOf` 的成果保留。
 
 ### D-170 · 配置写入曾落到真实 `~/.harness`（D-125 的配置文件版本）
 
@@ -1683,7 +1832,7 @@
 - **影响**: 只要本机开着 `npm run serve:ui`，`npm test` 就会整份 `api.test.ts` 崩溃；失败原因（端口冲突）与代码无关，容易被误判成被测逻辑有问题。
 - **触发升级条件**: 已有修改（子代理改为 `freePort()` + `startUi()`，与 `approvals-api.test.ts`、`api-unreadable.test.ts` 的既有做法一致）。
 - **修复建议**: ①让 `createUiServer` 暴露绑定结果（返回一个 `listening: Promise<void>`，或在函数内部挂 `error` 并转成 reject），调用方不必猜；②`createApiHandler` 之外再加一层「端口被占」的显式错误码，而不是让进程崩。当前只做了测试侧的规避。
-- **状态**: **已解决**（2026-10-21 第九轮）。`createUiServer` 返回值新增 `listening: Promise<void>` 并在 `server` 上挂常驻 `error` 监听：绑定失败时 reject 该 promise，进程不再崩；绑定成功后该监听退化为「确保 error 永远有人接」。向后兼容——`{ server, port, close }` 全部保留，6 个既有调用点一行未改；创建时立即 `listening.catch(() => undefined)`，不 await 它的调用点不会收到 `unhandledRejection`（有专门用例守着）。`serve.ts` 的 `exitCode = 1` 语义实测未变（占用端口后跑 `dist/server/serve.js` 仍是 `UI server failed: …` + 退出码 1）。测试见 `tests/server/ui-server-bind.test.ts`。
+- **状态**: **已解决**（2026-10-21 第九轮）。`createUiServer` 返回值新增 `listening: Promise<void>` 并在 `server` 上挂常驻 `error` 监听：绑定失败时 reject 该 promise，进程不再崩；绑定成功后该监听退化为「确保 error 永远有人接」。向后兼容——`{ server, port, close }` 全部保留，6 个既有调用点一行未改；创建时立即 `listening.catch(() => undefined)`，不 await 它的调用点不会收到 `unhandledRejection`（有专门用例守着）。`serve.ts` 的 `exitCode = 1` 语义实测未变（占用端口后跑 `dist/server/serve.js` 仍是 `UI server failed: …` + 退出码 1）。测试见 `tests/server/ui-server-bind.test.ts`。**已作废**（2026-10-22，浏览器形态下线，相关代码已删除）：`createUiServer`、`serve.ts` 与 `tests/server/ui-server-bind.test.ts` 均已删除，桌面形态不监听端口。
 
 ---
 
@@ -1765,4 +1914,8 @@
 | 2026-10-21 | 第十轮(用户「鉴权失败…派子代理修复」「浏览器无法打开文件夹」「所有前端不要出现Prometheus这个移植过来的项目名称」):①**根因是设计缺陷不是 bug**:`providers.json` 的 schema 只有 `apiKeyEnv`、没有存密钥本身的字段,用户把密钥填进「环境变量名」后被当作变量名去查 `process.env`,自然查不到。新增 `apiKey` 字段与 `resolveProviderApiKey`(`apiKey` 优先于 `apiKeyEnv`,空值一律视为未配置),设置页新增密码框(带显示/隐藏)、环境变量栏降级为「或者」,`looksLikeSecret` 在误填时**当场**行内警告但不阻止保存;bridge/host 全程 `redact` 密钥,实测网关在 401 响应里回显密钥时事件流仍不含原文。录入 D-174(`GET /api/config` 回传明文密钥,受 loopback 保护但本机进程可读,未修)。②浏览器打开文件夹:新增 `POST /api/workspace/resolve` + `resolveWorkspaceCandidates`,把 `showDirectoryPicker()` 只给的裸文件夹名在本机有界搜索(深度 4 / 条目 20000 / 300ms 三重预算,跳过符号链接与 `.` 开头目录,**永不登记、只返回候选**),1 个候选直接用、多个弹选择、0 个回落手输并说明是「没找到」还是「超出预算」。**浏览器不暴露绝对路径这一限制没有被突破**,主目录外且未登记过的目录仍只能手输。③前端品牌清理:用户可见文案里的 Prometheus 全部清除(改用「Agent / the agent」而非把品牌名塞进每句),同时删掉三条**假路径**(`~/.prometheus/usage.jsonl`、`~/.prometheus/config.json`、`.prometheus/hooks.json` —— 均不存在,内核也没有 hooks 机制);`window.prometheus`、`localStorage` 的 `prometheus.*` 键名、preload 的 `exposeInMainWorld` 属运行时契约,**一律未改** |
 | 2026-10-22 | 第十一轮(用户「模型服务，应该可隐藏完整内容，只显示名称+模型」「侧边栏会话应该这个层级：一级：工作区（文件夹），二级：会话」「聊天界面的模型选择有问题，优化一下前端」「前端没做视觉对齐」,并发 4 个子代理):①设置页「模型服务」的 provider 卡片改为默认折叠,折叠态只有名称 + 模型名 + 测试连接/移除;保存校验失败与测试结果到达时强制展开(R3:错误不能藏在折叠卡里),首启强制展开第一张卡,展开态跨重建按 provider 名保持;②侧栏层级改为「工作区 → 会话」,`#sidebar-workspace` 从两行条目改为节标题行的图标按钮(保留 id),一级用文件夹图标 + 更大的字重、二级缩进到一级名字的左缘(`--group-lead` 单变量推导,不写魔数),当前工作区无会话也占一行并给出新建入口;顺带删掉 `.sidebar-foot`/`.locale-switch` 等死 CSS 与死 i18n 键;③**根因在内核不在 bridge**:`ActionInput` 没有 `model` 字段,`POST /api/actions` 也不接受,模型选择器点了只能落到 `unsupported()`。补 `ActionInput.model`(优先级 `sessionModel ?? input.model ?? opts.model ?? env/first`)、`invalid_model` 错误码、`/api/actions` 透传,`bridge.setModel`/`refreshModels` 接上,并把 `lastModel`(新建会话用)与 `sessionModel`(当前会话 header)拆开;④视觉对齐按实测而不是目测:用 headless Chrome + CDP 量光学左缘/字号/间距越界/裁切/对比度(`.tmp/visual-audit/`),修掉三处实测确认的缺陷——D-175 模型弹层被 `overflow:hidden` 裁掉、D-178 窄屏断点写了两份(900/860)导致抽屉必现遮挡聊天区、D-177 回放历史会话时失败工具行伪装成成功(R3,并补波浪下划线使失败不只靠颜色);另把 composer 三个 chip 的三套内边距统一为 `4px 8px`、品牌图标从别家首字母「P」改为方波、设置页头像的同源「P」改为文件夹图标。**未改** `window.prometheus` / `localStorage` 的 `prometheus.*` 键名(运行时契约) |
 | 2026-10-22 | 第十二轮(用户「MCP 也应该可隐藏（默认都应该是隐藏）」「现在推进 Agentic Search 作为知识库检索（见实验结论）」「设置界面可见知识库」,并发 3 个子代理):①设置页「MCP 服务器」列表改为默认折叠卡片,复用「模型服务」的 `.settings-card-*` 结构,折叠态只有名称 + `命令 basename · N args`(无参数只留名字),完整命令行/cwd/timeoutMs 进展开体,开关与编辑/删除放在折叠按钮**外面**;英文补 `mcpArgsCountOne`(「1 arg」不是「1 args」),中文无复数不加键、代码按 `!== undefined` 回退。②**推进 agentic 检索**:`mcp-servers/kb` 新增 `kb_glob(pattern)` 与 `kb_grep(pattern, glob?)`,`kb_read` 补 `offset`/`limit` 分页与 `truncated`;上限对齐实验 B(单次 100 条 / 2000 行 / 命中行 300 字符),`count` 报真实命中总数;补齐内核 `glob.ts` 同值的 pattern 长度 256 与段数 64 上限(每段 `**/` 都是回溯出口,D-086 的同一个坑),并在命中超上限后只计数不留文本(D-078 的同一个坑)。**部署形态 ≠ 实验 B**(B 无 `kb_lookup`),0.925 不能算到本部署头上,已在两处 README 如实披露;新增的 glob/grep **没有任何拒答机制**,登记 **D-179**。③**设置界面可见知识库**:`GET /api/kb` 原来只扫 `$HARNESS_HOME/kb`(对真实用户恒为空),新增 `src/server/kb-locate.ts` 按 `KB_ROOT` → `mcp.json` 的 `env.KB_ROOT` → 仓库默认解析并如实回报 `source`/`note`,根不存在时保留候选路径而不是装作空知识库;`truncated` 覆盖深度/条目/文件数三种触顶与子目录读不动,触顶时 `fileCount` 只作「至少 N」;**D-064 已解决**。宿主 `getKb` 用惰性 import(旧 `dist/` 缺模块不拖垮宿主),bridge 走 `GET /api/kb`、失败只发 notice 不发空 kb;设置页新增「知识库」页,目录默认折叠、文件不可点(无预览端点,死按钮违反 R3),空状态区分「没找到根」与「根下没文件」,`error`/`truncated` 时拒绝断言目录为空。**主控实测补的**:`.kb-body` 无 `gap` 导致「Status」标题与说明行间距为 0(实测 `top === bottom === 178`),加 `.kb-head { margin-bottom: 14px }` 后为 192 |
+| 2026-10-22 | 第十三轮补(用户「桌面宿主暂不支持该命令：worktreeStart，直接删掉这个按键吧」「达到最大回合数是什么鬼」):①worktree 顶栏按钮与面板整块删除(内核无 worktree 能力,点它只得到「暂不支持该命令」;`worktreeStart`/`worktreeDiff`/`worktreeMerge`/`worktreeDiscard` 的按钮、`renderWorktree`、`worktree_diff` 事件分支、`state.worktree`/`worktreeDiffText`、CSS 与 i18n 全部移除;CDP 实测顶栏只剩 侧栏切换 / cwd / spacer / 状态 / actions / menu / 窗口控件,`#worktree-button` 与 `#worktree-panel` 计数为 0、无控制台错误);②**`maxTurns` 按整段会话累计**——`turn` 同时是检查点序号(D-045 要求跨消息递增)与 `maxTurns` 的比较对象,会话累计用满 10 轮后**之后每条消息**都在调用模型前熔断,用户真实日志可复现;拆成 `turn` / `runTurn` 两个变量,`maxCostUsd` 有意保持会话累计(标签写的就是总预算),**登记 D-183** |
 | 2026-10-22 | 第十三轮(用户「删除语言输入UI」「选择会话，上方的文件夹不会随会话所在文件夹变化」「会话操作与时间重合」「桌面宿主暂不支持该命令：rewindTo」「表格、分割线 md 语法渲染有误」「查找README.md 似乎并没有从项目文件夹开始找」「继续完善 Agentic Search」,并发 5 个子代理):①删除语音输入 UI(用户确认指麦克风按钮,界面语言切换保留);②**顶栏不跟会话目录**——`handleLoadSession` 从不更新宿主模块级 `cwd`,而 `stateEvent()` 用的就是它,渲染器 `state.cwd` 又无条件覆盖,两条事件对同一事实说了两种话;新增 `adoptSessionWorkdir`(单次 `statSync` 判定,目录消失/非目录/读不了分别告警且不改 cwd),顶栏/文件树/`getFile` 边界一起收敛,**登记 D-182**;③会话行三点按钮压住日期——`:hover`/`:focus-within` 时 meta 让位 `calc(9px+20px+6px)`,CDP 强制真实 `:hover` 实测由相交 20px 变为 6px 间隙;④删除「回退到这里」按钮(内核无 rewind 能力,按 R3 删而不是伪造;检查点面板整块仍是死代码,已记录);⑤Markdown 表格与分割线(渲染器原本不产出 `<table>`/`<hr>`,样式一直是死代码;新增 26 例测试,`\|` 与 code-span 内竖线不拆列);⑥**`glob`/`grep` 从缓存目录起扫**——旧 DFS 未排序,`.mypy_cache` 等先递归进 5000 文件预算,根目录 README.md 从未被访问(真实项目 25089 个未忽略文件,复现命中 0 次);改惰性 BFS + 忽略清单扩到 24 项 + `*.egg-info`,截断追加可行动提示,**登记 D-181**;⑦Agentic Search 按 D-179 建议①②(`kb_grep` 的 `fileCount`/`files`、描述写死「必须 kb_read 原文确认」、KB 遍历上限与 `scanTruncated`),**③未做故 D-179 不关闭**;⑧**`tests/assistant-delta.test.ts` 的超限用例在测磁盘延迟**(实测首次 fsync 18–25ms,原断言固定睡 10ms,空闲机器上 5/5 稳定红),改 `vi.waitFor` 并做反向验证(把超限分支改回定时器路径 → 立刻变红),**登记 D-180** |
+| 2026-10-22 | 第十五轮（用户「compact不考虑有没有达到阈值，一律压缩」「/命令也要作为消息正常发送，context应显示完整一些，参考claude code的实现」「补一些tool，如read，write」，并发 5 个子代理）：①**compact 一律压缩**——内核 `compactSession` 加 `force`（跳过软阈值提前返回**且**跳过 microcompact 阶段：后者是「超预算时廉价回收」，用户显式要求压缩时要的是摘要），宿主删掉阈值提前返回、改传 `force: true`，阈值数字只留在报告里；协议层把 `no_progress` / `no summarizable content` 降级为 dim 提示（一律压缩后小会话必撞到，印成「失败」是误报）。②**命令作为消息**——执行时 echo 原文，拒绝路径（未知 / 带参数）**不 echo**，否则先留消息再报错会让人以为它跑过。③**context 显示完整**——新增 `src/context/breakdown.ts`（四桶 `systemPrompt`/`messages`/`toolResults`/`mcpTools`，等比缩放 + 余数补给最大桶，强制 `sum(parts) === used`），`/context` 扩成完整报告，**D-191 已解决**。④**D-195**（本轮最要紧的一条，子代理只报「值得登记」，核实后是 D-165 起就在的静默缺陷）：`usage` 事件在工具批次闭合前重新投影日志测占用率，必然抛错被空 `catch` 吞掉，**每条带工具调用的回合都没有占用率**；测量移到发请求之前。⑤**补工具**——`fs` 拆成 `read`/`write`/`edit`/`multiedit` 并**删除 `fs` 不保留别名**（留着等于留了第二条写路径，`{tool:"write",action:"deny"}` 可被 `fs op=write` 绕过），`builtinRules` 改三条并列 allow 不用通配符；新增 `ls`（`lstat` 不跟随链接、空目录有明确占位、**刻意不套** glob/grep 的忽略清单）。注册顺序 `[echo,read,ls,write,edit,multiedit,shell,glob,grep]`，渲染器 `TOOL_LABELS`/`toolGlyph`/`FILE_TOOLS` 同步（`ls` 故意不在 `FILE_TOOLS`：摘要是目录，`getFile` 拒绝目录，点不动的行不该看起来可点）。**登记 D-196**（五个事件有 handler 无生产者）。 |
+| 2026-10-22 | 第十四轮（用户「取消最大轮数限制」「测试连接显示的可以模型需进行展示美化」「上下文情况的获取」「@点名文件和/调取命令的实现（如/compact，/clear）」，并发 5 个子代理）：①**取消默认轮数上限**——上一轮只修了计数口径，默认 10 仍在；`BreakerLimits.maxTurns` 改可选、`assertBreakers` 缺省即不检查、`AppRunLimits.maxTurns: number \| null` 且默认 `null`、`readRunLimits`/`readRunLimitsBody` 把 `null` 规范化成「字段缺席」、宿主只在正数时才下发；设置页留空 = 不限制。**0 / 负数 / 非整数仍拒绝**（把笔误当「不限」会让用户以为上限生效）。`maxCostUsd` 有意不动（会话总预算，与轮数是两件事）。新增集成用例：12 轮工具调用 + 收尾，模型必须被调用 **13** 次且日志无 `interrupted`，RED 阶段失败在 `expected 13, received 10`。D-183 追加「第十四轮补充」。②**``@`` 文件搜索端到端接通**——新增内核 `searchFilesByName`（复用 `walkFiles` 的惰性 BFS / 24 项忽略清单 / 符号链接跳过 / D-080 保守截断，边界复用 `listDirectory` 的 `resolveReadableDirectory`）+ `GET /api/files/search`；宿主 `searchFiles` 与 bridge 同一套规则，分层排序（基名全等 → 基名前缀 → 基名包含 → 路径包含，层内短路径优先）；宿主的边界拒绝发 notice、bridge 保持安静，两者都必回一条带 query 的 `file_matches`（弹窗只在该事件上释放）。`dist/` 缺该导出时每进程只 warn 一次。**登记 D-184**（目录不出现在结果里；旧 `dist/` 下静默失效）。D-166 第 3 项标记**已解决**。③**上下文占用率真正可见**——内核 D-165 起就在发 `context{tokens,percent,window}`，但 `#context-label` 一直带 `hidden` 且无人移除，百分比从未显示过；同时 `initialState()` 用 `{tokens:0,percent:0}` 兜底，把「未知」画成「0%」。现在 `protocol.measuredContext()` 只在两个字段都是有限数时才认，缺省为 `null`（显式「未知」哨兵）；`updateMeter` 的合同是 `undefined` 保留原值、`null` 清除并隐藏、真实测量才显示；`window` 仅在有限且为正时带上。`session_loaded` 用字面 `null` 清空（转录已换，不能继承上一段的百分比）。④**「测试连接」结果区重做**——新增纯模块 `settings-models.js`（`availableModelEntries` / `connectionSummary`，13 例测试），结果块改为「状态行（勾选 + 摘要 + 独立延迟）+ 可用模型标题与计数 + 可换行的模型 chip 网格」；**已列出的模型不再被静默丢弃**，改为展品态的禁用 chip（R3：结果块少一半就是错答案）；端点为 0 模型时用警告色勾选而非绿色。`maxTurns` 设置项同步改为「留空 = 不限制」。⑤**复核并登记 10 条此前无编号的缺口**（D-184 ~ D-193）：`getBoardState` 两端无 handler 而 Board 是唯一常驻页签、快捷键表三条键与实现不符、`contextBreakdown` 无生产者、MCP 仅 stdio、无整跑墙钟超时、图片附件静默丢弃、About 页 `checkUpdate` 无实现必崩、「排队」标签是假的（消息实际被丢弃）、goals/subagents/检查点三块死 UI |
+| 2026-10-22 | 只保留桌面端（用户「不要浏览器了，只保留桌面端」）：删除 `desktop/renderer/bridge.js`、`src/server` 的 HTTP 层（`api.ts` / `serve.ts` / `http.ts` / `body.ts` / `config-api.ts` / `event-stream.ts`）与 11 个 `tests/server/*` 测试（连同 `tests/desktop/bridge.test.js`、`tests/events-e2e.test.ts`），`package.json` 移除 `serve:ui`；`readSessionHeader` 搬进 `src/session/persistence.ts`；`HttpError` 移入 `src/server/errors.ts`（保留类名，桌面宿主仍靠 `status` / `code` 区分「路径非法」「目录不存在」「会话忙」）。文档侧：README、AGENTS.md、`docs/frontend-design.md` 去掉浏览器形态的说法；本文件给 D-051 / D-060 / D-063 / D-067 / D-112 / D-133 / D-136 / D-137 / D-138 / D-139 / D-146 / D-150 / D-152 / D-153 / D-167 / D-171 / D-174 标注**已作废**并保留原文（D-172 / D-176 / D-182 标在各自的状态行或遗留行上）；D-145 / D-147 / D-148 / D-149 / D-163 / D-193 补注「浏览器形态下线后结论如何变化」。D-124 / D-134 / D-135 等与形态无关的条目未动 |

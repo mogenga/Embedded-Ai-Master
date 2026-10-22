@@ -180,8 +180,7 @@ async function attempt(permissions: unknown): Promise<unknown> {
   );
 }
 
-const WRITE_CALL = toolCall("write-1", "fs", {
-  op: "write",
+const WRITE_CALL = toolCall("write-1", "write", {
   path: "new.txt",
   content: "written",
 });
@@ -195,7 +194,7 @@ describe("runSession 权限装配", () => {
 
     const events = await runIn(home, workdir, "default-diagnose", [
       WRITE_CALL,
-      toolCall("read-1", "fs", { op: "read", path: "note.txt" }),
+      toolCall("read-1", "read", { path: "note.txt" }),
       EMPTY_RESPONSE,
     ]);
 
@@ -241,7 +240,7 @@ describe("runSession 权限装配", () => {
     await writePermissionFile(projectPath, {
       version: 1,
       preset: "danger-full-access",
-      rules: [{ tool: "fs", action: "allow" }],
+      rules: [{ tool: "write", action: "allow" }],
     });
 
     const sessionDir = path.join(home, "project-skipped");
@@ -261,7 +260,7 @@ describe("runSession 权限装配", () => {
     const workdir = await tempDir();
     await writePermissionFile(path.join(workdir, ".harness", "permissions.json"), {
       version: 1,
-      rules: [{ tool: "fs", action: "allow" }],
+      rules: [{ tool: "write", action: "allow" }],
     });
 
     const events = await runIn(home, workdir, "project-trusted", [WRITE_CALL, EMPTY_RESPONSE], {
@@ -279,7 +278,7 @@ describe("runSession 权限装配", () => {
     const projectPath = path.join(workdir, ".harness", "permissions.json");
     await writePermissionFile(projectPath, {
       version: 1,
-      rules: [{ tool: "fs", action: "allow" }],
+      rules: [{ tool: "write", action: "allow" }],
     });
 
     const sessionDir = path.join(home, "mcp-trust-independent");
@@ -372,7 +371,7 @@ describe("runSession 权限装配", () => {
     const sessionDir = path.join(home, "resume-project-skipped");
     await writePermissionFile(path.join(workdir, ".harness", "permissions.json"), {
       version: 1,
-      rules: [{ tool: "fs", action: "allow" }],
+      rules: [{ tool: "write", action: "allow" }],
     });
     await runIn(home, workdir, "resume-project-skipped", [EMPTY_RESPONSE]);
 
@@ -442,7 +441,7 @@ describe("runSession 权限装配", () => {
     });
 
     const events = await runIn(home, workdir, "inline-rules", [WRITE_CALL, EMPTY_RESPONSE], {
-      permissions: { rules: [{ tool: "fs", action: "allow" }] },
+      permissions: { rules: [{ tool: "write", action: "allow" }] },
     });
 
     expect(toolResults(events)[0]).toMatchObject({ ok: true, code: "ok" });
@@ -486,7 +485,7 @@ describe("runSession 权限装配", () => {
 
   it("内联规则含未知字段抛 PermissionConfigError(invalid_schema)", async () => {
     const error = await attempt({
-      rules: [{ tool: "fs", action: "allow", unexpected: true }],
+      rules: [{ tool: "write", action: "allow", unexpected: true }],
     });
     expect(error).toBeInstanceOf(PermissionConfigError);
     expect((error as PermissionConfigError).code).toBe("invalid_schema");
@@ -570,7 +569,7 @@ describe("runSession 权限装配", () => {
 
     expect(prompter.request).toHaveBeenCalledTimes(1);
     expect(prompter.request).toHaveBeenCalledWith(
-      expect.objectContaining({ tool: "fs", preset: "diagnose" }),
+      expect.objectContaining({ tool: "write", preset: "diagnose" }),
     );
     expect(toolResults(events)[0]).toMatchObject({ ok: true, code: "ok" });
     expect(existsSync(path.join(workdir, "new.txt"))).toBe(true);
@@ -582,7 +581,7 @@ describe("runSession 权限装配", () => {
     const workdir = await tempDir();
     await writePermissionFile(path.join(workdir, ".harness", "permissions.json"), {
       version: 1,
-      rules: [{ tool: "fs", action: "allow" }],
+      rules: [{ tool: "write", action: "allow" }],
     });
 
     appendFailure.enabled = true;

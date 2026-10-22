@@ -904,4 +904,70 @@ describe("compactSession", () => {
       ),
     ).toBe(true);
   });
+
+  // 用户原话:「compact 不考虑有没有达到阈值，一律压缩」。`force` 就是那条出口：
+  // 缺省仍按软阈值提前返回（现有用例锁定的行为），显式 force 时才跳过它。
+  it("force=true 时低于软阈值也产出 summary，force 缺省时不追加任何事件", async () => {
+    // 400 token 的尾段刚好越过 keepTailRatio 预算（2000 × 0.16 = 320），
+    // 摘要边界因而落在第一条 user 之后；总量 402 仍远低于软阈值 1600。
+    const seed = async (): Promise<SessionHandle> => {
+      const session = await makeSession();
+      await addUser(session, "start");
+      await addUser(session, "x".repeat(1600));
+      return session;
+    };
+
+    const plain = await seed();
+    const plainBefore = plain.events().length;
+    const plainModel = createFakeModel();
+    await compactSession(makeOptions(plain, plainModel.model, cfg(2000)));
+    expect(plain.events().length).toBe(plainBefore);
+    expect(plainModel.calls).toHaveLength(0);
+
+    const forced = await seed();
+    const forcedModel = createFakeModel(async () => ok("SUMMARY_FORCED"));
+    await compactSession(
+      makeOptions(forced, forcedModel.model, cfg(2000), { force: true }),
+    );
+
+    expect(forcedModel.calls).toHaveLength(1);
+    const summaries = forced
+      .events()
+      .filter((event) => event.type === "compaction" && event.payload.kind === "summary");
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].payload.summary).toBe("SUMMARY_FORCED");
+  });
+
+  // microcompact 是「超预算时先廉价回收」：把工具结果换成一行标记就结束，
+  // 模型根本不会被调用。用户显式要求压缩时要的是摘要，不是这种静默替换。
+  it("force=true 跳过 microcompact：可省略的 tool_result 保持原样且不落 microcompact 事件", async () => {
+    const session = await makeSession();
+    await addUser(session, "start");
+    await addBatch(session, "c1", "a".repeat(1600));
+    await addUser(session, "wrap up");
+    const { calls, model } = createFakeModel(async () => ok("SUMMARY_NO_MICRO"));
+
+    await compactSession(
+      makeOptions(session, model, cfg(2000), { force: true, keepRecentTurns: 0 }),
+    );
+
+    expect(calls).toHaveLength(1);
+    const events = session.events();
+    expect(
+      events.some(
+        (event) => event.type === "compaction" && event.payload.kind === "microcompact",
+      ),
+    ).toBe(false);
+    expect(
+      events.some(
+        (event) => event.type === "compaction" && event.payload.kind === "summary",
+      ),
+    ).toBe(true);
+    // 工具结果原样留在投影里：它没有被换成一行标记，也没有被摘要边界吞掉。
+    expect(
+      buildMessages(events).some(
+        (message) => message.role === "tool" && message.content === "a".repeat(1600),
+      ),
+    ).toBe(true);
+  });
 });

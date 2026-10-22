@@ -7,6 +7,7 @@ import {
   readAppConfig,
   readProviders,
   writeProviders,
+  writeRunLimits,
 } from "../src/config/app-config.js";
 import type { ProvidersConfig } from "../src/config/providers.js";
 
@@ -243,5 +244,53 @@ describe("readAppConfig 的 providers 降级读取", () => {
     expect(snapshot.run.systemPrompt).toBe("只做只读诊断");
     expect(snapshot.permissions.preset).toBe("read-only");
     expect(snapshot.mcpServers).toEqual([{ name: "probe", command: "node" }]);
+  });
+});
+
+describe("运行上限的 maxTurns 可缺省（null = 不限）", () => {
+  it("没有 run.json 时默认快照的 maxTurns 是 null，不是 10", () => {
+    const home = makeHome();
+
+    const snapshot = readAppConfig(home);
+
+    // 产品决定：不存在默认轮数上限。null 必须能穿过「文件 -> 快照」这一层，
+    // 否则前端与宿主仍会按「默认 10」渲染。
+    expect(snapshot.run.maxTurns).toBeNull();
+  });
+
+  it("写正整数 7 能读回 7", async () => {
+    const home = makeHome();
+
+    const written = await writeRunLimits(home, { maxTurns: 7 });
+
+    expect(written.maxTurns).toBe(7);
+    expect(readAppConfig(home).run.maxTurns).toBe(7);
+  });
+
+  it("写 null 能读回 null", async () => {
+    const home = makeHome();
+
+    const written = await writeRunLimits(home, {
+      maxTurns: null,
+      maxCostUsd: null,
+      timeoutMs: null,
+      systemPrompt: "",
+    });
+
+    expect(written.maxTurns).toBeNull();
+    expect(readAppConfig(home).run.maxTurns).toBeNull();
+    // 落盘的是 null 本身，而不是「字段消失后又被默认值填上」。
+    expect(readRaw(path.join(home, "run.json"))).toContain('"maxTurns": null');
+  });
+
+  it.each<[string, unknown]>([
+    ["0", 0],
+    ["-1", -1],
+  ])("maxTurns 为 %s 仍被拒绝（正整数或 null）", async (_label, maxTurns) => {
+    const home = makeHome();
+
+    await expect(writeRunLimits(home, { maxTurns })).rejects.toMatchObject({
+      code: "invalid_config",
+    });
   });
 });

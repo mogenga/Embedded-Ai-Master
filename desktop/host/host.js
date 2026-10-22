@@ -55,10 +55,14 @@ try {
   const [
     { createSessionRunner },
     { createLogTailEventSource },
-    { readSessionDir, readSessionSnapshot },
+    // `readSessionHeader` lives here now: it used to be re-exported by the
+    // HTTP layer's `api.js`, which was deleted with the browser form. The one
+    // that survived is the checked variant (it also insists on at least one
+    // log file), so a session directory with a header but no log reads as
+    // corrupt here rather than as an empty conversation.
+    { readSessionDir, readSessionSnapshot, readSessionHeader },
     { resolveHarnessHome },
     { loadProviders, resolveModelRef },
-    { readSessionHeader },
     { isValidSessionId },
     { readSessionMeta },
     {
@@ -78,7 +82,6 @@ try {
     import(dist("session/persistence.js")),
     import(dist("config/harness-home.js")),
     import(dist("config/providers.js")),
-    import(dist("server/api.js")),
     import(dist("session/handle.js")),
     import(dist("session/metadata.js")),
     import(dist("config/app-config.js")),
@@ -186,6 +189,76 @@ let ctx = kernel.protocol.createContext();
 let followAbort;
 /** Resolves when the pump ends; kept so tests can await a turn. */
 let followTask;
+/**
+ * The in-flight `/compact`, if any.
+ *
+ * Kept apart from `followAbort` because it belongs to no run: `handleAbort`
+ * stops this first so a compaction blocked on a slow summary request can be
+ * cancelled without pretending a turn was running.
+ */
+let compactAbort;
+
+/**
+ * The kernel modules `/compact` needs, loaded on first use.
+ *
+ * Deliberately not in the startup `Promise.all`: `dist/context/compact.js`
+ * and friends are newer than some `dist/` trees in the wild, and a kernel
+ * built before them must still boot. A command the user can retry reports the
+ * gap instead of taking the window down (`getKb` / `getTree` do the same).
+ *
+ * `dist/context/breakdown.js` rides in the same batch and shares its failure
+ * mode on purpose: the split is what `/compact` reports afterwards, so a
+ * kernel without it would answer with numbers the host could not break down.
+ * One "npm run build" message covers both, and the `catch` below stays.
+ */
+let compactModulesPromise;
+function compactModules() {
+  compactModulesPromise ??= Promise.all([
+    import(dist("config/providers.js")),
+    import(dist("model/openai.js")),
+    import(dist("session/session.js")),
+    import(dist("context/compact.js")),
+    import(dist("context/build.js")),
+    import(dist("context/breakdown.js")),
+    import(dist("model/count.js")),
+  ])
+    .then(([
+      providersModule,
+      openaiModule,
+      sessionModule,
+      compactModule,
+      buildModule,
+      breakdownModule,
+      countModule,
+    ]) => ({
+      loadProviders: providersModule.loadProviders,
+      resolveModelRef: providersModule.resolveModelRef,
+      resolveProviderApiKey: providersModule.resolveProviderApiKey,
+      resolveContextWindow: providersModule.resolveContextWindow,
+      createOpenAIProvider: openaiModule.createOpenAIProvider,
+      resumeSession: sessionModule.resumeSession,
+      compactSession: compactModule.compactSession,
+      buildMessages: buildModule.buildMessages,
+      // A namespace member, not a destructured name: an older `dist/` may lack
+      // `context/breakdown.js` entirely (the import above rejects and
+      // `compactModules()` resolves `undefined`, which the handler reports as
+      // "run npm run build"). When the module exists but the export does not,
+      // the value is `undefined` and the meter simply carries no split.
+      buildContextBreakdown: breakdownModule.buildContextBreakdown,
+      heuristicCountTokens: countModule.heuristicCountTokens,
+    }))
+    .catch(() => undefined);
+  return compactModulesPromise;
+}
+
+/**
+ * Whether the stale-`dist/` warning for file search has been sent.
+ *
+ * The `@` popup asks once per keystroke; without this flag a kernel missing
+ * `searchFilesByName` would emit one notice per character and bury the
+ * transcript. One warning per process says the same thing once.
+ */
+let searchUnavailableWarned = false;
 
 const sessions = (() => {
   return {
@@ -294,18 +367,23 @@ function baseUrlOf(ref) {
 }
 
 /** Saved run limits, re-read whenever the settings save handler runs. */
-let runLimits = { maxTurns: 10, maxCostUsd: null, timeoutMs: null, systemPrompt: "" };
+let runLimits = { maxTurns: null, maxCostUsd: null, timeoutMs: null, systemPrompt: "" };
 
 /**
  * The limits to hand this run.
  *
  * `null` means "not set", not "zero": sending `maxCostUsd: null` would fail
  * the runner's number check, and sending 0 would stop the loop before its
- * first turn. Unset fields are omitted so the kernel defaults apply.
+ * first turn. Unset fields are omitted so the kernel defaults apply — which
+ * for `maxTurns` means no cap at all, not a hidden number.
  */
 function runLimitOptions() {
   return {
-    ...(runLimits.maxTurns === 10 ? {} : { maxTurns: runLimits.maxTurns }),
+    ...(typeof runLimits.maxTurns === "number"
+      && Number.isFinite(runLimits.maxTurns)
+      && runLimits.maxTurns > 0
+      ? { maxTurns: runLimits.maxTurns }
+      : {}),
     ...(runLimits.maxCostUsd === null ? {} : { maxCostUsd: runLimits.maxCostUsd }),
     ...(runLimits.timeoutMs === null ? {} : { timeoutMs: runLimits.timeoutMs }),
     ...(runLimits.systemPrompt === "" ? {} : { systemPrompt: runLimits.systemPrompt }),
@@ -377,20 +455,28 @@ function configEvent() {
 }
 
 /**
- * Occupancy and spend as of the last priced call in a log.
+ * Occupancy, its per-category split and spend, as of the last priced call.
  *
  * `state` is sent on boot and on every session switch; without these figures
  * the meter drops back to zero each time a conversation is reopened, even
  * though its transcript is full.
+ *
+ * The split is read from the same `usage` event that carried the occupancy —
+ * the kernel writes both together, so taking them from different events could
+ * pair a total with a breakdown of a different transcript. A log written before
+ * the split existed simply has no such field, and the key stays absent rather
+ * than travelling as `null` ("no measurement" is a different claim).
  */
 function lastMeasure(events) {
   let context;
+  let contextBreakdown;
   let costUsd;
   for (const event of events) {
     if (event?.type !== "usage" || typeof event.payload !== "object" || event.payload === null) continue;
     const payload = event.payload;
     if (typeof payload.context === "object" && payload.context !== null) {
       context = payload.context;
+      contextBreakdown = payload.contextBreakdown;
     }
     if (typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd)) {
       costUsd = payload.costUsd;
@@ -398,6 +484,7 @@ function lastMeasure(events) {
   }
   return {
     ...(context === undefined ? {} : { context }),
+    ...(contextBreakdown === undefined ? {} : { contextBreakdown }),
     ...(costUsd === undefined ? {} : { costUsd }),
   };
 }
@@ -478,20 +565,37 @@ async function settleRoot() {
  * The kernel header has no title field, so the first user message stands in
  * for one. Reading a log per row on every list would stall the sidebar on a
  * large home; the cache makes each session pay that cost once.
+ *
+ * **Only a hit is cached.** A miss means the log has no user event *yet*:
+ * `runner.start()` returns as soon as `onSession` fires — the header is
+ * written, the user event is not — so the `sessions` push that follows every
+ * prompt runs before there is anything to read. Caching that empty answer
+ * froze the row on its UUID for the life of the process: the title arrived
+ * milliseconds later and nothing ever asked again. A session with genuinely
+ * no messages now pays one log read per list push, which is the correct price
+ * for a row that can still change.
  */
 const titleCache = new Map();
 const TITLE_SCAN_LIMIT = 30;
+
+/** Cache key for one session row: a rename or a fork changes `createdAt`. */
+function titleKey(entry) {
+  return `${entry.id}@${entry.createdAt}`;
+}
 
 function titleFor(entry) {
   // A name the operator gave is the title; the first user message is only a
   // stand-in for a session nobody renamed.
   if (typeof entry.title === "string" && entry.title !== "") return entry.title;
-  const key = `${entry.id}@${entry.createdAt}`;
+  const key = titleKey(entry);
   const cached = titleCache.get(key);
   if (cached !== undefined) return cached;
   const title = sessions.titleOf(entry.id);
-  titleCache.set(key, title === entry.id ? "" : title);
-  return title === entry.id ? "" : title;
+  // `titleOf` falls back to the id when the log has no user event; that is a
+  // miss, not a title, and must not be remembered.
+  if (title === entry.id || title === "") return "";
+  titleCache.set(key, title);
+  return title;
 }
 
 /** Rows per page when the renderer does not ask for a specific page size. */
@@ -545,7 +649,10 @@ function sessionsEvent(query = sessionListQuery) {
   const page = filtered.slice(0, limit);
   let scanned = 0;
   const list = page.map((entry) => {
-    const alreadyCached = titleCache.has(`${entry.id}@${entry.createdAt}`);
+    const alreadyCached = titleCache.has(titleKey(entry));
+    // A row with no derived title yet reports `""` rather than its id: the
+    // renderer draws "no messages" for that, where an id reads as a name the
+    // operator gave. It stays out of the cache so the next push can find it.
     const title = alreadyCached || scanned < TITLE_SCAN_LIMIT ? titleFor(entry) : "";
     if (!alreadyCached) scanned += 1;
     return { ...entry, title };
@@ -897,12 +1004,270 @@ async function handlePrompt(text) {
 }
 
 function handleAbort() {
+  // A compaction is not a turn: it has no session in the runner's registry, so
+  // `runner.abort` would answer "nothing is running" while a summary request
+  // kept the UI busy. The controller is the stop button for it.
+  if (compactAbort !== undefined) {
+    compactAbort.abort();
+    return;
+  }
   if (sessionId === "" || !runner.abort(sessionId)) {
     send({ type: "notice", level: "dim", text: "没有正在运行的会话" });
     return;
   }
   // The kernel appends `interrupted` and closes the session; the pump will
   // deliver both and emit run_end. Nothing else to send here.
+}
+
+/**
+ * Run the kernel's compaction on the open session, now.
+ *
+ * There is no shortcut here: the same `compactSession` the loop calls is
+ * invoked against a handle opened for this command, keeps the same boundaries
+ * and writes the same `compaction` events the transcript already knows how to
+ * draw. The host's only jobs are the bookkeeping the loop would have done for
+ * it — a busy state, an abort path, and a fresh measurement afterwards.
+ *
+ * One deliberate difference from the loop: this command compacts whether or
+ * not the session has reached the soft threshold (`force: true`). The operator
+ * pressed the button, so the occupancy check is not theirs to lose; the
+ * threshold still travels to the kernel as `compactAt` for the report and the
+ * meter, but it no longer decides whether anything happens.
+ *
+ * Every outcome is stated with real numbers: a completion quotes the occupancy
+ * measured before and after, a no-op says so with the before figure, and a
+ * failure carries the kernel's own reason. Nothing here reports success it did
+ * not observe (R3), and nothing invents a zero for a figure it could not take.
+ */
+async function handleCompact() {
+  if (sessionId === "") {
+    send({ type: "notice", level: "warn", text: "没有打开的会话" });
+    return;
+  }
+  if (ctx.running) {
+    send({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
+    return;
+  }
+  let header;
+  try {
+    ({ header } = await sessions.detailTolerant(sessionId));
+  } catch (error) {
+    send({ type: "notice", level: "warn", text: `上下文压缩失败：${messageOf(error)}` });
+    return;
+  }
+  const model = header.model ?? modelRef;
+  if (model === "") {
+    send({ type: "notice", level: "warn", text: "没有可用的模型，无法压缩上下文" });
+    return;
+  }
+
+  const modules = await compactModules();
+  if (modules === undefined) {
+    send({
+      type: "notice",
+      level: "warn",
+      text: "上下文压缩不可用：内核未编译，请先 npm run build",
+    });
+    return;
+  }
+
+  let handle;
+  const controller = new AbortController();
+  compactAbort = controller;
+  const signal = controller.signal;
+  // The UI state is set only once the session is actually held: a refusal
+  // before this point must not flash a busy meter.
+  ctx.running = true;
+  running = true;
+  send({ type: "run_start" });
+  try {
+    const providers = modules.loadProviders(harnessHome);
+    const { provider, modelName, model: modelCfg } = modules.resolveModelRef(providers, model);
+    const apiKey = modules.resolveProviderApiKey(provider);
+    const modelProtocol = modules.createOpenAIProvider({
+      baseUrl: provider.baseUrl,
+      model: modelName,
+      ...(apiKey === undefined ? {} : { apiKey }),
+      ...(provider.requestTimeoutMs === undefined
+        ? {}
+        : { requestTimeoutMs: provider.requestTimeoutMs }),
+      ...(provider.maxResponseBytes === undefined
+        ? {}
+        : { maxResponseBytes: provider.maxResponseBytes }),
+    });
+
+    const window = modules.resolveContextWindow(modelCfg);
+    const softRatio = 0.8;
+    const softLimit = Math.floor(window * softRatio);
+    const tokensOf = (events) => modules.heuristicCountTokens(modules.buildMessages(events));
+
+    // The handle is opened before anything is measured: it takes the session
+    // lock, so "another process is using this conversation" is reported as
+    // itself instead of as a measurement that could change a moment later.
+    handle = await modules.resumeSession(path.join(sessionsRoot, sessionId));
+    const lastSeq = handle.events().at(-1)?.seq ?? -1;
+    // Measured whether or not it clears the threshold: the figure is what the
+    // report compares against, and `force` below is what makes the threshold
+    // stop being a gate.
+    const beforeTokens = tokensOf(handle.events());
+
+    try {
+      await modules.compactSession({
+        session: handle,
+        model: modelProtocol,
+        modelCfg,
+        signal,
+        softRatio,
+        // The operator asked for a compaction, so the kernel's soft threshold
+        // does not get to answer "nothing to do". `force` skips both the
+        // early return and the microcompact stage; without it (a `dist/`
+        // built before this option existed) the call behaves as it always
+        // did, which the report below still describes honestly.
+        force: true,
+      });
+    } finally {
+      await handle.close().catch(() => undefined);
+      handle = undefined;
+    }
+
+    // What this call appended is what happened. Reading the log again rather
+    // than trusting a return value keeps the report tied to the record.
+    const after = await sessions.detailTolerant(sessionId);
+    const appended = after.events.filter((event) => event.seq > lastSeq);
+    const compactions = appended.filter((event) => event.type === "compaction");
+    const summary = compactions.filter((event) => event.payload?.kind === "summary");
+    const failed = compactions.filter((event) => event.payload?.kind === "failed");
+    const elided = compactions
+      .filter((event) => event.payload?.kind === "microcompact")
+      .reduce(
+        (total, event) =>
+          total + (Array.isArray(event.payload.elidedSeqs) ? event.payload.elidedSeqs.length : 0),
+        0,
+      );
+    // The same measurement the kernel makes, taken again on the log as it now
+    // stands. Both figures are facts about this command: `beforeTokens` from
+    // the handle before it ran, `afterTokens` from the record after it. A
+    // message build that throws is kept as its own outcome: a compaction that
+    // did happen must not be reported as a failure because the meter choked
+    // on the result, and no figure is invented to fill the gap (R3).
+    let messagesAfter;
+    let afterTokens = 0;
+    let measureError;
+    try {
+      messagesAfter = modules.buildMessages(after.events);
+      afterTokens = modules.heuristicCountTokens(messagesAfter);
+    } catch (error) {
+      measureError = error;
+    }
+
+    // `summary` and `microcompact` become the transcript's existing
+    // `compacted` marker. `failed` is left to the branch below: the protocol
+    // turns it into a warning too, and forwarding it here would print the same
+    // kernel reason twice.
+    for (const event of compactions) {
+      if (event.payload?.kind === "failed") continue;
+      for (const message of kernel.protocol.sessionEventToHostEvents(event, ctx)) {
+        send(message);
+      }
+    }
+    if (failed.length > 0) {
+      // The kernel's own reason, stated once. It normally also wrote a
+      // `compaction` event with `kind: "failed"`, which the protocol renders
+      // as the same warning through the pump; this direct path exists because
+      // nothing is following the log during the command.
+      for (const event of failed) {
+        for (const message of kernel.protocol.sessionEventToHostEvents(event, ctx)) {
+          send(message);
+        }
+      }
+    } else if (summary.length === 0 && elided === 0) {
+      // compactSession ran but found nothing it could do. Saying so beats a
+      // silent no-op the operator would read as "it worked". The figure is the
+      // one measured before the call, stated so the operator can see what was
+      // weighed.
+      send({
+        type: "notice",
+        level: "dim",
+        text: `压缩没有产生任何改动（上下文 ${beforeTokens} / 窗口 ${window} tokens，压缩阈值 ${softLimit}）`,
+      });
+    } else if (afterTokens > 0) {
+      // What actually changed, in the two measurements that bracket it. No
+      // fallback to 0: an unmeasurable `after` is not an empty transcript, and
+      // the `compacted` marker above already reports that it happened.
+      send({
+        type: "notice",
+        level: "dim",
+        text: `压缩完成：上下文 ${beforeTokens} → ${afterTokens} tokens（窗口 ${window}，压缩阈值 ${softLimit}）`,
+      });
+    } else if (measureError !== undefined) {
+      // The compaction was appended (the marker above says so); only the
+      // "how much is left" figure is missing. Stated with the kernel's reason
+      // instead of a made-up number.
+      send({
+        type: "notice",
+        level: "warn",
+        text: `压缩已完成，但未能重新测量上下文：${messageOf(measureError)}`,
+      });
+    }
+    if (failed.length === 0 && summary.length === 0 && elided > 0) {
+      // Only reachable through a kernel that still stops after microcompaction
+      // (one built before `force`); it is a fact either way, so it is stated
+      // whether or not the "压缩完成" line above had a measured `after`.
+      send({
+        type: "notice",
+        level: "dim",
+        text: `已省略 ${elided} 条工具结果（microcompact）`,
+      });
+    }
+
+    // The meter must show the transcript as it now stands. The figure is the
+    // kernel's own heuristic on the kernel's own message build — the same
+    // measurement `compactSession` made — not a guess at how much a summary
+    // saved. The split answers "what is the window spent on" for the same
+    // message build; it is attached only when the compiled kernel exports it,
+    // so a `dist/` that has compaction but not `context/breakdown.js` still
+    // gets an honest total instead of a crash.
+    if (afterTokens > 0 && window > 0) {
+      // A split that throws costs the split, not the total: the kernel's own
+      // loop takes the same stance (`query.ts` deletes the field and keeps the
+      // measurement), and a compaction that did happen must not be reported as
+      // a failure because its chart could not be drawn.
+      let contextBreakdown;
+      if (typeof modules.buildContextBreakdown === "function") {
+        try {
+          contextBreakdown = modules.buildContextBreakdown(messagesAfter, {
+            window,
+            used: afterTokens,
+            compactAt: softLimit,
+          });
+        } catch {
+          contextBreakdown = undefined;
+        }
+      }
+      lastSessionMeasure = {
+        ...lastSessionMeasure,
+        context: {
+          tokens: afterTokens,
+          percent: Math.min(100, Math.round((afterTokens / window) * 1000) / 10),
+          window,
+        },
+        ...(contextBreakdown === undefined ? {} : { contextBreakdown }),
+      };
+      send(stateEvent());
+    }
+  } catch (error) {
+    if (signal.aborted) {
+      send({ type: "notice", level: "dim", text: "上下文压缩已停止" });
+      return;
+    }
+    send({ type: "notice", level: "warn", text: `上下文压缩失败：${messageOf(error)}` });
+  } finally {
+    if (handle !== undefined) await handle.close().catch(() => undefined);
+    compactAbort = undefined;
+    ctx.running = false;
+    running = false;
+    send({ type: "run_end" });
+  }
 }
 
 function handleNewSession() {
@@ -929,8 +1294,8 @@ function handleNewSession() {
  * Opening a conversation from the sidebar is a workspace switch: the topbar,
  * the file tree and the preview boundary all describe the project the
  * operator is now looking at, so all three have to follow the header rather
- * than the folder this window happened to boot in. The browser form does the
- * same thing in `bridge.js` (`currentCwd = header.workdir`).
+ * than the folder this window happened to boot in — switching conversations
+ * therefore re-points the topbar's directory at the header's workdir.
  *
  * A workdir that is gone is not adopted — pointing the host at a directory
  * that does not exist would make every later tree request, every new session
@@ -1222,7 +1587,13 @@ const handlers = {
     send(stateEvent());
     send({ type: "ready" });
     send(sessionsEvent());
-    send({ type: "commands", commands: [] });
+    // The same catalogue `listCommands` answers with: the popup must be usable
+    // before the renderer's own `listCommands` arrives, and two sources for one
+    // list is how they drift apart.
+    send({
+      type: "commands",
+      commands: [{ name: "clear" }, { name: "context" }, { name: "compact" }],
+    });
     send({ type: "setup_checklist", checks: [] });
     send({ type: "locale", locale });
     if (missing) {
@@ -1247,8 +1618,23 @@ const handlers = {
   },
 
   abort() {
-    if (runner === undefined) return;
+    // The compaction check comes before the runner guard: a compaction holds
+    // no runner entry, and a host whose runner was never built must still be
+    // able to stop one.
+    if (runner === undefined && compactAbort === undefined) return;
     handleAbort();
+  },
+
+  /**
+   * `/compact` — run the kernel's compaction on the open session.
+   *
+   * Not returned to the command queue for the same reason `testProvider` is
+   * not: the summary is one model call and can take as long as the gateway
+   * does, and `abort` must still reach `handleAbort` while it runs. That
+   * handler knows to stop this first.
+   */
+  compact() {
+    void handleCompact();
   },
 
   permission(payload) {
@@ -1759,7 +2145,12 @@ const handlers = {
       send({ type: "notice", level: "warn", text: `会话未删除：${messageOf(error)}` });
       return;
     }
-    titleCache.delete(id);
+    // Keys are `id@createdAt`, not the bare id — deleting by id alone left
+    // every entry in place, so a later session reusing the id would have
+    // inherited this one's title.
+    for (const key of [...titleCache.keys()]) {
+      if (key.startsWith(`${id}@`)) titleCache.delete(key);
+    }
     send(sessionsEvent());
   },
 
@@ -1945,8 +2336,20 @@ const handlers = {
     send({ type: "setup_checklist", checks });
   },
 
+  /**
+   * The built-in slash commands this form can actually run.
+   *
+   * All three have a real handler here: `/clear` maps to `newSession`,
+   * `/context` is answered by the renderer from the kernel's own measurement,
+   * and `/compact` runs the kernel's compaction. A verb with no route behind
+   * it would be a menu row that fails on click (R3), so the list is short on
+   * purpose.
+   */
   listCommands() {
-    send({ type: "commands", commands: [] });
+    send({
+      type: "commands",
+      commands: [{ name: "clear" }, { name: "context" }, { name: "compact" }],
+    });
   },
 
   /**
@@ -2001,12 +2404,68 @@ const handlers = {
     });
   },
 
-  searchFiles(payload) {
-    // The kernel has no file-name search API (no index, no walker): probing
-    // `listDirectory` recursively here would be this host inventing one, and
-    // the results would disagree with the browser form's `/api` surface. The
-    // mention popup therefore answers "no matches" rather than hanging.
-    send({ type: "file_matches", query: String(payload.query ?? ""), files: [] });
+  /**
+   * File-name matches for the composer's `@` popup.
+   *
+   * The kernel owns both the walk and the boundary (`searchFilesByName` uses
+   * the same `resolveReadableDirectory` as `getTree`), so the desktop and
+   * browser forms answer from the same rules. The root is the host's current
+   * workspace — the same `cwd` the topbar shows and the next session runs in.
+   *
+   * Every failure still answers with a `file_matches` carrying the query: the
+   * renderer only releases the popup on that event, so staying silent would
+   * leave it waiting forever. A refusal says why in a `notice` (R3); a truncation
+   * rides along as `truncated` because "not all matches" is not "no matches".
+   */
+  async searchFiles(payload = {}) {
+    const query = typeof payload.query === "string" ? payload.query : "";
+    // A keystroke-driven command must not wait on a registration that the boot
+    // handshake has not finished yet; a failed one is reported by the search.
+    await settleRoot();
+    const search = kernel.filesApi?.searchFilesByName;
+    if (typeof search !== "function") {
+      // A `dist/` built before the search landed. Warn once per process: the
+      // popup asks on every keystroke, and one notice per character would bury
+      // the transcript. The empty answer still releases the popup.
+      if (!searchUnavailableWarned) {
+        searchUnavailableWarned = true;
+        send({
+          type: "notice",
+          level: "warn",
+          text: "文件搜索不可用：内核未导出 searchFilesByName，请先执行 npm run build",
+        });
+      }
+      send({
+        type: "file_matches",
+        query,
+        files: [],
+        truncated: false,
+        scanned: 0,
+      });
+      return;
+    }
+    if (cwd === "") {
+      // No workspace open: there is no folder to search. Not an error.
+      send({ type: "file_matches", query, files: [], truncated: false, scanned: 0 });
+      return;
+    }
+    let result;
+    try {
+      result = await search(harnessHome, cwd, query);
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `文件搜索失败：${messageOf(error)}` });
+      send({ type: "file_matches", query, files: [], truncated: false, scanned: 0 });
+      return;
+    }
+    const files = Array.isArray(result?.files) ? result.files : [];
+    send({
+      type: "file_matches",
+      query,
+      files: files.map((file) => file.path),
+      // 两种截断对弹窗是同一件事：列表不是全部。
+      truncated: result?.truncated === true || result?.scanTruncated === true,
+      scanned: typeof result?.scanned === "number" ? result.scanned : 0,
+    });
   },
 
   /**

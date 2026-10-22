@@ -111,7 +111,7 @@ describe("executeBatch 权限授权与执行边界", () => {
   it("deny → 审计一次、不执行、结构化 permission_denied", async () => {
     const session = makeSession(path.join(tmp, "session"));
     const execute = vi.fn(async () => ok("never"));
-    const tool = makeTool("fs", z.object({ op: z.string() }), execute, { readOnly: false });
+    const tool = makeTool("fileop", z.object({ op: z.string() }), execute, { readOnly: false });
     const reg = new ToolRegistry([tool]);
     const onDecision = vi.fn<PermissionOptions["onDecision"]>(async () => {});
     const gate = fakeGate((input) =>
@@ -127,7 +127,7 @@ describe("executeBatch 权限授权与执行边界", () => {
     const results = await executeBatch(
       session,
       reg,
-      [call("c1", "fs", { op: "write" })],
+      [call("c1", "fileop", { op: "write" })],
       optsOf(permissionOf(gate, onDecision)),
     );
 
@@ -159,7 +159,7 @@ describe("executeBatch 权限授权与执行边界", () => {
       order.push("execute");
       return ok("done");
     });
-    const tool = makeTool("fs", z.object({ op: z.string() }), execute, { readOnly: false });
+    const tool = makeTool("fileop", z.object({ op: z.string() }), execute, { readOnly: false });
     const reg = new ToolRegistry([tool]);
     const onDecision = vi.fn(async (batchCall: BatchCall, decision: PermissionRequest) => {
       expect(batchCall.id).toBe("c1");
@@ -172,7 +172,7 @@ describe("executeBatch 权限授权与执行边界", () => {
     const results = await executeBatch(
       session,
       reg,
-      [call("c1", "fs", { op: "read" })],
+      [call("c1", "fileop", { op: "read" })],
       optsOf(permissionOf(fakeGate(), onDecision)),
     );
 
@@ -184,7 +184,7 @@ describe("executeBatch 权限授权与执行边界", () => {
   it("gate 收到解析后的参数、调用 id 与批次 signal", async () => {
     const session = makeSession(path.join(tmp, "session"));
     const execute = vi.fn(async () => ok("done"));
-    const tool = makeTool("fs", z.object({ op: z.string() }), execute, { readOnly: true });
+    const tool = makeTool("fileop", z.object({ op: z.string() }), execute, { readOnly: true });
     const reg = new ToolRegistry([tool]);
     const controller = new AbortController();
     const check = vi.fn(async (input: PermissionCheckInput) => decisionFor(input));
@@ -193,14 +193,14 @@ describe("executeBatch 权限授权与执行边界", () => {
     await executeBatch(
       session,
       reg,
-      [call("c9", "fs", { op: "read" })],
+      [call("c9", "fileop", { op: "read" })],
       optsOf(permissionOf(gate, async () => {}), { signal: controller.signal }),
     );
 
     expect(check).toHaveBeenCalledTimes(1);
     const input = check.mock.calls[0]![0];
     expect(input.callId).toBe("c9");
-    expect(input.tool.name).toBe("fs");
+    expect(input.tool.name).toBe("fileop");
     expect(input.args).toEqual({ op: "read" });
     expect(input.signal).toBe(controller.signal);
   });
@@ -208,7 +208,7 @@ describe("executeBatch 权限授权与执行边界", () => {
   it("ask 无审批通道 → audit 记录 action=ask/effective=deny 且不执行", async () => {
     const session = makeSession(path.join(tmp, "session"));
     const execute = vi.fn(async () => ok("never"));
-    const tool = makeTool("fs", z.object({ op: z.string() }), execute, {
+    const tool = makeTool("fileop", z.object({ op: z.string() }), execute, {
       readOnly: false,
       destructive: true,
     });
@@ -219,7 +219,7 @@ describe("executeBatch 权限授权与执行边界", () => {
     const results = await executeBatch(
       session,
       reg,
-      [call("ask-1", "fs", { op: "write" })],
+      [call("ask-1", "fileop", { op: "write" })],
       optsOf(permissionOf(gate, onDecision)),
     );
 
@@ -239,13 +239,13 @@ describe("executeBatch 权限授权与执行边界", () => {
   it("未提供 permission → 直接执行（P0 行为）", async () => {
     const session = makeSession(path.join(tmp, "session"));
     const execute = vi.fn(async () => ok("done"));
-    const tool = makeTool("fs", z.object({ op: z.string() }), execute, { readOnly: false });
+    const tool = makeTool("fileop", z.object({ op: z.string() }), execute, { readOnly: false });
     const reg = new ToolRegistry([tool]);
 
     const results = await executeBatch(
       session,
       reg,
-      [call("c1", "fs", { op: "write" })],
+      [call("c1", "fileop", { op: "write" })],
       optsOf(),
     );
 
@@ -256,7 +256,7 @@ describe("executeBatch 权限授权与执行边界", () => {
   it("onDecision 抛错 → 工具不执行且错误上抛", async () => {
     const session = makeSession(path.join(tmp, "session"));
     const execute = vi.fn(async () => ok("never"));
-    const tool = makeTool("fs", z.object({ op: z.string() }), execute, { readOnly: false });
+    const tool = makeTool("fileop", z.object({ op: z.string() }), execute, { readOnly: false });
     const reg = new ToolRegistry([tool]);
     const onDecision = vi.fn(async () => {
       throw new Error("audit down");
@@ -266,7 +266,7 @@ describe("executeBatch 权限授权与执行边界", () => {
       executeBatch(
         session,
         reg,
-        [call("c1", "fs", { op: "read" })],
+        [call("c1", "fileop", { op: "read" })],
         optsOf(permissionOf(fakeGate(), onDecision)),
       ),
     ).rejects.toThrow("audit down");

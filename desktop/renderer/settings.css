@@ -939,6 +939,159 @@
   padding: 2px 2px 4px;
 }
 
+/* What "Test connection" found: one status line, then every model the endpoint
+   listed. The block is a surface of its own rather than a bare note, because it
+   holds controls (the add chips) and a result you can act on has to look like
+   one. A failure stays a plain `.setting-note` line in the same slot. */
+.conn-test-result {
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+  padding: 11px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.conn-test-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The check takes the success colour and the sentence stays in the body text
+   colour: a whole line painted green is harder to read than a mark beside it. */
+.conn-test-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text);
+}
+
+.conn-test-status-icon {
+  width: 14px;
+  height: 14px;
+  color: var(--success);
+}
+
+/* Reached the endpoint, got no list back: the call worked, the answer did not.
+   A green mark beside that sentence would overstate it, so it takes the warn
+   colour the rest of the page uses for "worked, but not as expected". */
+.conn-test-status.empty .conn-test-status-icon {
+  color: var(--warn);
+}
+
+/* Latency is a measurement, so it is set apart from the sentence: muted, its
+   own segment, tabular figures so a column of results lines up. Absent when
+   the probe did not report it — never rendered as "0 ms". */
+.conn-test-latency {
+  padding-left: 9px;
+  border-left: 1px solid var(--border);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.conn-test-models {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+/* The heading spans the row so the chips wrap under it. */
+.conn-test-models-head {
+  flex: 1 1 100%;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+.conn-test-count {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* One model. The name is mono because a model id is an identifier, and the
+   glyph on the left says what a click will do before the title does. */
+.conn-model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+  /* The global `prefers-reduced-motion` rule in styles.css already turns every
+     transition off, so this only needs the ordinary timing. */
+  transition: border-color var(--fast) var(--ease), background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+
+/* Only the actionable state reacts to a pointer: an added chip is not a
+   control any more, and a hover lift would promise a click it will not take. */
+.conn-model-chip:not(.added):hover {
+  border-color: var(--accent);
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.conn-model-chip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.conn-model-chip-icon {
+  width: 12px;
+  height: 12px;
+  color: var(--accent);
+}
+
+/* Long ids wrap inside the pill instead of pushing the block sideways. */
+.conn-model-chip-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+
+/* Already on the card — or just added by a click. It stays in the list and
+   stops being a button, so the answer stays complete while the state is
+   visible (R3: the list says what the endpoint offered, not what is left). */
+.conn-model-chip.added {
+  border-color: transparent;
+  background: var(--success-soft);
+  color: var(--success);
+  /* `button:disabled` in the base sheet does not change the cursor, so a
+     disabled pill would still show a pointer and read as clickable. */
+  cursor: default;
+}
+
+.conn-model-chip.added .conn-model-chip-icon {
+  color: var(--success);
+}
+
+.conn-model-chip-state {
+  font-family: var(--sans);
+  font-size: var(--text-xs);
+  color: var(--success);
+  opacity: 0.85;
+}
+
 .settings-form-actions {
   display: flex;
   justify-content: flex-end;

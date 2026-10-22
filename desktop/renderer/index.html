@@ -81,22 +81,6 @@
             <span class="topbar-cwd-name" id="topbar-cwd-name">Embedded AI Master</span>
             <span class="topbar-cwd-branch" id="topbar-cwd-branch" hidden></span>
           </button>
-          <button class="icon-button small worktree-toggle" id="worktree-button" data-i18n-title="worktreeLabel" aria-haspopup="menu" aria-expanded="false">
-            <svg class="icon" aria-hidden="true"><use href="#i-branch"></use></svg>
-          </button>
-          <div class="worktree-panel" id="worktree-panel" hidden>
-            <p class="worktree-copy" id="worktree-copy" data-i18n="worktreeExplain">
-              Run this session in its own git worktree so your working copy stays untouched.
-            </p>
-            <div class="worktree-actions" id="worktree-actions-off">
-              <button class="btn btn-primary small" id="worktree-enable" data-i18n="worktreeEnable">Start isolated</button>
-            </div>
-            <div class="worktree-actions" id="worktree-actions-on" hidden>
-              <button class="btn small" id="worktree-diff" data-i18n="worktreeDiff">View diff</button>
-              <button class="btn small" id="worktree-merge" data-i18n="worktreeMerge">Merge back</button>
-              <button class="btn btn-quiet small" id="worktree-discard" data-i18n="worktreeDiscard">Discard</button>
-            </div>
-          </div>
           <div class="titlebar-spacer"></div>
           <div class="titlebar-status">
             <button class="goal-badge" id="goal-badge" hidden type="button" data-i18n-title="goalStopTitle">
@@ -332,12 +316,15 @@
                       <div class="effort-menu" id="effort-menu" role="menu" hidden></div>
                     </div>
                     <!-- The usage chip sits last: it is the session's running
-                         accounting, not a control for the next message. The
-                         kernel reports spend, not context occupancy, so the
-                         percentage is omitted rather than invented. -->
+                         accounting, not a control for the next message. Since
+                         D-165 the kernel also reports context occupancy, so
+                         the percentage is shown once a measurement exists;
+                         it starts hidden because "not measured yet" is not
+                         0% (R3), and the renderer unhides it on the first
+                         `context` it receives. -->
                     <button class="context-chip" id="usage-meter" aria-haspopup="dialog" aria-expanded="false" data-i18n-title="usageTitle">
                       <span id="context-length">—</span>
-                      <span class="context-pct" id="context-label" hidden>0%</span>
+                      <span class="context-pct" id="context-label" hidden></span>
                     </button>
                   </div>
                 </div>
@@ -603,11 +590,9 @@
       </form>
     </dialog>
 
-    <!-- bridge.js installs window.prometheus when there is no Electron
-         preload (browser form). Under Electron it sees the preload's object
-         and does nothing. Module scripts run in order, so app.js always sees
-         the bridge's object. -->
-    <script type="module" src="bridge.js"></script>
+    <!-- 只支持桌面形态：window.prometheus 由 desktop/preload.cjs 的
+         exposeInMainWorld 在页面脚本之前注入，渲染器没有别的来源——浏览器
+         bridge（HTTP + SSE）已于 2026-10-22 随浏览器形态一并删除。 -->
     <script type="module" src="app.js"></script>
   </body>
 </html>

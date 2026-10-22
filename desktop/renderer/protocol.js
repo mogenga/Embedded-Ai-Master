@@ -1,10 +1,13 @@
 /**
  * Kernel session events → Embedded AI Master host events.
  *
- * Pure functions shared by the desktop host (Node) and the browser bridge
- * (renderer). Nothing here touches the DOM, the filesystem, or the network:
- * both adapters feed it `SessionEvent` objects from the kernel log and get
- * back the `{ type }` messages the ported renderer already knows how to draw.
+ * Pure functions shared by the desktop host (Node) and the renderer. Nothing
+ * here touches the DOM, the filesystem, or the network: the host feeds it
+ * `SessionEvent` objects from the kernel log and gets back the `{ type }`
+ * messages the renderer already knows how to draw. (There used to be a second
+ * adapter — a browser bridge over HTTP + SSE — removed on 2026-10-22 when the
+ * desktop form became the only one; this layer was what made the two agree,
+ * and it stays because host and renderer are still two processes.)
  *
  * The kernel's log is the single source of truth. The renderer's expectations
  * differ from it in two ways this module bridges:
@@ -34,6 +37,10 @@ const KNOWN_TYPES = new Set([
   "compaction",
   "permission_decision",
   "approval_request",
+  // `todos` must stay in this set. A type missing here does not pass silently:
+  // it becomes a `未识别的事件类型` warn notice, so every plan update would
+  // print a warning line above the plan card it just drew.
+  "todos",
 ]);
 
 /** Tool output larger than this is truncated before it reaches the DOM. */
@@ -48,6 +55,102 @@ function isRecord(value) {
 
 function textOf(value) {
   return typeof value === "string" ? value : "";
+}
+
+/**
+ * Occupancy as the renderer consumes it, or `null` when there is no
+ * measurement.
+ *
+ * `tokens` and `percent` must both be finite numbers: a record carrying one of
+ * them is not a measurement, and filling the other with 0 would paint a figure
+ * the kernel never reported (R3 — unknown is not zero). `window` travels only
+ * when it is a positive finite number; 0 is "no window reported", not "a window
+ * of zero", and it would make the percentage uninterpretable.
+ */
+function measuredContext(value) {
+  if (!isRecord(value)) return null;
+  const { tokens, percent, window } = value;
+  if (typeof tokens !== "number" || !Number.isFinite(tokens)) return null;
+  if (typeof percent !== "number" || !Number.isFinite(percent)) return null;
+  const context = { tokens, percent };
+  if (typeof window === "number" && Number.isFinite(window) && window > 0) {
+    context.window = window;
+  }
+  return context;
+}
+
+/**
+ * Per-category occupancy split as the renderer consumes it, or `null`.
+ *
+ * The kernel's producer guarantees `sum(parts.tokens) === used`; this only
+ * checks the shape, because a translator is not the place to second-guess the
+ * producer. A part whose `key` or `tokens` is unusable is dropped rather than
+ * rounded to zero — a zero-token slice would still add a legend row nobody
+ * measured (R3). A split with no usable part left is no split at all, and so
+ * is one missing any of the four figures: every percentage in the panel
+ * divides by `window`, and 0 is "not reported", not "a window of zero".
+ */
+function measuredBreakdown(value) {
+  if (!isRecord(value)) return null;
+  const { used, window, percent, compactAt, parts } = value;
+  if (typeof used !== "number" || !Number.isFinite(used)) return null;
+  if (typeof window !== "number" || !Number.isFinite(window) || window <= 0) return null;
+  if (typeof percent !== "number" || !Number.isFinite(percent)) return null;
+  if (typeof compactAt !== "number" || !Number.isFinite(compactAt)) return null;
+  if (!Array.isArray(parts)) return null;
+  const kept = [];
+  for (const part of parts) {
+    if (!isRecord(part)) continue;
+    if (typeof part.key !== "string" || part.key === "") continue;
+    const tokens = part.tokens;
+    if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) continue;
+    kept.push({ key: part.key, tokens });
+  }
+  if (kept.length === 0) return null;
+  return { used, window, percent, compactAt, parts: kept };
+}
+
+/** The only statuses the kernel writes for a plan item. */
+const TODO_STATUSES = new Set(["pending", "in_progress", "completed"]);
+
+/** The kernel's `todo_write` schema caps item text at 500 characters. */
+const MAX_TODO_CONTENT = 500;
+
+/**
+ * A `todos` payload as the renderer's plan card consumes it, or `null` when
+ * there is no list at all.
+ *
+ * The renderer paints what this returns, so anything it cannot vouch for is
+ * dropped rather than shown: a row with no usable text would put a blank line
+ * on a plan nobody can read, and a status outside the three known values would
+ * become a CSS class that matches no rule. The text, though, is what the model
+ * actually meant to say — a broken status does not make the task disappear —
+ * so such a row survives as `pending`.
+ *
+ * An empty list is *not* `null`: clearing the plan is a legal instruction the
+ * model can give, and the renderer removes the card when it receives it. Only
+ * a payload with no array at all is untranslatable.
+ */
+export function todosEvent(payload) {
+  if (!isRecord(payload) || !Array.isArray(payload.items)) return null;
+  const items = [];
+  for (const raw of payload.items) {
+    if (!isRecord(raw)) continue;
+    if (typeof raw.content !== "string") continue;
+    // `trim` is only the emptiness test: the row keeps the text exactly as the
+    // model wrote it, because that text is the one thing here it is entitled
+    // to say without this module editing it.
+    if (raw.content.trim() === "") continue;
+    // The kernel already enforces the 500 limit; this defends against older
+    // logs and other producers without inventing a different bound.
+    const content =
+      raw.content.length > MAX_TODO_CONTENT
+        ? `${raw.content.slice(0, MAX_TODO_CONTENT)}…`
+        : raw.content;
+    const status = TODO_STATUSES.has(raw.status) ? raw.status : "pending";
+    items.push({ content, status });
+  }
+  return { type: "todos", items };
 }
 
 const encoder = new TextEncoder();
@@ -112,6 +215,10 @@ function toolAnnotations(value) {
  *
  * Used when a session is opened: the renderer replaces the whole transcript
  * with these rows and then appends live events on top of them.
+ *
+ * `todos` is deliberately absent. The plan is interface state drawn beside the
+ * transcript, not something the model said, so it travels in `sessionLoadedEvent`'s
+ * own field and never becomes a bubble (which would also put it in an export).
  */
 export function sessionEventsToMessages(events) {
   const out = [];
@@ -408,6 +515,15 @@ export function sessionEventToHostEvents(event, ctx) {
       break;
     }
 
+    case "todos": {
+      // The plan card is interface state, not a message: it is drawn beside
+      // the transcript and never becomes a bubble. `null` (an untranslatable
+      // payload) produces nothing rather than a blank card.
+      const todos = todosEvent(payload);
+      if (todos !== null) out.push(todos);
+      break;
+    }
+
     case "device_status": {
       // The probe MCP reports `{ backend, probe, cpu, serial }` and nothing
       // else — it does not know about targets, ports or the workspace scan.
@@ -460,6 +576,15 @@ export function sessionEventToHostEvents(event, ctx) {
       }
       if (typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd)) {
         message.costUsd = payload.costUsd;
+      }
+      // The per-category split is attached only when the payload carries the
+      // field at all. An older log has none, and that absence is the file's
+      // standing convention for "this event says nothing about it" — writing
+      // `null` there would claim the kernel reported "no split". When the
+      // field is present, the validated result travels as-is, `null` included:
+      // a present-but-unusable split is an answer, just not a drawable one.
+      if (isRecord(payload.contextBreakdown)) {
+        message.contextBreakdown = measuredBreakdown(payload.contextBreakdown);
       }
       out.push(message);
       break;
@@ -527,11 +652,24 @@ export function sessionEventToHostEvents(event, ctx) {
           coversUpToSeq: Number(payload.coversUpToSeq) || 0,
         });
       } else if (kind === "failed") {
-        out.push({
-          type: "notice",
-          level: "warn",
-          text: `压缩失败（${textOf(payload.stage)}）: ${textOf(payload.reason)}`,
-        });
+        // `/compact` now always runs. On a session with nothing new to fold in,
+        // the kernel answers `failed` for two reasons that are not failures:
+        // the last summary already covers this far (`no_progress`), or there is
+        // no user/assistant/tool turn to summarize at all. Reporting either as
+        // a red "压缩失败" would be a false alarm on a perfectly healthy small
+        // session — they are said quietly, and only a real error stays `warn`.
+        const reason = textOf(payload.reason);
+        if (reason === "no_progress") {
+          out.push({ type: "notice", level: "dim", text: "压缩没有进展（上一次摘要已经覆盖到这里）" });
+        } else if (reason === "no summarizable content") {
+          out.push({ type: "notice", level: "dim", text: "没有可压缩的内容" });
+        } else {
+          out.push({
+            type: "notice",
+            level: "warn",
+            text: `压缩失败（${textOf(payload.stage)}）: ${reason}`,
+          });
+        }
       }
       break;
     }
@@ -561,21 +699,21 @@ export function initialState(options = {}) {
     models,
     modelsSource: textOf(options.modelsSource) || "providers.json",
     baseUrl: textOf(options.baseUrl),
-    context: { tokens: 0, percent: 0 },
-    contextBreakdown: null,
+    // Occupancy is unknown until a `usage` event measured it. `null` is the
+    // renderer's explicit "unknown" sentinel: a zeroed record here would paint
+    // "0%" for a session whose fill nobody has measured (R3).
+    context: measuredContext(options.context),
+    // The kernel now measures a per-category split alongside the total
+    // (`src/context/breakdown.ts`); this passes one through when a caller has
+    // it. Without one the popover draws the total only — a split invented from
+    // the total would be a fabricated chart.
+    contextBreakdown: measuredBreakdown(options.contextBreakdown),
     usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0 },
     board: { selection: {}, projectKind: "unknown" },
     serial: { open: false, port: null, baud: null, buffered: 0, queued: 0 },
   };
-  // Spend and occupancy only when the caller has a real figure. A zero here
-  // would read as "known to be free" and blank the meter's honest unknown.
-  if (isRecord(options.context)) {
-    state.context = {
-      tokens: Number(options.context.tokens) || 0,
-      percent: Number(options.context.percent) || 0,
-      ...(Number(options.context.window) ? { window: Number(options.context.window) } : {}),
-    };
-  }
+  // Spend only when the caller has a real figure. A zero here would read as
+  // "known to be free" and blank the meter's honest unknown.
   if (typeof options.costUsd === "number" && Number.isFinite(options.costUsd)) {
     state.costUsd = options.costUsd;
   }
@@ -648,9 +786,10 @@ export function sessionsEvent(summaries) {
     const id = textOf(record.id);
     const cwd = textOf(record.workdir);
     const createdAt = textOf(record.createdAt);
-    // A caller that already derived a title (the browser bridge reads it from
-    // the first user event) passes it as `title`; without one the row still
-    // needs a non-empty string because the renderer lowercases it.
+    // The host derives a title from the first user event and passes it here;
+    // without one the row still needs a non-empty string because the renderer
+    // lowercases it. An empty title is meaningful — it means "not readable
+    // yet", which the renderer draws as "no messages" rather than as an id.
     const title = textOf(record.title);
     const summary = textOf(record.summary);
     return {
@@ -708,12 +847,39 @@ export function sessionCostUsd(events) {
   return cost;
 }
 
+/**
+ * The plan a session ended on, or `null` when it never had one.
+ *
+ * Scans for the last `todos` event whose payload translates. An event that
+ * does not translate is not an instruction to clear the plan — it is a log
+ * line this module cannot read — so it is skipped instead of erasing the
+ * plan the session honestly had before it. A translated empty list *is*
+ * kept: that is the model clearing its own plan.
+ */
+function latestTodos(events) {
+  if (!Array.isArray(events)) return null;
+  let latest = null;
+  for (const event of events) {
+    if (!isRecord(event) || event.type !== "todos") continue;
+    const translated = todosEvent(isRecord(event.payload) ? event.payload : {});
+    if (translated !== null) latest = translated.items;
+  }
+  return latest;
+}
+
 /** `session_loaded` event for a freshly opened or created conversation. */
 export function sessionLoadedEvent(events, options = {}) {
   const costUsd = sessionCostUsd(events);
   return {
     type: "session_loaded",
     messages: sessionEventsToMessages(events),
+    // The plan card is rebuilt from this, not from `messages`:
+    // `sessionEventsToMessages` only produces chat bubbles, and the plan is
+    // interface state the transcript replay never contained. The last
+    // translatable `todos` is the answer because that is where the work
+    // stopped; a malformed one is skipped rather than erasing a plan the
+    // session really had. `null` means this session never carried one.
+    todos: latestTodos(events),
     cwd: textOf(options.cwd),
     mode: textOf(options.mode) || "diagnose",
     effort: "auto",

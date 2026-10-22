@@ -30,8 +30,8 @@ export interface AppMcpServer {
 }
 
 export interface AppRunLimits {
-  /** 单次运行的最大轮数；默认 10。 */
-  maxTurns: number;
+  /** 单次运行的最大轮数；null 表示不限制。 */
+  maxTurns: number | null;
   /** 成本上限（美元）；null 表示不限。 */
   maxCostUsd: number | null;
   /** 模型请求超时（毫秒）；null 表示用内核默认。 */
@@ -94,13 +94,17 @@ const MCP_SERVER_FIELDS = new Set([
   "disabled",
 ]);
 
-// 与 src/permissions/config.ts 的默认值保持一致：那边未导出常量，这里只镜像字面量，
-// 并由 tests/server/config-api.test.ts 的默认快照断言锁定。
+// 与 src/permissions/config.ts 的默认值保持一致：那边未导出常量，这里只镜像字面量。
+//
+// 这里原本写着「由 tests/server/config-api.test.ts 的默认快照断言锁定」。那个文件
+// 随 HTTP 形态一起删了，所以这句话不再成立——而且它锁的始终只是 app-config 自己的
+// 快照，从未真正比对过 permissions/config.ts 的值。**改一侧要同时改另一侧**，目前
+// 没有测试能替你发现偏差。
 const DEFAULT_PERMISSION_PRESET: PermissionPreset = "diagnose";
 const DEFAULT_APPROVAL_TIMEOUT_MS = 120_000;
 
 const DEFAULT_RUN_LIMITS: AppRunLimits = Object.freeze({
-  maxTurns: 10,
+  maxTurns: null,
   maxCostUsd: null,
   timeoutMs: null,
   systemPrompt: "",
@@ -332,11 +336,17 @@ function parseRunLimits(value: unknown, source: string): AppRunLimits {
     }
   }
   const limits: AppRunLimits = { ...DEFAULT_RUN_LIMITS };
-  if (value.maxTurns !== undefined) {
-    if (typeof value.maxTurns !== "number" || !Number.isInteger(value.maxTurns) || value.maxTurns <= 0) {
-      throw invalidConfig(`运行上限 maxTurns 必须是正整数: ${source}`);
+  const maxTurns = value.maxTurns;
+  if (maxTurns !== undefined) {
+    // null 是显式的「不限制」；0 / 负数 / 非整数仍是错误——它们更像笔误，
+    // 静默当成「不限」会让用户以为上限生效了。
+    if (
+      maxTurns !== null
+      && (typeof maxTurns !== "number" || !Number.isInteger(maxTurns) || maxTurns <= 0)
+    ) {
+      throw invalidConfig(`运行上限 maxTurns 必须是正整数或 null: ${source}`);
     }
-    limits.maxTurns = value.maxTurns;
+    limits.maxTurns = maxTurns;
   }
   if (value.maxCostUsd !== undefined) {
     if (

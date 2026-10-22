@@ -8,12 +8,12 @@ import { readSessionMeta, writeSessionMeta } from "../session/metadata.js";
 import { SessionForkError } from "../session/errors.js";
 import { forkSession, readSessionDir, readSessionHeader } from "../session/persistence.js";
 import type { SessionHeader } from "../session/types.js";
-import { HttpError } from "./http.js";
+import { HttpError } from "./errors.js";
 
 /**
  * 会话管理（重命名 / 置顶 / 归档 / 删除 / fork）。
  *
- * 与只读的 api.ts 分开：这里有删除与写盘，必须先把目标路径钉死在
+ * 与只读的 files-api 分开：这里有删除与写盘，必须先把目标路径钉死在
  * `$HARNESS_HOME/sessions` 之内（realpath + relative），再检查单写者锁。
  * 锁检查只**读**锁文件，不调用 acquireSessionLock——那会真的把会话锁住，
  * 让一个管理操作变成写者。

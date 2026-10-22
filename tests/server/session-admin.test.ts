@@ -18,7 +18,7 @@ import { SESSION_LOCK_FILE } from "../../src/session/lock.js";
 import { SESSION_META_FILE, readSessionMeta } from "../../src/session/metadata.js";
 import { readSessionDir, readSessionHeader } from "../../src/session/persistence.js";
 import { createSessionAdmin } from "../../src/server/session-admin.js";
-import { HttpError } from "../../src/server/http.js";
+import { HttpError } from "../../src/server/errors.js";
 import type { SessionEvent } from "../../src/session/types.js";
 
 const homes: string[] = [];

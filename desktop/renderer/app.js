@@ -1,6 +1,7 @@
 /** Embedded AI Master desktop renderer. */
 
 import { detectLocale, getDict } from "./i18n.js";
+import { contextReport, mergeCommands, parseSlashText } from "./commands.js";
 import { escapeHtml, renderMarkdown, IncrementalRenderer } from "./markdown.js";
 import { createSettings } from "./settings.js";
 import { icon, setIcon } from "./icons.js";
@@ -90,7 +91,18 @@ const state = {
   fileLoadTimer: null,
   tree: [],
   cwd: "",
-  context: { tokens: 0, percent: 0 },
+  /**
+   * Occupancy of the current transcript, or null when nothing measured it.
+   * Null is "unknown", never "empty": the chip stays hidden rather than
+   * painting a 0% the kernel never reported (R3).
+   */
+  context: null,
+  /**
+   * The kernel's per-category split of `context`, or null when it reported
+   * none. Null is "not measured", never "all zero": the popover draws the
+   * total without a chart rather than a bar of fabricated slices (R3).
+   */
+  contextBreakdown: null,
   /** The active model's window, drawn next to its name in the bottom bar. */
   contextWindow: 0,
   sandbox: "enforce",
@@ -109,8 +121,6 @@ const state = {
   // be restored into a view nothing can fill.
   pane: ["board"].includes(savedPane) ? savedPane : "board",
   git: null,
-  worktree: null,
-  worktreeDiffText: "",
   artifacts: [],
   selectedArtifact: null,
   queuedCount: 0,
@@ -520,9 +530,21 @@ function bindCodeCopy(root) {
   });
 }
 
-/** Human labels for tool ids: the transcript should read as actions. */
+/**
+ * Human labels for tool ids: the transcript should read as actions.
+ *
+ * The kernel's file tool is one row per verb as of 2026-10-22 (`fs` was split
+ * into `read` / `write` / `edit` / `multiedit`, and `ls` was added). The old
+ * single `fs` entry is gone on purpose: a tool the kernel no longer has should
+ * not keep a friendly name here, or a stale log would be the only place it
+ * shows up looking supported.
+ */
 const TOOL_LABELS = {
-  fs: "Files",
+  read: "Read",
+  ls: "List",
+  write: "Write",
+  edit: "Edit",
+  multiedit: "Multi-edit",
   shell: "Run",
   glob: "Find files",
   grep: "Search",
@@ -558,10 +580,11 @@ function toolGroup() {
 function toolGlyph(name) {
   if (name === "bash" || name === "shell") return "terminal";
   if (name === "todo_write") return "list-check";
+  if (name === "write" || name === "edit" || name === "multiedit") return "edit";
   if (name === "write_file" || name === "edit_file") return "edit";
   if (name === "search_codebase" || name === "grep") return "search";
-  if (name === "glob" || name === "list_files") return "folder";
-  if (name === "fs") return "file";
+  if (name === "ls" || name === "glob" || name === "list_files") return "folder";
+  if (name === "read" || name === "fs") return "file";
   // The probe and KB servers are the two domain MCPs in this repo; their
   // calls read as hardware and book lookups rather than anonymous rows.
   if (name.startsWith("mcp__probe__")) {
@@ -700,8 +723,26 @@ function attachInlineDiff(row, change) {
   state.lastToolNode = null;
 }
 
-/** Kernel file tools are one tool with an `op`; the path is still the summary. */
-const FILE_TOOLS = new Set(["fs", "read_file", "write_file", "edit_file"]);
+/**
+ * Tools whose argument summary is a path, so the row can open it.
+ *
+ * The kernel's file tools are a verb each since 2026-10-22; `fs` stays listed
+ * because an older session log still carries that name and its rows should
+ * keep opening the file they named.
+ */
+// `ls` is deliberately absent: its summary is a directory, `getFile` refuses
+// directories, and a row that looks clickable but always fails is worse than a
+// plain row. Everything else here names a file.
+const FILE_TOOLS = new Set([
+  "read",
+  "write",
+  "edit",
+  "multiedit",
+  "fs",
+  "read_file",
+  "write_file",
+  "edit_file",
+]);
 /** Rows that lead somewhere: the pane showing the same facts, in full. */
 const EMBED_TOOL_PANES = {
   // Serial tools report state the board pane's Device section shows; they do
@@ -724,9 +765,9 @@ function lastToolRow() {
  *
  * It lives inside the `<pre>` that holds the output, so it opens and closes
  * with the details block instead of floating above a collapsed row. The click
- * asks the host to reveal the path: the renderer cannot open a `file://` URL
- * (Electron blocks it, and in a browser it is meaningless), and a host that
- * has no file manager answers with a notice, which is the honest degradation.
+ * goes through the preload's `revealArtifact`: the renderer cannot open a
+ * `file://` URL itself (Electron blocks it), and a window that has no file
+ * manager answers with a notice, which is the honest degradation.
  */
 function attachArtifactLink(container, artifactPath) {
   // The details arrive after the block is built (and a later `tool_output`
@@ -747,9 +788,9 @@ function attachArtifactLink(container, artifactPath) {
     event.stopPropagation();
     const target = button.dataset.path;
     // The preload is the only route that can actually select the file in a
-    // window. Without it (the browser form) the command goes to the host,
-    // which answers with a notice naming the path: a notice is honest, while
-    // a `file://` anchor would be blocked and look like a broken button.
+    // window. Without it the command goes to the host, which answers with a
+    // notice naming the path: a notice is honest, while a `file://` anchor
+    // would be blocked and look like a broken button.
     if (typeof api.revealArtifact === "function") {
       void api.revealArtifact(target);
       return;
@@ -1186,6 +1227,18 @@ $("find-close").addEventListener("click", closeFind);
 const commandMenu = $("command-menu");
 let commandState = null;
 
+/**
+ * The host-reported commands with the local catalogue's copy.
+ *
+ * `state.commands` stays exactly what the host said — that list is the
+ * capability boundary — while the descriptions and the argument hint come
+ * from `commands.js` in the language on screen. Merging on read keeps a
+ * locale switch from leaving the menu in the previous language.
+ */
+function commandList() {
+  return mergeCommands(state.commands, state.locale);
+}
+
 function commandsAtCaret() {
   const before = input.value.slice(0, input.selectionStart);
   const match = /(^|\n)\/([a-z0-9][a-z0-9-_]*)?$/i.exec(before);
@@ -1194,11 +1247,11 @@ function commandsAtCaret() {
 
 function updateCommandMenu() {
   const query = commandsAtCaret();
-  if (query === null || state.commands.length === 0) {
+  if (query === null) {
     closeCommandMenu();
     return;
   }
-  const matches = state.commands.filter((command) => command.name.startsWith(query.toLowerCase()));
+  const matches = commandList().filter((command) => command.name.startsWith(query.toLowerCase()));
   if (matches.length === 0) {
     closeCommandMenu();
     return;
@@ -1236,15 +1289,169 @@ function applyCommand(command) {
   // A built-in with no arguments runs on the spot. Inserting "/clear " and
   // waiting for a second Enter made a one-shot verb feel like a text field.
   if (command.source === "builtin" && !command.argumentHint) {
+    const draft = input.value;
     input.value = "";
     autoSize();
-    api.send({ cmd: "prompt", text: `/${command.name}` });
+    // Clicking a row is the same act as typing the verb: the transcript gets
+    // `/${name}` as the message, exactly the text the palette would have put
+    // in the composer had the command taken arguments.
+    if (runSlashCommand({ name: command.name, args: "" }, `/${command.name}`) === "kept") {
+      // The command refused (unknown, or asked for an argument this verb does
+      // not take). Putting the draft back is the difference between "read the
+      // notice and fix it" and "retype what you had".
+      input.value = draft;
+      autoSize();
+      input.focus();
+    }
     return;
   }
   input.value = `/${command.name} `;
   input.setSelectionRange(input.value.length, input.value.length);
   autoSize();
   input.focus();
+}
+
+/**
+ * "This window cannot run that verb": name it, then list what it can run.
+ *
+ * The offending name is filtered out of the list it is answered with, so a
+ * host-reported verb with no handler here cannot produce "unknown /deploy;
+ * available /clear · /deploy".
+ */
+function reportUnknownCommand(name, available) {
+  addNotice("dim", t.commandUnknownHeading(name));
+  const names = available
+    .filter((entry) => entry.name !== name)
+    .map((entry) => `/${entry.name}`)
+    .join(" · ");
+  addNotice("dim", `${t.commandAvailable} ${names || "—"}`);
+  scrollToBottom();
+}
+
+/**
+ * The verbs `runSlashCommand` actually implements. A name outside this set is
+ * a stale host catalogue, not a command, so it must not echo into the
+ * transcript on its way to the "unknown" notice.
+ */
+const RUNNABLE_COMMANDS = new Set(["clear", "context", "compact"]);
+
+/**
+ * Run one built-in command locally.
+ *
+ * Slash commands are this window's own vocabulary: the kernel has no such
+ * verbs, and `/clear` used to travel to the model as a prompt, which is why
+ * the model answered "I can't clear the conversation". Each verb maps to the
+ * action that actually exists, and `/context` prints only the figure the
+ * kernel last reported — an unknown measurement is said out loud rather than
+ * printed as 0.
+ *
+ * A command that really runs also *appears in the transcript*, as the plain
+ * user message the user typed. The kernel is not involved in that: it is the
+ * same convention Claude Code follows, where `/compact` sits in the record as
+ * a message followed by its result. Without it the output arrived from nowhere
+ * — a `/context` report with no question above it reads like a spontaneous
+ * notice, and a reopened session lost every trace that a command ran. Refusals
+ * do not echo: a typo or a stray argument must not leave a message in the log
+ * that looks like something the kernel accepted.
+ *
+ * `rawText` is what the user actually typed, echoed verbatim. The command
+ * palette has no typed text, so it defaults to `/${name}` — the same string
+ * the palette would have inserted.
+ *
+ * Returns `"ran"` when the draft was consumed, and `"kept"` when it must stay
+ * in the composer: an unknown name and a refused argument are both answers the
+ * user has to see before retyping, so erasing their text would be the loss.
+ */
+function runSlashCommand({ name, args }, rawText = `/${name}`) {
+  const available = commandList();
+  // Both shipped hosts report exactly the three runnable verbs, so anything
+  // else is a stale catalogue entry. Reporting it here rather than in the
+  // switch keeps the echo below reachable only by a command that runs.
+  const command = available.find((entry) => entry.name === name);
+  if (command === undefined || !RUNNABLE_COMMANDS.has(name)) {
+    reportUnknownCommand(name, available);
+    return "kept";
+  }
+  if (String(args ?? "").trim() !== "") {
+    // None of these verbs takes an argument, and the kernel's compaction has
+    // no focus/keep option. Silently dropping the text would be the same
+    // broken promise `--keep N` made before it was removed.
+    addNotice("warn", t.commandTakesNoArguments(name));
+    scrollToBottom();
+    return "kept";
+  }
+  // Past this point the command runs, so the transcript gets the message that
+  // asked for it. `/clear` echoes too, even though the `session_loaded` it
+  // triggers wipes the transcript a moment later — that is the correct
+  // outcome, and special-casing it here would be a second rule to keep in sync.
+  addUserTurn(rawText);
+  switch (name) {
+    case "clear":
+      api.send({ cmd: "newSession" });
+      return "ran";
+    case "context":
+      reportContextLines();
+      scrollToBottom();
+      return "ran";
+    case "compact":
+      // The host answers with the kernel's own result: a compaction marker, a
+      // "nothing to compact" note, or a warning.
+      api.send({ cmd: "compact" });
+      return "ran";
+    default:
+      // Unreachable: `RUNNABLE_COMMANDS` is the same set these cases cover.
+      return "kept";
+  }
+}
+
+/**
+ * The full `/context` report, one dim line per fact.
+ *
+ * The single "used / window (percent)" line said how full the window was but
+ * not with what, which is the first question anyone asks when it fills up.
+ * The split comes from the kernel's own measurement, so every figure here is
+ * reported rather than derived — except the per-category percentage, which
+ * divides the part by the window (the same denominator the popover uses, so
+ * the two views agree).
+ *
+ * An unknown window drops the percentages and the free line rather than
+ * printing them against a guess; an unknown measurement is one line saying so,
+ * never a page of zeros (R3).
+ */
+function reportContextLines() {
+  const report = contextReport(state.context, state.contextBreakdown);
+  if (!report.known) {
+    addNotice("dim", t.commandContextUnknown);
+    return;
+  }
+  const used = formatTokens(report.used);
+  if (report.window === null) {
+    // No window: the existing wording for "this figure, no denominator".
+    addNotice("dim", t.commandContextUsedNoWindow(used, Math.round(report.percent)));
+  } else {
+    addNotice(
+      "dim",
+      t.commandContextUsed(used, formatTokens(report.window), report.percent),
+    );
+  }
+  for (const part of report.parts) {
+    // The denominator is the window, matching the popover's own percentage
+    // column, so a part reads the same in both places. Without a window there
+    // is no denominator, and the token count stands alone.
+    const share =
+      report.window === null
+        ? ""
+        : t.commandContextPartShare(((part.tokens / report.window) * 100).toFixed(1));
+    addNotice("dim", `· ${t.contextPart(part.key)} ${formatTokens(part.tokens)}${share}`);
+  }
+  if (report.window !== null) {
+    addNotice("dim", `· ${t.contextFree} ${formatTokens(report.free)}`);
+  }
+  // Only a real, positive buffer is worth a line: "0 left before compaction"
+  // means compaction is already due, and the free line above says that better.
+  if (report.headroom !== null && report.headroom > 0) {
+    addNotice("dim", `· ${t.contextCompactionBuffer} ${formatTokens(report.headroom)}`);
+  }
 }
 
 function moveCommand(delta) {
@@ -1370,6 +1577,60 @@ function formatTokens(n) {
 }
 
 /**
+ * Draw the chip's occupancy percentage, or clear it.
+ *
+ * Three inputs, deliberately distinct (R3 — a figure nobody measured is not
+ * zero):
+ *   - a record with a finite `percent` is a measurement: show it and its
+ *     window;
+ *   - `null` says "no measurement for this transcript": clear the figure and
+ *     hide the chip rather than paint a 0%;
+ *   - `undefined` says "this event does not speak about occupancy at all" —
+ *     a `state` event that only changed a mode — so the known figure stays.
+ */
+function applyContext(context) {
+  // `undefined` = this event says nothing about occupancy (a mode change on
+  // the same session): keep whatever is on screen.
+  if (context === undefined) return;
+  const percent = context === null ? Number.NaN : context.percent;
+  if (typeof percent !== "number" || !Number.isFinite(percent)) {
+    // `null`, or a record without a usable percentage: nothing was measured,
+    // so the chip goes back to "unknown" rather than keeping a stale number.
+    // Strings are rejected rather than coerced — a coerced `"40"` would look
+    // like a measurement the kernel never sent.
+    state.context = null;
+    contextLabel.textContent = "";
+    contextLabel.hidden = true;
+    return;
+  }
+  // The window cannot be more than full. The kernel already clamps to 100,
+  // so this only guards against a malformed sender; it never turns a real
+  // under-100 figure into anything else.
+  const shown = Math.min(100, Math.round(percent));
+  state.context = {
+    // A missing token count stays unknown rather than becoming 0: the
+    // percentage is what was measured, and the count is not implied by it.
+    tokens: typeof context.tokens === "number" && Number.isFinite(context.tokens) ? context.tokens : null,
+    // Kept as reported (one decimal); only the chip rounds.
+    percent,
+    ...(typeof context.window === "number" && Number.isFinite(context.window) && context.window > 0
+      ? { window: context.window }
+      : {}),
+  };
+  // The chip is one glance wide, so it rounds; the popover keeps the
+  // kernel's one-decimal figure. Unhiding here is what makes the reading
+  // visible at all — the markup ships it hidden (R3: no measurement yet).
+  contextLabel.textContent = `${shown}%`;
+  contextLabel.hidden = false;
+  // The window is what turns the percentage into "how much is left"; the
+  // model picker knows it too, but the kernel's figure wins when it sends one.
+  if (state.context.window && state.context.window !== state.contextWindow) {
+    state.contextWindow = state.context.window;
+    renderContextLength();
+  }
+}
+
+/**
  * The composer meter is the session's token accounting: how full the context
  * window is, and what the conversation has spent so far. Clicking it opens the
  * breakdown instead of hiding the numbers in a tooltip.
@@ -1377,19 +1638,15 @@ function formatTokens(n) {
  * `usage` events are per model call, not per session — a tool-using turn writes
  * several. The popover's label says "this session", so a state event's running
  * total replaces the numbers while a live `usage` event adds to them.
+ *
+ * `replace` is about the token totals, not the transcript: `state` replaces
+ * the session-level sum while still describing the same conversation. A
+ * caller that is swapping transcripts (the `session_loaded` handler) passes
+ * `context: null` so the previous session's percentage is not inherited —
+ * that session's `state` event then supplies the real figure.
  */
 function updateMeter(context, usage, { replace = false } = {}) {
-  if (context) {
-    state.context = { tokens: context.tokens ?? 0, percent: Math.min(100, Math.round(context.percent ?? 0)) };
-    contextLabel.textContent = `${state.context.percent}%`;
-    // The window is what turns the percentage into "how much is left"; the
-    // model picker knows it too, but the kernel's figure wins when it sends one.
-    const window = Number(context.window) || 0;
-    if (window > 0 && window !== state.contextWindow) {
-      state.contextWindow = window;
-      renderContextLength();
-    }
-  }
+  applyContext(context);
   if (usage) {
     const add = {
       inputTokens: Number(usage.inputTokens) || 0,
@@ -1472,9 +1729,9 @@ function renderUsage() {
   $("usage-output-value").textContent = formatTokens(usage.outputTokens);
   $("usage-total-value").textContent = formatTokens(usage.inputTokens + usage.outputTokens);
 
-  // The spend line is filled before the breakdown guard: the kernel does not
-  // produce a breakdown at all today, and returning first would make the cost
-  // permanently invisible. No price means no row — a $0.00 would be a claim.
+  // The spend line is filled before the breakdown guard: a session can have a
+  // cost and no split, and returning first would make the cost invisible. No
+  // price means no row — a $0.00 would be a claim.
   const costRow = $("usage-cost-row");
   const costValue = $("usage-cost-value");
   if (costRow && costValue) {
@@ -1488,24 +1745,50 @@ function renderUsage() {
     }
   }
 
-  const info = state.contextBreakdown;
-  if (!info) {
-    $("usage-context-value").textContent = "—";
+  const context = state.context;
+  const headline = $("usage-context-value");
+  if (!context) {
+    // R3: nothing has measured this transcript. `—` is the only honest
+    // headline, and an empty bar beats a chart of invented zeros.
+    headline.textContent = "—";
+    headline.removeAttribute("title");
     $("usage-stack").innerHTML = "";
     $("usage-breakdown").innerHTML = "";
     return;
   }
 
+  const info = state.contextBreakdown;
   // Headline: used / window (percent) — the three facts the chip reduces to
-  // one, spelled out where there is room for all three.
-  $("usage-context-value").textContent =
-    `${formatTokens(info.used)} / ${formatTokens(info.window)} (${info.percent}%)` +
+  // one, spelled out where there is room for all three. The breakdown, when
+  // one exists, carries the per-category split; without it the total
+  // occupancy still states all three facts. An unknown half is `—`, not 0.
+  // The percentage is the kernel's own figure, the same one the chip rounds,
+  // so the two never disagree beyond the rounding the chip is allowed.
+  const used = info ? info.used : context.tokens;
+  const window = info && info.window > 0 ? info.window : context.window;
+  const percent = info ? info.percent : context.percent;
+  const usedText = Number.isFinite(used) ? formatTokens(used) : "—";
+  const windowText = Number.isFinite(window) && window > 0 ? formatTokens(window) : "—";
+  const percentText = Number.isFinite(percent) ? `${percent}%` : "—";
+  const windowKnown = Number.isFinite(window) && window > 0;
+  headline.textContent =
+    `${usedText} / ${windowText} (${percentText})` +
     // A percentage of an assumed window is a percentage of a guess. Saying so
     // costs one marker and stops the meter from reading as an endpoint fact.
-    (info.windowAssumed ? ` ${t.usageWindowAssumed}` : "");
-  $("usage-context-value").title = info.windowAssumed
-    ? t.usageWindowAssumedHint
-    : `${formatTokens(info.window)} ${t.tokens}`;
+    (info?.windowAssumed ? ` ${t.usageWindowAssumed}` : "");
+  if (info?.windowAssumed) headline.title = t.usageWindowAssumedHint;
+  else if (windowKnown) headline.title = `${windowText} ${t.tokens}`;
+  // No window reported: a title saying "— tokens" states a fact nobody has.
+  else headline.removeAttribute("title");
+
+  if (!info) {
+    // This transcript has no split (an older log, or a kernel that measured
+    // only the total): leave the chart empty rather than drawing the whole
+    // window as one fabricated slice.
+    $("usage-stack").innerHTML = "";
+    $("usage-breakdown").innerHTML = "";
+    return;
+  }
 
   // A colour per category, in a fixed order so the same slice is the same
   // colour between sessions. The palette is the app's own four accents plus
@@ -2195,7 +2478,12 @@ function handleEvent(message) {
       // isolation, so it has to know before the label is drawn.
       if (message.sandbox) state.sandbox = message.sandbox;
       if (message.effortChoices) state.effortChoices = message.effortChoices;
-      if (message.contextBreakdown !== undefined) state.contextBreakdown = message.contextBreakdown;
+      // A state event speaks for the whole transcript: it either brings a
+      // fresh split or says there is none. An absent field falls back to
+      // `null` because this event replaces the occupancy too — keeping the
+      // previous split beside a new total would describe two different
+      // measurements at once.
+      state.contextBreakdown = message.contextBreakdown ?? null;
       setMode(message.mode);
       setEffort(message.effort || "auto");
       // Board selection and project kind are cheap, so every state event carries
@@ -2222,8 +2510,10 @@ function handleEvent(message) {
       }
       // A state event carries session-level totals: replace, never add. It
       // may also carry spend and occupancy (the host attaches them when it
-      // opens a stored session); a state event without them is the same
-      // session changing a mode, so the figures on screen stay.
+      // opens a stored session). An event that omits either is the same
+      // session changing a mode, so `undefined` leaves the figure on screen;
+      // an explicit `null` is the protocol saying "no measurement", which
+      // clears the chip instead of keeping a stale percentage.
       applyCost(message);
       updateMeter(message.context, message.usage, { replace: true });
       break;
@@ -2427,7 +2717,10 @@ function handleEvent(message) {
       break;
 
     case "commands":
-      state.commands = message.commands ?? [];
+      // Stored exactly as reported: this list is the host's capability answer,
+      // not a display list. `commandList()` merges the local copy on read so a
+      // locale switch re-labels the menu without asking the host again.
+      state.commands = Array.isArray(message.commands) ? message.commands : [];
       break;
 
     case "context_report": {
@@ -2462,9 +2755,7 @@ function handleEvent(message) {
 
     case "git_status":
       state.git = message;
-      state.worktree = message.worktree ?? null;
       renderGitBar();
-      renderWorktree();
       break;
 
     case "pr_status":
@@ -2479,12 +2770,6 @@ function handleEvent(message) {
       } else {
         addNotice("warn", `${t.prFailed} ${message.error ?? ""}`);
       }
-      break;
-
-    case "worktree_diff":
-      state.worktreeDiffText = message.diff || "";
-      addNotice("dim", `${t.worktreeDiff} · ${message.branch}`);
-      showWorktreeDiff();
       break;
 
     case "git_commit": {
@@ -2576,8 +2861,18 @@ function handleEvent(message) {
       // A live event adds to the totals but may also carry occupancy and the
       // session's running spend. The cost is taken first so the redraw at the
       // end of updateMeter already has it; the token sum stays with the call
-      // below, which owns the add-vs-replace rule.
+      // below, which owns the add-vs-replace rule. An event without a context
+      // is not a measurement (the kernel only attaches one when it could
+      // measure), so it must not erase the figure the last measurement set.
+      //
+      // The split takes the opposite rule on purpose. The kernel writes a
+      // total and its split from the same measurement, so an event carrying
+      // one without the other is an older kernel or a different producer —
+      // and in that case the chart on screen no longer describes what was
+      // just measured. `?? null` clears it instead of leaving last turn's
+      // composition under this turn's total.
       applyCost(message);
+      state.contextBreakdown = message.contextBreakdown ?? null;
       updateMeter(message.context, message.usage);
       break;
 
@@ -2753,10 +3048,19 @@ function handleEvent(message) {
       break;
     }
 
-    case "todos":
+    case "todos": {
+      // `renderPlan` reads `items.length`, so an `undefined` here throws inside
+      // the event loop and the rest of the transcript stops updating. The
+      // protocol layer already guarantees an array, but this switch is a second
+      // entrance: a host that has not been rebuilt may still send a payload
+      // from before that guarantee existed. An empty array is legal —
+      // it is how the model clears the plan, and `renderPlan` removes the card
+      // for it.
+      if (!Array.isArray(message.items)) break;
       renderPlan(message.items);
       scrollToBottom();
       break;
+    }
 
     case "ask_user": {
       // A question from the model, drawn with the same bar the permission
@@ -3016,6 +3320,9 @@ function handleEvent(message) {
       endThinking();
       setBusy(false);
       suggestNextTurn();
+      // The host's `run_end` carries no occupancy — the turn's `usage` event
+      // already delivered it. Passing `undefined` keeps that figure instead of
+      // clearing a measurement the run just made.
       updateMeter(message.context, message.usage);
       notifyIfAway(t.notifyTurnDone, summariseLastAssistant());
       if (message.files && message.files.length > 0) {
@@ -3042,9 +3349,16 @@ function handleEvent(message) {
       // The transcript was replaced with this session's; so was its spend.
       // The cost is replaced rather than merged: an older log carries none,
       // and keeping the previous session's figure would attribute it here.
+      // Occupancy is cleared with it: this event never carries a measurement,
+      // and inheriting the previous session's percentage would attribute it
+      // to the wrong transcript. The `state` event that follows this one in
+      // both adapters supplies the real figure (or leaves it unknown).
       applyCost(message, { replace: true });
-      if (message.usage) updateMeter(null, message.usage, { replace: true });
-      else renderUsage();
+      updateMeter(null, message.usage, { replace: true });
+      // The categories belonged to the transcript that just left the screen.
+      // The `state` event that follows supplies this session's split, if it
+      // has one; until then the chart is empty rather than the old one.
+      state.contextBreakdown = null;
       target
         .querySelectorAll(".turn, .tool-row, .tool-group, .tool-item, .tool-output, .notice, .plan, .thinking, .subagent, .compact-marker")
         .forEach((node) => node.remove());
@@ -3085,6 +3399,18 @@ function handleEvent(message) {
       if ((message.messages || []).length === 0) {
         target.appendChild(emptyState);
         emptyState.hidden = false;
+      }
+      // The plan is rebuilt from the session, not from the replayed messages:
+      // `messages` only carries chat bubbles. Replayed after the messages so
+      // the card lands below every turn. It goes to the end of the transcript
+      // because `renderPlan` inserts before `state.currentAssistant` when there
+      // is one — and the replay just set that to `null`: the plan belongs to
+      // the whole conversation, not to its last message, so the tail is where
+      // it reads correctly. No call at all for an absent or empty list: the
+      // card was already removed above, and calling with `[]` would only repeat
+      // that removal.
+      if (Array.isArray(message.todos) && message.todos.length > 0) {
+        renderPlan(message.todos);
       }
       if (message.cwd) {
         state.cwd = message.cwd;
@@ -3239,8 +3565,8 @@ function renderSubagents() {
  * pane whose Start button answers "unsupported". The probe's serial state is
  * visible as a field in the board pane's Device section.
  *
- * `files` is the workspace tree: `getTree` is real in the host and the bridge,
- * and a directory row expands through the same `getTree` the pane's root uses.
+ * `files` is the workspace tree: `getTree` is real in the host, and a
+ * directory row expands through the same `getTree` the pane's root uses.
  */
 const SUPPORTED_PANES = new Set(["board", "file", "files", "artifact"]);
 
@@ -3426,17 +3752,6 @@ $("terminal-restart").addEventListener("click", () => {
   terminalOutput.textContent = "";
   api.send({ cmd: "terminalRestart" });
 });
-
-function showWorktreeDiff() {
-  // openWorkbench("diff") renders the session diff, so paint over it with the
-  // worktree diff afterwards.
-  openWorkbench("diff");
-  workbenchMeta.textContent = t.worktreeDiff;
-  diffFilelist.hidden = true;
-  diffRoot.innerHTML = state.worktreeDiffText
-    ? `<pre class="raw-diff">${escapeHtml(state.worktreeDiffText)}</pre>`
-    : `<div class="diff-empty">${escapeHtml(t.noChanges)}</div>`;
-}
 
 /**
  * Mark the words that differ between a removed line and the line that
@@ -4477,9 +4792,9 @@ function treeRow(node) {
     container.className = "tree-children";
     row.after(container);
     setIcon(row.querySelector(".twisty svg"), "chevron-down");
-    // The target is recorded before the request goes out. The browser bridge
-    // answers a supported command synchronously, so setting this afterwards
-    // delivered the reply into the root of the tree instead of under the row.
+    // The target is recorded before the request goes out, so a reply that
+    // arrives while the row is still being built cannot land in the root of
+    // the tree instead of under it.
     pendingTreeTarget = container;
     api.send({ cmd: "getTree", path: node.path });
   });
@@ -5107,6 +5422,32 @@ function rememberInHistory(text) {
 
 function submit() {
   const text = input.value.trim();
+  // A slash command is not a prompt. Reading it before anything else keeps
+  // `/clear` out of the model's inbox; an unknown name is named and left in
+  // the box instead of being sent, so a typo costs a notice, not a turn.
+  //
+  // It is still *shown* as a message when it runs — `runSlashCommand` echoes
+  // the typed text — but that bubble is this window's own record, not a
+  // `prompt` command: the kernel has no slash verbs, so forwarding `/clear`
+  // would only buy a model reply saying it cannot clear the conversation.
+  const slash = parseSlashText(text);
+  if (slash !== null && commandList().some((command) => command.name === slash.name)) {
+    if (runSlashCommand(slash, text) === "ran") {
+      input.value = "";
+      autoSize();
+      // Up-arrow walks what was typed, commands included. Remembering only
+      // prompts made a just-run `/compact` unreachable without retyping it.
+      rememberInHistory(text);
+    }
+    return;
+  }
+  // A slash-looking message whose verb this window does not know: answer it
+  // here and keep the draft. Sending it would spend a turn on text the model
+  // cannot act on, and `/deploy` in the transcript would read as if it ran.
+  if (slash !== null) {
+    reportUnknownCommand(slash.name, commandList());
+    return;
+  }
   // Attachments and @-mentions have no upload path in this kernel. An image
   // stays in the strip and is not sent; a picked path is not uploaded either,
   // but it costs nothing to tell the model which paths the user meant: the
@@ -5366,8 +5707,8 @@ function handleImageFiles(files) {
       reader.readAsDataURL(file);
       continue;
     }
-    // Electron exposes the real path on dropped files; plain browser File
-    // objects do not, and there is nothing useful to send without one.
+    // Electron exposes the real path on dropped files, and without one there
+    // is nothing useful to send.
     const path = file.path;
     if (!path) {
       addNotice("warn", t.attachmentUnsupported);
@@ -5463,20 +5804,6 @@ $("pr-create").addEventListener("click", async () => {
   if (title === null) return;
   api.send({ cmd: "createPr", title: title.trim(), body: t.prBodyDefault });
 });
-
-/**
- * Split `/compact` arguments into a focus and a keep count.
- *
- * Mirrors the REPL's parser: `--keep N` is pulled out wherever it appears and
- * the rest is the focus, so "tests --keep 12" and "--keep 12 tests" mean the
- * same thing.
- */
-function parseCompactArgs(text) {
-  const keepMatch = /(?:^|\s)--keep(?:=|\s+)(\d+)/.exec(text || "");
-  const keep = keepMatch ? Number(keepMatch[1]) : 0;
-  const focus = String(text || "").replace(/(?:^|\s)--keep(?:=|\s+)\d+/, "").trim();
-  return { ...(focus ? { focus } : {}), ...(keep > 0 ? { keep } : {}) };
-}
 
 /**
  * Ask for one line of text.
@@ -5583,11 +5910,17 @@ function paletteEntries() {
     })),
     { label: t.shortcutStop, run: () => api.send({ cmd: "abort" }) },
   ];
-  for (const command of state.commands) {
+  for (const command of commandList()) {
     entries.push({
       label: `/${command.name}`,
       hint: command.description || command.argumentHint || "",
+      // The same path the popup and a typed command take. Inserting the text
+      // instead made the palette a second, weaker way to run the same verb.
       run: () => {
+        if (command.source === "builtin" && !command.argumentHint) {
+          runSlashCommand({ name: command.name, args: "" });
+          return;
+        }
         input.value = `/${command.name} `;
         autoSize();
         input.focus();
@@ -6035,10 +6368,8 @@ function setWorkspace(path) {
  * Both the top bar's folder button and the sidebar's workspace entry call
  * this one function, so the two paths cannot drift apart:
  * - a picker that throws is not an answer, so it falls through to typing;
- * - Electron returning null means the native dialog was cancelled, which is
- *   not an error to punish with a second prompt;
- * - the browser bridge has no native picker and returns null, so the path is
- *   typed instead.
+ * - the native dialog returning null means it was cancelled, which is not an
+ *   error to punish with a second prompt.
  */
 async function chooseWorkspace() {
   let picked = null;
@@ -6053,64 +6384,20 @@ async function chooseWorkspace() {
     setWorkspace(picked);
     return;
   }
-  // `api.platform` exists only when an Electron preload is in front. There a
-  // null means the user closed the native dialog, and re-asking with a text
-  // box would punish them for cancelling; here the click has already done
+  // A null from the native dialog means the user closed it, and re-asking with
+  // a text box would punish them for cancelling — the click has already done
   // something (a dialog opened and closed).
-  if (api.platform && !pickerFailed) return;
-  // The browser bridge has no native picker and returns null, so the path is
-  // typed instead. `askText`, not `window.prompt`: Electron does not implement
-  // prompt and returns null without drawing anything (see the note on
-  // askText), which would put a dead click back in the desktop window.
+  if (!pickerFailed) return;
+  // Only a picker that never produced an answer lands here. `askText`, not
+  // `window.prompt`: Electron does not implement prompt and returns null
+  // without drawing anything (see the note on askText), which would put a dead
+  // click back in the desktop window.
   const typed = await askText(t.workspacePathPrompt, state.cwd ?? "");
   if (typed) setWorkspace(typed);
 }
 
 $("topbar-cwd").addEventListener("click", chooseWorkspace);
 $("sidebar-workspace").addEventListener("click", chooseWorkspace);
-
-/* ---------- isolated worktree ---------- */
-
-function renderWorktree() {
-  const active = state.worktree;
-  // The worktree control lives on the active project's header, so its state
-  // reads where the project is named instead of in a second card.
-  $("worktree-button").classList.toggle("active", Boolean(active));
-  $("worktree-button").title = active ? `${t.worktreeLabel}: ${active.branch}` : t.worktreeLabel;
-  $("worktree-actions-off").hidden = Boolean(active);
-  $("worktree-actions-on").hidden = !active;
-  $("worktree-copy").textContent = active ? `${t.worktreeActive} ${active.path}` : t.worktreeExplain;
-}
-
-$("worktree-button").addEventListener("click", (event) => {
-  event.stopPropagation();
-  const panel = $("worktree-panel");
-  panel.hidden = !panel.hidden;
-  $("worktree-button").setAttribute("aria-expanded", String(!panel.hidden));
-});
-
-document.addEventListener("click", (event) => {
-  if (!event.target.closest("#worktree-panel") && !event.target.closest("#worktree-button")) {
-    const panel = $("worktree-panel");
-    if (!panel.hidden) {
-      panel.hidden = true;
-      $("worktree-button").setAttribute("aria-expanded", "false");
-    }
-  }
-});
-
-$("worktree-enable").addEventListener("click", () => api.send({ cmd: "worktreeStart" }));
-$("worktree-diff").addEventListener("click", () => api.send({ cmd: "worktreeDiff" }));
-$("worktree-merge").addEventListener("click", () => {
-  void confirmAction(t.worktreeMergeConfirm).then((yes) => {
-    if (yes) api.send({ cmd: "worktreeMerge" });
-  });
-});
-$("worktree-discard").addEventListener("click", () => {
-  void confirmAction(t.worktreeDiscardConfirm, { danger: true }).then((yes) => {
-    if (yes) api.send({ cmd: "worktreeDiscard" });
-  });
-});
 
 const clearConversation = () => {
   // The kernel has no "erase this transcript" operation — the log is append
@@ -6460,7 +6747,7 @@ $("diff-scope").querySelectorAll("button").forEach((button) => {
 // Windows and Linux draw their caption buttons in the renderer so they match
 // the top bar; macOS keeps its native traffic lights.
 const windowControls = $("window-controls");
-if (api.platform && api.platform !== "darwin") {
+if (api.platform !== "darwin") {
   windowControls.hidden = false;
   document.documentElement.classList.add("custom-caption");
   windowControls.querySelectorAll("[data-window]").forEach((button) => {
@@ -6662,7 +6949,10 @@ function bootStep(name, fn) {
 }
 
 api.onEvent(handleEvent);
-if (api.platform) document.documentElement.classList.add(`platform-${api.platform}`);
+// `platform` comes from the preload (`process.platform`), so this is always a
+// real platform string — the `platform-*` classes key the caption-button and
+// shortcut styling.
+document.documentElement.classList.add(`platform-${api.platform}`);
 bootStep("locale", () => applyLocale(state.locale));
 bootStep("mode", () => setMode(state.mode));
 // Preferences are restored from localStorage so the first paint is already

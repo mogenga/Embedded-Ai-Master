@@ -21,6 +21,13 @@ export interface CompactOptions {
   keepTailRatio?: number;
   softRatio?: number;
   meter?: TokenMeter;
+  /**
+   * 显式要求压缩：跳过软阈值提前返回，也跳过 microcompact。
+   *
+   * 这是 `/compact` 这类用户指令的出口——用户说「压缩」时不该被阈值挡回来。
+   * 缺省 false，等价于历史上「只在超预算时才动手」的行为。
+   */
+  force?: boolean;
   signal: AbortSignal;
 }
 
@@ -192,6 +199,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
     keepTailRatio = 0.16,
     softRatio = 0.8,
     meter,
+    force = false,
     signal,
   } = opts;
   assertCompactionRatios(keepTailRatio, softRatio);
@@ -207,22 +215,28 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   };
 
   let current = measure();
-  if (current.tokens <= softLimit) return;
+  // force 跳过软阈值：用户显式要压缩时，「还没到阈值」不是拒绝的理由。
+  if (!force && current.tokens <= softLimit) return;
 
   const events = session.events();
   const boundary = lastSummaryBoundary(events);
   const elided = collectElidedSeqs(events);
   const recent = recentBatchParents(events, keepRecentTurns);
   const candidates: number[] = [];
-  for (const event of events) {
-    if (event.type !== "tool_result") continue;
-    if (event.payload.evidence === true) continue;
-    if (event.parent !== undefined && recent.has(event.parent)) continue;
-    if (elided.has(event.seq)) continue;
-    if (boundary !== undefined && event.seq <= boundary) continue;
-    const text = event.payload.text;
-    if (typeof text !== "string" || elidedContent(event.payload, text) === undefined) continue;
-    candidates.push(event.seq);
+  // force 时整个 microcompact 阶段都跳过：它是「超预算时先廉价回收」的手段，
+  // 把工具结果悄悄换成一行标记就收工。用户显式要求压缩，要的是一份摘要，
+  // 不是一次静默替换——所以连候选都不必找。
+  if (!force) {
+    for (const event of events) {
+      if (event.type !== "tool_result") continue;
+      if (event.payload.evidence === true) continue;
+      if (event.parent !== undefined && recent.has(event.parent)) continue;
+      if (elided.has(event.seq)) continue;
+      if (boundary !== undefined && event.seq <= boundary) continue;
+      const text = event.payload.text;
+      if (typeof text !== "string" || elidedContent(event.payload, text) === undefined) continue;
+      candidates.push(event.seq);
+    }
   }
 
   if (candidates.length > 0) {

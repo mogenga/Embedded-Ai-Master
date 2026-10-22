@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { TodoItem } from "../session/types.js";
 
 export interface ToolCtx {
   sessionId: string;
@@ -15,6 +16,8 @@ export interface ToolResult {
   evidence?: boolean;
   deviceStatus?: { server: string; state: Record<string, unknown> };
   deviceStatusInvalid?: string;
+  /** 模型要显示的计划；由 query 写成一条 `todos` 事件，不进 tool_result 正文。 */
+  todos?: TodoItem[];
 }
 
 export interface ToolAnnotations {

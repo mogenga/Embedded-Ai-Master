@@ -19,6 +19,7 @@ import type {
 } from "../src/model/protocol.js";
 import type { SessionHandle } from "../src/session/session.js";
 import { createSession } from "../src/session/session.js";
+import type { TodoItem } from "../src/session/types.js";
 import { echoTool } from "../src/tools/echo.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import type { ToolDef } from "../src/tools/types.js";
@@ -164,6 +165,28 @@ describe("query 主循环", () => {
     await collect(query(ctx, "first", { maxTurns: 10 }));
     await collect(query(ctx, "second", { maxTurns: 10 }));
 
+    const turns = session
+      .events()
+      .filter((event) => event.type === "checkpoint")
+      .map((event) => event.payload.turn);
+    expect(turns).toStrictEqual([1, 2]);
+  });
+
+  it("maxTurns 按本次运行计，不累计整段会话", async () => {
+    // 用户实测：一段会话用掉 10 次模型调用后，**之后每条消息都立刻**以
+    // interrupted:max_turns 结束，一次模型调用都没发生。设置项写的是
+    // 「每条消息的轮数上限」，实现却拿会话级的 checkpoint.turn 去比上限。
+    const provider = scriptedProvider([reply("完成"), reply("完成")]);
+    const { ctx, session } = await makeCtx(provider);
+
+    await collect(query(ctx, "first", { maxTurns: 1 }));
+    const second = await collect(query(ctx, "second", { maxTurns: 1 }));
+
+    // 第二条消息有自己的那一轮可用。
+    expect(second.filter((event) => event.kind === "model_message")).toHaveLength(1);
+    expect(second.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    // 但 checkpoint.turn 仍跨消息单调递增（D-045：同一目录出现重复 turn 会让
+    // 按 turn 定位断点产生歧义）。两个计数各管一件事，不能合并。
     const turns = session
       .events()
       .filter((event) => event.type === "checkpoint")
@@ -366,6 +389,83 @@ describe("query 主循环", () => {
     expect(() => buildMessages(logged)).not.toThrow();
   });
 
+  it("工具返回 todos 时在 tool_result 之后写一条 todos 事件", async () => {
+    const items: TodoItem[] = [
+      { content: "读 datasheet", status: "completed" },
+      { content: "量波形", status: "in_progress" },
+    ];
+    const planTool: ToolDef<{ items: TodoItem[] }> = {
+      name: "todo_write",
+      description: "替换整份待办列表",
+      schema: z.object({
+        items: z.array(
+          z.object({
+            content: z.string(),
+            status: z.enum(["pending", "in_progress", "completed"]),
+          }),
+        ),
+      }),
+      access: () => "read",
+      execute: async (input) => ({
+        isError: false,
+        code: "ok",
+        message: "",
+        text: `Updated plan: ${input.items.length} items`,
+        detail: { items: input.items },
+        todos: input.items,
+      }),
+    };
+    const provider = scriptedProvider([
+      reply("先列计划", [{ id: "t1", name: "todo_write", arguments: { items } }]),
+      reply("完成"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([planTool]),
+    });
+
+    await collect(query(ctx, "做点事", { maxTurns: 10 }));
+
+    const logged = session.events();
+    const resultIndex = logged.findIndex((event) => event.type === "tool_result");
+    const todosIndex = logged.findIndex((event) => event.type === "todos");
+    const assistant = logged.find((event) => event.type === "assistant");
+    expect(resultIndex).toBeGreaterThanOrEqual(0);
+    // 状态事件必须排在真实结果之后：结果先落盘，状态写入失败也不能把结果补成 lost。
+    expect(todosIndex).toBeGreaterThan(resultIndex);
+    expect(logged[todosIndex]!.payload).toStrictEqual({ callId: "t1", items: [...items] });
+    expect(logged[todosIndex]!.parent).toBe(assistant?.seq);
+    // 计划是界面状态，重开会话时投影不能因为它而失败。
+    expect(() => buildMessages(logged)).not.toThrow();
+  });
+
+  it("todo_write 失败时不写 todos 事件", async () => {
+    const planTool: ToolDef<{ items: unknown[] }> = {
+      name: "todo_write",
+      description: "总是失败",
+      schema: z.object({ items: z.array(z.unknown()) }),
+      access: () => "read",
+      execute: async () => ({
+        isError: true,
+        code: "boom",
+        message: "boom",
+        text: "boom",
+        todos: [{ content: "半成品", status: "pending" }],
+      }),
+    };
+    const provider = scriptedProvider([
+      reply("列计划", [{ id: "t1", name: "todo_write", arguments: { items: [] } }]),
+      reply("完成"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([planTool]),
+    });
+
+    await collect(query(ctx, "做点事", { maxTurns: 10 }));
+
+    // 失败的工具没有计划成立：result.todos 存在也不该落成事件。
+    expect(session.events().some((event) => event.type === "todos")).toBe(false);
+  });
+
   it("工具返回 deviceStatusInvalid 时写 device_status_invalid 状态事件", async () => {
     const probeTool: ToolDef<{ text: string }> = {
       name: "probe",
@@ -565,6 +665,88 @@ describe("query 主循环", () => {
       (event) => event.type === "usage" && event.payload.context !== undefined,
     );
     expect(usage?.payload.context).toMatchObject({ window: DEFAULT_CONTEXT_WINDOW });
+  });
+
+  // 这是本仓库最常走的那条路：一次工具调用之后，占用仍必须被报出来。
+  // 事件顺序是 assistant → usage → tool_result，而 `buildMessages` 拒绝投影
+  // 尚未闭合的工具批次，所以「在 usage 落盘时重新投影整份日志」会必然抛错，
+  // 被 catch 吞掉，导致每一条带工具调用的回合都没有占用率(D-195)。
+  it("带工具调用的那一轮也报占用率与分类拆分", async () => {
+    const provider = scriptedProvider([
+      reply("用 echo", [echoCall("c1")], false, { promptTokens: 10, completionTokens: 1 }),
+      reply("完成", [], false, { promptTokens: 20, completionTokens: 2 }),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      budget: (messages) => checkBudget(messages, DEFAULT_CONTEXT_WINDOW),
+    });
+
+    await collect(query(ctx, "请回应", { maxTurns: 10 }));
+
+    const assistants = session.events().filter((event) => event.type === "assistant");
+    expect(assistants).toHaveLength(2);
+    const callsTools = assistants[0]!.payload.toolCalls as unknown[];
+    expect(callsTools).toHaveLength(1);
+
+    // 第一条 usage 就是那一轮工具调用之后的：它必须带占用率。
+    const first = session
+      .events()
+      .filter((event) => event.type === "usage" && event.seq > assistants[0]!.seq)
+      .at(0);
+    expect(first?.payload.context).toBeDefined();
+    const context = first!.payload.context as { tokens: number; window: number };
+    // `makeCtx` 的 modelCfg 显式给了 8192：窗口取的是配置值，不是兜底默认值。
+    expect(context.window).toBe(8192);
+    expect(context.tokens).toBeGreaterThan(0);
+    const breakdown = first!.payload.contextBreakdown as
+      | { used: number; parts: Array<{ tokens: number }> }
+      | undefined;
+    expect(breakdown).toBeDefined();
+    expect(breakdown!.parts.reduce((total, part) => total + part.tokens, 0)).toBe(breakdown!.used);
+  });
+
+  // `context` 说「用了多少」，`contextBreakdown` 说「被什么占的」——两者必须是
+  // 同一次测量的两种说法，否则弹层上的总量与分段之和会对不上（D-191）。
+  it("usage 事件带 contextBreakdown，且与 context.tokens 同源", async () => {
+    // 两轮都带 usage：第一轮带工具调用时日志里的工具批次尚未闭合，
+    // `buildMessages` 会拒绝投影（既有语义），所以取第二轮那条完整转录上的 usage。
+    const provider = scriptedProvider([
+      reply("用 echo", [echoCall("c1")], false, { promptTokens: 10, completionTokens: 1 }),
+      reply("完成", [], false, { promptTokens: 20, completionTokens: 2 }),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      budget: (messages) => checkBudget(messages, DEFAULT_CONTEXT_WINDOW),
+    });
+
+    await collect(query(ctx, "请回应", { maxTurns: 10 }));
+
+    const usages = session
+      .events()
+      .filter((event) => event.type === "usage" && event.payload.context !== undefined);
+    expect(usages.length).toBeGreaterThan(0);
+    const payload = usages.at(-1)?.payload as {
+      context: { tokens: number; percent: number; window: number };
+      contextBreakdown: {
+        used: number;
+        window: number;
+        percent: number;
+        compactAt: number;
+        parts: Array<{ key: string; tokens: number }>;
+      };
+    };
+    const { context, contextBreakdown: breakdown } = payload;
+
+    expect(breakdown).toBeDefined();
+    expect(breakdown.used).toBe(context.tokens);
+    expect(breakdown.window).toBe(context.window);
+    expect(breakdown.percent).toBe(context.percent);
+    expect(Number.isInteger(breakdown.compactAt)).toBe(true);
+    expect(breakdown.compactAt).toBeGreaterThan(0);
+    expect(breakdown.parts.reduce((total, part) => total + part.tokens, 0)).toBe(breakdown.used);
+    // 这段会话有 user/assistant 与一条 echo 结果，但没有任何 MCP 工具。
+    const keys = breakdown.parts.map((part) => part.key);
+    expect(keys).toContain("messages");
+    expect(keys).toContain("toolResults");
+    expect(keys).not.toContain("mcpTools");
   });
 
   it("truncatedByMaxTokens=true 且无工具调用 → 再次 complete", async () => {
@@ -774,6 +956,15 @@ describe("query 主循环", () => {
     expect(
       computeCostUsd({ promptTokens: Infinity, completionTokens: Infinity }, price),
     ).toBe(0);
+  });
+
+  it("assertBreakers 不设 maxTurns 时不检查轮数（无默认上限）", () => {
+    // 未配置 = 没有上限，不是「上限为 0」也不是「上限为 10」。
+    expect(() => assertBreakers({}, 100, 0)).not.toThrow();
+    expect(() => assertBreakers({ maxTurns: undefined }, 100, 0)).not.toThrow();
+    // 成本检查不受影响：只设预算时仍然只在预算处熔断。
+    expect(() => assertBreakers({}, 100, 1)).not.toThrow();
+    expect(() => assertBreakers({ maxCostUsd: 1 }, 100, 1)).toThrow("max_cost_usd");
   });
 
   it("assertBreakers 拒绝非法 maxTurns/maxCostUsd", () => {
