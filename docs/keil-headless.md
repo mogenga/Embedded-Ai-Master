@@ -92,9 +92,12 @@
 ### 烧录与整片擦除
 
 ```jsonc
+{ "action": "close" }   // 先释放探针
 { "action": "flash" }   // UV4 -f，烧完回读校验
 { "action": "erase" }   // 整片擦除，走 STM32_Programmer_CLI
 ```
+
+**`flash` 必须在调试会话关闭后执行**（实测）：`flash` 跑在 plain 工程会话上，调试会话占着探针时 UV4 会报 `Target DLL has been cancelled`。先 `close`，再 `flash`，最后重新 `open`。`erase` 也会先自动关闭所有会话。
 
 `flash` 只擦除镜像自身占用的扇区（Keil 的行为），不是整片。要整片必须 `erase`。
 
@@ -143,6 +146,7 @@
 | `Target is in debug mode` | 是否在调试会话里改工程 | 先 `close`，再改工程，再重新 `open` |
 | 工程改了但文件没变 | 是否调用了 `close` / `close_project` | uVision 在退出时才写盘；本服务不会直接改 `.uvprojx` |
 | `Flash Download failed` | 芯片型号、Flash 算法、是否整片擦除过 | 选项字节/读保护；先 `erase` 再 `flash` |
+| `Target DLL has been cancelled` | 是否还有打开的调试会话 | 探针被调试会话占用；先 `close` 再 `flash` |
 | `erase` 说不可用 | 是否装了 STM32CubeProgrammer | 整片擦除必须走 ST 的 CLI，UVSOCK 的擦除在 5.43a 无响应 |
 | 中文组名/路径乱码 | 工程文件编码 | 协议按 GBK 编解码；工程文件本身若是 UTF-8，新建中文组名仍会按 GBK 发送 |
 

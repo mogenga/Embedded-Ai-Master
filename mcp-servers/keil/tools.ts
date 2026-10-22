@@ -255,13 +255,19 @@ async function sessionFor(
   options: { target?: "hardware" | "simulator"; connectOnly?: boolean } = {},
 ): Promise<{ ok: true; session: KeilSession; key: string; log: string[] } | { ok: false; content: string }> {
   const resolved = resolveKeil(input, selection, { ...(options.connectOnly ? { connectOnly: true } : {}) });
+  // 没有显式 project、也没有服务级选中项时，回退到已经打开的会话：上一轮
+  // `open` 已经确定了工程，后续 `registers` / `run` 不该要求调用方重复传路径。
+  // A 侧由 Board 面板的 `config.keil` 承担这个角色，B 侧宿主尚未接入，
+  // 因此用"当前打开的会话"作为等价回退。
+  const fallbackProject = resolved.project ? undefined : [...listKeilSessions()].at(-1)?.project;
+  const project = resolved.project ?? fallbackProject;
   // A debug session and a plain project session cannot be the same uVision:
   // the target options refuse to answer while the debugger is entered, so the
   // plain one runs on its own port and is reused only by plain work.
   const chosen = options.target ?? resolved.backend;
   const opened = await openKeilSession({
     cwd,
-    ...(resolved.project ? { project: resolved.project } : {}),
+    ...(project ? { project } : {}),
     target: chosen,
     port: resolved.port,
     ...(options.connectOnly ? { connectOnly: true } : {}),
