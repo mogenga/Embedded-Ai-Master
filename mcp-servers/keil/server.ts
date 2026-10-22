@@ -1,38 +1,54 @@
+import { pathToFileURL } from "node:url";
+import { McpServer } from "@modelcontextprotocol/server";
+import type {
+  AnyToolHandler,
+  ServerContext,
+  StandardSchemaWithJSON,
+} from "@modelcontextprotocol/server";
+import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
+import { createKeilTools } from "./tools.js";
+
 /**
- * Keil / UVSOCK MCP server — porting skeleton.
+ * Keil / UVSOCK MCP server。
  *
- * Source of truth for the domain logic is Prometheus's src/embedded:
- *   uvsock.ts        — UVSOCK binary protocol (32-byte header, 0x3000/0x4000/0x50xx, GBK)
- *   keilSession.ts   — debug session registry, flash-download verify, project editing
- *   keilExtra.ts     — evaluate/disassemble/ITM/capability report
- *   keilProjectFile.ts — .uvprojx/.uvoptx surgical editing
- *   keilCli.ts       — UV4.exe command-line flags
- *   gbk.ts           — GBK/GB18030 codec
+ * 领域代码全部在本目录，内核 `src/` 零改动（probe 的 bootstrap 红线）。
+ * 接线方式与 probe/kb 同构：
  *
- * Porting notes (see docs/embedded-porting-plan.md):
- *  - Domain code lives here, never in src/ (guarded by probe's bootstrap test).
- *  - Tools follow the probe pattern: zod inputSchema, ProbeToolResult-shaped results,
- *    declarations on every destructive operation, evidence on read-back verifications.
- *  - keilTools.ts from Prometheus is an adapter to a different ToolResult contract —
- *    do NOT copy it; re-register each action as its own tool or a tool+action enum here.
+ *   { "mcpServers": { "keil": { "command": "node", "args": ["dist-mcp/keil/server.js"] } } }
  */
 
 export const KEIL_SERVER_NAME = "embedded-ai-keil";
 
-/** Tools to expose once the UVSOCK layer lands. Keep in sync with permissions.example.json. */
-export const PLANNED_TOOLS = [
-  {
-    name: "keil_debug",
-    description:
-      "Keil uVision debug actions (56): session enter/exit, run control, breakpoints, " +
-      "stack, registers, variables, memory, disassembly, flash download + read-back verify.",
-    annotations: { readOnlyHint: false }, // per-action; see tool implementation
-  },
-  {
-    name: "keil_project",
-    description:
-      "Keil project file actions (14): read/patch .uvprojx/.uvoptx fields " +
-      "(Device/Vendor/PackID/Cpu/FlashDriverDll/OutputName/OutputDirectory/pMon).",
-    annotations: { readOnlyHint: false },
-  },
-] as const;
+export function createKeilServer(): McpServer {
+  const server = new McpServer({ name: KEIL_SERVER_NAME, version: "0.1.0" });
+  for (const tool of createKeilTools()) {
+    const inputSchema = (tool.inputSchema ?? {}) as unknown as StandardSchemaWithJSON;
+    server.registerTool(
+      tool.name,
+      {
+        description: tool.description,
+        inputSchema,
+        annotations: tool.annotations,
+        _meta: tool.meta,
+      },
+      (async (args: unknown, ctx: ServerContext) =>
+        tool.handler(args, ctx.mcpReq.signal)) as unknown as AnyToolHandler<StandardSchemaWithJSON>,
+    );
+  }
+  return server;
+}
+
+function isEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return import.meta.url === pathToFileURL(entry).href;
+  } catch {
+    return false;
+  }
+}
+
+if (isEntryPoint()) {
+  const transport = new StdioServerTransport();
+  await createKeilServer().connect(transport);
+}

@@ -749,20 +749,18 @@ it("a multi-target project's image is read from the active target's block", asyn
   }
 });
 
-// 依赖 A 侧未迁移模块：src/tools (A 侧适配层)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("the capability report is reachable and does not claim a working op is refused", async () => {
-  const { toolByName } = await import("../src/tools/index.ts");
+it("the capability report is reachable and does not claim a working op is refused", async () => {
+  const { createKeilTools } = await import("../tools.js");
   const { UNSUPPORTED_ON_MDK_5_43 } = await import("../keilExtra.js");
-  const tool = toolByName("keil_debug");
-  expect(tool).toBeTruthy();
-  const actions = ((tool!.parameters as { properties: { action: { enum: string[] } } }).properties.action.enum);
+  const debug = createKeilTools().find((tool) => tool.name === "keil_debug")!;
+  const actions = (debug.inputSchema as unknown as { shape: { action: { options: string[] } } }).shape.action.options;
   expect(actions.includes("capabilities")).toBeTruthy();
   // Re-measured: `TRAPS` is not one of the target's enumerated trace variables
   // and is refused. The entry belongs in the table (see the test below); what
   // must not happen is the report listing a *working* operation as refused.
   expect(UNSUPPORTED_ON_MDK_5_43["DBG_VTR_ENUM"]).toBe(undefined);
   // Every remaining entry says why, not just that it is unsupported.
-  for (const [name, why] of Object.entries(UNSUPPORTED_ON_MDK_5_43)) {
+  for (const why of Object.values(UNSUPPORTED_ON_MDK_5_43)) {
     expect(why.length > 15).toBeTruthy();
   }
 });

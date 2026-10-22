@@ -5,32 +5,51 @@
     {
       "tool": "mcp__keil__keil_debug",
       "params": [
-        { "key": "action", "in": ["state", "stack", "registers", "variables", "memory_read", "disassemble"] }
+        {
+          "key": "action",
+          "in": ["registers", "register_read", "variables", "struct_members", "stack", "where", "read", "disassemble", "show_code", "symbols", "symbols_all", "tasks", "time", "capabilities", "version", "license", "trace_get", "itm", "event_recorder", "breakpoints"]
+        }
       ],
       "action": "allow",
-      "reason": "示例:调试会话内的只读取证动作"
-    },
-    {
-      "tool": "mcp__keil__keil_debug",
-      "params": [
-        { "key": "action", "in": ["halt", "resume", "step"] },
-        { "key": "action", "not_in": [] }
-      ],
-      "action": "ask",
-      "reason": "运行控制影响真机/仿真状态,默认确认"
-    },
-    {
-      "tool": "mcp__keil__keil_debug",
-      "params": [
-        { "key": "action", "in": ["flash_download"] }
-      ],
-      "action": "ask",
-      "reason": "Keil 下载烧录,默认确认"
+      "reason": "调试取证读数:结果本身是证据,不改变目标状态"
     },
     {
       "tool": "mcp__keil__keil_project",
+      "params": [
+        { "key": "action", "in": ["info", "targets", "groups", "files", "output_name", "get_option"] }
+      ],
+      "action": "allow",
+      "reason": "工程事实查询"
+    },
+    {
+      "tool": "mcp__keil__keil_debug",
+      "params": [
+        {
+          "key": "action",
+          "in": ["open", "run", "continue", "halt", "reset", "run_to", "step", "step_into", "step_instruction", "step_out", "step_many", "flash", "erase", "build", "rebuild", "clean", "clean_rebuild", "export_cprj", "export_cprjs", "convert", "command", "window"]
+        }
+      ],
       "action": "ask",
-      "reason": "工程文件编辑(.uvprojx/.uvoptx)默认确认;只读动作可在正式配置中拆出 allow"
+      "reason": "运行控制/烧录/擦除/构建:影响真机或覆盖产物,默认确认"
+    },
+    {
+      "tool": "mcp__keil__keil_debug",
+      "params": [
+        {
+          "key": "action",
+          "in": ["write", "register_set", "variable_set", "breakpoint_add", "breakpoint_delete", "watch_add", "watch_remove", "trace_set", "menu_exec"]
+        }
+      ],
+      "action": "ask",
+      "reason": "写目标状态:内存/寄存器/变量/断点"
+    },
+    {
+      "tool": "mcp__keil__keil_project",
+      "params": [
+        { "key": "action", "in": ["add_group", "add_file", "remove_group", "remove_file", "set_option", "set_target", "set_output_name", "close"] }
+      ],
+      "action": "ask",
+      "reason": "工程文件编辑(.uvprojx/.uvoptx):经 uVision 落盘,编辑前自动备份"
     }
   ]
 }
