@@ -52,7 +52,9 @@ v1.4 描述的是一套**从未按此实现**的设计基线（Preact + Vite、�
 
 以下入口在 DOM 中保留但带 `hidden`，宿主/bridge 收到对应命令时回显式 `notice`（R3，不静默吞掉）。逐条见 `desktop/MATRIX.md`：
 
-git / PR、终端、worktree、packs、browser、skills / memory / instructions / hooks、subagents、goals、文件树、导出、检查点恢复、附件与 @ 补全、斜杠命令、会话 fork/删除/改名、压缩、工作目录切换、板卡/串口的写操作、模型与 effort 直设。
+git / PR、终端、worktree、packs、browser、skills / memory / instructions / hooks、subagents、goals、检查点恢复、附件（图片）、板卡/串口的写操作、`effort` 直设（内核适配层不发该参数，如实拒绝而不是假装生效）。
+
+> **已从本文档移出的能力**（2026-10-21 起陆续接通，此处列表曾长期未同步）：文件树、导出、会话 fork / 删除 / 改名、工作目录切换、模型直选、`@` 文件补全、斜杠命令（`/clear` `/context` `/compact`）、压缩（桌面形态）。它们现在在本文件 §7、§8 与 `desktop/MATRIX.md` 里按「已支持」描述。
 
 > **「始终允许」按钮不渲染**：内核审批桥只有单次 allow/deny，没有持久规则。渲染出来就是一句兑现不了的承诺。
 
@@ -104,7 +106,7 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ TopBar  侧栏切换 │ cwd │ worktree │ 状态点 · 状态文本 │ 设置 │ 窗口控件(仅桌面) │ 48
+│ TopBar  侧栏切换 │ cwd │ 状态点 · 状态文本 │ 设置 │ 窗口控件(仅桌面) │ 48
 ├────────────────────┬─────────────────────────────────────┬───────────────────┤
 │ Sidebar 264px      │ Transcript（滚动）                  │ Workbench 420px   │
 │  可拖拽调宽         │  find-bar（sticky）                 │  可拖拽 320–560   │
@@ -370,7 +372,7 @@ prometheus.expandedProjects  collapsedProjects
 
 ### 7.1 TopBar 顶栏
 
-- 高 48px。左侧：侧栏切换按钮、cwd 按钮、worktree 按钮；中间：goal 徽标（隐藏）、状态点 + 状态文本；右侧：changes / terminal / more（**均隐藏**）、设置按钮、窗口控件（**仅桌面**，`hidden`）。
+- 高 48px。左侧：侧栏切换按钮、cwd 按钮；中间：goal 徽标（隐藏）、状态点 + 状态文本；右侧：changes / terminal / more（**均隐藏**）、设置按钮、窗口控件（**仅桌面**，`hidden`）。**worktree 按钮与面板已于 2026-10-22 整块删除**——内核没有 worktree 能力，点它只得到「桌面宿主暂不支持该命令」。
 - 状态文本取值来自 `status` 事件与运行状态（如"starting"）。
 - 主题与语言切换在 more 菜单里（`index.html:135-150`），但 more 按钮本身 `hidden` —— **该菜单当前无法打开**；设置页是它们的实际入口。
 
@@ -423,9 +425,14 @@ prometheus.expandedProjects  collapsedProjects
 - 控件行：模式选择器、模型选择器、用量胶囊（`#usage-meter`）。
 - **模式选择器 = 内核四个权限预设**：`diagnose` / `read-only` / `workspace-write` / `danger-full-access`（`app.js:1452`）。默认 `diagnose`。
 - 用量胶囊点击弹出 `usage-popover`：按输入 / 缓存 / 输出分段的色条 + 分类明细 + 本会话合计。
-  > 上下文**占用百分比被隐藏**（`#context-label` 带 `hidden`）：内核只给花费不给占用，编一个百分比就是撒谎（D-165）。
+  > **上下文占用百分比自 2026-10-22 起可见**：内核早在 D-165 就随 `usage` 事件下发 `context{tokens,percent,window}`，但前端把 `#context-label` 写死成 `hidden` 且无人移除，百分比从未显示过。现在 `protocol.measuredContext()` 只在 `tokens` 与 `percent` 都是有限数时才认，否则 `null`（显式「未知」哨兵，**不是 0%**）；`updateMeter` 的三种输入各有语义——`undefined` 保留原值（`state` 事件只是换模式）、`null` 清除并隐藏、真实测量才显示。
+  > **同日：D-195 修掉一个更要紧的问题。** `usage` 事件落盘时重新投影日志来测占用率，那一刻 assistant 已写、`tool_result` 未写，`buildMessages` 必然抛「工具批次未闭合」，被空 `catch` 吞掉——**每一条带工具调用的回合都没有占用率**（D-165 起即如此，而本仓库几乎每轮都在调工具）。现在测量移到**发请求之前**，量的是即将送出去的那份消息，这个数字也才真正表达它该表达的东西。
+  > `contextBreakdown`（按类别拆分）同日起有生产者：`src/context/breakdown.ts` 的纯函数按 `systemPrompt` / `messages` / `toolResults` / `mcpTools` 分桶，各桶之和强制等于 `used`（等比缩放 + 余数补给最大桶），随同一条 `usage` 事件下发。分段条与图例不再是死代码。
 - 文本域高度 `Math.min(220, scrollHeight)`（`app.js:4454`），无内部滚动条。
-- 附件（图片）、@ 文件提及、斜杠命令、`+` 菜单**均已隐藏**（无后端）。**语音输入（麦克风）已于 2026-10-22 整块删除**：按钮、`setupVoice`/`stopVoice`、录音动画、`voiceStart`/`voiceStop` 文案与 `#i-mic` 图标都不在了（Web Speech API 在 Electron 里通常不可用，留着一个永不出现的 `hidden` 空壳只是噪音）。`searchFiles` 仍会发（`app.js:1188`），但返回空匹配且**不刷警告** —— 每按键一次就警告会把整个转录埋掉。
+- 附件（图片）、`+` 菜单**均已隐藏**（无后端）。**语音输入（麦克风）已于 2026-10-22 整块删除**：按钮、`setupVoice`/`stopVoice`、录音动画、`voiceStart`/`voiceStop` 文案与 `#i-mic` 图标都不在了（Web Speech API 在 Electron 里通常不可用，留着一个永不出现的 `hidden` 空壳只是噪音）。
+  > 图片粘贴/拖入的代码**仍在**（`addAttachment` / `renderAttachments`）且会画出缩略图，但 `submit()` 不读 `state.attachments`、内核 `ModelChatMessage.content` 也只是 `string`——所以图片在发送时被静默丢弃。这是 R3 缺口，登记为 **D-188**，不是「已支持」。
+- **`@` 文件提及自 2026-10-22 起可用**：内核 `searchFilesByName` + `GET /api/files/search`，宿主与 bridge 走同一套遍历与边界规则（复用 D-181 的惰性 BFS 与 24 项忽略清单），按「基名全等 → 基名前缀 → 基名包含 → 路径包含」分层排序，层内短路径优先。目录不在结果里（D-184）。
+- **斜杠命令自 2026-10-22 起可用**：`/clear`、`/context`、`/compact`（桌面）；纯模块 `desktop/renderer/commands.js`（`mergeCommands` / `parseSlashText` / `contextReport`），`submit()` 先解析再决定发给模型还是本地执行。**命令执行时原文会作为一条用户消息留在转录里**；未知命令只提示、草稿留在框里，**不会**被当成提示词，也**不会**先留一条消息再报错。细节见 §8.3 / §8.4。
 
 ### 7.7 审批条
 
@@ -559,7 +566,9 @@ interface SessionEventEnvelope extends SessionEvent {
 
 NDJSON over stdio，Electron 主进程以 `ELECTRON_RUN_AS_NODE=1` spawn。宿主只从编译后的 `dist/` 导入内核模块；`dist/` 缺失时发 `fatal` 并 `exit(1)`。
 
-**命令**：`init`、`prompt`、`abort`、`permission`、`newSession`、`loadSession`、`listSessions`、`setMode`、`setLocale`、`setUiPreference`、`getSettings`、`getUsage`、`getSetupChecklist`、`listCommands`、`getTree`、`searchFiles`、`searchSessions`、`shutdown`。
+**命令**：`init`、`prompt`、`abort`、`permission`、`newSession`、`loadSession`、`listSessions`、`setMode`、`setLocale`、`setUiPreference`、`getSettings`、`getUsage`、`getSetupChecklist`、`listCommands`、`getTree`、`searchFiles`、`searchSessions`、`compact`、`shutdown`。
+
+**斜杠命令**（2026-10-22）：`listCommands` 回 `clear` / `context` / `compact` 三个。**命令真正执行时，敲进去的原文会作为一条普通用户消息留在转录里**（`/clear` 也一样，虽然它紧接着的 `session_loaded` 会清空转录）；未知命令与「带了参数被拒」的命令**不 echo**——先留一条消息再报错，会让人以为它跑过。`/clear` 在渲染器侧直接发 `newSession`；`/context` 由渲染器从内核自己的测量回答，逐行给出「用了多少 / 窗口 / 百分比」、每个类别占窗口的份额、剩余空间与压缩前余量，未知时明说「没有测量」而不是打印一页 0；`/compact` 走宿主的 `handleCompact`——用 `resumeSession` 打开会话、调内核 `compactSession({…, force: true})`。**不再看阈值**：用户显式要求压缩时，`force` 跳过软阈值提前返回与 microcompact 阶段，直接产出摘要；随后把新追加的 `compaction` 事件经 `sessionEventToHostEvents` 投影（复用既有的 `compacted` 标记），给出压缩前后的实测 token 数，并用新的测量刷新 `state.context` 与 `contextBreakdown`。压缩期间持有 `run_start`/`run_end` 与一个独立的 `AbortController`，`abort` 会先中止它。**三个命令都不接受参数**：内核 `compactSession` 没有 focus / keep 选项，`--keep N` 会是一个没人兑现的承诺（原 `parseCompactArgs` 已删）。`dist/` 缺 `context/compact.js` 或 `context/breakdown.js` 时回「请先 npm run build」而不是崩宿主。
 
 **未列入的命令**统一回 `notice{level:"warn", text:"桌面宿主暂不支持该命令：<cmd>"}`。
 
@@ -588,7 +597,9 @@ NDJSON over stdio，Electron 主进程以 `ELECTRON_RUN_AS_NODE=1` spawn。宿�
 
 不在白名单内的命令回 `notice{level:"warn", text:"浏览器形态暂不支持该命令：<cmd>"}`。
 
-**`searchFiles` 特判**：虽不在白名单，但单独拦截并返回 `file_matches{query, files:[]}` —— 补全弹窗每按一次键请求一次，按通用路径每字符回一条 warn 会把整个转录埋掉。
+**`searchFiles`**（2026-10-22 起真实实现）：不在 `supportedCommands` 里，但在 `send()` 的 switch 之前单独拦截，走 `GET /api/files/search?path=<currentCwd>&query=<q>`，把 `{files, truncated, scanned}` 映射成 `file_matches`。仍然不每字符回警告——补全弹窗每按一次键请求一次，按通用路径每字符一条 warn 会把整个转录埋掉；请求失败时安静回空（桌面宿主则在边界拒绝时发 `notice`）。
+
+**`listCommands`** 回 `clear` / `context` 两个。**`/compact` 在浏览器形态刻意缺席**：HTTP 层没有压缩路由，伪造一条成功会违反 R3；用户仍能敲 `/compact`（`compact` 在白名单里，好让请求走到 switch 而不是落进「暂不支持」的通用文案），得到一条说明「浏览器形态无法压缩」的 warn，且**不发任何请求**（有用例断言 `/api/actions` 调用数为 0）。
 
 ### 8.5 两种形态的差异
 
@@ -730,7 +741,7 @@ interface ToolAnnotations {
 | OPEN-UI-07 | **前端为纯 ES 模块**，无框架无打包器 | 2026-10-20 | 前端移植；`desktop/renderer/` 直接被浏览器与 Electron 加载，零构建 |
 | OPEN-UI-08 | **内核不支持的能力隐藏入口**，宿主/bridge 回显显式 notice | 2026-10-20 | R3 工具必须诚实：渲染一个只会报错的按钮比没有按钮更糟 |
 | OPEN-UI-09 | **不渲染「始终允许」** | 2026-10-20 | 内核审批桥只有单次 allow/deny，无持久规则；按钮即失信的承诺 |
-| OPEN-UI-10 | **上下文占用百分比隐藏** | 2026-10-20 | 内核只报花费不报占用（D-165），编百分比是撒谎 |
+| OPEN-UI-10 | ~~**上下文占用百分比隐藏**~~ → **作废（2026-10-22）** | 2026-10-20 | 原理由「内核只报花费不报占用」早在 D-165 就已不成立（`usage` 事件带 `context{tokens,percent,window}`）；本轮才把 `#context-label` 的 `hidden` 真正解除。`null` 表示未知，**不是 0%** |
 
 > 后续新增前端决策沿用 `OPEN-UI-xx` 编号；已关闭项保留在本表，不删除。
 

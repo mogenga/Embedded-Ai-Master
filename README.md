@@ -49,7 +49,7 @@ src/
 ├── model/        模型协议、OpenAI 兼容适配器、重试、token 估算
 ├── session/      append-only JSONL 会话
 ├── server/       只读 HTTP API（会话 / 知识库 / 设备）与静态资源服务
-├── tools/        工具契约、注册表、echo/fs/shell/glob/grep、五阶段执行管线
+├── tools/        工具契约、注册表、echo/read/write/edit/multiedit/shell/glob/grep、五阶段执行管线
 └── index.ts      runSession 装配
 desktop/
 ├── main.js       Electron 主进程（窗口、IPC、宿主生命周期）
@@ -89,29 +89,36 @@ docs/             设计、计划与已知问题
 |---|---|
 | `mcp.json` | `{ "mcpServers": { "<name>": { "command", "args", "env", "cwd", "timeoutMs", "disabled" } } }` |
 | `permissions.json` | `{ "version": 1, "preset", "rules": [{ "tool", "params", "action", "reason" }], "approvalTimeoutMs" }` |
-| `run.json` | `{ "maxTurns", "maxCostUsd", "timeoutMs", "systemPrompt" }`；`null` 表示不限，`systemPrompt: ""` 表示用默认 |
+| `run.json` | `{ "maxTurns", "maxCostUsd", "timeoutMs", "systemPrompt" }`；`null` 表示不限（`maxTurns` 的默认值就是 `null`，2026-10-22 起不再有默认轮数上限），`systemPrompt: ""` 表示用默认 |
 
 三份文件都由「临时文件 + rename」原子替换；内容非法时报错并保留原文件，不会写坏。
 
 ## 内置工具
 
-`runSession` 默认注册 `echo` / `fs` / `shell` / `glob` / `grep` 五个工具（`createBuiltinTools()`，顺序固定）。工具根（`ToolCtx.cwd`）为 `opts.cwd ?? header.workdir ?? process.cwd()`：创建会话时 `opts.cwd`（缺省 `process.cwd()`）同时写入 `header.workdir`；resume 未传 `opts.cwd` 时沿用 `header.workdir`，两者都提供且不一致时抛 `SessionResumeError("workdir_mismatch")`，失败不写 header/日志。所有相对路径按工具根解析。
+`runSession` 默认注册 `echo` / `read` / `ls` / `write` / `edit` / `multiedit` / `shell` / `glob` / `grep` 九个工具（`createBuiltinTools()`，顺序固定）。工具根（`ToolCtx.cwd`）为 `opts.cwd ?? header.workdir ?? process.cwd()`：创建会话时 `opts.cwd`（缺省 `process.cwd()`）同时写入 `header.workdir`；resume 未传 `opts.cwd` 时沿用 `header.workdir`，两者都提供且不一致时抛 `SessionResumeError("workdir_mismatch")`，失败不写 header/日志。所有相对路径按工具根解析。
 
 | 工具 | 能力 | 注解 |
 |---|---|---|
 | `echo` | 回显输入，用于连通性验证 | 只读 |
-| `fs` | `read` / `write` / `edit` 文本文件 | 非只读、destructive |
+| `read` | 读取文本文件（带行号，可分页） | 只读 |
+| `ls` | 列一个目录的直接子项（目录在前、不递归） | 只读 |
+| `write` | 写入文本文件（覆盖，自动建父目录） | 非只读、destructive |
+| `edit` | 单处唯一替换 | 非只读、destructive |
+| `multiedit` | 同一文件多处替换（全成或全不改） | 非只读、destructive |
 | `shell` | 执行 shell 命令（非沙箱） | 非只读、destructive |
 | `glob` | 按 glob 模式查找文件 | 只读 |
 | `grep` | 按正则搜索文件内容 | 只读 |
 
-### `fs`
+### `read` / `ls` / `write` / `edit` / `multiedit`
 
 - `read`：`path` + 可选 `offset`（0 起行号）/`limit`（≤2000 行）；单次最多 2000 行、256 KiB，超出以 `[truncated]` 标记，`detail.nextOffset` 给出继续读取的位置；`offset` 越界返回 `(no lines at offset)`。
-- `write`：`path` + `content`，自动创建父目录。
+- `ls`：`path` 可选（缺省工具根）。逐行输出 `d  <name>/` / `f  <size>  <name>` / `l  <name>`（符号链接只标记**不跟随**）/ `?  <name>`，目录在前、文件在后、组内按名排序。最多 500 条，超出置 `detail.truncated` 并追加 `[truncated]`；空目录返回 `(empty directory)`（**不是空字符串**，否则与失败无法区分）。`detail.entries[].size` 是原始字节数，人类可读单位只在文本层。**刻意不套 `glob`/`grep` 的忽略清单**——那是给大范围扫描用的，`ls` 是点名要看这个目录，`node_modules` 也如实列出。`not_found` / `not_a_directory` / `read_failed` / `aborted`，单个文件 `lstat` 失败时该行大小写 `-` 而不是 0。
+- `write`：`path` + `content`，自动创建父目录；`content: ""` 会写出空文件，这是合法写入而不是错误。
 - `edit`：`path` + 非空 `oldText` + `newText`；`oldText` 必须唯一命中，否则 `edit_not_found` / `edit_not_unique`；按文件现有 CRLF/LF 风格写入。
-- workdir 限制：解析到工具根之外（含 `..`、绝对路径、symlink/junction 逃逸）→ `path_outside_workdir`；Windows 保留设备名 → `reserved_name`；`read` / `edit` 目标不是普通文件 → `not_a_file`；`write` 目标为目录或底层写入失败 → `write_failed`。
-- `fs` 响应 `AbortSignal`：read 的流、write/edit 的 `readFile`/`writeFile` 都接 signal；取消返回 `aborted`，write/edit 会提示可能留下部分文件。
+- `multiedit`：`path` + `edits`（1–50 条 `{oldText, newText}`）。按顺序应用，后一条在前一条的替换结果里查找；**要么全部成功、要么一个字节都不改**——任一 `oldText` 为空 / 找不到 / 不唯一就在内存里中止，文件从不打开写入，返回 `edit_not_found` 或 `edit_not_unique` 并带 `detail.index` 指明第几处。全部命中时只写一次盘，返回 `detail.occurrences` 为总替换数。
+- workdir 限制：解析到工具根之外（含 `..`、绝对路径、symlink/junction 逃逸）→ `path_outside_workdir`；Windows 保留设备名 → `reserved_name`；`read` / `edit` / `multiedit` 目标不是普通文件 → `not_a_file`；`write` 目标为目录或底层写入失败 → `write_failed`。
+- 四者都响应 `AbortSignal`：`read` 的流、`write`/`edit`/`multiedit` 的 `readFile`/`writeFile` 都接 signal；取消返回 `aborted`，写类工具会提示可能留下部分文件。
+- **`fs` 已删除，不保留别名。** 旧版单一 `fs` 工具用 `op` 参数分派 `read`/`write`/`edit`，权限规则只能靠 `params` 里的 `op` 区分读写；一旦规则漏写 `params`，一条读规则就会顺带放行写，而写规则也可能被 `fs op=write` 绕过——那是静默绕过权限边界。拆成四个工具后按工具名匹配，最坏情况是旧的 `fs` 规则不再命中、退回预设行为（`workspace-write` 下写变成 `ask`），方向是可见且更严的。迁移：把规则里的 `{"tool": "fs", "params": [{"key": "op", "eq": "write"}]}` 改成 `{"tool": "write"}`；`edit` / `multiedit` 各自同理。
 
 ### `shell`
 
@@ -287,7 +294,7 @@ npm run diagnosis:e2e
 
 ## 权限与审批
 
-权限层在工具执行前判定 `allow` / `ask` / `deny`，默认预设为 `diagnose`。判定只决定是否调用工具；`allow` 后仍会经过 `shell` 危险命令黑名单与 `fs` 路径边界检查。权限规则是声明式匹配而非沙箱（D-114）。
+权限层在工具执行前判定 `allow` / `ask` / `deny`，默认预设为 `diagnose`。判定只决定是否调用工具；`allow` 后仍会经过 `shell` 危险命令黑名单与 `read`/`write`/`edit`/`multiedit` 的路径边界检查。权限规则是声明式匹配而非沙箱（D-114）。
 
 **配置路径与 trust 语义**
 
@@ -300,7 +307,7 @@ npm run diagnosis:e2e
 | 预设 | 只读 | 写 | 未知 |
 |---|---|---|---|
 | `read-only` | allow | deny | deny |
-| `workspace-write` | allow | ask（`fs` 的 `write`/`edit` 内置 allow） | deny |
+| `workspace-write` | allow | allow（`write`/`edit`/`multiedit` 各有内置 allow；其余写工具仍 ask） | deny |
 | `diagnose`（默认） | allow | ask | deny |
 | `danger-full-access` | allow | allow | allow |
 
@@ -329,8 +336,7 @@ npm run diagnosis:e2e
       "action": "allow"
     },
     {
-      "tool": "fs",
-      "params": [{ "key": "op", "eq": "write" }],
+      "tool": "write",
       "action": "ask"
     },
     { "tool": "mcp__probe__reset", "action": "deny", "reason": "无人值守禁止复位" }
@@ -346,7 +352,7 @@ for await (const event of runSession({
   model: "local-gw/flash",
   permissions: {
     preset: "diagnose",
-    rules: [{ tool: "fs", params: [{ key: "op", eq: "read" }], action: "allow" }],
+    rules: [{ tool: "read", action: "allow" }],
     approvalTimeoutMs: 60000,
     prompter: { request: async () => "deny" },
   },
@@ -380,7 +386,7 @@ MCP 工具参数 schema 为 `z.unknown()`，不会应用 server `inputSchema` �
 npm test -- tests/permissions-integration.test.ts
 ```
 
-覆盖 diagnose 拒绝 `fs` 写、`danger-full-access` 放行，以及项目配置未 trust 时跳过。
+覆盖 diagnose 拒绝 `write`、`danger-full-access` 放行，以及项目配置未 trust 时跳过。
 
 live 演示需要用户自备 OpenAI 兼容网关与模型：
 
@@ -450,7 +456,7 @@ demo 不读取 `HARNESS_COMPAT_API_KEY`（该变量仅 live 测试使用）；de
 | 码 | 含义 |
 |---|---|
 | 0 | 正常完成（模型无工具调用） |
-| 1 | 熔断（`maxTurns` / `maxCostUsd`） |
+| 1 | 熔断（`maxTurns` / `maxCostUsd`；`maxTurns` 默认不限制，只有显式配置时才会触发） |
 | 130 | 取消（SIGINT/SIGTERM） |
 | 2 | 用法或装配错误（含运行期未恢复错误：模型 4xx/网络/响应非法/会话写入失败） |
 
@@ -474,6 +480,7 @@ npm --prefix desktop run desktop
 - **环境变量**：`HARNESS_UI_PORT` 改监听端口（默认 `5174`）；`HARNESS_HOME` 指定会话与知识库根目录（默认 `~/.harness`）；`HARNESS_UI_STATIC` 指定静态目录（默认 `desktop/renderer`）；`HARNESS_WEB_MODEL` 指定默认模型引用。服务只监听 `127.0.0.1`。
 - **本机边界**：`/api/*` 校验 `Host` / `Origin` 必须为 `127.0.0.1` / `localhost` / `::1` 且端口等于监听端口；跨源返回 403 `forbidden_host` / `forbidden_origin`，用于阻断 DNS rebinding 与跨源读取（D-067 已解决）。写端点额外拒绝浏览器自动发送的 `Sec-Fetch-Site: cross-site`（403 `forbidden_origin`），覆盖真正的跨站页面；同 site 但不同端口（如 `localhost:5173` 页面写 `127.0.0.1:5174`）通常标记为 `same-site`，由 `Origin` 的 loopback + 端口一致性校验拦截。非浏览器客户端不发送该头，仍以 `Origin` 为准（D-146）。
 - **协议层**：`desktop/renderer/protocol.js` 把内核 `SessionEvent` 翻译成渲染器认识的事件（`assistant` → `start/delta/end`、`tool_started`+`tool_result` → 工具行、`approval_request` → 审批条等）。桌面宿主与浏览器 bridge 共用这一层，两种形态对同一份日志给出同一套 UI。
+- **输入框里的两个前缀**（2026-10-22）：`@` 打开文件名补全（内核 `searchFilesByName`，按「基名全等 → 前缀 → 包含 → 路径包含」分层排序，目录不在结果里）；`/` 打开命令补全，实到三个——`/clear`（新建会话）、`/context`（报当前上下文占用，未知时明说没测量而不是打印 0）、`/compact`（立即压缩，**桌面形态才有**；浏览器形态回一条说明，不发请求）。三个命令都**不接受参数**：内核压缩没有 focus / keep 选项。敲一个不认识的名字只会得到一条提示，草稿留在输入框里，不会被当成提示词发给模型。
 - **API**：
 
   | 方法 | 路径 | 行为 |
@@ -497,7 +504,7 @@ npm --prefix desktop run desktop
   | POST | `/api/approvals` | 回传审批决策，202/200；错误码见「Web 会话与审批」 |
   | GET | `/api/events` | SSE 单会话事件流，见「实时事件流」；非法 id/cursor 400，不存在 404，损坏 500 |
 
-- **配置**：设置页有「模型服务」「MCP 服务器」「行为」三页。模型服务读写 `$HARNESS_HOME/providers.json`（provider / `baseUrl` / `apiKeyEnv` / 模型名），首次启动缺这份文件时会提示去这里填，**不会**因它缺失而拒绝启动。「`apiKeyEnv` 填的是环境变量名，不是密钥」——应用本身不保存密钥，只在调用时从自己的运行环境读该变量。每张服务卡片有**「测试连接」**：请求 `GET {baseUrl}/models` 列出可用模型，非 2xx 且填了模型名时退一步打一次极小请求（`max_tokens: 1`）；失败原因分「地址不通 / 鉴权失败 / HTTP 错误 / 地址非法」并说清楚，鉴权失败还会区分「环境变量没设置」和「密钥被拒」。`contextWindow` 与 `maxOutput` 不在表单里——OpenAI 兼容协议不提供真实值，内核按估算默认值处理（128000 / 4096），需要精确值时在 `providers.json` 里手写，**写入优先**。价格同理不再出现在界面，旧文件里已有的 `pricePerMillion` 保存时原样保留。桌面宿主直接写盘，浏览器形态走 `PUT /api/config` 的 `providers` 段；`getSettings` 同时给出 `providers`（选单用的扁平列表）与 `providerConfig`（文件本体，设置页据此画表单并整份写回），文件读坏时带 `providersError` 说明原因，表单仍可编辑——保存即覆盖。MCP 页读写 `mcp.json`；行为页读写 `permissions.json`（预设 / 审批超时 / 审批规则）与 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`）。运行上限随每次 `POST /api/actions` 下发；桌面宿主同样从 `run.json` 读取。改动在下一回合生效，不手编文件也能接上探针与模型。
+- **配置**：设置页有「模型服务」「MCP 服务器」「行为」三页。模型服务读写 `$HARNESS_HOME/providers.json`（provider / `baseUrl` / `apiKeyEnv` / 模型名），首次启动缺这份文件时会提示去这里填，**不会**因它缺失而拒绝启动。「`apiKeyEnv` 填的是环境变量名，不是密钥」——应用本身不保存密钥，只在调用时从自己的运行环境读该变量。每张服务卡片有**「测试连接」**：请求 `GET {baseUrl}/models` 列出可用模型，非 2xx 且填了模型名时退一步打一次极小请求（`max_tokens: 1`）；失败原因分「地址不通 / 鉴权失败 / HTTP 错误 / 地址非法」并说清楚，鉴权失败还会区分「环境变量没设置」和「密钥被拒」。结果区（2026-10-22 重做）是一条状态行（勾选图标 + 「连接正常 · N 个模型可用」+ 单独的延迟数字），下面是「可用模型」标题与计数，再下面是可以直接点的模型 chip——**卡片上已经列出的模型不再被静默丢弃**，而是画成禁用态的「已添加」chip，否则结果块会少掉一半答案（R3）。端点可达但一个模型都没列出来时，勾选图标用警告色而不是成功色。`contextWindow` 与 `maxOutput` 不在表单里——OpenAI 兼容协议不提供真实值，内核按估算默认值处理（128000 / 4096），需要精确值时在 `providers.json` 里手写，**写入优先**。价格同理不再出现在界面，旧文件里已有的 `pricePerMillion` 保存时原样保留。桌面宿主直接写盘，浏览器形态走 `PUT /api/config` 的 `providers` 段；`getSettings` 同时给出 `providers`（选单用的扁平列表）与 `providerConfig`（文件本体，设置页据此画表单并整份写回），文件读坏时带 `providersError` 说明原因，表单仍可编辑——保存即覆盖。MCP 页读写 `mcp.json`；行为页读写 `permissions.json`（预设 / 审批超时 / 审批规则）与 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`）。运行上限随每次 `POST /api/actions` 下发；桌面宿主同样从 `run.json` 读取。改动在下一回合生效，不手编文件也能接上探针与模型。
 - **会话管理**：侧栏右键可改名、置顶、归档、删除、复制为新会话；标题存 `meta.json`，与内核的 `header.json` 分离。列表按 `updatedAt` 倒序，改过名的会话不会被埋在新建会话下面。
 - **导出**：顶栏「⋯」菜单导出当前对话为 Markdown，内容由会话日志渲染（不是抓 DOM），工具输出按 2000 字符截断。
 - **工作区**：顶栏的工作区按钮可切换目录。桌面形态弹系统目录选择框；浏览器形态拿不到目录的绝对路径（`showDirectoryPicker` 只给句柄，没有路径），因此会说明原因并让你直接粘贴路径，而不是静默失败。选中的目录同时被登记为文件树的浏览边界，文件树（顶栏「⋯」→ 浏览工作区文件）只列已登记工作区、会话目录与会话工作目录内的路径。
@@ -552,12 +559,14 @@ npm run build && npm run serve:ui
 
 ```json
 { "text": "读取 0x20000000 的 4 字节", "sessionId": "可选", "mode": "可选",
-  "maxTurns": 10, "maxCostUsd": 0.5, "timeoutMs": 60000, "systemPrompt": "可选" }
+  "maxTurns": null, "maxCostUsd": 0.5, "timeoutMs": 60000, "systemPrompt": "可选" }
 ```
 
 缺省 `sessionId` 新建会话；带 `sessionId` 时向该会话追加输入（使用 `header.model` 与 `header.workdir`）。`mode` 是本次运行的权限预设（`read-only` / `workspace-write` / `diagnose` / `danger-full-access`），覆盖运行器构造时的预设，仅对这一次 run 生效——浏览器形态的权限模式菜单就是靠它下发的。
 
-`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt` 是本次运行的上限，缺省时用内核默认值（`maxTurns` 10、无成本上限、provider 的 `requestTimeoutMs`、默认系统提示词）。`maxCostUsd` 只在 provider 配了 `pricePerMillion` 时生效。
+`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt` 是本次运行的上限，缺省时用内核默认值（**`maxTurns` 默认不限制**、无成本上限、provider 的 `requestTimeoutMs`、默认系统提示词）。`maxCostUsd` 只在 provider 配了 `pricePerMillion` 时生效。
+
+**`maxTurns` 默认不限制，填了才生效**（D-183 补充，2026-10-22）：给一个正整数就按它截断，这一次运行以 `interrupted{reason:"max_turns"}` 结束，下一条消息重新从 1 开始；`null` 或不传等于不检查。**刻意没有默认上限**——任何隐式数字都会在长诊断里静默截断一次本来能跑完的运行，而用户真实遇到过 10 轮之后连提问都发不出去的会话。0 / 负数 / 非整数一律 400，不静默当成「不限」。会话级的 `checkpoint.turn` 仍然跨消息单调递增（D-045）。`maxCostUsd` 相反——它是**会话总预算**，会把历史 `usage` 算进去，所以一次会话的花费越过上限后，后续消息会在首次模型调用之前就以 `max_cost_usd` 结束。
 
 202 响应：
 
@@ -571,7 +580,7 @@ npm run build && npm run serve:ui
 | 400 | `invalid_text` | `text` 为空/纯空白、超过 8000 字符 |
 | 400 | `invalid_session_id` | `sessionId` 非法 |
 | 400 | `invalid_mode` | `mode` 非字符串，或不是四个预设之一 |
-| 400 | `invalid_run_limits` | `maxTurns` / `maxCostUsd` / `timeoutMs` 非数字或非正，`systemPrompt` 非字符串 |
+| 400 | `invalid_run_limits` | `maxTurns` 不是正整数（`null` 合法，表示不限）/ `maxCostUsd` / `timeoutMs` 非数字或非正，`systemPrompt` 非字符串 |
 | 404 | `unknown_session` | 指定会话不存在 |
 | 409 | `session_busy` | 同会话正在运行 |
 | 500 | `session_corrupt` | 追加会话的 header 损坏 |
@@ -609,7 +618,7 @@ npm run build && npm run serve:ui
 
 **失败语义**：审批超时（`approvalTimeoutMs`，默认 120000ms）、用户拒绝、会话中断均不执行工具，日志以 `permission_decision` deny 收尾；迟到决策在运行中返回 410，会话结束后返回 404。服务重启后未决审批丢失，`resumeSession` 会补 `approval_aborted: crash_recovery` 审计（按事件顺序配对：`requestId` 优先，旧日志无 `requestId` 时按 `callId` 配对最早一条待决；同 `callId` 的已决审批不会重复补写）。`query` 启动前的失败会写 `interrupted`（`reason: "start_failed"`）。headless demo 与未注入审批桥的库调用仍是 `ask` → deny（`approval_unavailable`）。
 
-**演示**：启动后在输入栏发送需要 `ask` 的指令（默认 `diagnose` 下让 `shell` 执行无害命令，或让 `fs` 写临时文件），页面出现审批卡片；批准后工具执行，拒绝后不执行。过程记录见 `dev-notes/M2-Web审批.md`。
+**演示**：启动后在输入栏发送需要 `ask` 的指令（默认 `diagnose` 下让 `shell` 执行无害命令，或让 `write` 写临时文件），页面出现审批卡片；批准后工具执行，拒绝后不执行。过程记录见 `dev-notes/M2-Web审批.md`。
 
 ## 会话管理
 
@@ -719,7 +728,7 @@ $env:HARNESS_COMPAT_LIVE="1"; $env:HARNESS_COMPAT_MODEL="local-gw/flash"; $env:H
 
 MCP：
 
-- 超时/取消会终止 transport、轮询 PID 确认退出后再允许重连；终止未确认时返回 `mcp_uncertain` 并拒绝重连。内置 `fs`/`glob`/`grep`/`shell` 均已响应 signal；剩余风险仅限自定义/第三方 in-process 工具故意忽略 signal（D-022 已缓解，D-071/D-077 已解决）。
+- 超时/取消会终止 transport、轮询 PID 确认退出后再允许重连；终止未确认时返回 `mcp_uncertain` 并拒绝重连。内置 `read`/`write`/`edit`/`multiedit`/`glob`/`grep`/`shell` 均已响应 signal；剩余风险仅限自定义/第三方 in-process 工具故意忽略 signal（D-022 已缓解，D-071/D-077 已解决）。
 - 默认 env 白名单可通过 `inheritEnv: true` 或 `envAllowlist` 放宽；放开后第三方 server 可读取相应父进程变量（D-102 已解决，配置方需知悉）。
 - 配置未知字段（含 typo）静默忽略（D-103）；刷新失败保留旧缓存且不自动重试（D-104）。
 - 工具名消歧依赖 server 返回顺序，跨会话稳定性未保证（D-100）；会话结束与 list_changed 重叠时可能丢失最后一条 status 审计（D-101）。
@@ -731,8 +740,16 @@ MCP：
 - 实时总线只做日志投影：延迟约 200-250ms，无进程内低延迟适配器（D-134）；只支持单会话流（D-133）。
 - 浏览器形态的缺口重拉是整篇重建（`session_loaded`），期间转录会被替换一次；桌面宿主没有对应的缺口检测。
 - 设备面板只消费 MCP 显式发布的 `device_status`（板卡面板的「设备」段）；无该事件时 `/api/device` 仍恒为 `unknown`，缺少显式连接状态枚举（D-052、D-058）。
-- 内核不支持的能力仍无前端入口：MCP 配置、权限规则、系统提示词、fork、会话改名/删除等需手编配置文件或直接调用内核；见 `docs/deferred-issues.md` D-169。
-- 前端未覆盖的能力（git/PR、终端、worktree、导出、回放等）在 UI 隐藏入口，宿主/bridge 回显式 `notice`；清单见 `desktop/MATRIX.md`（D-166）。
+- 内核不支持的能力仍无前端入口：git/PR、终端、worktree、packs、浏览器、skills/memory/hooks、goals、subagents、检查点恢复、会话回放；清单见 `desktop/MATRIX.md` 与 `docs/deferred-issues.md` D-166。
+- **已登记的、用户会直接撞到的缺口**（2026-10-22 复核，D-184 ~ D-193）：
+  - Board 面板是唯一常驻的工作台页签，但它发的 `getBoardState` 在桌面宿主与浏览器 bridge 里**都没有 handler**（D-193）——点开只得到「暂不支持该命令」。板卡信息实际经 `device_status` 事件下发。
+  - 运行中给发送按钮标的「排队」是**假的**：气泡显示「排队中」，消息仍被两端拒绝并丢弃（D-186）。
+  - 图片附件会被静默丢弃：缩略图留在输入框上，`submit()` 不读 `state.attachments`，内核也不支持图片输入（D-188）。
+  - About 页的「检查更新」调用的 `api.checkUpdate` 两个宿主都没提供，点一下必崩（D-187）。
+  - 上下文弹层的「用了多少 / 被什么占的」已接通（`usage` 事件同时带 `context` 与 `contextBreakdown`，分段条与图例不再是死代码）。**D-195 修掉的那条要认真看**：占用率原先在 `usage` 落盘时重新投影日志来测，那一刻工具批次未闭合、必然抛错被吞，所以**每一条带工具调用的回合都没有占用率**——而本仓库几乎每轮都在调工具。现在测量移到发请求之前，量的是即将送出去的消息。
+  - 快捷键表里的 `Ctrl+Shift+D`（Changes）不做事、`Ctrl+Shift+E`（Files）打开的是 Board、`` Ctrl+` ``（Terminal）被 `SUPPORTED_PANES` 挡掉（D-192）。
+  - MCP 客户端只支持 stdio（D-190）；`timeoutMs` 只作用于单次工具调用，**没有整跑墙钟超时**（D-189）。
+  - `@` 搜索不返回目录（D-184）；`kb_grep` / `kb_glob` 仍无拒答机制（D-179）。
 - 会话列表的坏目录进 `errors`，界面在会话面板底部显示「N 个会话目录不可读」（D-065 已解决）。
 - 知识库扫描深度上限 8、条目上限 2000、文件计数上限 20000；触顶时 `GET /api/kb` 置 `truncated`，`fileCount` 只作「至少 N」读（D-064 的静默截断已在此端点消除，`scanKb` 的旧实现一并移除）。
 
