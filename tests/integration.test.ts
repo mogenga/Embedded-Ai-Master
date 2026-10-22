@@ -64,6 +64,9 @@ vi.mock("../src/session/session.js", async (importOriginal) => {
 
 const tempDirs: string[] = [];
 
+// 13 轮模型调用 = 13 次真实落盘；满负载跑全量时会超过 vitest 的 5s 默认值。
+const LONG_RUN_TIMEOUT_MS = 20_000;
+
 async function tempDir(): Promise<string> {
   const dir = await mkdtemp(path.join(os.tmpdir(), "integration-test-"));
   tempDirs.push(dir);
@@ -244,12 +247,12 @@ describe("runSession 端到端装配", () => {
     expect(calls[0].body.model).toBe("flash");
     expect(calls[0].body.max_tokens).toBe(512);
     expect(calls[0].body.stream).toBe(true);
-    expect(calls[0].body.tools).toHaveLength(5);
+    expect(calls[0].body.tools).toHaveLength(9);
     expect(
       (calls[0].body.tools as Array<{ type: string; function: { name: string } }>).map(
         (tool) => tool.function.name,
       ),
-    ).toEqual(["echo", "fs", "shell", "glob", "grep"]);
+    ).toEqual(["echo", "read", "ls", "write", "edit", "multiedit", "shell", "glob", "grep"]);
     expect(calls[0].body.tools).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -540,27 +543,34 @@ describe("runSession 端到端装配", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("不传 maxTurns 时默认 10 轮后熔断", async () => {
+  it("不传 maxTurns 时没有默认上限：12 轮工具调用后照常正常结束", async () => {
+    // 产品决定：不再有默认轮数上限。用户实测被旧默认值 10 反复打断
+    // （D-183 之后仍然存在），所以「缺省」必须等于「不检查」，而不是
+    // 换一个更大的数字——任何隐式上限都会在长诊断里以同样方式咬人。
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
-    const { impl, calls } = mockFetch([TOOL_RESPONSE]);
+    // mockFetch 会重复最后一个 body：前 12 次是工具调用，第 13 次是最终回答。
+    const { impl, calls } = mockFetch([
+      ...Array.from({ length: 12 }, () => TOOL_RESPONSE),
+      EMPTY_RESPONSE,
+    ]);
 
     const events = await collect(
       runSession({
         input: "hi",
         model: "gw/flash",
         providersText: providersText(),
-        sessionDir: path.join(home, "default-max-turns"),
+        sessionDir: path.join(home, "no-default-max-turns"),
         fetchImpl: impl,
       }),
     );
 
-    expect(calls).toHaveLength(10);
-    expect(events.slice(-2)).toEqual([
-      { kind: "interrupted", reason: "max_turns" },
-      { kind: "done", finishReason: "max_turns" },
-    ]);
-  });
+    expect(calls).toHaveLength(13);
+    expect(events.some((event) => event.kind === "interrupted")).toBe(false);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    const log = readSessionFile(path.join(home, "no-default-max-turns", "session.v1.jsonl"));
+    expect(log.filter((event) => event.type === "interrupted")).toEqual([]);
+  }, LONG_RUN_TIMEOUT_MS);
 
   it("compaction 默认开启:小 contextWindow 下历史工具结果触发摘要并落日志", async () => {
     const home = await tempDir();
@@ -1465,14 +1475,14 @@ function toolCallResponse(id: string, name: string, args: unknown): unknown {
 }
 
 describe("runSession 内置工具装配", () => {
-  it("模型返回 fs read 调用时在临时 workdir 内闭环执行", async () => {
+  it("模型返回 read 调用时在临时 workdir 内闭环执行", async () => {
     const home = await tempDir();
     vi.stubEnv("HARNESS_HOME", home);
     const workdir = await tempDir();
     const sessionDir = path.join(home, "fs-closed-loop");
     await writeFile(path.join(workdir, "note.txt"), "hello fs\n", "utf8");
     const { impl, calls } = mockFetch([
-      toolCallResponse("call-fs", "fs", { op: "read", path: "note.txt" }),
+      toolCallResponse("call-fs", "read", { path: "note.txt" }),
       EMPTY_RESPONSE,
     ]);
 
@@ -1659,7 +1669,7 @@ describe("runSession 内置工具装配", () => {
     );
 
     const secondFetch = mockFetch([
-      toolCallResponse("call-resume", "fs", { op: "read", path: "resume-note.txt" }),
+      toolCallResponse("call-resume", "read", { path: "resume-note.txt" }),
       EMPTY_RESPONSE,
     ]);
     const events = await collect(

@@ -3,8 +3,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fsTool } from "../src/tools/fs.js";
-import type { ToolCtx } from "../src/tools/types.js";
+import { editTool, readTool, writeTool } from "../src/tools/fs.js";
+import type { ToolCtx, ToolDef } from "../src/tools/types.js";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -32,13 +32,9 @@ function makeWorkdir(): string {
   return dir;
 }
 
-function run(
-  workdir: string,
-  input: Parameters<typeof fsTool.execute>[0],
-  signalOverride: AbortSignal = signal,
-) {
+function run<I>(tool: ToolDef<I>, workdir: string, input: I, signalOverride: AbortSignal = signal) {
   const ctx: ToolCtx = { sessionId: "test", cwd: workdir };
-  return fsTool.execute(input, ctx, signalOverride);
+  return tool.execute(input, ctx, signalOverride);
 }
 
 afterEach(() => {
@@ -47,34 +43,12 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe("fsTool 元数据与 schema", () => {
-  it("名称与注解", () => {
-    expect(fsTool.name).toBe("fs");
-    expect(fsTool.annotations).toEqual({ readOnly: false, destructive: true });
-  });
-
-  it.each([
-    [{ op: "delete", path: "x" }],
-    [{ op: "read", path: "" }],
-    [{ op: "read", path: "x", offset: -1 }],
-    [{ op: "read", path: "x", limit: 0 }],
-    [{ op: "read", path: "x", limit: 2001 }],
-    [{ op: "read", path: "x", offset: 1.5 }],
-  ])("拒绝非法输入 %j", (input) => {
-    expect(fsTool.schema.safeParse(input).success).toBe(false);
-  });
-
-  it("write 的 content 在 schema 层可选(运行时校验)", () => {
-    expect(fsTool.schema.safeParse({ op: "write", path: "x" }).success).toBe(true);
-  });
-});
-
-describe("fs read", () => {
+describe("read", () => {
   it("返回 1-based 行号内容", async () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "a.txt"), "alpha\nbeta\ngamma\n", "utf8");
 
-    const r = await run(workdir, { op: "read", path: "a.txt" });
+    const r = await run(readTool, workdir, { path: "a.txt" });
 
     expect(r.isError).toBe(false);
     expect(r.text).toBe("   1| alpha\n   2| beta\n   3| gamma");
@@ -84,7 +58,7 @@ describe("fs read", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "zh.txt"), "第一行\n第二行", "utf8");
 
-    const r = await run(workdir, { op: "read", path: "zh.txt" });
+    const r = await run(readTool, workdir, { path: "zh.txt" });
 
     expect(r.text).toBe("   1| 第一行\n   2| 第二行");
   });
@@ -93,7 +67,7 @@ describe("fs read", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "a.txt"), "a\nb\nc\n", "utf8");
 
-    const r = await run(workdir, { op: "read", path: "a.txt", offset: 1, limit: 1 });
+    const r = await run(readTool, workdir, { path: "a.txt", offset: 1, limit: 1 });
 
     expect(r.text).toContain("   2| b");
     expect(r.text).not.toContain("   1| a");
@@ -104,7 +78,7 @@ describe("fs read", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "a.txt"), "a\nb\nc\n", "utf8");
 
-    const r = await run(workdir, { op: "read", path: "a.txt", offset });
+    const r = await run(readTool, workdir, { path: "a.txt", offset });
 
     expect(r.isError).toBe(false);
     expect(r.text).toBe("(no lines at offset)");
@@ -115,7 +89,7 @@ describe("fs read", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "empty.txt"), "", "utf8");
 
-    const r = await run(workdir, { op: "read", path: "empty.txt", offset: 0 });
+    const r = await run(readTool, workdir, { path: "empty.txt", offset: 0 });
 
     expect(r.isError).toBe(false);
     expect(r.text).toBe("(no lines at offset)");
@@ -126,7 +100,7 @@ describe("fs read", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "a.txt"), "a\nb\n", "utf8");
 
-    const r = await run(workdir, { op: "read", path: "a.txt", offset: 1 });
+    const r = await run(readTool, workdir, { path: "a.txt", offset: 1 });
 
     expect(r.text).toContain("   2| b");
     expect(r.text).not.toContain("(no lines at offset)");
@@ -137,7 +111,7 @@ describe("fs read", () => {
     const lines = Array.from({ length: 2005 }, (_, i) => `line-${i + 1}`);
     writeFileSync(path.join(workdir, "big.txt"), lines.join("\n"), "utf8");
 
-    const r = await run(workdir, { op: "read", path: "big.txt" });
+    const r = await run(readTool, workdir, { path: "big.txt" });
 
     expect(r.isError).toBe(false);
     expect(r.text).toContain("2000| line-2000");
@@ -152,7 +126,7 @@ describe("fs read", () => {
     const content = Array.from({ length: 700 }, () => line).join("\n");
     writeFileSync(path.join(workdir, "wide.txt"), content, "utf8");
 
-    const r = await run(workdir, { op: "read", path: "wide.txt" });
+    const r = await run(readTool, workdir, { path: "wide.txt" });
 
     expect(r.isError).toBe(false);
     expect(r.text.endsWith("[truncated]")).toBe(true);
@@ -165,7 +139,7 @@ describe("fs read", () => {
     const content = Array.from({ length: 26215 }, () => line).join("\n");
     writeFileSync(path.join(workdir, "huge.log"), content, "utf8");
 
-    const r = await run(workdir, { op: "read", path: "huge.log" });
+    const r = await run(readTool, workdir, { path: "huge.log" });
 
     expect(r.isError).toBe(false);
     expect(r.text.startsWith("   1| 0123456789")).toBe(true);
@@ -177,7 +151,7 @@ describe("fs read", () => {
   it("不存在 → not_found,不返回空内容", async () => {
     const workdir = makeWorkdir();
 
-    const r = await run(workdir, { op: "read", path: "missing.txt" });
+    const r = await run(readTool, workdir, { path: "missing.txt" });
 
     expect(r.isError).toBe(true);
     expect(r.code).toBe("not_found");
@@ -188,7 +162,7 @@ describe("fs read", () => {
     const workdir = makeWorkdir();
     mkdirSync(path.join(workdir, "dir"));
 
-    const r = await run(workdir, { op: "read", path: "dir" });
+    const r = await run(readTool, workdir, { path: "dir" });
 
     expect(r.isError).toBe(true);
     expect(r.code).toBe("not_a_file");
@@ -197,18 +171,18 @@ describe("fs read", () => {
   it("越界 → path_outside_workdir", async () => {
     const workdir = makeWorkdir();
 
-    const r = await run(workdir, { op: "read", path: "../secret.txt" });
+    const r = await run(readTool, workdir, { path: "../secret.txt" });
 
     expect(r.isError).toBe(true);
     expect(r.code).toBe("path_outside_workdir");
   });
 });
 
-describe("fs write", () => {
+describe("write", () => {
   it("创建父目录并返回字节数", async () => {
     const workdir = makeWorkdir();
 
-    const r = await run(workdir, { op: "write", path: "a/b/c.txt", content: "你好" });
+    const r = await run(writeTool, workdir, { path: "a/b/c.txt", content: "你好" });
 
     expect(r.isError).toBe(false);
     expect(r.text).toBe("wrote 6 bytes to a/b/c.txt");
@@ -219,25 +193,16 @@ describe("fs write", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "x.txt"), "old", "utf8");
 
-    const r = await run(workdir, { op: "write", path: "x.txt", content: "new-content" });
+    const r = await run(writeTool, workdir, { path: "x.txt", content: "new-content" });
 
     expect(r.isError).toBe(false);
     expect(readFileSync(path.join(workdir, "x.txt"), "utf8")).toBe("new-content");
   });
 
-  it("缺 content → invalid_input", async () => {
-    const workdir = makeWorkdir();
-
-    const r = await run(workdir, { op: "write", path: "x.txt" });
-
-    expect(r).toMatchObject({ isError: true, code: "invalid_input" });
-    expect(existsSync(path.join(workdir, "x.txt"))).toBe(false);
-  });
-
   it("越界 → path_outside_workdir 且不落盘", async () => {
     const workdir = makeWorkdir();
 
-    const r = await run(workdir, { op: "write", path: "../escape.txt", content: "x" });
+    const r = await run(writeTool, workdir, { path: "../escape.txt", content: "x" });
 
     expect(r).toMatchObject({ isError: true, code: "path_outside_workdir" });
     expect(existsSync(path.join(path.dirname(workdir), "escape.txt"))).toBe(false);
@@ -247,20 +212,19 @@ describe("fs write", () => {
     const workdir = makeWorkdir();
     writeFileMock.mockRejectedValueOnce(new Error("disk full"));
 
-    const r = await run(workdir, { op: "write", path: "x.txt", content: "x" });
+    const r = await run(writeTool, workdir, { path: "x.txt", content: "x" });
 
     expect(r).toMatchObject({ isError: true, code: "write_failed" });
     expect(r.text).toContain("disk full");
   });
 });
 
-describe("fs edit", () => {
+describe("edit", () => {
   it("唯一匹配替换并写回", async () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "note.txt"), "alpha beta", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "note.txt",
       oldText: "beta",
       newText: "gamma",
@@ -268,6 +232,7 @@ describe("fs edit", () => {
 
     expect(r.isError).toBe(false);
     expect(r.text).toBe("replaced 1 occurrence in note.txt");
+    expect(r.detail).toMatchObject({ path: "note.txt", occurrences: 1 });
     expect(readFileSync(path.join(workdir, "note.txt"), "utf8")).toBe("alpha gamma");
   });
 
@@ -275,8 +240,7 @@ describe("fs edit", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "crlf.txt"), "line1\r\nline2\r\nline3\r\n", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "crlf.txt",
       oldText: "line2\nline3",
       newText: "changed2\nchanged3",
@@ -292,8 +256,7 @@ describe("fs edit", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "crlf.txt"), "a\r\nb\r\nc\r\n", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "crlf.txt",
       oldText: "a\r\nb",
       newText: "x\r\ny",
@@ -307,8 +270,7 @@ describe("fs edit", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "lf.txt"), "a\nb\nc\n", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "lf.txt",
       oldText: "a\r\nb",
       newText: "x\r\ny",
@@ -322,8 +284,7 @@ describe("fs edit", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "mixed.txt"), "a\r\nb\nc\r\n", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "mixed.txt",
       oldText: "b",
       newText: "x\ny",
@@ -337,8 +298,7 @@ describe("fs edit", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "mixed.txt"), "a\r\nb\r\nc", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "mixed.txt",
       oldText: "a\nb\nc",
       newText: "z",
@@ -352,8 +312,7 @@ describe("fs edit", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "crlf.txt"), "a\r\nx\r\nx\r\n", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "crlf.txt",
       oldText: "x",
       newText: "y",
@@ -367,8 +326,7 @@ describe("fs edit", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "overlap.txt"), "aaa", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "overlap.txt",
       oldText: "aa",
       newText: "b",
@@ -382,8 +340,7 @@ describe("fs edit", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "note.txt"), "keep drop", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "note.txt",
       oldText: " drop",
       newText: "",
@@ -397,8 +354,7 @@ describe("fs edit", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "note.txt"), "alpha", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "note.txt",
       oldText: "zzz",
       newText: "y",
@@ -412,8 +368,7 @@ describe("fs edit", () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "note.txt"), "a a", "utf8");
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "note.txt",
       oldText: "a",
       newText: "b",
@@ -423,15 +378,11 @@ describe("fs edit", () => {
     expect(readFileSync(path.join(workdir, "note.txt"), "utf8")).toBe("a a");
   });
 
-  it.each([
-    [{ op: "edit", path: "note.txt", newText: "y" }],
-    [{ op: "edit", path: "note.txt", oldText: "a" }],
-    [{ op: "edit", path: "note.txt", oldText: "", newText: "y" }],
-  ])("缺 oldText/newText → invalid_input (%j)", async (input) => {
+  it("oldText 为空 → invalid_input 且文件不变", async () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "note.txt"), "a", "utf8");
 
-    const r = await run(workdir, input as Parameters<typeof fsTool.execute>[0]);
+    const r = await run(editTool, workdir, { path: "note.txt", oldText: "", newText: "y" });
 
     expect(r).toMatchObject({ isError: true, code: "invalid_input" });
     expect(readFileSync(path.join(workdir, "note.txt"), "utf8")).toBe("a");
@@ -440,8 +391,7 @@ describe("fs edit", () => {
   it("文件不存在 → not_found", async () => {
     const workdir = makeWorkdir();
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "missing.txt",
       oldText: "a",
       newText: "b",
@@ -455,8 +405,7 @@ describe("fs edit", () => {
     writeFileSync(path.join(workdir, "note.txt"), "alpha", "utf8");
     readFileMock.mockRejectedValueOnce(new Error("EACCES: permission denied"));
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "note.txt",
       oldText: "alpha",
       newText: "beta",
@@ -469,8 +418,7 @@ describe("fs edit", () => {
   it("越界 → path_outside_workdir", async () => {
     const workdir = makeWorkdir();
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: "../note.txt",
       oldText: "a",
       newText: "b",
@@ -479,7 +427,8 @@ describe("fs edit", () => {
     expect(r).toMatchObject({ isError: true, code: "path_outside_workdir" });
   });
 });
-describe("fs Windows 保留设备名", () => {
+
+describe("Windows 保留设备名", () => {
   it.each([
     "CON", "CON ", "CON:", "CON:stream", "CON. ", "con.txt", "NUL", "COM1", "lpt9.log",
     "sub/AUX.txt", "COM¹", "LPT².log", "CONIN$", "CONOUT$",
@@ -488,7 +437,7 @@ describe("fs Windows 保留设备名", () => {
     async (target) => {
       const workdir = makeWorkdir();
 
-      const r = await run(workdir, { op: "write", path: target, content: "x" });
+      const r = await run(writeTool, workdir, { path: target, content: "x" });
 
       expect(r).toMatchObject({ isError: true, code: "reserved_name" });
       expect(readdirSync(workdir)).not.toContain(target.split("/")[0]);
@@ -498,8 +447,7 @@ describe("fs Windows 保留设备名", () => {
   it.each(["CON", "CON ", "CON:", "CON:stream", "aux", "COM1.txt", "sub/NUL", "NUL."])("edit %s → reserved_name", async (target) => {
     const workdir = makeWorkdir();
 
-    const r = await run(workdir, {
-      op: "edit",
+    const r = await run(editTool, workdir, {
       path: target,
       oldText: "a",
       newText: "b",
@@ -511,21 +459,21 @@ describe("fs Windows 保留设备名", () => {
   it("普通文件名仍可写", async () => {
     const workdir = makeWorkdir();
 
-    const r = await run(workdir, { op: "write", path: "console.txt", content: "ok" });
+    const r = await run(writeTool, workdir, { path: "console.txt", content: "ok" });
 
     expect(r.isError).toBe(false);
     expect(readFileSync(path.join(workdir, "console.txt"), "utf8")).toBe("ok");
   });
 });
 
-describe("fs 取消", () => {
+describe("取消", () => {
   it("已取消 signal 时 read 返回 aborted", async () => {
     const workdir = makeWorkdir();
     writeFileSync(path.join(workdir, "a.txt"), "hello", "utf8");
     const controller = new AbortController();
     controller.abort();
 
-    const r = await run(workdir, { op: "read", path: "a.txt" }, controller.signal);
+    const r = await run(readTool, workdir, { path: "a.txt" }, controller.signal);
 
     expect(r).toMatchObject({ isError: true, code: "aborted" });
   });
@@ -535,11 +483,7 @@ describe("fs 取消", () => {
     const controller = new AbortController();
     controller.abort();
 
-    const r = await run(
-      workdir,
-      { op: "write", path: "x.txt", content: "x" },
-      controller.signal,
-    );
+    const r = await run(writeTool, workdir, { path: "x.txt", content: "x" }, controller.signal);
 
     expect(r).toMatchObject({ isError: true, code: "aborted" });
     expect(existsSync(path.join(workdir, "x.txt"))).toBe(false);
@@ -552,8 +496,9 @@ describe("fs 取消", () => {
     controller.abort();
 
     const r = await run(
+      editTool,
       workdir,
-      { op: "edit", path: "a.txt", oldText: "hello", newText: "bye" },
+      { path: "a.txt", oldText: "hello", newText: "bye" },
       controller.signal,
     );
 

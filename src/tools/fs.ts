@@ -6,17 +6,46 @@ import { z } from "zod";
 import { resolveInWorkdir, ToolPathError } from "./path-safety.js";
 import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
 
-export const fsInputSchema = z.object({
-  op: z.enum(["read", "write", "edit"]),
+// 文件能力拆成四个独立工具,而不是继续用 `fs` + `op` 分派:
+// 权限规则按工具名匹配,单工具分派会把「能不能写」藏进参数里,规则必须写
+// params 才能区分读写;一旦漏写,读规则会顺带放行写。拆开后 write/edit/multiedit
+// 各自可被 allow/ask/deny,读工具则完全落在只读注解上。
+
+export const readInputSchema = z.object({
   path: z.string().min(1),
-  content: z.string().optional(),
-  oldText: z.string().optional(),
-  newText: z.string().optional(),
   offset: z.number().int().nonnegative().optional(),
   limit: z.number().int().positive().max(2000).optional(),
 });
 
-export type FsInput = z.infer<typeof fsInputSchema>;
+export type ReadInput = z.infer<typeof readInputSchema>;
+
+export const writeInputSchema = z.object({
+  path: z.string().min(1),
+  content: z.string(),
+});
+
+export type WriteInput = z.infer<typeof writeInputSchema>;
+
+export const editInputSchema = z.object({
+  path: z.string().min(1),
+  oldText: z.string(),
+  newText: z.string(),
+});
+
+export type EditInput = z.infer<typeof editInputSchema>;
+
+const editPairSchema = z.object({
+  oldText: z.string(),
+  newText: z.string(),
+});
+
+export const multieditInputSchema = z.object({
+  path: z.string().min(1),
+  // 上限 50:再多也不是「一处改动」,模型该直接用 write 重写整个文件。
+  edits: z.array(editPairSchema).min(1).max(50),
+});
+
+export type MultieditInput = z.infer<typeof multieditInputSchema>;
 
 const MAX_READ_LINES = 2000;
 const MAX_READ_BYTES = 256 * 1024;
@@ -120,7 +149,7 @@ async function ensureRegularFile(absolute: string, inputPath: string): Promise<T
   return undefined;
 }
 
-async function readOp(input: FsInput, ctx: ToolCtx, signal: AbortSignal): Promise<ToolResult> {
+async function readOp(input: ReadInput, ctx: ToolCtx, signal: AbortSignal): Promise<ToolResult> {
   if (signal.aborted) return failure("aborted", "read aborted");
   const absolute = resolveInWorkdir(ctx.cwd, input.path);
   const invalid = await ensureRegularFile(absolute, input.path);
@@ -188,11 +217,7 @@ async function readOp(input: FsInput, ctx: ToolCtx, signal: AbortSignal): Promis
   });
 }
 
-async function writeOp(
-  input: FsInput,
-  ctx: ToolCtx,
-  signal: AbortSignal,
-): Promise<ToolResult> {
+async function writeOp(input: WriteInput, ctx: ToolCtx, signal: AbortSignal): Promise<ToolResult> {
   if (signal.aborted) return failure("aborted", "write aborted");
   if (typeof input.content !== "string") {
     return failure("invalid_input", "write requires content");
@@ -217,11 +242,57 @@ async function writeOp(
   return success(`wrote ${bytes} bytes to ${relative}`, { path: relative, bytes });
 }
 
-async function editOp(
-  input: FsInput,
-  ctx: ToolCtx,
-  signal: AbortSignal,
-): Promise<ToolResult> {
+interface EditPair {
+  oldText: string;
+  newText: string;
+}
+
+interface EditFailure {
+  code: "edit_not_found" | "edit_not_unique";
+  index: number;
+}
+
+type ApplyEditsResult =
+  | { ok: true; text: string; occurrences: number }
+  | { ok: false; failure: EditFailure };
+
+// 在内存里顺序应用全部替换,全部成功才返回最终文本。
+// 这是 multiedit 原子性的唯一来源:调用方只在 ok 时才写盘,
+// 任何一步失败都直接返回,文件从未被打开写入,因此不需要回滚。
+function applyEdits(content: string, pairs: readonly EditPair[]): ApplyEditsResult {
+  const crlf = isCrlfContent(content);
+  let current = content;
+  let occurrences = 0;
+  for (let index = 0; index < pairs.length; index += 1) {
+    const pair = pairs[index]!;
+    // 空 oldText 的 indexOf 恒为 0,会变成「在文件头插入」这种静默错误;
+    // 按「没找到」处理,并把位置告诉调用方。
+    if (pair.oldText.length === 0) {
+      return { ok: false, failure: { code: "edit_not_found", index } };
+    }
+    // 每一步都对「当前累积文本」重新归一化取 map:替换会改变长度,
+    // 沿用最初那一次 map 会把行号映射到错误的原始字节上。
+    // 未触及的原文片段始终从 current 原样切片,所以 CRLF/混合换行不会被抹平。
+    const mapped = crlf ? undefined : normalizeWithMap(current);
+    const haystack = mapped ? mapped.text : current;
+    const needle = applyFileStyle(pair.oldText, crlf);
+    const first = haystack.indexOf(needle);
+    if (first === -1) {
+      return { ok: false, failure: { code: "edit_not_found", index } };
+    }
+    if (haystack.indexOf(needle, first + needle.length) !== -1) {
+      return { ok: false, failure: { code: "edit_not_unique", index } };
+    }
+    const replacement = applyFileStyle(pair.newText, crlf);
+    const start = mapped ? mapped.map[first]! : first;
+    const end = mapped ? mapped.map[first + needle.length]! : first + needle.length;
+    current = current.slice(0, start) + replacement + current.slice(end);
+    occurrences += 1;
+  }
+  return { ok: true, text: current, occurrences };
+}
+
+async function editOp(input: EditInput, ctx: ToolCtx, signal: AbortSignal): Promise<ToolResult> {
   if (signal.aborted) return failure("aborted", "edit aborted");
   if (typeof input.oldText !== "string" || input.oldText.length === 0 || typeof input.newText !== "string") {
     return failure("invalid_input", "edit requires non-empty oldText and newText");
@@ -245,25 +316,15 @@ async function editOp(
     return failure("read_failed", `failed to read ${input.path}: ${errorMessage(error)}`);
   }
 
-  const crlf = isCrlfContent(content);
-  const mapped = crlf ? undefined : normalizeWithMap(content);
-  const haystack = mapped ? mapped.text : content;
-  const needle = applyFileStyle(input.oldText, crlf);
-  const replacement = applyFileStyle(input.newText, crlf);
-  const first = haystack.indexOf(needle);
-  if (first === -1) {
-    return failure("edit_not_found", `oldText not found in ${input.path}`);
+  const applied = applyEdits(content, [{ oldText: input.oldText, newText: input.newText }]);
+  if (!applied.ok) {
+    return applied.failure.code === "edit_not_found"
+      ? failure("edit_not_found", `oldText not found in ${input.path}`)
+      : failure("edit_not_unique", `oldText matches multiple times in ${input.path}`);
   }
-  if (haystack.indexOf(needle, first + needle.length) !== -1) {
-    return failure("edit_not_unique", `oldText matches multiple times in ${input.path}`);
-  }
-
-  const start = mapped ? mapped.map[first]! : first;
-  const end = mapped ? mapped.map[first + needle.length]! : first + needle.length;
-  const next = content.slice(0, start) + replacement + content.slice(end);
   if (signal.aborted) return failure("aborted", "edit aborted");
   try {
-    await writeFile(absolute, next, { encoding: "utf8", signal });
+    await writeFile(absolute, applied.text, { encoding: "utf8", signal });
   } catch (error) {
     if (signal.aborted || isAbortError(error)) {
       return failure("aborted", "edit aborted; file may be partial");
@@ -274,27 +335,114 @@ async function editOp(
   return success(`replaced 1 occurrence in ${relative}`, { path: relative, occurrences: 1 });
 }
 
-export const fsTool: ToolDef<FsInput> = {
-  name: "fs",
-  description: "在 workdir 内读取、写入或编辑文本文件",
-  schema: fsInputSchema,
-  annotations: { readOnly: false, destructive: true },
-  access: (input) => (input.op === "read" ? "read" : "write"),
-  execute: async (input, ctx, signal) => {
-    if (signal.aborted) return failure("aborted", "fs aborted before execution");
-    try {
-      switch (input.op) {
-        case "read":
-          return await readOp(input, ctx, signal);
-        case "write":
-          return await writeOp(input, ctx, signal);
-        case "edit":
-          return await editOp(input, ctx, signal);
-      }
-      return failure("invalid_input", `unknown op: ${String(input.op)}`);
-    } catch (error) {
-      if (error instanceof ToolPathError) return failure(error.code, error.message);
-      return failure("internal_error", errorMessage(error));
+async function multieditOp(
+  input: MultieditInput,
+  ctx: ToolCtx,
+  signal: AbortSignal,
+): Promise<ToolResult> {
+  if (signal.aborted) return failure("aborted", "multiedit aborted");
+  if (!Array.isArray(input.edits) || input.edits.length === 0) {
+    return failure("invalid_input", "multiedit requires at least one edit");
+  }
+  const reserved = reservedDeviceName(input.path);
+  if (reserved) {
+    return failure("reserved_name", `reserved Windows device name: ${reserved}`);
+  }
+  const absolute = resolveInWorkdir(ctx.cwd, input.path);
+  const invalid = await ensureRegularFile(absolute, input.path);
+  if (invalid) return invalid;
+  if (signal.aborted) return failure("aborted", "multiedit aborted");
+
+  let content: string;
+  try {
+    content = await readFile(absolute, { encoding: "utf8", signal });
+  } catch (error) {
+    if (signal.aborted || isAbortError(error)) {
+      return failure("aborted", "multiedit aborted");
     }
-  },
+    return failure("read_failed", `failed to read ${input.path}: ${errorMessage(error)}`);
+  }
+
+  const applied = applyEdits(content, input.edits);
+  if (!applied.ok) {
+    const { code, index } = applied.failure;
+    const detail = { path: toRelative(ctx.cwd, absolute), index };
+    const message =
+      code === "edit_not_found"
+        ? `edits[${index}].oldText not found in ${input.path}`
+        : `edits[${index}].oldText matches multiple times in ${input.path}`;
+    return failure(code, message, detail);
+  }
+  // 全部替换已在内存里成功;这里只写一次盘,失败也只影响这一次写。
+  if (signal.aborted) return failure("aborted", "multiedit aborted");
+  try {
+    await writeFile(absolute, applied.text, { encoding: "utf8", signal });
+  } catch (error) {
+    if (signal.aborted || isAbortError(error)) {
+      return failure("aborted", "multiedit aborted; file may be partial");
+    }
+    return failure("write_failed", `failed to write ${input.path}: ${errorMessage(error)}`);
+  }
+  const relative = toRelative(ctx.cwd, absolute);
+  const suffix = applied.occurrences === 1 ? "occurrence" : "occurrences";
+  return success(`replaced ${applied.occurrences} ${suffix} in ${relative}`, {
+    path: relative,
+    occurrences: applied.occurrences,
+  });
+}
+
+// 四个工具共用同一层外壳:执行前复查中断、把路径越界转成结构化错误码。
+// 工具内抛出的异常一律折成 internal_error,不能让异常穿过管线(R3:失败要显式)。
+async function executeOp<I>(
+  label: string,
+  op: (input: I, ctx: ToolCtx, signal: AbortSignal) => Promise<ToolResult>,
+  input: I,
+  ctx: ToolCtx,
+  signal: AbortSignal,
+): Promise<ToolResult> {
+  if (signal.aborted) return failure("aborted", `${label} aborted before execution`);
+  try {
+    return await op(input, ctx, signal);
+  } catch (error) {
+    if (error instanceof ToolPathError) return failure(error.code, error.message);
+    return failure("internal_error", errorMessage(error));
+  }
+}
+
+export const readTool: ToolDef<ReadInput> = {
+  name: "read",
+  description: "读取 workdir 内的文本文件,返回带行号的内容;可按 offset/limit 分页,超长自动截断",
+  schema: readInputSchema,
+  // 不提供 access:由 readOnly 注解推导出 "read",避免注解与 access 两处声明打架。
+  annotations: { readOnly: true },
+  execute: (input, ctx, signal) => executeOp("read", readOp, input, ctx, signal),
+};
+
+export const writeTool: ToolDef<WriteInput> = {
+  name: "write",
+  description: "在 workdir 内写入文本文件(覆盖已有内容),父目录不存在时自动创建",
+  schema: writeInputSchema,
+  annotations: { readOnly: false, destructive: true },
+  // 写类工具没有只读模式,常量返回 write;这样 read-only/diagnose 预设才能按预设拒绝或询问。
+  access: () => "write",
+  execute: (input, ctx, signal) => executeOp("write", writeOp, input, ctx, signal),
+};
+
+export const editTool: ToolDef<EditInput> = {
+  name: "edit",
+  description: "把文件里唯一命中的 oldText 替换成 newText;命中零次或多次都报错且不改文件",
+  schema: editInputSchema,
+  annotations: { readOnly: false, destructive: true },
+  access: () => "write",
+  execute: (input, ctx, signal) => executeOp("edit", editOp, input, ctx, signal),
+};
+
+export const multieditTool: ToolDef<MultieditInput> = {
+  name: "multiedit",
+  description:
+    "按顺序对同一文件应用多处替换;要么全部成功、要么一个字节都不改,失败时用 detail.index 指出第几处",
+  schema: multieditInputSchema,
+  annotations: { readOnly: false, destructive: true },
+  access: () => "write",
+  execute: (input, ctx, signal) => executeOp("multiedit", multieditOp, input, ctx, signal),
 };

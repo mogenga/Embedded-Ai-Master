@@ -1,5 +1,6 @@
 import { resolveContextWindow, resolveMaxOutput } from "../config/providers.js";
 import type { ModelCfg } from "../config/providers.js";
+import { buildContextBreakdown } from "../context/breakdown.js";
 import { buildMessages } from "../context/build.js";
 import type { TokenMeter } from "../context/token-meter.js";
 import type {
@@ -136,6 +137,39 @@ function lostToolResult(): ToolResult {
   };
 }
 
+/**
+ * 这次请求实际携带的消息有多少 token、被什么占着。
+ *
+ * 必须在**发请求之前**量,量的是 `messages` 本身——不要在 `usage` 事件落盘时
+ * 重新 `buildMessages(session.events())`:那一刻 assistant 事件已写入、对应的
+ * `tool_result` 还没写,投影层会以「工具批次未闭合」拒绝投影,整段被 catch 吞掉,
+ * 于是**每一条带工具调用的回合都没有占用率**(D-195)。而这种回合正是本仓库的
+ * 常态:这个数字在最该出现的时候从不出现,比不显示更糟——它看起来像没测量。
+ *
+ * 崩溃时返回 `undefined` 而不是零:占用率是显示数据,量不出来就不报,
+ * 绝不能因此让这一轮失败,也不能用一个 0 冒充「上下文是空的」。
+ */
+function measureRequestContext(
+  messages: ModelChatMessage[],
+  ctx: LoopCtx,
+): { tokens: number; percent: number; window: number; softLimit: number } | undefined {
+  try {
+    const measured = ctx.budget(messages);
+    const window = resolveContextWindow(ctx.modelCfg);
+    // 零测量不是「空上下文」,是量不出来——报出去会画成一个 0% 的窗口。
+    if (!(measured.tokens > 0) || !(window > 0)) return undefined;
+    return {
+      tokens: measured.tokens,
+      // 一位小数让细小的变化可见;界面四舍五入显示,但事件里是事实本身。
+      percent: Math.min(100, Math.round((measured.tokens / window) * 1000) / 10),
+      window,
+      softLimit: measured.softLimit,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 
 function splitToolUses(toolCalls: CompletionResult["toolCalls"]): {
   calls: BatchCall[];
@@ -232,7 +266,24 @@ export async function* query(
 
 
   const costTracked = ctx.pricePerMillion !== undefined;
+  // `turn` 与 `runTurn` 是两件事，曾经被合并成一个变量：
+  //
+  // - `turn` 是会话级检查点序号，跨消息单调递增（D-045：同一目录出现重复 turn
+  //   会让「按 turn 定位断点」产生歧义）。
+  // - `runTurn` 是**本次运行**已经发起的模型调用数，`maxTurns` 只对它生效——
+  //   设置项写的是「每条消息的轮数上限 / Turns per message」。
+  //
+  // 合并的后果：一次会话累计用满当时的默认上限（10）轮之后，**之后每条消息**
+  // 都在调用模型**之前**就被熔断，界面显示「达到最大回合数」而模型一次都没被调用，
+  // 会话从此不可用。用户实测遇到的就是这个（D-183）。默认上限现已整体移除：
+  // `maxTurns` 缺省表示不检查轮数，只有显式配置正整数才有上限。
+  //
+  // `costUsd` 保持会话累计，并**有意**计入历史 usage：它的设置项描述是总预算，
+  // 越过上限就该停，这是 2026-10-18 起就有测试锁定的行为（「历史 usage 计入
+  // maxCostUsd,首轮前即熔断」）。它与 `maxTurns` 的区别不是疏漏：轮数上限按
+  // 标签说的是「每条消息」，预算是「整段会话」。
   let turn = lastCheckpointTurn(session);
+  let runTurn = 0;
   let costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
   let pending: PendingBatch | undefined;
   let exitReason: ExitReason | undefined;
@@ -296,6 +347,7 @@ export async function* query(
   try {
     while (true) {
       turn += 1;
+      runTurn += 1;
       if (ctx.signal.aborted) {
         exitReason = "normal";
         yield* emitInterrupted(session, "aborted");
@@ -303,7 +355,7 @@ export async function* query(
       }
 
       try {
-        assertBreakers(cfg, turn, costUsd, costTracked);
+        assertBreakers(cfg, runTurn, costUsd, costTracked);
       } catch (error) {
         if (error instanceof LoopBroke) {
           exitReason = "normal";
@@ -332,6 +384,11 @@ export async function* query(
         messages = buildMessages(session.events());
         costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
       }
+
+      // 量在发请求之前:这一刻 `messages` 还是闭合的日志投影,能算占用率与分类;
+      // 等 `usage` 事件落盘时,assistant 已写、tool_result 未写,再投影必然抛错
+      // (D-195)。量的是即将送出去的那份消息,也就是这个数字真正含义所在。
+      const requestContext = measureRequestContext(messages, ctx);
 
       let response: CompletionResult;
       const toolSchemas = toModelToolSchemas(ctx.tools.all());
@@ -379,30 +436,30 @@ export async function* query(
         if (normalized.cachedTokens !== undefined) {
           payload.cachedTokens = normalized.cachedTokens;
         }
-        // Occupancy is measured on the transcript as it now stands: the
-        // assistant turn is already appended, so this is what the next request
-        // would carry. Without it the UI can only show spend, never how full
-        // the window is (D-165).
-        try {
-          const measured = ctx.budget(buildMessages(session.events()));
-          // The window is the kernel's estimate when the user did not configure
-          // one; the event carries whichever value was actually used so the UI
-          // never has to guess which of the two it is looking at.
-          const window = resolveContextWindow(ctx.modelCfg);
-          // A zero measurement is not "an empty context" — it is a transcript
-          // the meter could not read. Reporting it would paint a 0% window.
-          if (measured.tokens > 0 && window > 0) {
-            payload.context = {
-              tokens: measured.tokens,
-              // One decimal keeps small movements visible; the UI rounds for
-              // display but the event is the fact.
-              percent: Math.min(100, Math.round((measured.tokens / window) * 1000) / 10),
-              window,
-            };
+        // 占用率是**这次请求**携带的消息量：`requestContext` 在发请求之前就量好了,
+        // 那时 `messages` 是闭合的、可投影的。不要在这里重新投影日志(D-195)。
+        // 没有它,界面只能显示花费,永远看不到窗口有多满(D-165)。
+        if (requestContext !== undefined) {
+          payload.context = {
+            tokens: requestContext.tokens,
+            percent: requestContext.percent,
+            window: requestContext.window,
+          };
+          // 分段条回答「这些 token 被什么占的」,与 `context.tokens` 是同一个
+          // 实测值的两种说法(D-191)。meter 先取到局部常量再进闭包:`ctx.meter`
+          // 是可选字段,直接在闭包里用会让 TS 无法窄化。
+          const meter = ctx.meter;
+          try {
+            payload.contextBreakdown = buildContextBreakdown(messages, {
+              window: requestContext.window,
+              used: requestContext.tokens,
+              compactAt: requestContext.softLimit,
+              ...(meter === undefined ? {} : { measure: (list) => meter.measure(list) }),
+            });
+          } catch {
+            // 分类拆分坏了不影响总量:总量已经测到,分段是它的细化。
+            delete payload.contextBreakdown;
           }
-        } catch {
-          // A usage figure the meter cannot measure must not fail the turn:
-          // occupancy is display data, the usage event is the audit record.
         }
         if (normalized.cachedTokensRaw !== undefined) {
           payload.cachedTokensRaw = normalized.cachedTokensRaw;
