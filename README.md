@@ -294,6 +294,24 @@ npm run diagnosis:e2e
 - OpenOCD 后端只完成可用性检测、参数与错误路径验证，未连接真机；真串口设备同样未实测。
 - 真串口与真机 OpenOCD 验证登记为 D-157；KB 语料/查询集不入库导致 CI 无法运行回归，登记为 D-158。
 
+## 领域 MCP：Keil（BR-4）
+
+`mcp-servers/keil` 以 stdio MCP server 暴露 Keil MDK 的无头调试与工程编辑（`keil_debug` 57 个动作、`keil_project` 14 个动作），驱动本机已授权的 `UV4.exe` 与 UVSOCK 接口，不下载、不捆绑任何 Keil 组件；内核不含领域逻辑。先构建再配置：
+
+```bash
+npm run build:mcp
+```
+
+```json
+{
+  "mcpServers": {
+    "keil": { "command": "node", "args": ["<repo>/dist-mcp/keil/server.js"], "timeoutMs": 120000 }
+  }
+}
+```
+
+两次调用之间会话保持打开，`close` 释放探针；**工程编辑要到 uVision 退出时才写回 `.uvprojx`**，`SUCCESS` 不代表文件已变。整片擦除走 STM32CubeProgrammer（UVSOCK 的 `PRJ_FLASH_ERASE` 在 MDK 5.43a 无响应），未安装时明确拒绝而不是伪装成功。取证读数带 `evidence`、破坏性动作带 `declaration`；`diagnose` 预设下运行控制/烧录/擦除/写参数/改工程为 `ask`，headless 下降级为拒绝。权限模板见 `mcp-servers/keil/permissions.example.json`，使用与故障排查见 `docs/keil-headless.md`，已知限制见 `docs/deferred-issues.md`（D-200 / D-201）。
+
 ## 权限与审批
 
 权限层在工具执行前判定 `allow` / `ask` / `deny`，默认预设为 `diagnose`。判定只决定是否调用工具；`allow` 后仍会经过 `shell` 危险命令黑名单与 `read`/`write`/`edit`/`multiedit` 的路径边界检查。权限规则是声明式匹配而非沙箱（D-114）。

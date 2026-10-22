@@ -1372,6 +1372,10 @@ export function createKeilTools(): ProbeToolSpec[] {
       inputSchema: isDebug ? debugInputSchema : projectInputSchema,
       annotations: { readOnlyHint: false, destructiveHint: true },
       meta: {
+        // 内核只认工具级 `_meta.evidence === true`（src/mcp/manager.ts:625）。
+        // Keil 的证据性是 per-action 的：这里声明"该工具会产生证据"，动作白名单
+        // 一并带上，供审批层与文档使用。
+        evidence: true,
         evidenceActions: [...EVIDENCE_ACTIONS],
         destructiveActions: [...DESTRUCTIVE_ACTIONS],
       },

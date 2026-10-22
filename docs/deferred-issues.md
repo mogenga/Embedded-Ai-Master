@@ -1871,6 +1871,24 @@
 
 ---
 
+### D-200 · Keil 构建失败只回传 UV4 日志原文，没有结构化诊断
+
+- **发现**: 2026-10-22，Keil 移植（步骤 14–15）。
+- **现象**: `mcp-servers/keil` 的 `build`/`rebuild` 成功时可用，失败时只把 UV4 写出的 `build/keil-build.log` 原文与退出码交回；A 仓库的 `diagnostics.ts`（`#20: identifier undefined` → 文件:行号、级联折叠）未随迁移。
+- **影响**: 模型要自己从日志里刮文件名与行号；A 侧已经实测过的 `collapseCascades`（把一条根因引发的 12 条链接错误折叠成 1 条）在 B 侧不存在，长日志可能挤占上下文。
+- **触发升级条件**: ① 真实工程出现无法从日志原文定位的构建失败；② 有人反馈构建失败后模型反复重试而不改代码；③ 需要把构建诊断纳入 evidence 保护。
+- **修复建议**: 从 A 的 `src/embedded/diagnostics.ts` 整体搬运（纯函数、无外部依赖），在 `keilCli` 返回结果里替换 `log` 为 `diagnostics`，并补「同一条根因只报一次」的测试。
+- **状态**: 未解决。
+
+### D-201 · 整片擦除依赖外部 CLI，且必须先关闭所有会话
+
+- **发现**: 2026-10-22，Keil 移植（步骤 7 / 14）。
+- **现象**: `erase` 不走 UVSOCK：`PRJ_FLASH_ERASE` 在 MDK 5.43a 上请求无响应（A 侧实测），改走 `STM32_Programmer_CLI -e all`。未安装 STM32CubeProgrammer 时返回 `massEraseUnavailableReason()`。执行前会关闭全部 Keil 会话，因为一个探针不能被 uVision 与 ST 的 CLI 同时占用。
+- **影响**: ① 只装了 MDK、没装 STM32CubeProgrammer 的机器无法整片擦除；② 擦除会结束调试会话，断点与观察点丢失，调用方需要重新 `open`；③ 该 CLI 只覆盖 STM32，其他厂商的芯片没有等价的整片擦除路径。
+- **触发升级条件**: ① 用户在非 ST 芯片上要求整片擦除；② Keil 新版本修复 `PRJ_FLASH_ERASE`（需重新实测）；③ 擦除后丢失断点被反馈为缺陷。
+- **修复建议**: 非 ST 芯片走各厂商 CLI（如 nRF 的 `nrfjprog --eraseall`、NXP 的 `blhost`），或在能力报告里明确「整片擦除仅 STM32」；会话恢复做成「擦除前记录断点列表，完成后重放」。
+- **状态**: 未解决。
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -1956,3 +1974,4 @@
 | 2026-10-22 | 第十四轮（用户「取消最大轮数限制」「测试连接显示的可以模型需进行展示美化」「上下文情况的获取」「@点名文件和/调取命令的实现（如/compact，/clear）」，并发 5 个子代理）：①**取消默认轮数上限**——上一轮只修了计数口径，默认 10 仍在；`BreakerLimits.maxTurns` 改可选、`assertBreakers` 缺省即不检查、`AppRunLimits.maxTurns: number \| null` 且默认 `null`、`readRunLimits`/`readRunLimitsBody` 把 `null` 规范化成「字段缺席」、宿主只在正数时才下发；设置页留空 = 不限制。**0 / 负数 / 非整数仍拒绝**（把笔误当「不限」会让用户以为上限生效）。`maxCostUsd` 有意不动（会话总预算，与轮数是两件事）。新增集成用例：12 轮工具调用 + 收尾，模型必须被调用 **13** 次且日志无 `interrupted`，RED 阶段失败在 `expected 13, received 10`。D-183 追加「第十四轮补充」。②**``@`` 文件搜索端到端接通**——新增内核 `searchFilesByName`（复用 `walkFiles` 的惰性 BFS / 24 项忽略清单 / 符号链接跳过 / D-080 保守截断，边界复用 `listDirectory` 的 `resolveReadableDirectory`）+ `GET /api/files/search`；宿主 `searchFiles` 与 bridge 同一套规则，分层排序（基名全等 → 基名前缀 → 基名包含 → 路径包含，层内短路径优先）；宿主的边界拒绝发 notice、bridge 保持安静，两者都必回一条带 query 的 `file_matches`（弹窗只在该事件上释放）。`dist/` 缺该导出时每进程只 warn 一次。**登记 D-184**（目录不出现在结果里；旧 `dist/` 下静默失效）。D-166 第 3 项标记**已解决**。③**上下文占用率真正可见**——内核 D-165 起就在发 `context{tokens,percent,window}`，但 `#context-label` 一直带 `hidden` 且无人移除，百分比从未显示过；同时 `initialState()` 用 `{tokens:0,percent:0}` 兜底，把「未知」画成「0%」。现在 `protocol.measuredContext()` 只在两个字段都是有限数时才认，缺省为 `null`（显式「未知」哨兵）；`updateMeter` 的合同是 `undefined` 保留原值、`null` 清除并隐藏、真实测量才显示；`window` 仅在有限且为正时带上。`session_loaded` 用字面 `null` 清空（转录已换，不能继承上一段的百分比）。④**「测试连接」结果区重做**——新增纯模块 `settings-models.js`（`availableModelEntries` / `connectionSummary`，13 例测试），结果块改为「状态行（勾选 + 摘要 + 独立延迟）+ 可用模型标题与计数 + 可换行的模型 chip 网格」；**已列出的模型不再被静默丢弃**，改为展品态的禁用 chip（R3：结果块少一半就是错答案）；端点为 0 模型时用警告色勾选而非绿色。`maxTurns` 设置项同步改为「留空 = 不限制」。⑤**复核并登记 10 条此前无编号的缺口**（D-184 ~ D-193）：`getBoardState` 两端无 handler 而 Board 是唯一常驻页签、快捷键表三条键与实现不符、`contextBreakdown` 无生产者、MCP 仅 stdio、无整跑墙钟超时、图片附件静默丢弃、About 页 `checkUpdate` 无实现必崩、「排队」标签是假的（消息实际被丢弃）、goals/subagents/检查点三块死 UI |
 | 2026-10-22 | 只保留桌面端（用户「不要浏览器了，只保留桌面端」）：删除 `desktop/renderer/bridge.js`、`src/server` 的 HTTP 层（`api.ts` / `serve.ts` / `http.ts` / `body.ts` / `config-api.ts` / `event-stream.ts`）与 11 个 `tests/server/*` 测试（连同 `tests/desktop/bridge.test.js`、`tests/events-e2e.test.ts`），`package.json` 移除 `serve:ui`；`readSessionHeader` 搬进 `src/session/persistence.ts`；`HttpError` 移入 `src/server/errors.ts`（保留类名，桌面宿主仍靠 `status` / `code` 区分「路径非法」「目录不存在」「会话忙」）。文档侧：README、AGENTS.md、`docs/frontend-design.md` 去掉浏览器形态的说法；本文件给 D-051 / D-060 / D-063 / D-067 / D-112 / D-133 / D-136 / D-137 / D-138 / D-139 / D-146 / D-150 / D-152 / D-153 / D-167 / D-171 / D-174 标注**已作废**并保留原文（D-172 / D-176 / D-182 标在各自的状态行或遗留行上）；D-145 / D-147 / D-148 / D-149 / D-163 / D-193 补注「浏览器形态下线后结论如何变化」。D-124 / D-134 / D-135 等与形态无关的条目未动 |
 | 2026-10-22 | 第十六轮（用户「接入skills功能，发子代理」，并发 4 个子代理）：**技能＝保存下来的提示词模板**，`$ARGUMENTS` 由渲染层替换。①内核新增 `src/skills/`（`store.ts` / `types.ts`）：用户级 `<home>/skills/<name>.md`、项目级 `<workdir>/.harness/skills/<name>.md`，frontmatter 只认 `description` / `argument-hint`（未知键是额外元数据，不是故障），无 frontmatter 时整份文件就是正文；名称须匹配 `/^[a-z][a-z0-9_-]{0,63}$/` 且不得与内置命令 `clear`/`context`/`compact` 同名（同名者永远轮不到执行）；frontmatter 未闭合、文件读失败、名称非法一律进 `problems` 并跳过该文件，**不静默丢弃**（R3）；项目作用域同名覆盖用户作用域；输出按名称排序；写入走「临时文件 + fsync + rename」。②宿主新增 `getSkills` / `saveSkill` / `removeSkill`，`init` 与 `listCommands` 的目录里追加 `source: "skill"` 行，保存成功后重播 `skills` + `commands`，**保存失败什么都不播**并说明原因。③渲染层 `mergeCommands` 认 `source: "skill"`，`expandSkill` 做 `$ARGUMENTS` 替换（正文无占位符时把参数作为追加段落），设置页「技能」页恢复。④**刻意不做**模型可调用的 `Skill` 工具（用户要的是技能，不是模型自选技能）。登记 **D-198**：四条边界（无权限语义 / 无自动调用 / 参数只有字符串替换 / 项目作用域无信任门与同名覆盖缺口）＋两处**已在本轮内修掉**的缺陷（①技能名允许 `_` 而 `parseSlashText` 的 `SLASH` 字符类不含 `_`，`/review_diff` 会被当普通提示词原样发给模型——`SLASH` 补 `_` 并补「合法技能名必须能被斜杠语法还原」的不变量测试；②保存/删除失败只发 `notice`，而渲染器把它写进被设置页遮住的转录、`settings.js` 又没有 `notice` 分支——失败提示加 `domain: "skills"` 转进设置页就地显示，表单不再无条件关闭，草稿留在原处）；**D-166 的 skills 一项标记已解决**，其余能力未动 |
+| 2026-10-22 | Keil 移植步骤 14–15：新增 `mcp-servers/keil/README.md` 与 `docs/keil-headless.md`（安装检查 → 接线 → 典型流程 → 故障排查），根 README 补「领域 MCP：Keil」一节；`mcp.json` 接线与 `KEIL_SELECTION_JSON` 服务级选中项写入文档；`createKeilTools` 的 `_meta` 补 `evidence: true`（内核只认工具级标志，见 `src/mcp/manager.ts:625`）并附 `evidenceActions` / `destructiveActions` 白名单。录入 D-200（构建诊断未迁移）与 D-201（整片擦除依赖 STM32CubeProgrammer 且需先关会话） |
