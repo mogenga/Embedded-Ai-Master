@@ -1,4 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { existsSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 /**
  * 子进程的环境构造（精简版）。
@@ -96,4 +99,114 @@ export function allPackBinDirs(): string[] {
  */
 export function toolEnv(_kinds?: string[], base: NodeJS.ProcessEnv = sandboxEnv()): NodeJS.ProcessEnv {
   return prependPath({ ...base }, allPackBinDirs());
+}
+/**
+ * `cbuild` 找到编译器的方式：`<name>_TOOLCHAIN_<major>_<minor>_<patch>` 里写
+ * 编译器的 `bin` 目录。
+ *
+ * 这不是可选的调优项。实测：不设它，`cbuild` 对任何 csolution 工程都以
+ * `error cbuild2cmake: compiler registration environment variable missing` 失败，
+ * 而工具链明明已经装好、`armclang --version` 也能跑——因为 CMSIS-Toolbox 刻意
+ * 不猜编译器装在哪。
+ *
+ * 这里只登记"检测已经找到的那个编译器"，不认识任何一家厂商的目录名：路径和
+ * 版本都来自 `compilerFromDetection` 的答案。
+ */
+export function compilerRegistration(
+  compilers: { name: string; bin: string; version: string }[],
+  env: NodeJS.ProcessEnv = {},
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const { name, bin, version } of compilers) {
+    const parts = version.match(/\d+/g) ?? [];
+    if (parts.length < 2 || !bin) continue;
+    const [major, minor, patch = "0"] = parts;
+    // 已经由用户设过时不覆盖：他显式指定的那份优先。
+    const key = `${name}_TOOLCHAIN_${major}_${minor}_${patch}`;
+    const existing = Object.keys(env).find((name) => name.toUpperCase() === key.toUpperCase());
+    if (!existing) out[key] = bin;
+  }
+  return out;
+}
+
+/**
+ * 工具链的 `bin` 目录和版本，从检测结果里读。
+ *
+ * `armclang.exe` 在 `...\ARMCLANG\bin\armclang.exe`；版本串是
+ * `Tool: armclang [5f371800]` 那类输出里的 `6.24`，或者 `--version` 的
+ * `Product: ... 6.24`。两种都要认。
+ */
+export function compilerFromDetection(tools: { kind: string; path: string; version?: string }[]): { kind: string; bin: string; version: string }[] {
+  const out: { kind: string; bin: string; version: string }[] = [];
+  for (const tool of tools) {
+    // CMSIS-Toolbox 认的是编译器家族名（AC6 / GCC / IAR / CLANG），不是可执行
+    // 文件名；`armclang` 属于 AC6，`arm-none-eabi-gcc` 属于 GCC。
+    // Keil's own compilers are not separate tools in the detection report: an
+    // MDK install carries AC5/AC6 and the project chooses between them, so the
+    // `keil` entry's install root is where they live.
+    if (tool.kind === "keil") {
+      for (const found of keilCompilers(dirname(tool.path))) out.push(found);
+      continue;
+    }
+    const family = /armclang/i.test(tool.path) ? "AC6"
+      : /arm-none-eabi-gcc|riscv.*gcc|(^|\\)(gcc|g\+\+)(\.exe)?$/i.test(tool.path) ? "GCC"
+      : /iccarm|iar/i.test(tool.path) ? "IAR"
+      : /clang/i.test(tool.path) ? "CLANG"
+      : null;
+    if (!family) continue;
+    const version = (tool.version ?? "").match(/\d+\.\d+(\.\d+)?/)?.[0] ?? "";
+    if (!version) continue;
+    out.push({ kind: family, bin: dirname(tool.path), version });
+  }
+  return out;
+}
+
+/**
+ * The Arm compilers inside a Keil install, newest AC6 first.
+ *
+ * `<root>\ARM\ARMCLANG\bin\armclang.exe` and `<root>\ARM\ARM_Compiler_5.06u7\
+ * bin\armcc.exe`, with `UV4.exe` in `<root>\UV4\`. The version comes from
+ * running the compiler, because the directory name is not part of any
+ * contract (`ARM_Compiler_5.06u7` carries a vendor suffix).
+ */
+function keilCompilers(uv4Dir: string): { kind: string; bin: string; version: string }[] {
+  const root = join(uv4Dir, "..");
+  const found: { kind: string; bin: string; version: string }[] = [];
+  const ac6 = join(root, "ARM", "ARMCLANG", "bin");
+  if (existsSync(join(ac6, "armclang.exe"))) {
+    const version = runVersion(join(ac6, "armclang.exe"));
+    // `armclang --version` prints `Product: MDK Plus 5.43` on its first line,
+    // which is the IDE's version, not the compiler's. The compiler version is
+    // the `Component: Arm Compiler for Embedded 6.24` line; CMSIS-Toolbox
+    // wants that one, and registering `AC6_TOOLCHAIN_5_43_0` registered
+    // nothing at all.
+    const parsed = /Arm Compiler for Embedded\s+(\d+\.\d+(?:\.\d+)?)/i.exec(version)?.[1]
+      ?? /Component:.*?(\d+\.\d+(?:\.\d+)?)\s*$/im.exec(version)?.[1];
+    if (parsed) found.push({ kind: "AC6", bin: ac6, version: parsed });
+  }
+  // AC5 (`armcc`) reports a version CMSIS-Toolbox does not register; it is
+  // listed so a caller can say why an AC5 target cannot be built by `cbuild`.
+  try {
+    for (const entry of readdirSync(join(root, "ARM"))) {
+      if (!/^ARM_Compiler_/i.test(entry)) continue;
+      const bin = join(root, "ARM", entry, "bin");
+      if (!existsSync(join(bin, "armcc.exe"))) continue;
+      const version = runVersion(join(bin, "armcc.exe"));
+      const parsed = version.match(/(\d+\.\d+(\.\d+)?)/)?.[0];
+      if (parsed) found.push({ kind: "AC5", bin, version: parsed });
+    }
+  } catch {
+    /* no ARM directory: not a Keil install */
+  }
+  return found;
+}
+
+function runVersion(program: string): string {
+  try {
+    const out = execFileSync(program, ["--version"], { encoding: "utf8", timeout: 10_000, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    return out;
+  } catch {
+    // `armcc` prints its banner on stdout but exits non-zero for `--version`.
+    return "";
+  }
 }
