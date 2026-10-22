@@ -1,7 +1,8 @@
 export type BreakReason = "max_turns" | "max_cost_usd";
 
 export interface BreakerLimits {
-  maxTurns: number;
+  /** 本次运行的模型调用上限；缺省表示不限制轮数（没有默认上限）。 */
+  maxTurns?: number;
   maxCostUsd?: number;
 }
 
@@ -40,13 +41,17 @@ export function assertBreakers(
   costUsd: number,
   costTracked = true,
 ): void {
-  if (!Number.isFinite(cfg.maxTurns) || cfg.maxTurns < 0) {
-    throw new TypeError("maxTurns must be a finite non-negative number");
+  // 缺省 = 不检查轮数，而不是「检查一个默认值」。刻意没有默认上限：
+  // 任何隐式上限都会在长诊断里静默截断一次本来能跑完的运行（D-183）。
+  if (cfg.maxTurns !== undefined) {
+    if (!Number.isFinite(cfg.maxTurns) || cfg.maxTurns < 0) {
+      throw new TypeError("maxTurns must be a finite non-negative number");
+    }
+    if (turn > cfg.maxTurns) throw new LoopBroke("max_turns");
   }
   if (cfg.maxCostUsd !== undefined && !Number.isFinite(cfg.maxCostUsd)) {
     throw new TypeError("maxCostUsd must be a finite number");
   }
-  if (turn > cfg.maxTurns) throw new LoopBroke("max_turns");
   if (cfg.maxCostUsd !== undefined && costTracked && costUsd >= cfg.maxCostUsd) {
     throw new LoopBroke("max_cost_usd");
   }

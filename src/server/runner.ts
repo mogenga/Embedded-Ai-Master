@@ -27,8 +27,14 @@ export interface ActionInput {
    * the runner was built without permissions and the value is absent.
    */
   mode?: PermissionPreset;
-  /** Loop breakers and per-call timeout; absent means the kernel defaults. */
-  maxTurns?: number;
+  /**
+   * Loop breakers and per-call timeout.
+   *
+   * `maxTurns: null` means "no turn limit" and is the same as omitting the
+   * field; the kernel has no default cap. `maxCostUsd` / `timeoutMs` are
+   * unchanged: absent still means the kernel default.
+   */
+  maxTurns?: number | null;
   maxCostUsd?: number;
   timeoutMs?: number;
   /** Replaces the built-in system prompt for this run. */
@@ -55,7 +61,9 @@ interface RunLimits {
 
 function readRunLimits(input: ActionInput): RunLimits {
   const limits: RunLimits = {};
-  if (input.maxTurns !== undefined) {
+  // null 与 undefined 是同一个意思：不限制轮数。字段必须真的缺席，而不是
+  // 传 `null` 下去——那会让 `runSession` 的空值检查与日志都出现一个假值。
+  if (input.maxTurns !== undefined && input.maxTurns !== null) {
     if (!Number.isInteger(input.maxTurns) || input.maxTurns < 1) {
       throw new RunnerError("invalid_run_limits", `maxTurns 必须是正整数: ${String(input.maxTurns)}`);
     }

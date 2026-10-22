@@ -58,7 +58,9 @@ export interface RunOptions {
   systemPrompt?: string;
   fetchImpl?: typeof fetch;
   signal?: AbortSignal;
+  /** 本次运行的模型调用上限；缺省表示不限制轮数。 */
   maxTurns?: number;
+  /** 会话累计成本上限（美元）；缺省表示不限制。 */
   maxCostUsd?: number;
   cwd?: string;
   timeoutMs?: number;
@@ -709,8 +711,10 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
 
     queryStarted = true;
     yield* query(ctx, opts.input, {
-      maxTurns: opts.maxTurns ?? 10,
-      maxCostUsd: opts.maxCostUsd,
+      // 只在调用方给了上限时才传：缺省表示「不检查轮数」。不要把 undefined
+      // 填成一个默认数字——那正是被移除的旧行为（D-183 后续）。
+      ...(opts.maxTurns !== undefined ? { maxTurns: opts.maxTurns } : {}),
+      ...(opts.maxCostUsd !== undefined ? { maxCostUsd: opts.maxCostUsd } : {}),
     });
   } catch (error) {
     hasPrimaryError = true;
