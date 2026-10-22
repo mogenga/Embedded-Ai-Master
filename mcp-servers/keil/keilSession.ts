@@ -125,6 +125,23 @@ export async function closeAllKeilSessions(): Promise<void> {
   for (const key of [...sessions.keys()]) await closeKeilSession(key);
 }
 
+/**
+ * 关闭某个工程的调试会话，把探针让给下载器。
+ *
+ * A 的适配层要求调用方先 `close` 再 `flash`；B 侧直接替调用方做，因为
+ * `flash` 这个动作本身已经说清了它需要什么。实测：调试会话占着 ST-Link 时，
+ * 4824 的 plain 会话下载会报 `Target DLL has been cancelled`。
+ */
+export async function closeDebugSessions(project: string): Promise<number> {
+  let closed = 0;
+  for (const entry of listKeilSessions()) {
+    if (!entry.debugging) continue;
+    if (entry.project.toLowerCase() !== project.toLowerCase()) continue;
+    if (await closeKeilSession(entry.key)) closed += 1;
+  }
+  return closed;
+}
+
 export function listKeilSessions(): { key: string; project: string; target: string; debugging: boolean; openedAt: number }[] {
   return [...sessions.entries()].map(([key, session]) => ({
     key,

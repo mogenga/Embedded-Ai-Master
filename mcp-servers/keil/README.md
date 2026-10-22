@@ -13,7 +13,7 @@
 
 两次调用之间会话保持打开；`close` / `close_project` 结束会话。**工程编辑（`add_group` / `add_file` / `set_option` 等）在 uVision 退出时才写回 `.uvprojx`**——这是 uVision 的行为，不是本服务的缓冲，所以看到 `SUCCESS` 不代表文件已变。
 
-**烧录必须先关闭调试会话**：`flash` 在 plain 会话上执行；调试会话占着探针时 UV4 会报 `Target DLL has been cancelled`。正确顺序是 `close` → `flash` → `open`。
+**烧录会自动让出探针**：`flash` 跑在 plain 会话上，执行前会先关闭同工程的调试会话（否则两个 uVision 抢同一个 ST-Link，下载报 `Target DLL has been cancelled`），下载完成后回读校验。调试状态（断点、运行位置）会因此丢失，需要重新 `open`。
 
 每个破坏性动作在执行前都带 `declaration`（operation / effect / address? / length?）。取证类动作（寄存器、变量、内存、栈等）在 `structuredContent.evidence === true`，参与上下文压缩保护。
 

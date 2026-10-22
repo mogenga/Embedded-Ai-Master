@@ -106,6 +106,7 @@ import {
   step,
   writeRegister,
   writeMemory,
+  closeDebugSessions,
   type KeilSession,
   type OptionName,
 } from "./keilSession.js";
@@ -252,7 +253,7 @@ async function sessionFor(
   input: Record<string, unknown>,
   cwd: string,
   selection: KeilSelection | undefined,
-  options: { target?: "hardware" | "simulator"; connectOnly?: boolean } = {},
+  options: { target?: "hardware" | "simulator"; connectOnly?: boolean; forDownload?: boolean } = {},
 ): Promise<{ ok: true; session: KeilSession; key: string; log: string[] } | { ok: false; content: string }> {
   const resolved = resolveKeil(input, selection, { ...(options.connectOnly ? { connectOnly: true } : {}) });
   // 没有显式 project、也没有服务级选中项时，回退到已经打开的会话：上一轮
@@ -265,6 +266,10 @@ async function sessionFor(
   // the target options refuse to answer while the debugger is entered, so the
   // plain one runs on its own port and is reused only by plain work.
   const chosen = options.target ?? resolved.backend;
+  // 下载要在探针空闲时启动 plain 会话：如果调试会话还占着 ST-Link，
+  // 4824 的 UV4 启动即处于坏状态，随后下载命令会无人应答（实测 0x100a 超时）。
+  let closedDebug = 0;
+  if (options.forDownload && project) closedDebug = await closeDebugSessions(project);
   const opened = await openKeilSession({
     cwd,
     ...(project ? { project } : {}),
@@ -556,7 +561,10 @@ const keilDebugTool: LegacyTool = {
     if (action === "close_project") {
       return closeAndReport(ctx.cwd);
     }
-    const opened = await sessionFor(input, ctx.cwd, ctx.selection, projectAction || cliAction ? { connectOnly: true } : {});
+    const opened = await sessionFor(input, ctx.cwd, ctx.selection, {
+      ...(projectAction || cliAction ? { connectOnly: true } : {}),
+      ...(action === "flash" ? { forDownload: true } : {}),
+    });
     if (!opened.ok) return { isError: true, content: opened.content, display: "Keil unavailable" };
     const session = opened.session;
     // Every inspection below answers an empty list when the debugger is not
@@ -1068,6 +1076,11 @@ const keilDebugTool: LegacyTool = {
           fail(`the build failed with uVision build code ${started.status}`);
         } else if (started.status === 2) lines.push("the build completed with warnings (uVision build code 2)");
       } else if (action === "flash") {
+        // 下载跑在 plain 会话上，而调试会话占着探针：先关掉同工程的调试会话，
+        // 否则 UV4 报 "Target DLL has been cancelled"（实测）。A 侧把这一步
+        // 留给调用方，B 侧由 `flash` 自己完成。
+        const closedDebug = await closeDebugSessions(session.project);
+        if (closedDebug > 0) lines.push(`closed ${closedDebug} debug session(s) so the downloader can own the probe`);
         const flashed = await flashInIde(session);
         if (flashed.lines.length > 30) lines.push(`(showing the last 30 of ${flashed.lines.length} download lines)`);
         lines.push(...flashed.lines.slice(-30));
