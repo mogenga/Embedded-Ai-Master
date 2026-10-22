@@ -2,10 +2,9 @@
  * The renderer's slash-command catalogue and its two pure helpers.
  *
  * No DOM, no `window`, no imports: both the desktop renderer and a test can
- * load this module anywhere. The host owns *which* commands exist (the browser
- * form has no route to the kernel's compaction, so it never reports
- * `/compact`); this module only knows how to describe them and how to read
- * `/name rest` out of a message.
+ * load this module anywhere. The host owns *which* commands exist; this module
+ * only knows how to describe them and how to read `/name rest` out of a
+ * message.
  */
 
 export const COMMANDS = [

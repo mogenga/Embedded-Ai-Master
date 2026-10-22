@@ -590,11 +590,9 @@
       </form>
     </dialog>
 
-    <!-- bridge.js installs window.prometheus when there is no Electron
-         preload (browser form). Under Electron it sees the preload's object
-         and does nothing. Module scripts run in order, so app.js always sees
-         the bridge's object. -->
-    <script type="module" src="bridge.js"></script>
+    <!-- 只支持桌面形态：window.prometheus 由 desktop/preload.cjs 的
+         exposeInMainWorld 在页面脚本之前注入，渲染器没有别的来源——浏览器
+         bridge（HTTP + SSE）已于 2026-10-22 随浏览器形态一并删除。 -->
     <script type="module" src="app.js"></script>
   </body>
 </html>

@@ -19,7 +19,6 @@
     "diagnosis:e2e": "node scripts/diagnosis-e2e.mjs",
     "kb:regression": "node scripts/kb-regression.mjs",
     "kb:review": "node scripts/kb-review.mjs",
-    "serve:ui": "node dist/server/serve.js",
     "test:desktop": "vitest run tests/desktop"
   },
   "dependencies": {

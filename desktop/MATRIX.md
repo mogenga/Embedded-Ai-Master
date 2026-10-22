@@ -2,55 +2,57 @@
 
 本文件是 `desktop/` 前端与当前内核之间的契约表：哪些命令/事件已接通、哪些被隐藏、为什么。
 
-- **协议层**：`desktop/renderer/protocol.js` —— 内核 `SessionEvent` → 渲染器事件的纯函数映射，桌面宿主与浏览器 bridge 共用。
+> **2026-10-22 起只保留桌面形态，浏览器 bridge 已删除。** 下表原先的「浏览器」一列随之移除；文中提到浏览器形态的补充说明保留为历史记录。
+
+- **协议层**：`desktop/renderer/protocol.js` —— 内核 `SessionEvent` → 渲染器事件的纯函数映射，由桌面宿主与渲染器共用。
 - **桌面宿主**：`desktop/host/host.js` —— NDJSON 分发器，复用 `dist/` 下的内核模块。
-- **浏览器 bridge**：`desktop/renderer/bridge.js` —— 没有 preload 时注入 `window.prometheus`，把命令映射到 `/api/*`。
+- **渲染器**：`desktop/renderer/app.js` —— 只跑在 Electron 里，`window.prometheus` 由 `desktop/preload.cjs` 注入。
 
 ## 命令（renderer → 宿主）
 
-| 命令 | 桌面 | 浏览器 | 说明 |
-|---|---|---|---|
-| `init` | ✅ | —（bridge 自启动） | 握手：providers、模型列表、runner、事件源 |
-| `prompt` | ✅ | ✅ | 走 `runner.start`，权限与审批在内核 |
-| `abort` | ✅ | ✅ | 桌面走 `runner.abort`；浏览器走 `POST /api/abort` |
-| `permission` | ✅ | ✅ | `yes`/`no` → allow/deny；`always` 降级为本次 allow 并显式提示 |
-| `newSession` | ✅ | ✅ | 清空转录，会话 id 留到首个 prompt 才产生 |
-| `loadSession` | ✅ | ✅ | 读整篇日志重建转录。桌面端另把**会话记录的工作目录采纳为当前 cwd**（`adoptSessionWorkdir`）：顶栏、文件树、`getFile` 边界三处一起跟随；目录已消失/不是目录/读不了时**不改 cwd** 并发 warn notice（「已不存在」与「无法访问」分开说）。浏览器形态只有 `currentCwd = header.workdir`，对已消失目录不校验（D-182 记录了这处两端不一致） |
-| `listSessions` | ✅ | ✅ | 标题取首条 user 事件（缓存，最多扫 30 条）。支持 `includeArchived` / `cwd` / `limit`：归档行默认隐藏，`total` 是过滤后的总数（`slice` 前算），分页按 `updatedAt` 倒序稳定切片。`status` 筛选在桌面侧只认 `working`，浏览器侧回一条 dim notice 说明不可用 |
-| `getSettings` | ✅ | ✅ | UI 偏好 + 三份配置文件（`mcpServers` / `permissions` / `run`）及其路径，外加模型服务的两种形状：`providers`（选单用的扁平列表）与 `providerConfig`（`providers.json` 本身，设置页整份写回）。`providersError` 在文件读坏时给出原因，页面据此说明为什么表单是空的 |
-| `saveProviders` | ✅ | ✅ | 整份写 `providers.json`；桌面直写（写完从磁盘重新 `loadProviders`，不信任入参），浏览器走 `PUT /api/config`。模型引用失效时自动回退到首个可用引用并重建 runner |
-| `testProvider` | ✅ | ✅ | 探测一个模型服务：桌面调内核 `probeProvider`（`dist/model/probe.js`，缺失时回「未编译，请先 build」而不是崩宿主），浏览器走 `POST /api/providers/test`。回 `provider_test{ok, baseUrl, models?, error?, code?, latencyMs?}`；`models` 拿不到时字段不存在。**不进命令队列**，探测可能占用 10s，不能把 abort 堵在后面 |
-| `saveMcpServer` | ✅ | ✅ | 合并同名项后整份写 `mcp.json`；桌面直写，浏览器走 `PUT /api/config` |
-| `removeMcpServer` | ✅ | ✅ | 按 name 删除 |
-| `savePermissions` | ✅ | ✅ | 整份写 `permissions.json`（`preset` / `approvalTimeoutMs` / `rules`） |
-| `saveRunLimits` | ✅ | ✅ | 整份写 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`），下一回合生效。`maxTurns: null` 表示**不限制轮数**（2026-10-22 起默认值就是 `null`，见 D-183 补充）；`0` / 负数 / 非整数仍会被拒绝——把笔误当「不限」会让用户以为上限生效了 |
-| `sessionFlags` | ✅ | ✅ | 改名/置顶/归档，写旁挂 `meta.json`（header 校验会丢弃未知字段） |
-| `deleteSession` | ✅ | ✅ | 删除会话目录；锁被占用时 409。拒绝删除当前打开的会话 |
-| `forkSession` | ✅ | ✅ | `forkSession(dir, atSeq)`，分叉后直接打开新会话 |
-| `exportSession` | ✅ | ✅ | 读日志渲染 Markdown；桌面走 `saveFile`，浏览器走下载 |
-| `revealArtifact` | ✅（preload） | ✅（notice） | 桌面经 preload 的 `revealArtifact` 在文件管理器中选中；浏览器只能回一条含路径的 notice |
-| `setUiPreference` | ✅ | ✅ | 回显，localStorage 是事实源 |
-| `setLocale` | ✅ | ✅ | |
-| `setMode` | ✅ | ✅ | 映射内核四预设；运行中拒绝切换并说明原因。浏览器形态随 `POST /api/actions` 的 `mode` 字段下发给内核，不再只是改本地状态 |
-| `setModel` | ✅ | — | 仅接受 `providers.json` 中存在的引用；只对新建会话生效。浏览器形态改不了服务端配置，回显式 `notice` |
-| `refreshModels` | ✅ | — | 重读 `providers.json` 并广播 `models`；读取失败保留原列表 |
-| `setCwd` | ✅（需先新建会话） | — | 仅在无会话时切换；内核把 workdir 固定在 header 里，不能中途改 |
-| `getUsage` | ✅ | ✅ | 汇总当前会话的 `usage` 事件 |
-| `getSetupChecklist` | ✅ | ✅ | 只报真实检查项（providers、模型引用） |
-| `listCommands` | ✅ | ✅ | 内核无斜杠命令，但前端内置三个：桌面 `clear` / `context` / `compact`，浏览器 `clear` / `context`（`/compact` 在浏览器形态没有路由，拒绝而不伪造）。`/compact` **不接受参数**——内核 `compactSession` 没有 focus / keep 选项，`--keep N` 会是一个没人兑现的承诺。**命令真正执行时，敲进去的原文会作为一条普通用户消息留在转录里**（`/clear` 也一样，虽然它紧接着的 `session_loaded` 会清空转录）；未知命令与带参数被拒的命令**不 echo**，只出提示并把草稿留在输入框——先留消息再报错会让人以为它跑过 |
-| `getFile` | ✅ | ✅ | 只读预览一个文本文件，256 KiB 上限；越界（工作目录与会话目录之外）、符号链接、目录一律拒绝并说明原因；含 NUL 字节按二进制处理且不给文本预览 |
-| `getArtifacts` | ✅ | ✅ | 列当前会话 `artifacts/` 下的普通文件（跳过目录与符号链接）；目录不存在或没有打开的会话 → 空列表 |
-| `getArtifact` | ✅ | ✅ | 读一个产物文件；只允许当前会话 artifacts 目录内的路径 |
-| `setEffort` | ✅（如实拒绝） | ✅（如实拒绝） | 内核模型适配层不发 reasoning effort 参数。回 warn notice，**不发 `state`** —— 假装生效比不支持更糟 |
-| `saveSettings` | ✅（窄） | ✅（窄） | 只接 `settings.locale`（en/zh），转调 `setLocale`；其他字段回 warn。不提供万能写配置入口——配置写入口是 `saveProviders`/`saveMcpServer`/`savePermissions`/`saveRunLimits` |
-| `getTree` | ✅ | ✅ | 列一层子项（`listDirectory` / `GET /api/tree`）。边界＝已登记工作区 ∪ 会话目录 ∪ 会话工作目录，`realpath` 后判定；目录在前、按名排序、跳过符号链接、超 500 项截断。失败先发 warn notice **再**发空 `tree`——空树是释放 `pendingTreeTarget` 的信号，不是「目录是空的」 |
-| `getKb` | ✅ | ✅ | 知识库定位 + 树（`dist/server/kb-locate.js` / `GET /api/kb`）。根解析优先级：`KB_ROOT` 环境变量 → `$HARNESS_HOME/mcp.json` 里任一 server 的 `env.KB_ROOT` → 仓库默认 `mcp-servers/kb/kb`；`source` 如实回报来自哪一级，`note` 说明选择理由。根不存在时**保留候选路径** + 空树 + `note`（「没找到」≠「是空的」）。`fileCount` 只数 `.md`；`truncated` 表示触顶（深度 8 / 条目 2000 / 文件数 20000），此时 `fileCount` 是「至少 N」而不是精确值。桌面端惰性 import：旧 `dist/` 缺该模块时回 warn「请先 npm run build」并回空 `kb`，不崩宿主 |
-| `setWorkspace` | ✅ | ✅ | 发 `POST /api/workspace` 登记，再委托给 `setCwd` 的全部语义（运行中拒绝、仅新建会话生效）。登记是进程内的，重启失效 |
-| `searchFiles` | ✅ | ✅ | `@` 提及的文件名搜索。内核 `searchFilesByName`（复用 `walkFiles` 的惰性 BFS / 24 项忽略清单 / 跳符号链接），根＝宿主当前 `cwd`；浏览器走 `GET /api/files/search?path&query`。分层排序：基名全等 → 基名前缀 → 基名包含 → 路径包含，层内短路径优先，上限 20 条。回 `file_matches{query, files, truncated, scanned}`，`truncated` 取「命中超上限」与「遍历被预算截停」之或。**目录不在结果里**（walker 只访问文件，D-184）；边界拒绝发 warn notice（浏览器侧安静），但**两端都必回一条带 query 的 `file_matches`** —— 弹窗只在该事件上释放 |
-| `searchSessions` | ✅ | ✅（已加载的列表） | 桌面按标题/工作目录/id 搜索；浏览器只过滤已加载的行（HTTP API 无查询参数） |
-| `shutdown` | ✅ | — | 桌面宿主退出 |
+| 命令 | 说明 |
+|---|---|
+| `init` | 握手：providers、模型列表、runner、事件源 |
+| `prompt` | 走 `runner.start`，权限与审批在内核 |
+| `abort` | 走 `runner.abort` |
+| `permission` | `yes`/`no` → allow/deny；`always` 降级为本次 allow 并显式提示 |
+| `newSession` | 清空转录，会话 id 留到首个 prompt 才产生 |
+| `loadSession` | 读整篇日志重建转录，并把**会话记录的工作目录采纳为当前 cwd**（`adoptSessionWorkdir`）：顶栏、文件树、`getFile` 边界三处一起跟随；目录已消失/不是目录/读不了时**不改 cwd** 并发 warn notice（「已不存在」与「无法访问」分开说） |
+| `listSessions` | 标题取首条 user 事件（缓存，最多扫 30 条）。支持 `includeArchived` / `cwd` / `limit`：归档行默认隐藏，`total` 是过滤后的总数（`slice` 前算），分页按 `updatedAt` 倒序稳定切片。`status` 筛选只认 `working` |
+| `getSettings` | UI 偏好 + 三份配置文件（`mcpServers` / `permissions` / `run`）及其路径，外加模型服务的两种形状：`providers`（选单用的扁平列表）与 `providerConfig`（`providers.json` 本身，设置页整份写回）。`providersError` 在文件读坏时给出原因，页面据此说明为什么表单是空的 |
+| `saveProviders` | 整份写 `providers.json`，直写后从磁盘重新 `loadProviders`（不信任入参）。模型引用失效时自动回退到首个可用引用并重建 runner |
+| `testProvider` | 探测一个模型服务：调内核 `probeProvider`（`dist/model/probe.js`，缺失时回「未编译，请先 build」而不是崩宿主）。回 `provider_test{ok, baseUrl, models?, error?, code?, latencyMs?}`；`models` 拿不到时字段不存在。**不进命令队列**，探测可能占用 10s，不能把 abort 堵在后面 |
+| `saveMcpServer` | 合并同名项后整份写 `mcp.json` |
+| `removeMcpServer` | 按 name 删除 |
+| `savePermissions` | 整份写 `permissions.json`（`preset` / `approvalTimeoutMs` / `rules`） |
+| `saveRunLimits` | 整份写 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`），下一回合生效。`maxTurns: null` 表示**不限制轮数**（2026-10-22 起默认值就是 `null`，见 D-183 补充）；`0` / 负数 / 非整数仍会被拒绝——把笔误当「不限」会让用户以为上限生效了 |
+| `sessionFlags` | 改名/置顶/归档，写旁挂 `meta.json`（header 校验会丢弃未知字段） |
+| `deleteSession` | 删除会话目录；锁被占用时 409。拒绝删除当前打开的会话 |
+| `forkSession` | `forkSession(dir, atSeq)`，分叉后直接打开新会话 |
+| `exportSession` | 读日志渲染 Markdown，经 `saveFile` 存盘 |
+| `revealArtifact` | 经 preload 的 `revealArtifact` 在文件管理器中选中；没有 preload 时会退化成一条含路径的 notice |
+| `setUiPreference` | 回显，localStorage 是事实源 |
+| `setLocale` | |
+| `setMode` | 映射内核四预设；运行中拒绝切换并说明原因 |
+| `setModel` | 仅接受 `providers.json` 中存在的引用；只对新建会话生效 |
+| `refreshModels` | 重读 `providers.json` 并广播 `models`；读取失败保留原列表 |
+| `setCwd` | 仅在无会话时切换；内核把 workdir 固定在 header 里，不能中途改 |
+| `getUsage` | 汇总当前会话的 `usage` 事件 |
+| `getSetupChecklist` | 只报真实检查项（providers、模型引用） |
+| `listCommands` | 内核无斜杠命令，但前端内置三个：`clear` / `context` / `compact`。`/compact` **不接受参数**——内核 `compactSession` 没有 focus / keep 选项，`--keep N` 会是一个没人兑现的承诺。**命令真正执行时，敲进去的原文会作为一条普通用户消息留在转录里**（`/clear` 也一样，虽然它紧接着的 `session_loaded` 会清空转录）；未知命令与带参数被拒的命令**不 echo**，只出提示并把草稿留在输入框——先留消息再报错会让人以为它跑过 |
+| `getFile` | 只读预览一个文本文件，256 KiB 上限；越界（工作目录与会话目录之外）、符号链接、目录一律拒绝并说明原因；含 NUL 字节按二进制处理且不给文本预览 |
+| `getArtifacts` | 列当前会话 `artifacts/` 下的普通文件（跳过目录与符号链接）；目录不存在或没有打开的会话 → 空列表 |
+| `getArtifact` | 读一个产物文件；只允许当前会话 artifacts 目录内的路径 |
+| `setEffort` | 内核模型适配层不发 reasoning effort 参数。回 warn notice，**不发 `state`** —— 假装生效比不支持更糟 |
+| `saveSettings` | 只接 `settings.locale`（en/zh），转调 `setLocale`；其他字段回 warn。不提供万能写配置入口——配置写入口是 `saveProviders`/`saveMcpServer`/`savePermissions`/`saveRunLimits` |
+| `getTree` | 列一层子项（`listDirectory`）。边界＝已登记工作区 ∪ 会话目录 ∪ 会话工作目录，`realpath` 后判定；目录在前、按名排序、跳过符号链接、超 500 项截断。失败先发 warn notice **再**发空 `tree`——空树是释放 `pendingTreeTarget` 的信号，不是「目录是空的」 |
+| `getKb` | 知识库定位 + 树（`dist/server/kb-locate.js`）。根解析优先级：`KB_ROOT` 环境变量 → `$HARNESS_HOME/mcp.json` 里任一 server 的 `env.KB_ROOT` → 仓库默认 `mcp-servers/kb/kb`；`source` 如实回报来自哪一级，`note` 说明选择理由。根不存在时**保留候选路径** + 空树 + `note`（「没找到」≠「是空的」）。`fileCount` 只数 `.md`；`truncated` 表示触顶（深度 8 / 条目 2000 / 文件数 20000），此时 `fileCount` 是「至少 N」而不是精确值。惰性 import：旧 `dist/` 缺该模块时回 warn「请先 npm run build」并回空 `kb`，不崩宿主 |
+| `setWorkspace` | 宿主登记目录后委托给 `setCwd` 的全部语义（运行中拒绝、仅新建会话生效）。登记是进程内的，重启失效 |
+| `searchFiles` | `@` 提及的文件名搜索。内核 `searchFilesByName`（复用 `walkFiles` 的惰性 BFS / 24 项忽略清单 / 跳符号链接），根＝宿主当前 `cwd`。分层排序：基名全等 → 基名前缀 → 基名包含 → 路径包含，层内短路径优先，上限 20 条。回 `file_matches{query, files, truncated, scanned}`，`truncated` 取「命中超上限」与「遍历被预算截停」之或。**目录不在结果里**（walker 只访问文件，D-184）；边界拒绝发 warn notice，但**必回一条带 query 的 `file_matches`** —— 弹窗只在该事件上释放 |
+| `searchSessions` | 按标题/工作目录/id 搜索 |
+| `shutdown` | 宿主退出 |
 
-### 已隐藏（前端不渲染入口，宿主/bridge 回显式 `notice`）
+### 已隐藏（前端不渲染入口，宿主回显式 `notice`）
 
 git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi`）、终端（`terminalOpen`/`terminalRun`/`terminalInterrupt`/`terminalRestart`）、worktree（`worktreeStart`/`worktreeMerge`/`worktreeDiscard`/`worktreeDiff`；**顶栏与面板已在 2026-10-22 整块删除**，用户点它只得到「桌面宿主暂不支持该命令」）、packs（`getPacks`/`installPack`/…）、browser（`browserOpen`/`browserNavigate`/…）、skills / memory / instructions / hooks、subagents、goals、检查点（`getCheckpoints`/`restoreCheckpoint`/`restoreFile`）、压缩（`compact`）、板卡/串口控制（`getBoardState`/`serialOpen`/…）。
 
@@ -77,6 +79,7 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 | `status{usage_missing\|device_status_invalid\|permissions_project_config_skipped}` | `notice` |
 | `interrupted` | `notice{warn}` + `run_end` |
 | `compaction` | `compacted`（microcompact / summary）/ `notice`（failed）。**`no_progress` 与 `no summarizable content` 降级为 dim 提示而不是 warn 失败**：`/compact` 现在一律执行（不再看阈值），小会话上必然撞到这两种「没什么可压」，把它们印成「压缩失败」是误报 |
+| `todos` | `todos{items:[{content,status}]}`（`todo_write` 工具写的计划；渲染器画计划卡并在执行中原地打勾）。`status` 非法时该行按 `pending` 保留文字，坏项丢弃；空数组表示「清空计划」，渲染器据此移除卡片。`session_loaded` 额外带 `todos`（取最后一条 `todos` 事件），否则重开会话时计划卡会消失 |
 | `system` / `user` / `checkpoint` / `tool_call` | 不产出（用户消息在提交时已回显） || 未知类型 | `notice{warn}`（R3，不静默） |
 
 宿主另发：`hello`、`ready`、`state`、`sessions`、`session_loaded`、`session_matches`、`commands`、`setup_checklist`、`settings`、`usage_summary`、`models`、`locale`、`ui_preference`、`tree`、`file_matches`、`export_ready`、`notice`、`error`、`fatal`、`run_start`、`run_end`、`permission_closed`。

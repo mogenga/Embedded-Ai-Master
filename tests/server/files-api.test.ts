@@ -11,13 +11,14 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { HttpError } from "../../src/server/http.js";
+import { HttpError } from "../../src/server/errors.js";
 import {
   __resetWorkspaceRootsForTests,
   listDirectory,
   MAX_DIRECTORY_ENTRIES,
   readFilePreview,
   registerWorkspaceRoot,
+  searchFilesByName,
 } from "../../src/server/files-api.js";
 import { createSessionRunner, RunnerError } from "../../src/server/runner.js";
 import type { SessionRunner } from "../../src/server/runner.js";
@@ -198,6 +199,163 @@ describe("listDirectory", () => {
 
     expect(result.entries.map((entry) => entry.name)).toEqual(["real-dir", "real.txt"]);
     expect(result.truncated).toBe(false);
+  });
+});
+
+describe("searchFilesByName", () => {
+  /** A project tree under the sessions root, so the boundary check passes unaided. */
+  function makeProject(): { home: string; root: string } {
+    const home = makeHome();
+    const root = path.join(home, "sessions", "project");
+    mkdirSync(root, { recursive: true });
+    return { home, root };
+  }
+
+  it("文件名完全相等排在最前，其次是前缀，再其次是包含，最后才是仅路径命中", async () => {
+    const { home, root } = makeProject();
+    // One file per tier, plus a second tier-3 file so the within-tier sort
+    // (shorter path first) is exercised rather than assumed.
+    mkdirSync(path.join(root, "readme-dir"));
+    writeFileSync(path.join(root, "readme"), "x");
+    writeFileSync(path.join(root, "readme.md"), "x");
+    writeFileSync(path.join(root, "x-readme.md"), "x");
+    writeFileSync(path.join(root, "longer-x-readme.md"), "x");
+    writeFileSync(path.join(root, "readme-dir", "notes.md"), "x");
+
+    const result = await searchFilesByName(home, root, "readme");
+
+    expect(result.files.map((file) => file.relative)).toEqual([
+      "readme",
+      "readme.md",
+      "x-readme.md",
+      "longer-x-readme.md",
+      "readme-dir/notes.md",
+    ]);
+    expect(result.query).toBe("readme");
+    expect(result.truncated).toBe(false);
+    expect(result.scanTruncated).toBe(false);
+  });
+
+  it("嵌套路径查询命中子目录里的文件，relatives 用 / 分隔", async () => {
+    const { home, root } = makeProject();
+    mkdirSync(path.join(root, "src", "server"), { recursive: true });
+    writeFileSync(path.join(root, "src", "server", "files-api.ts"), "x");
+    writeFileSync(path.join(root, "src", "loop.ts"), "x");
+
+    const result = await searchFilesByName(home, root, "src/server");
+
+    expect(result.files).toHaveLength(1);
+    const match = result.files[0];
+    expect(match).toBeDefined();
+    expect(match?.relative).toBe("src/server/files-api.ts");
+    expect(match?.name).toBe("files-api.ts");
+    expect(path.isAbsolute(match?.path ?? "")).toBe(true);
+    expect(match?.path).toBe(path.join(realpathSync(root), "src", "server", "files-api.ts"));
+    // POSIX separators on every platform: the renderer splits on "/".
+    expect(match?.relative.includes("\\")).toBe(false);
+  });
+
+  it("大小写不敏感", async () => {
+    const { home, root } = makeProject();
+    writeFileSync(path.join(root, "README.md"), "x");
+
+    const result = await searchFilesByName(home, root, "readme");
+
+    expect(result.files.map((file) => file.name)).toEqual(["README.md"]);
+    expect(result.files[0]?.relative).toBe("README.md");
+  });
+
+  it("空查询不遍历：scanned 为 0", async () => {
+    const { home, root } = makeProject();
+    writeFileSync(path.join(root, "readme.md"), "x");
+
+    for (const query of ["", "   ", undefined, null, 42]) {
+      const result = await searchFilesByName(home, root, query);
+      expect(result.files).toEqual([]);
+      expect(result.scanned).toBe(0);
+      expect(result.truncated).toBe(false);
+      expect(result.scanTruncated).toBe(false);
+    }
+  });
+
+  it("忽略目录（node_modules）不贡献结果", async () => {
+    const { home, root } = makeProject();
+    mkdirSync(path.join(root, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(path.join(root, "node_modules", "pkg", "readme.md"), "x");
+    writeFileSync(path.join(root, "readme.md"), "x");
+
+    const result = await searchFilesByName(home, root, "readme");
+
+    expect(result.files.map((file) => file.relative)).toEqual(["readme.md"]);
+    // Not even visited: the budget is spent on files the user wrote.
+    expect(result.scanned).toBe(1);
+  });
+
+  it("目录本身不返回（遍历器只访问文件）", async () => {
+    const { home, root } = makeProject();
+    mkdirSync(path.join(root, "readme-dir"));
+    writeFileSync(path.join(root, "readme-dir", "inner.md"), "x");
+
+    const result = await searchFilesByName(home, root, "readme");
+
+    expect(result.files.map((file) => file.relative)).toEqual(["readme-dir/inner.md"]);
+  });
+
+  it("越界路径返回 400 invalid_path", async () => {
+    const home = makeHome();
+    const outside = makeTempDir("eam-files-search-outside-");
+    writeFileSync(path.join(outside, "readme.md"), "x");
+
+    const error = await capture(searchFilesByName(home, outside, "readme"));
+
+    expectHttpError(error, 400, "invalid_path");
+  });
+
+  it("超长查询与含 NUL 的查询返回 400 invalid_query", async () => {
+    const { home, root } = makeProject();
+
+    expectHttpError(await capture(searchFilesByName(home, root, "a".repeat(129))), 400, "invalid_query");
+    expectHttpError(await capture(searchFilesByName(home, root, "a\0b")), 400, "invalid_query");
+    // 128 是允许的上限。
+    const atLimit = await searchFilesByName(home, root, "a".repeat(128));
+    expect(atLimit.files).toEqual([]);
+  });
+
+  it("超过 limit 时截断并标记 truncated，返回的是排好序的前 N 个", async () => {
+    const { home, root } = makeProject();
+    for (const name of ["hit-9.md", "hit-1.md", "hit-3.md", "hit-2.md"]) {
+      writeFileSync(path.join(root, name), "x");
+    }
+
+    const result = await searchFilesByName(home, root, "hit", { limit: 2 });
+
+    expect(result.files.map((file) => file.name)).toEqual(["hit-1.md", "hit-2.md"]);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("扫描预算耗尽时置 scanTruncated 而不是把没扫完说成没有", async () => {
+    const { home, root } = makeProject();
+    for (const name of ["a1.txt", "a2.txt", "a3.txt"]) {
+      writeFileSync(path.join(root, name), "x");
+    }
+
+    const result = await searchFilesByName(home, root, "a", { maxScanned: 1 });
+
+    expect(result.files).toHaveLength(1);
+    expect(result.scanTruncated).toBe(true);
+  });
+
+  it("路径不存在返回 404 not_found，指向文件返回 400 not_directory", async () => {
+    const { home, root } = makeProject();
+    const file = path.join(root, "readme.md");
+    writeFileSync(file, "x");
+
+    expectHttpError(
+      await capture(searchFilesByName(home, path.join(root, "nope"), "readme")),
+      404,
+      "not_found",
+    );
+    expectHttpError(await capture(searchFilesByName(home, file, "readme")), 400, "not_directory");
   });
 });
 

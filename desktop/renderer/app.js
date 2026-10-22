@@ -765,9 +765,9 @@ function lastToolRow() {
  *
  * It lives inside the `<pre>` that holds the output, so it opens and closes
  * with the details block instead of floating above a collapsed row. The click
- * asks the host to reveal the path: the renderer cannot open a `file://` URL
- * (Electron blocks it, and in a browser it is meaningless), and a host that
- * has no file manager answers with a notice, which is the honest degradation.
+ * goes through the preload's `revealArtifact`: the renderer cannot open a
+ * `file://` URL itself (Electron blocks it), and a window that has no file
+ * manager answers with a notice, which is the honest degradation.
  */
 function attachArtifactLink(container, artifactPath) {
   // The details arrive after the block is built (and a later `tool_output`
@@ -788,9 +788,9 @@ function attachArtifactLink(container, artifactPath) {
     event.stopPropagation();
     const target = button.dataset.path;
     // The preload is the only route that can actually select the file in a
-    // window. Without it (the browser form) the command goes to the host,
-    // which answers with a notice naming the path: a notice is honest, while
-    // a `file://` anchor would be blocked and look like a broken button.
+    // window. Without it the command goes to the host, which answers with a
+    // notice naming the path: a notice is honest, while a `file://` anchor
+    // would be blocked and look like a broken button.
     if (typeof api.revealArtifact === "function") {
       void api.revealArtifact(target);
       return;
@@ -1231,10 +1231,9 @@ let commandState = null;
  * The host-reported commands with the local catalogue's copy.
  *
  * `state.commands` stays exactly what the host said — that list is the
- * capability boundary (the browser form has no `/compact`) — while the
- * descriptions and the argument hint come from `commands.js` in the language
- * on screen. Merging on read keeps a locale switch from leaving the menu in
- * the previous language.
+ * capability boundary — while the descriptions and the argument hint come
+ * from `commands.js` in the language on screen. Merging on read keeps a
+ * locale switch from leaving the menu in the previous language.
  */
 function commandList() {
   return mergeCommands(state.commands, state.locale);
@@ -3049,10 +3048,19 @@ function handleEvent(message) {
       break;
     }
 
-    case "todos":
+    case "todos": {
+      // `renderPlan` reads `items.length`, so an `undefined` here throws inside
+      // the event loop and the rest of the transcript stops updating. The
+      // protocol layer already guarantees an array, but this switch is a second
+      // entrance: a host that has not been rebuilt may still send a payload
+      // from before that guarantee existed. An empty array is legal —
+      // it is how the model clears the plan, and `renderPlan` removes the card
+      // for it.
+      if (!Array.isArray(message.items)) break;
       renderPlan(message.items);
       scrollToBottom();
       break;
+    }
 
     case "ask_user": {
       // A question from the model, drawn with the same bar the permission
@@ -3392,6 +3400,18 @@ function handleEvent(message) {
         target.appendChild(emptyState);
         emptyState.hidden = false;
       }
+      // The plan is rebuilt from the session, not from the replayed messages:
+      // `messages` only carries chat bubbles. Replayed after the messages so
+      // the card lands below every turn. It goes to the end of the transcript
+      // because `renderPlan` inserts before `state.currentAssistant` when there
+      // is one — and the replay just set that to `null`: the plan belongs to
+      // the whole conversation, not to its last message, so the tail is where
+      // it reads correctly. No call at all for an absent or empty list: the
+      // card was already removed above, and calling with `[]` would only repeat
+      // that removal.
+      if (Array.isArray(message.todos) && message.todos.length > 0) {
+        renderPlan(message.todos);
+      }
       if (message.cwd) {
         state.cwd = message.cwd;
         renderTopbarLocation();
@@ -3545,8 +3565,8 @@ function renderSubagents() {
  * pane whose Start button answers "unsupported". The probe's serial state is
  * visible as a field in the board pane's Device section.
  *
- * `files` is the workspace tree: `getTree` is real in the host and the bridge,
- * and a directory row expands through the same `getTree` the pane's root uses.
+ * `files` is the workspace tree: `getTree` is real in the host, and a
+ * directory row expands through the same `getTree` the pane's root uses.
  */
 const SUPPORTED_PANES = new Set(["board", "file", "files", "artifact"]);
 
@@ -4772,9 +4792,9 @@ function treeRow(node) {
     container.className = "tree-children";
     row.after(container);
     setIcon(row.querySelector(".twisty svg"), "chevron-down");
-    // The target is recorded before the request goes out. The browser bridge
-    // answers a supported command synchronously, so setting this afterwards
-    // delivered the reply into the root of the tree instead of under the row.
+    // The target is recorded before the request goes out, so a reply that
+    // arrives while the row is still being built cannot land in the root of
+    // the tree instead of under it.
     pendingTreeTarget = container;
     api.send({ cmd: "getTree", path: node.path });
   });
@@ -5687,8 +5707,8 @@ function handleImageFiles(files) {
       reader.readAsDataURL(file);
       continue;
     }
-    // Electron exposes the real path on dropped files; plain browser File
-    // objects do not, and there is nothing useful to send without one.
+    // Electron exposes the real path on dropped files, and without one there
+    // is nothing useful to send.
     const path = file.path;
     if (!path) {
       addNotice("warn", t.attachmentUnsupported);
@@ -6348,10 +6368,8 @@ function setWorkspace(path) {
  * Both the top bar's folder button and the sidebar's workspace entry call
  * this one function, so the two paths cannot drift apart:
  * - a picker that throws is not an answer, so it falls through to typing;
- * - Electron returning null means the native dialog was cancelled, which is
- *   not an error to punish with a second prompt;
- * - the browser bridge has no native picker and returns null, so the path is
- *   typed instead.
+ * - the native dialog returning null means it was cancelled, which is not an
+ *   error to punish with a second prompt.
  */
 async function chooseWorkspace() {
   let picked = null;
@@ -6366,15 +6384,14 @@ async function chooseWorkspace() {
     setWorkspace(picked);
     return;
   }
-  // `api.platform` exists only when an Electron preload is in front. There a
-  // null means the user closed the native dialog, and re-asking with a text
-  // box would punish them for cancelling; here the click has already done
+  // A null from the native dialog means the user closed it, and re-asking with
+  // a text box would punish them for cancelling — the click has already done
   // something (a dialog opened and closed).
-  if (api.platform && !pickerFailed) return;
-  // The browser bridge has no native picker and returns null, so the path is
-  // typed instead. `askText`, not `window.prompt`: Electron does not implement
-  // prompt and returns null without drawing anything (see the note on
-  // askText), which would put a dead click back in the desktop window.
+  if (!pickerFailed) return;
+  // Only a picker that never produced an answer lands here. `askText`, not
+  // `window.prompt`: Electron does not implement prompt and returns null
+  // without drawing anything (see the note on askText), which would put a dead
+  // click back in the desktop window.
   const typed = await askText(t.workspacePathPrompt, state.cwd ?? "");
   if (typed) setWorkspace(typed);
 }
@@ -6730,7 +6747,7 @@ $("diff-scope").querySelectorAll("button").forEach((button) => {
 // Windows and Linux draw their caption buttons in the renderer so they match
 // the top bar; macOS keeps its native traffic lights.
 const windowControls = $("window-controls");
-if (api.platform && api.platform !== "darwin") {
+if (api.platform !== "darwin") {
   windowControls.hidden = false;
   document.documentElement.classList.add("custom-caption");
   windowControls.querySelectorAll("[data-window]").forEach((button) => {
@@ -6932,7 +6949,10 @@ function bootStep(name, fn) {
 }
 
 api.onEvent(handleEvent);
-if (api.platform) document.documentElement.classList.add(`platform-${api.platform}`);
+// `platform` comes from the preload (`process.platform`), so this is always a
+// real platform string — the `platform-*` classes key the caption-button and
+// shortcut styling.
+document.documentElement.classList.add(`platform-${api.platform}`);
 bootStep("locale", () => applyLocale(state.locale));
 bootStep("mode", () => setMode(state.mode));
 // Preferences are restored from localStorage so the first paint is already
