@@ -8,6 +8,7 @@ import {
   parseProviders,
   resolveModelRef,
   resolveProviderApiKey,
+  resolveReasoningEffort,
 } from "./config/providers.js";
 import { checkBudgetForModel, checkBudgetTokensForModel } from "./context/budget.js";
 import {
@@ -29,6 +30,7 @@ import type { McpToolAdapterStatus } from "./mcp/tools.js";
 import { heuristicCountTokens } from "./model/count.js";
 import { createOpenAIProvider } from "./model/openai.js";
 import { loadPermissionConfig, parseInlinePermissionConfig } from "./permissions/config.js";
+import type { ReasoningEffort } from "./config/providers.js";
 import type { InlinePermissionConfig, LoadedPermissionConfig } from "./permissions/config.js";
 import { PermissionConfigError } from "./permissions/errors.js";
 import { createPermissionGate } from "./permissions/gate.js";
@@ -64,6 +66,13 @@ export interface RunOptions {
   maxCostUsd?: number;
   cwd?: string;
   timeoutMs?: number;
+  /**
+   * 本次运行的推理强度覆盖；缺省表示用 `providers.json` 里该模型的默认值。
+   *
+   * 显式写成 `undefined` 与不写同义。注意它**不能**表达「不发这个字段而忽略
+   * 模型配置」——那是两回事，目前也没有调用方需要。
+   */
+  reasoningEffort?: ReasoningEffort;
   home?: string;
   onSession?: (session: SessionHandle) => void;
   compaction?: {
@@ -447,11 +456,16 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   // （见 resolveProviderApiKey）。两者都没有时不传 apiKey，适配器就不发
   // Authorization 头。这里拿到的是密钥原文，只能交给适配器，不得记入日志或事件。
   const apiKey = resolveProviderApiKey(provider);
+  // 推理强度：单次覆盖优先，其次是模型配置。两边都没有时是 `undefined`，
+  // 适配器就不发 `reasoning_effort`——不是「发默认值」，而是「不提要求」。
+  // 校验覆盖值的合法性由调用方负责（runner 会在 start 前拒绝），这里只合并。
+  const reasoningEffort = resolveReasoningEffort(model, opts.reasoningEffort);
   const modelProtocol = createOpenAIProvider({
     baseUrl: provider.baseUrl,
     model: modelName,
     fetchImpl: opts.fetchImpl,
     ...(apiKey !== undefined ? { apiKey } : {}),
+    ...(reasoningEffort !== undefined ? { reasoningEffort } : {}),
     ...(provider.requestTimeoutMs !== undefined
       ? { requestTimeoutMs: provider.requestTimeoutMs }
       : {}),

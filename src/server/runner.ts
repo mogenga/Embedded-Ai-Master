@@ -1,8 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { loadProviders, parseProviders, resolveModelRef } from "../config/providers.js";
-import type { ProvidersConfig } from "../config/providers.js";
+import {
+  isReasoningEffort,
+  loadProviders,
+  parseProviders,
+  resolveModelRef,
+  REASONING_EFFORTS,
+  supportsReasoning,
+} from "../config/providers.js";
+import type { ProvidersConfig, ReasoningEffort } from "../config/providers.js";
 import type { PermissionPreset } from "../permissions/types.js";
 import { runSession } from "../index.js";
 import type { RunOptions, RunPermissionOptions } from "../index.js";
@@ -39,6 +46,14 @@ export interface ActionInput {
   timeoutMs?: number;
   /** Replaces the built-in system prompt for this run. */
   systemPrompt?: string;
+  /**
+   * 本次运行的推理强度覆盖；`"auto"` 与缺省同义（用模型配置里的默认值）。
+   *
+   * `auto` 是界面的哨兵值，不是协议取值：协议里只有
+   * `none|minimal|low|medium|high`。把它当字面量发上线会得到一个 400，所以
+   * 这一层就把它转成「没有覆盖」，而不是让它继续往下走。
+   */
+  reasoningEffort?: ReasoningEffort | "auto";
   /** 本次运行的工作目录（新会话写入 header.workdir；续聊时内核以 header 为准）。
    *  必须是已存在的绝对路径目录，否则 RunnerError("invalid_cwd")。 */
   cwd?: string;
@@ -57,6 +72,7 @@ interface RunLimits {
   maxCostUsd?: number;
   timeoutMs?: number;
   systemPrompt?: string;
+  reasoningEffort?: ReasoningEffort;
 }
 
 function readRunLimits(input: ActionInput): RunLimits {
@@ -88,6 +104,19 @@ function readRunLimits(input: ActionInput): RunLimits {
     // An empty string means "use the default", not "send no system prompt":
     // the latter is indistinguishable from a caller who never set one.
     if (input.systemPrompt.trim() !== "") limits.systemPrompt = input.systemPrompt;
+  }
+  if (input.reasoningEffort !== undefined) {
+    // `auto` is the UI's "send nothing" sentinel, not a protocol level. It is
+    // accepted here and then dropped, so the field really is absent downstream
+    // — passing the literal through would send `reasoning_effort: "auto"`.
+    if (input.reasoningEffort === "auto") return limits;
+    if (!isReasoningEffort(input.reasoningEffort)) {
+      throw new RunnerError(
+        "invalid_run_limits",
+        `reasoningEffort 非法: ${JSON.stringify(input.reasoningEffort)}；合法值: auto, ${REASONING_EFFORTS.join(", ")}`,
+      );
+    }
+    limits.reasoningEffort = input.reasoningEffort;
   }
   return limits;
 }
