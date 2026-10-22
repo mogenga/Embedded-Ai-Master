@@ -925,6 +925,38 @@ describe("desktop host", () => {
     expect(models.source).toBe("providers.json");
   }, HOST_TIMEOUT_MS);
 
+  it("同一宿主进程内，会话名在首轮结束后就出现（不缓存空标题）", async () => {
+    // `runner.start()` 在 `onSession` 就返回，此刻 header 已写、**user 事件还没写**。
+    // 宿主紧接着推的 `sessions` 事件读不到标题，旧实现把这个「空」缓存进了
+    // `titleCache`；user 事件几毫秒后落盘，缓存却再也不会失效，侧栏一直显示 UUID
+    // 直到宿主重启。这里在同一个进程里跑完一轮再要列表，标题必须已经出现。
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "prompt", text: "串口没输出" },
+        { cmd: "listSessions" },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "run_end") &&
+          all.filter((event) => event.type === "sessions").length >= 3 &&
+          all.at(-1)?.type === "sessions",
+        timeoutMs: 30_000,
+      },
+    );
+    const rows = events
+      .filter((event) => event.type === "sessions")
+      .flatMap((event) => event.sessions)
+      .filter((row) => row && typeof row.id === "string");
+    const row = rows.at(-1);
+    expect(row).toBeDefined();
+    // 标题取首条 user 事件：不是 id、不是空串。
+    expect(row.title).toBe("串口没输出");
+    expect(row.summary).toBe("串口没输出");
+  }, HOST_TIMEOUT_MS);
+
   it("searchSessions 按标题命中，不只按 id", async () => {
     const home = await tempHome();
     const created = await runHost(

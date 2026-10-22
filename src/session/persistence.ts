@@ -20,6 +20,9 @@ import type { EventType, SessionEvent, SessionHeader } from "./types.js";
 const SESSION_LOG_PATTERN = /^session\.v(\d+)\.jsonl$/;
 const MAX_ARTIFACT_COPY_ATTEMPTS = 1_000;
 
+// 读取时的事件类型白名单,**不是**写盘过滤器:写盘不做类型校验,漏登记一项
+// 不会让写入失败,而是让下一次读盘抛 unknown_event_type——整份日志(包括其中
+// 早先写入的真实工具结果)一起不可用。新增事件类型必须同步加进这里。
 const EVENT_TYPES: Record<EventType, true> = {
   system: true,
   user: true,
@@ -37,6 +40,7 @@ const EVENT_TYPES: Record<EventType, true> = {
   compaction: true,
   permission_decision: true,
   approval_request: true,
+  todos: true,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -77,6 +81,13 @@ export function assertRegularEventFile(file: string): void {
   assertRegularFile(file, "event");
 }
 
+/**
+ * 只读 `header.json` 并校验，**不检查日志文件是否存在**。
+ *
+ * 内部实现：`readSessionDir` / `readSessionSnapshot` 自己会补上「至少要有一个
+ * 日志文件」的判定，那里再查一次只是白跑一遍 readdir。对外只导出
+ * `readSessionHeader`（带日志文件校验的那份），避免两个同名语义混淆。
+ */
 function readHeader(dir: string): SessionHeader {
   const file = path.join(dir, "header.json");
   assertRegularFile(file, "header");
@@ -99,10 +110,6 @@ function readHeader(dir: string): SessionHeader {
   }
 }
 
-export function readSessionHeader(dir: string): SessionHeader {
-  return readHeader(dir);
-}
-
 function parseGeneration(name: string): number | null {
   const match = SESSION_LOG_PATTERN.exec(name);
   if (match === null) return null;
@@ -120,6 +127,44 @@ export function listSessionLogFiles(dir: string): string[] {
     .map((entry) => entry.name);
   for (const name of files) assertRegularFile(path.join(dir, name), "event");
   return files;
+}
+
+function isPermissionError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "EACCES" || code === "EPERM";
+}
+
+function permissionCause(error: unknown): unknown {
+  const cause = (error as { detail?: { cause?: unknown } }).detail?.cause;
+  return cause !== undefined && isPermissionError(cause) ? cause : undefined;
+}
+
+/**
+ * 列表与详情用的 header-only 读取。
+ *
+ * 与内部 `readHeader` 的区别只有一条：**要求至少存在一个日志文件**。一个只剩
+ * `header.json` 的目录（建会话时日志写失败、或日志被外部删掉）读得出 header，
+ * 却一条事件也打不开；把它当正常会话列出来，用户点进去只会看到一个空对话。
+ *
+ * 底层错误会被 `readHeader` 包进 `detail.cause`；权限错误（EACCES/EPERM）在此
+ * 还原成原错误上抛，让调用方能把它归入「不可读」而不是「损坏」（D-070 的既有
+ * 语义：读不到和内容坏掉是两件事，R3）。
+ */
+export function readSessionHeader(dir: string): SessionHeader {
+  let header: SessionHeader;
+  try {
+    header = readHeader(dir);
+  } catch (error) {
+    const cause = permissionCause(error);
+    if (cause !== undefined) throw cause;
+    throw error;
+  }
+  if (listSessionLogFiles(dir).length === 0) {
+    throw new SessionCorruptionError("invalid_header", `Session has no log files: ${dir}`, {
+      dir,
+    });
+  }
+  return header;
 }
 
 // 代文件必须从 v1 连续递增;缺档可能是删除、截断或同步失败,静默接受会破坏审计链(D-048)。

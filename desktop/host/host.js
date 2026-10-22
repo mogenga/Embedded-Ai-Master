@@ -55,10 +55,14 @@ try {
   const [
     { createSessionRunner },
     { createLogTailEventSource },
-    { readSessionDir, readSessionSnapshot },
+    // `readSessionHeader` lives here now: it used to be re-exported by the
+    // HTTP layer's `api.js`, which was deleted with the browser form. The one
+    // that survived is the checked variant (it also insists on at least one
+    // log file), so a session directory with a header but no log reads as
+    // corrupt here rather than as an empty conversation.
+    { readSessionDir, readSessionSnapshot, readSessionHeader },
     { resolveHarnessHome },
     { loadProviders, resolveModelRef },
-    { readSessionHeader },
     { isValidSessionId },
     { readSessionMeta },
     {
@@ -78,7 +82,6 @@ try {
     import(dist("session/persistence.js")),
     import(dist("config/harness-home.js")),
     import(dist("config/providers.js")),
-    import(dist("server/api.js")),
     import(dist("session/handle.js")),
     import(dist("session/metadata.js")),
     import(dist("config/app-config.js")),
@@ -562,20 +565,37 @@ async function settleRoot() {
  * The kernel header has no title field, so the first user message stands in
  * for one. Reading a log per row on every list would stall the sidebar on a
  * large home; the cache makes each session pay that cost once.
+ *
+ * **Only a hit is cached.** A miss means the log has no user event *yet*:
+ * `runner.start()` returns as soon as `onSession` fires — the header is
+ * written, the user event is not — so the `sessions` push that follows every
+ * prompt runs before there is anything to read. Caching that empty answer
+ * froze the row on its UUID for the life of the process: the title arrived
+ * milliseconds later and nothing ever asked again. A session with genuinely
+ * no messages now pays one log read per list push, which is the correct price
+ * for a row that can still change.
  */
 const titleCache = new Map();
 const TITLE_SCAN_LIMIT = 30;
+
+/** Cache key for one session row: a rename or a fork changes `createdAt`. */
+function titleKey(entry) {
+  return `${entry.id}@${entry.createdAt}`;
+}
 
 function titleFor(entry) {
   // A name the operator gave is the title; the first user message is only a
   // stand-in for a session nobody renamed.
   if (typeof entry.title === "string" && entry.title !== "") return entry.title;
-  const key = `${entry.id}@${entry.createdAt}`;
+  const key = titleKey(entry);
   const cached = titleCache.get(key);
   if (cached !== undefined) return cached;
   const title = sessions.titleOf(entry.id);
-  titleCache.set(key, title === entry.id ? "" : title);
-  return title === entry.id ? "" : title;
+  // `titleOf` falls back to the id when the log has no user event; that is a
+  // miss, not a title, and must not be remembered.
+  if (title === entry.id || title === "") return "";
+  titleCache.set(key, title);
+  return title;
 }
 
 /** Rows per page when the renderer does not ask for a specific page size. */
@@ -629,7 +649,10 @@ function sessionsEvent(query = sessionListQuery) {
   const page = filtered.slice(0, limit);
   let scanned = 0;
   const list = page.map((entry) => {
-    const alreadyCached = titleCache.has(`${entry.id}@${entry.createdAt}`);
+    const alreadyCached = titleCache.has(titleKey(entry));
+    // A row with no derived title yet reports `""` rather than its id: the
+    // renderer draws "no messages" for that, where an id reads as a name the
+    // operator gave. It stays out of the cache so the next push can find it.
     const title = alreadyCached || scanned < TITLE_SCAN_LIMIT ? titleFor(entry) : "";
     if (!alreadyCached) scanned += 1;
     return { ...entry, title };
@@ -1271,8 +1294,8 @@ function handleNewSession() {
  * Opening a conversation from the sidebar is a workspace switch: the topbar,
  * the file tree and the preview boundary all describe the project the
  * operator is now looking at, so all three have to follow the header rather
- * than the folder this window happened to boot in. The browser form does the
- * same thing in `bridge.js` (`currentCwd = header.workdir`).
+ * than the folder this window happened to boot in — switching conversations
+ * therefore re-points the topbar's directory at the header's workdir.
  *
  * A workdir that is gone is not adopted — pointing the host at a directory
  * that does not exist would make every later tree request, every new session
@@ -2122,7 +2145,12 @@ const handlers = {
       send({ type: "notice", level: "warn", text: `会话未删除：${messageOf(error)}` });
       return;
     }
-    titleCache.delete(id);
+    // Keys are `id@createdAt`, not the bare id — deleting by id alone left
+    // every entry in place, so a later session reusing the id would have
+    // inherited this one's title.
+    for (const key of [...titleCache.keys()]) {
+      if (key.startsWith(`${id}@`)) titleCache.delete(key);
+    }
     send(sessionsEvent());
   },
 
@@ -2315,7 +2343,7 @@ const handlers = {
    * `/context` is answered by the renderer from the kernel's own measurement,
    * and `/compact` runs the kernel's compaction. A verb with no route behind
    * it would be a menu row that fails on click (R3), so the list is short on
-   * purpose. The browser form reports one fewer — see `bridge.js`.
+   * purpose.
    */
   listCommands() {
     send({
