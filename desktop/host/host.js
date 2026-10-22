@@ -22,6 +22,7 @@ import {
   readdirSync,
   readSync,
   realpathSync,
+  statSync,
 } from "node:fs";
 import path from "node:path";
 import { createInterface } from "node:readline";
@@ -914,9 +915,67 @@ function handleNewSession() {
   lastSessionId = "";
   lastSessionMeasure = {};
   ctx = kernel.protocol.createContext({ cwd });
+  // `cwd` here is the folder the topbar currently names — including one adopted
+  // from a conversation that was just opened. A new session starting where the
+  // topbar points is the intended meaning of that switch.
   send({ type: "session_loaded", messages: [], cwd, mode, effort: "auto" });
   send(stateEvent());
   send(sessionsEvent());
+}
+
+/**
+ * Adopt the working directory a saved conversation was recorded in.
+ *
+ * Opening a conversation from the sidebar is a workspace switch: the topbar,
+ * the file tree and the preview boundary all describe the project the
+ * operator is now looking at, so all three have to follow the header rather
+ * than the folder this window happened to boot in. The browser form does the
+ * same thing in `bridge.js` (`currentCwd = header.workdir`).
+ *
+ * A workdir that is gone is not adopted — pointing the host at a directory
+ * that does not exist would make every later tree request, every new session
+ * and the topbar itself lie. The caller still opens the transcript; this
+ * function only says what it did, and `stateEvent()` then keeps the old cwd.
+ *
+ * Returns the cwd the caller should build its protocol context with.
+ */
+function adoptSessionWorkdir(workdir) {
+  if (typeof workdir !== "string" || workdir.trim() === "") return cwd;
+  const resolved = path.resolve(workdir);
+  // One `stat` rather than `exists` then `stat`: between the two the folder
+  // could vanish, and a `stat` failure already says everything needed. It
+  // follows symlinks on purpose — `registerWorkspaceRoot` does too, so a
+  // project reached through a link is a real directory here as well.
+  let isDirectory = false;
+  let reason = "";
+  try {
+    isDirectory = statSync(resolved).isDirectory();
+    if (!isDirectory) reason = "不是目录";
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : "";
+    // "Gone" and "present but unreadable" are different facts, and the second
+    // one must not be reported as the first.
+    reason = code === "ENOENT" || code === "ENOTDIR"
+      ? "已不存在"
+      : `无法访问（${code === "" ? messageOf(error) : code}）`;
+  }
+  if (!isDirectory) {
+    // R3: a record pointing at a folder that is gone or unreadable is said out
+    // loud instead of being silently swapped for the boot folder.
+    send({
+      type: "notice",
+      level: "warn",
+      text: `会话记录的工作目录${reason}：${resolved}`,
+    });
+    return cwd;
+  }
+  cwd = resolved;
+  // Same registration as `init`/`setCwd`: the folder has to be browsable by
+  // the tree, not merely be where the next session runs. Not awaited — the
+  // transcript replay must not wait on the filesystem — but parked so the
+  // `getTree` that follows the topbar repaint settles it first.
+  pendingRoot = registerRoot(cwd).catch(() => false);
+  return cwd;
 }
 
 async function handleLoadSession(id) {
@@ -938,17 +997,40 @@ async function handleLoadSession(id) {
   }
   sessionId = id;
   running = false;
-  ctx = kernel.protocol.createContext({ sessionId: id, cwd });
+  // Follow the conversation's own project before the context and the `state`
+  // are built: both carry a cwd, and they must describe the same folder as
+  // the `session_loaded` below. Synchronous, so no other command can slip in
+  // between the decision and the events that report it.
+  const sessionCwd = adoptSessionWorkdir(detail.header.workdir);
+  ctx = kernel.protocol.createContext({ sessionId: id, cwd: sessionCwd });
   const lastSeq = detail.events.at(-1)?.seq ?? -1;
   ctx.lastSeq = lastSeq;
   lastSessionId = id;
   lastSessionMeasure = lastMeasure(detail.events);
   send(
     kernel.protocol.sessionLoadedEvent(detail.events, {
-      cwd: detail.header.workdir ?? cwd,
+      // The record's own workdir, even when it no longer exists: the replay is
+      // describing that conversation, and `adoptSessionWorkdir` has already
+      // said why the topbar is not moving there.
+      cwd: detail.header.workdir ?? sessionCwd,
       mode,
     }),
   );
+  // The runner is deliberately not rebuilt here. Rebuilding would discard
+  // state that outlives one conversation, and it is not needed for the cwd:
+  // `handlePrompt` passes the current `cwd` in its start options for every
+  // new session, which overrides the runner's constructor default. So the
+  // folder adopted above is also where the next new conversation runs — the
+  // topbar names that folder, and a new session using anything else would
+  // make the two disagree. A resumed run passes no cwd at all (the kernel
+  // reads the header), so this switch cannot alter an existing conversation's
+  // workdir either.
+  //
+  // Waited for, unlike `init`: `setCwd` does the same, and by the time the
+  // `state` naming this folder reaches the renderer the kernel already knows
+  // the folder is browsable. A failed registration is not fatal — `getTree`
+  // carries the reason.
+  await settleRoot();
   send(stateEvent());
   // No follow: the session is closed, so following would end immediately.
   // The next prompt resumes it and starts a fresh pump.

@@ -75,7 +75,7 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 - **渲染层语言是 JavaScript，不是 TypeScript**：TypeScript 只用于内核 `src/` 与 MCP server。`desktop/renderer/*.js` 是 `.js` 文件，靠 `protocol.d.ts` 提供协议层的类型提示。**这条与 v1.4 相反**。
 - **无 UI 框架、无组件系统**：`app.js`（5853 行）是命令式 DOM 操作（`addUserTurn` / `addAssistantTurn` / `addToolRow` / `attachToolOutput` …），状态在一个 `state` 对象里，没有 `TranscriptView` 那样的纯函数归约层。
 - **样式**：手写 CSS 变量体系，两张表（`styles.css` 5473 行 + `settings.css` 1243 行），无 CSS 预处理器。
-- **Markdown**：零依赖手写渲染器（`markdown.js`），带 `IncrementalRenderer` 增量 diff。
+- **Markdown**：零依赖手写渲染器（`markdown.js`），带 `IncrementalRenderer` 增量 diff。支持的块级语法是围栏代码块、`#`~`######`（降到 h3）、无序/有序列表、`>` 引用、**GFM 最小集表格**（表头 + `:?-{3,}:?` 分隔行；切列走状态机，`\|` 与 code-span 内的 `\|` 不拆列；对齐三态用 `style="text-align"`；短行补空单元、长行截断，保证每行同列数）、**分割线**（`---` / `***` / `___` / `- - -`，仅在段落为空时产出 `<hr>`，所以 `上面一行\n---` 仍是正文——本渲染器没有 setext 标题）。不支持嵌套表格、多行单元格、单元格内的块级语法、setext 标题。表格与 `hr` 的样式在 `styles.css` 的 `.markdown table` / `.markdown hr`。
 - **图标**：内联 SVG sprite（`icons.js`），单一 24×24 网格、`stroke-width: 1.75`。**零 emoji**。
 - **i18n**：`i18n.js`（en 437 键 / zh 438 键）+ `settings-i18n.js`（604 行），中英双语，默认跟随系统语言。
 
@@ -425,7 +425,7 @@ prometheus.expandedProjects  collapsedProjects
 - 用量胶囊点击弹出 `usage-popover`：按输入 / 缓存 / 输出分段的色条 + 分类明细 + 本会话合计。
   > 上下文**占用百分比被隐藏**（`#context-label` 带 `hidden`）：内核只给花费不给占用，编一个百分比就是撒谎（D-165）。
 - 文本域高度 `Math.min(220, scrollHeight)`（`app.js:4454`），无内部滚动条。
-- 附件（图片）、@ 文件提及、斜杠命令、语音、`+` 菜单**均已隐藏**（无后端）。`searchFiles` 仍会发（`app.js:1188`），但返回空匹配且**不刷警告** —— 每按键一次就警告会把整个转录埋掉。
+- 附件（图片）、@ 文件提及、斜杠命令、`+` 菜单**均已隐藏**（无后端）。**语音输入（麦克风）已于 2026-10-22 整块删除**：按钮、`setupVoice`/`stopVoice`、录音动画、`voiceStart`/`voiceStop` 文案与 `#i-mic` 图标都不在了（Web Speech API 在 Electron 里通常不可用，留着一个永不出现的 `hidden` 空壳只是噪音）。`searchFiles` 仍会发（`app.js:1188`），但返回空匹配且**不刷警告** —— 每按键一次就警告会把整个转录埋掉。
 
 ### 7.7 审批条
 

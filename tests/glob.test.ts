@@ -5,8 +5,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { globTool, matchesGlob } from "../src/tools/glob.js";
-import { MAX_SCANNED_FILES, walkFiles } from "../src/tools/fs-walk.js";
+import { isIgnoredDirectory, MAX_SCANNED_FILES, walkFiles } from "../src/tools/fs-walk.js";
 import type { ToolCtx } from "../src/tools/types.js";
+
+const SCAN_HINT =
+  "[the scan stopped before finishing - results are incomplete; narrow it with a subdirectory path or a glob filter]";
 
 vi.mock("node:fs/promises", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs/promises")>();
@@ -174,6 +177,124 @@ describe("matchesGlob", () => {
   });
 });
 
+describe("isIgnoredDirectory 排除清单", () => {
+  it.each([
+    ".git",
+    "node_modules",
+    ".harness",
+    "dist",
+    "coverage",
+    "build",
+    "out",
+    "target",
+    ".pio",
+    ".mypy_cache",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".venv",
+    "venv",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    ".parcel-cache",
+    ".gradle",
+    ".idea",
+    ".svelte-kit",
+  ])("忽略 %s", (name) => {
+    expect(isIgnoredDirectory(name)).toBe(true);
+  });
+
+  it.each(["cmake-build-debug", "cmake-build-release"])("忽略前缀目录 %s", (name) => {
+    expect(isIgnoredDirectory(name)).toBe(true);
+  });
+
+  it.each(["foo.egg-info", "my_pkg.egg-info"])("按后缀忽略 %s", (name) => {
+    expect(isIgnoredDirectory(name)).toBe(true);
+  });
+
+  it.each(["src", ".vscode", "vendor", "docs", "readme", "egg-info"])(
+    "不忽略 %s（排除清单是刻意列举的）",
+    (name) => {
+      expect(isIgnoredDirectory(name)).toBe(false);
+    },
+  );
+
+  it.skipIf(process.platform !== "win32")("win32 新忽略名同样大小写不敏感", () => {
+    expect(isIgnoredDirectory("__PYCACHE__")).toBe(true);
+    expect(isIgnoredDirectory(".MYPY_CACHE")).toBe(true);
+    expect(isIgnoredDirectory("FOO.EGG-INFO")).toBe(true);
+    expect(isIgnoredDirectory(".Vscode")).toBe(false);
+  });
+});
+
+describe("walkFiles 广度优先", () => {
+  it("按层序产出：根文件先于子目录文件，深层最后", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "deep/a/b/leaf.txt");
+    writeAt(workdir, "deep/mid.txt");
+    writeAt(workdir, "root.txt");
+
+    const seen: string[] = [];
+    const outcome = await walkFiles(
+      workdir,
+      workdir,
+      (_absolute, relative) => {
+        seen.push(relative);
+      },
+    );
+
+    expect(outcome.error).toBeUndefined();
+    expect(seen).toEqual(["root.txt", "deep/mid.txt", "deep/a/b/leaf.txt"]);
+  });
+
+  it("预算耗尽时优先覆盖根与浅层文件（问题场景回归）", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "README.md");
+    // 模拟根条目里排在前面的缓存目录;旧实现会先递归进去把预算耗尽。
+    for (let index = 0; index < 20; index++) writeAt(workdir, `.mypy_cache/x/f${index}.json`);
+    writeAt(workdir, "src/app.py");
+    writeAt(workdir, "src/nested/z.py");
+
+    const seen: string[] = [];
+    const outcome = await walkFiles(
+      workdir,
+      workdir,
+      (_absolute, relative) => {
+        seen.push(relative);
+      },
+      2,
+    );
+
+    expect(outcome.error).toBeUndefined();
+    expect(seen).toEqual(["README.md", "src/app.py"]);
+    expect(outcome.state.scanTruncated).toBe(true);
+  });
+
+  it("同一层内按名字排序后入队，readdir 顺序不影响结果", async () => {
+    const workdir = makeWorkdir();
+    const unsorted = [fakeFile("z.txt"), fakeFile("a.txt"), fakeFile("m.txt")];
+    readdirMock.mockImplementation(async (dir) => {
+      if (path.resolve(dir) === path.resolve(workdir)) return unsorted;
+      return [];
+    });
+
+    const seen: string[] = [];
+    const outcome = await walkFiles(
+      workdir,
+      workdir,
+      (_absolute, relative) => {
+        seen.push(relative);
+      },
+    );
+
+    expect(outcome.error).toBeUndefined();
+    expect(seen).toEqual(["a.txt", "m.txt", "z.txt"]);
+  });
+});
+
 describe("glob 执行", () => {
   it("递归结果相对 workdir、POSIX 且按字典序排序", async () => {
     const workdir = makeWorkdir();
@@ -286,7 +407,7 @@ describe("glob 执行", () => {
     expect(r.detail).toMatchObject({ matched: 250, returned: 200, truncated: true });
   });
 
-  it("扫描文件数上限 5000", async () => {
+  it("扫描文件数上限 5000，同时披露结果不完整与收窄建议", async () => {
     const workdir = makeWorkdir();
     const files = Array.from({ length: 5001 }, (_, index) => fakeFile(`f${index}.zzz`));
     readdirMock.mockImplementation(async (dir) => {
@@ -296,9 +417,21 @@ describe("glob 执行", () => {
 
     const r = await run(workdir, { pattern: "*.ts" });
 
-    expect(r.text).toContain("(no matches)");
-    expect(r.text).toContain(`[scan truncated at ${MAX_SCANNED_FILES} files]`);
+    expect(r.text).toBe(
+      ["(no matches)", `[scan truncated at ${MAX_SCANNED_FILES} files]`, SCAN_HINT].join("\n"),
+    );
     expect(r.detail).toMatchObject({ scanned: 5000, scanTruncated: true });
+  });
+
+  it("未截断时不输出收窄建议", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "a.ts");
+
+    const r = await run(workdir, { pattern: "**/*.ts" });
+
+    expect(r.text).toBe("a.ts");
+    expect(r.text).not.toContain(SCAN_HINT);
+    expect(r.detail).toMatchObject({ scanTruncated: false });
   });
 
   it("非法 pattern → invalid_pattern", async () => {

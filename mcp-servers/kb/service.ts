@@ -28,6 +28,8 @@ export interface KbSearchHit {
 export interface KbSearchResult {
   found: boolean
   hits: KbSearchHit[]
+  // 遍历预算被用完时出现；此时 hits 只覆盖已扫描到的文件（R3：不静默）。
+  scanTruncated?: boolean
 }
 
 export interface KbGlobResult {
@@ -35,6 +37,8 @@ export interface KbGlobResult {
   matches: string[]
   count: number
   truncated: boolean
+  // 遍历预算被用完（不是返回条数被截）：count/found 只代表已扫描到的部分。
+  scanTruncated: boolean
 }
 
 export interface KbGrepHit {
@@ -43,11 +47,26 @@ export interface KbGrepHit {
   text: string
 }
 
+export interface KbGrepFileHits {
+  path: string
+  // 该文件的真实命中行数，不随返回条数截断。
+  hits: number
+}
+
 export interface KbGrepResult {
   found: boolean
   hits: KbGrepHit[]
   count: number
   truncated: boolean
+  // 命中集中在几个文件 vs 散落在很多文件——只是线索，不是置信度（D-179 ②）。
+  fileCount: number
+  files: KbGrepFileHits[]
+  scanTruncated: boolean
+}
+
+export interface KbServiceOptions {
+  // 仅供测试注入更小的遍历预算；生产一律用 MAX_WALK_FILES。
+  maxWalkFiles?: number
 }
 
 export interface KbReadOptions {
@@ -74,6 +93,8 @@ export interface KbStatus {
   indexPresent: boolean
   inboxPending: number
   inboxError?: string
+  // 遍历预算被用完时出现；此时 fileCount 是「至少 N」（R3：不静默）。
+  scanTruncated?: boolean
 }
 
 export type KbServiceErrorCode =
@@ -103,6 +124,28 @@ const DEFAULT_SEARCH_LIMIT = 20
 const MAX_GLOB_MATCHES = 100
 const MAX_GREP_HITS = 100
 const GREP_TEXT_LIMIT = 300
+// `files` 只列命中最多的前 10 个文件：模型要的是「集中还是散落」，不是完整清单。
+const MAX_GREP_FILES = 10
+// 单次遍历最多访问的文件数。远大于当前 108 文件语料，只是防止 KB_ROOT 被误指到
+// 大目录时无限递归（旧实现的 walkFiles 既无上限也无忽略目录清单）。
+const MAX_WALK_FILES = 20000
+// 与内核 `src/tools/fs-walk.ts` 的 IGNORED_DIRS 同名子集。这里再写一遍是因为
+// MCP server 不能 import 内核（那会把领域进程绑到平台层构建产物上），理由同 D-086。
+const IGNORED_WALK_DIRS = new Set([
+  '.git',
+  'node_modules',
+  '__pycache__',
+  '.mypy_cache',
+  '.pytest_cache',
+  '.venv',
+  'venv',
+  '.next',
+  '.cache',
+  'dist',
+  'build',
+  'out',
+  'target',
+])
 const DEFAULT_READ_LINES = 2000
 const MAX_READ_LINES = 2000
 const GLOB_META_CHARS = new Set(['.', '+', '^', '$', '{', '}', '(', ')', '|', '[', ']', '\\'])
@@ -414,8 +457,9 @@ function truncateLine(text: string): string {
 export class KbService {
   private readonly root: string
   private readonly rootExists: boolean
+  private readonly maxWalkFiles: number
 
-  constructor(root: string) {
+  constructor(root: string, options: KbServiceOptions = {}) {
     const resolved = path.resolve(root)
     let real = resolved
     try {
@@ -425,6 +469,7 @@ export class KbService {
     }
     this.root = real
     this.rootExists = this.isDirectory(real)
+    this.maxWalkFiles = Math.max(0, Math.trunc(options.maxWalkFiles ?? MAX_WALK_FILES))
   }
 
   get rootPath(): string {
@@ -526,13 +571,14 @@ export class KbService {
   glob(pattern: string): KbGlobResult {
     const matcher = globToRegExp(normalizePattern(pattern))
     if (!this.rootExists) {
-      return { found: false, matches: [], count: 0, truncated: false }
+      return { found: false, matches: [], count: 0, truncated: false, scanTruncated: false }
     }
 
     // 与 grep 同一口径：`count` 是真实总数，但只保留能返回的那几条（D-078）。
     const matches: string[] = []
     let count = 0
-    for (const filePath of this.walkFiles(ALLOWED_EXTENSIONS)) {
+    const walk = this.walkFiles(ALLOWED_EXTENSIONS)
+    for (const filePath of walk.files) {
       const relative = toPosix(path.relative(this.root, filePath))
       if (isNavigationFile(relative)) continue
       if (!matcher.test(relative)) continue
@@ -545,6 +591,7 @@ export class KbService {
       matches,
       count,
       truncated: count > MAX_GLOB_MATCHES,
+      scanTruncated: walk.scanTruncated,
     }
   }
 
@@ -569,9 +616,12 @@ export class KbService {
     // 返回上限就只计数、不再保存文本。否则 `kb_grep(".")` 会把整份语料的每一行
     // 都复制一遍——这就是内核 grep 的 D-078（先收集再截断）。总数照样准确，
     // 因为这里只丢掉了「本来就返回不出去」的部分。
+    // 每个命中文件的计数不受返回上限影响，所以 files[] 报的也是真值。
     const hits: KbGrepHit[] = []
+    const perFile = new Map<string, number>()
     let matched = 0
-    for (const filePath of this.walkFiles(ALLOWED_EXTENSIONS)) {
+    const walk = this.walkFiles(ALLOWED_EXTENSIONS)
+    for (const filePath of walk.files) {
       const relative = toPosix(path.relative(this.root, filePath))
       if (isNavigationFile(relative)) continue
       if (matcher !== undefined && !matcher.test(relative)) continue
@@ -585,6 +635,7 @@ export class KbService {
         continue
       }
 
+      let fileHits = 0
       const lines = content.split(/\r?\n/)
       for (let index = 0; index < lines.length; index += 1) {
         const line = lines[index] ?? ''
@@ -592,9 +643,20 @@ export class KbService {
         if (hits.length < MAX_GREP_HITS) {
           hits.push({ path: relative, line: index + 1, text: truncateLine(line.trim()) })
         }
-        matched += 1
+        fileHits += 1
+      }
+      if (fileHits > 0) {
+        perFile.set(relative, fileHits)
+        matched += fileHits
       }
     }
+
+    // 命中集中在几个文件 vs 散落在很多文件：这是供模型判断的线索，不是置信度。
+    // 不加 score/confidence 之类的字段——未评测的数字会被当成结论（D-179）。
+    const files = [...perFile.entries()]
+      .map(([filePath, fileHits]) => ({ path: filePath, hits: fileHits }))
+      .sort((left, right) => right.hits - left.hits || compareText(left.path, right.path))
+      .slice(0, MAX_GREP_FILES)
 
     // count 报告真实命中总数（可以大于返回条数），truncated 说明 hits 被截断。
     return {
@@ -602,6 +664,9 @@ export class KbService {
       hits,
       count: matched,
       truncated: matched > MAX_GREP_HITS,
+      fileCount: perFile.size,
+      files,
+      scanTruncated: walk.scanTruncated,
     }
   }
 
@@ -609,8 +674,9 @@ export class KbService {
     const needles = tokens.map((token) => token.trim()).filter((token) => token !== '')
     if (!this.rootExists || needles.length === 0) return { found: false, hits: [] }
 
+    const walk = this.walkMarkdown()
     const hits: KbSearchHit[] = []
-    for (const filePath of this.walkMarkdown()) {
+    for (const filePath of walk.files) {
       const base = path.posix.basename(toPosix(filePath))
       if (NAVIGATION_FILES.has(base) || base === INDEX_FILE) continue
 
@@ -645,7 +711,12 @@ export class KbService {
         compareText(left.token, right.token),
     )
 
-    return { found: hits.length > 0, hits: hits.slice(0, Math.max(0, limit)) }
+    const result: KbSearchResult = {
+      found: hits.length > 0,
+      hits: hits.slice(0, Math.max(0, limit)),
+    }
+    if (walk.scanTruncated) result.scanTruncated = true
+    return result
   }
 
   status(): KbStatus {
@@ -675,13 +746,16 @@ export class KbService {
       }
     }
 
+    const walk = this.walkMarkdown()
     return {
       root: this.root,
-      fileCount: this.walkMarkdown().length,
+      // 遍历被截时 fileCount 只是下界，调用方必须读 scanTruncated 才能知道。
+      fileCount: walk.files.length,
       indexEntries,
       indexPresent,
       inboxPending,
       ...(inboxError === undefined ? {} : { inboxError }),
+      ...(walk.scanTruncated ? { scanTruncated: true } : {}),
     }
   }
 
@@ -736,9 +810,12 @@ export class KbService {
     return { absolute: real, relative }
   }
 
-  private walkFiles(extensions?: Set<string>): string[] {
+  private walkFiles(extensions?: Set<string>): { files: string[]; scanTruncated: boolean } {
     const files: string[] = []
+    let scanned = 0
+    let scanTruncated = false
     const visit = (directory: string): void => {
+      if (scanTruncated) return
       let entries
       try {
         entries = readdirSync(directory, { withFileTypes: true })
@@ -747,25 +824,35 @@ export class KbService {
       }
       entries.sort((left, right) => compareText(left.name, right.name))
       for (const entry of entries) {
-        const full = path.join(directory, entry.name)
+        // 与内核 walkFiles 同口径：达到上限后只要还有后续条目就标记截断。
+        // 不能悄悄少扫几个文件还说「没有更多」——那是 R3 意义上的不诚实。
+        if (scanned >= this.maxWalkFiles) {
+          scanTruncated = true
+          return
+        }
         if (entry.isDirectory()) {
-          visit(full)
+          // 目录名按小写比较：Windows 上 Node_Modules 与 node_modules 是同一个目录。
+          if (IGNORED_WALK_DIRS.has(entry.name.toLowerCase())) continue
+          visit(path.join(directory, entry.name))
           continue
         }
         if (!entry.isFile()) continue
+        // 计数按**访问过的文件**算，不按扩展名过滤：目录里堆满 .txt 时遍历成本
+        // 一样高，预算必须覆盖它，否则上限挡不住任何真实的大目录。
+        scanned += 1
         if (extensions === undefined) {
-          files.push(full)
+          files.push(path.join(directory, entry.name))
           continue
         }
         const extension = path.posix.extname(entry.name).toLowerCase()
-        if (extensions.has(extension)) files.push(full)
+        if (extensions.has(extension)) files.push(path.join(directory, entry.name))
       }
     }
     visit(this.root)
-    return files
+    return { files, scanTruncated }
   }
 
-  private walkMarkdown(): string[] {
+  private walkMarkdown(): { files: string[]; scanTruncated: boolean } {
     return this.walkFiles(new Set(['.md']))
   }
 

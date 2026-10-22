@@ -31,6 +31,8 @@ const passthroughStat = statMock.getMockImplementation();
 const tempDirs: string[] = [];
 const signal = new AbortController().signal;
 const MIB = 1024 * 1024;
+const SCAN_HINT =
+  "[the scan stopped before finishing - results are incomplete; narrow it with a subdirectory path or a glob filter]";
 
 function makeWorkdir(): string {
   const dir = mkdtempSync(path.join(tmpdir(), "eam-grep-"));
@@ -253,7 +255,7 @@ describe("grep 执行", () => {
     expect(r.detail).toMatchObject({ matched: 0, skippedLongLines: 1 });
   });
 
-  it("扫描 5001 个文件时追加 scan truncated 披露", async () => {
+  it("扫描 5001 个文件时追加 scan truncated 披露与收窄建议", async () => {
     const workdir = makeWorkdir();
     const files = Array.from({ length: 5001 }, (_, index) => fakeFile(`f${index}.txt`));
     readdirMock.mockImplementation(async (dir) => {
@@ -271,8 +273,54 @@ describe("grep 执行", () => {
     const r = await run(workdir, { pattern: "needle" });
 
     expect(r.isError).toBe(false);
-    expect(r.text).toBe("(no matches)\n[scan truncated at 5000 files]");
+    expect(r.text).toBe(["(no matches)", "[scan truncated at 5000 files]", SCAN_HINT].join("\n"));
     expect(r.detail).toMatchObject({ scanned: 5000, scanTruncated: true });
+  });
+
+  it("未截断时不输出收窄建议", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "a.txt", "needle\n");
+
+    const r = await run(workdir, { pattern: "needle" });
+
+    expect(r.text).toBe("a.txt:1:needle");
+    expect(r.text).not.toContain(SCAN_HINT);
+    expect(r.detail).toMatchObject({ scanTruncated: false });
+  });
+
+  it("深层缓存目录不挤占扫描预算，根文件仍被搜到", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "README.md", "needle\n");
+    for (let index = 0; index < 40; index++) {
+      writeAt(workdir, `.mypy_cache/x/f${index}.json`, "needle\n");
+    }
+
+    const r = await run(workdir, { pattern: "needle" });
+
+    expect(r.text).toBe("README.md:1:needle");
+  });
+
+  it("readdir 返回顺序不影响输出排序与截断", async () => {
+    const workdir = makeWorkdir();
+    writeAt(workdir, "b.txt", "hit\n");
+    writeAt(workdir, "a.txt", "hit\n");
+    const shuffled = [fakeFile("b.txt"), fakeFile("a.txt")];
+    readdirMock.mockImplementation(async (dir) => {
+      if (path.resolve(dir) === path.resolve(workdir)) return shuffled;
+      return [];
+    });
+    statMock.mockImplementation(async (target) => {
+      if (path.resolve(target) === path.resolve(workdir)) {
+        return ({ isDirectory: () => true } as Stats);
+      }
+      return ({ isFile: () => true, size: 4 } as Stats);
+    });
+    readFileMock.mockImplementation(async () => Buffer.from("hit\n"));
+
+    const r = await run(workdir, { pattern: "hit", maxResults: 1 });
+
+    expect(r.text).toBe("a.txt:1:hit\n[truncated]");
+    expect(r.detail).toMatchObject({ matched: 2, returned: 1, truncated: true });
   });
 
   it("不可读文件跳过并披露", async () => {

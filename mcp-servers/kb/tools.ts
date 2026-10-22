@@ -153,7 +153,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const glob: KbToolSpec = {
     name: 'kb_glob',
     description:
-      '按通配符列出知识库中的文件路径（相对知识库根，如 protocols/**/*.md）。支持 *（不跨目录）、**（跨目录）、?（单个字符）；已排除导航文件与 index.yaml，最多返回 100 条。无命中时返回 found=false、matches=[]，必须如实告知用户，不得编造路径。truncated: true 表示还有更多匹配，应收窄 pattern。',
+      '按通配符列出知识库中的文件路径（相对知识库根，如 protocols/**/*.md）。支持 *（不跨目录）、**（跨目录）、?（单个字符）；已排除导航文件、index.yaml 与缓存目录，最多返回 100 条。命中只是候选，断言前必须 kb_read 原文确认；无命中时返回 found=false、matches=[]，必须如实告知用户，不得编造路径。truncated: true 表示返回条数被截，应收窄 pattern；scanTruncated: true 表示扫描中途停止，未命中不等于不存在，应缩小范围重试。',
     inputSchema: globSchema,
     annotations: { readOnlyHint: true },
     handler: withSchema(globSchema, async (args) => {
@@ -169,7 +169,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const grep: KbToolSpec = {
     name: 'kb_grep',
     description:
-      '按正则（大小写不敏感）逐行检索知识库正文，返回命中行（path/line/text，line 为 1-based，text 截断到 300 字符）。可选 glob 限定文件（如 **/*.md）；已排除导航文件与 index.yaml；最多返回 100 条。无命中时返回 found=false、hits=[]，必须如实告知用户，不得编造。truncated: true 表示命中超过 100 条，应收窄正则。',
+      '按正则（大小写不敏感）逐行检索知识库正文，返回命中行（path/line/text，line 为 1-based，text 截断到 300 字符）。可选 glob 限定文件（如 **/*.md）；已排除导航文件、index.yaml 与缓存目录；最多返回 100 条。命中只是候选，断言知识库里有该结论前必须 kb_read 原文确认。fileCount 与 files（命中最多的前 10 个文件）只用来看命中集中还是散落：散落在很多文件各 1 行通常意味着该查询不属于知识库，但它不是置信度。无命中时 found=false、hits=[]，必须如实告知，不得编造。truncated: true 表示返回条数被截，应收窄正则；scanTruncated: true 表示扫描中途停止，未命中不等于不存在，应缩小范围重试。',
     inputSchema: grepSchema,
     annotations: { readOnlyHint: true },
     handler: withSchema(grepSchema, async (args) => {
@@ -185,7 +185,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const search: KbToolSpec = {
     name: 'kb_search',
     description:
-      '按关键词或十六进制 token 在知识库中逐行检索，返回命中行及上下文。字面多 token 检索，不支持正则；需要正则时用 kb_grep。无命中时返回 found=false，必须如实告知用户，不得编造。',
+      '按关键词或十六进制 token 在知识库中逐行检索，返回命中行及上下文。字面多 token 检索，不支持正则；需要正则时用 kb_grep。无命中时返回 found=false，必须如实告知用户，不得编造。scanTruncated: true 表示遍历被截，命中只覆盖已扫描部分，未命中不等于不存在。',
     inputSchema: searchSchema,
     annotations: { readOnlyHint: true },
     handler: withSchema(searchSchema, async (args) => {
@@ -198,7 +198,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const status: KbToolSpec = {
     name: 'kb_status',
     description:
-      '查看知识库根路径、markdown 文件数、索引条目数、待审提案数与索引是否存在。索引缺失时返回 indexPresent=false；索引损坏时返回 index_invalid；inbox 读取失败时返回 inboxError。',
+      '查看知识库根路径、markdown 文件数、索引条目数、待审提案数与索引是否存在。索引缺失时返回 indexPresent=false；索引损坏时返回 index_invalid；inbox 读取失败时返回 inboxError。scanTruncated: true 表示文件遍历被预算截停，此时 fileCount 只是下界。',
     annotations: { readOnlyHint: true },
     handler: async () => {
       try {

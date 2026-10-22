@@ -125,9 +125,11 @@ docs/             设计、计划与已知问题
 
 - `glob`：`pattern` 匹配**相对工具根**的 POSIX 路径（不是 `path` 根）；`*` 不跨 `/`、`?` 匹配单字符、`**/` 匹配任意层目录、段尾 `**` 匹配剩余路径，其余字符按字面量；反斜杠按 `/` 处理；大小写敏感。pattern 长度 ≤256、段数 ≤64，连续 `**/` 会折叠；超限视为非法。返回字典序路径，最多 200 条，超出 `[truncated]`；扫描上限 5000 个文件，超出 `[scan truncated at 5000 files]`。
 - `grep`：`pattern` 为正则（`ignoreCase` 可选），可加 `glob` 过滤、`maxResults`（1–1000，默认 200）；`glob` 非法（空 / NUL / 超长 / 超段数）→ `invalid_pattern`，不静默无匹配。输出 `<相对路径>:<行号>:<文本>`，按路径与行号排序，超出 `[truncated]`。扫描达到 5000 个文件时追加 `[scan truncated at 5000 files]`；单行超过 1 MiB 时跳过并追加 `[skipped N lines longer than 1 MiB]`。
-- 两者都只遍历工具根内：跳过 `.git`、`node_modules`、`.harness`、`dist`、`coverage`、`build`、`out`、`target`、`.pio`、`cmake-build-*`；遍历中遇到的 symlink 文件 / 目录都不跟随（显式 `path` 根为 symlink 时仍会跟随，D-079）。
+- 两者都只遍历工具根内：跳过 `.git`、`node_modules`、`.harness`、`dist`、`coverage`、`build`、`out`、`target`、`.pio`、`cmake-build-*`，以及语言/工具链缓存与虚拟环境（`.mypy_cache`、`__pycache__`、`.pytest_cache`、`.ruff_cache`、`.tox`、`.venv`、`venv`、`.next`、`.nuxt`、`.turbo`、`.cache`、`.parcel-cache`、`.gradle`、`.idea`、`.svelte-kit`、`*.egg-info`）。`.vscode` 与 `vendor` **不**跳过（可能是用户自己的配置与源码）；遍历中遇到的 symlink 文件 / 目录都不跟随（显式 `path` 根为 symlink 时仍会跟随，D-079）。
+- **遍历是广度优先（层序），同一层内按名字排序。** 5000 个文件的预算耗尽时，先被覆盖的是根目录与浅层文件。旧实现是深度优先且 `readdir` 未排序，根条目里靠前的 `.mypy_cache` 之类会先被递归进去吃光预算，根目录的 `README.md` 根本没被访问到——`glob "**/README.md"` 会返回 `(no matches)` 加一行扫描截断，看起来像「项目里没有这个文件」。截断时会额外追加一行 `[the scan stopped before finishing - results are incomplete; narrow it with a subdirectory path or a glob filter]`，明确「结果不完整」并给出收窄做法。
+- 忽略清单是**列举式**的：新出现的缓存目录不会自动被跳过，需要显式加入 `IGNORED_DIRS`。`IGNORED_DIR_SUFFIXES`（`.egg-info`）按后缀匹配目录名。
 - `grep` 只读 ≤2 MiB 的文件，含 NUL 视为二进制；跳过项分别计数并披露为 `[skipped N entries (X files, Y unreadable directories)]`，`detail.skipped` 区分 `binary` / `tooLarge` / `unreadableFiles` / `unreadableDirectories`，不列具体路径（D-084 仍跟踪路径披露）。
-- 两者都响应 `AbortSignal`：`walkFiles` 在每个条目/递归前检查，`grep` 在文件读取前与每 256 行检查，取消返回 `aborted`。`grep` 先收集全部命中再截断，命中集很大时内存占用随结果增长（D-078）；`grep` 正则同步执行，ReDoS 不可中断（D-085），glob 编译仍有回溯风险（D-086）。
+- 两者都响应 `AbortSignal`：`walkFiles` 在每个条目/递归/访问前检查，`grep` 在文件读取前与每 256 行检查，取消返回 `aborted`。`grep` 先收集全部命中再截断，命中集很大时内存占用随结果增长（D-078）；`grep` 正则同步执行，ReDoS 不可中断（D-085），glob 编译仍有回溯风险（D-086）。
 
 ## MCP 客户端
 
@@ -213,14 +215,14 @@ OpenOCD 后端本轮只做“连接已运行的 OpenOCD telnet”，`attach` 不
 | 工具 | 形态 | 说明 |
 |---|---|---|
 | `kb_lookup` | 索引首跳 | 关键词打分；可能漏召回，未命中应继续用 `kb_grep` / `kb_glob`，不要断言 KB 没有相关内容 |
-| `kb_glob` | agentic | 按 `*` / `**` / `?` 通配符列路径，最多 100 条 |
-| `kb_grep` | agentic | 逐行正则（大小写不敏感），可用 `glob` 限定文件，最多 100 条、命中行截断到 300 字符 |
+| `kb_glob` | agentic | 按 `*` / `**` / `?` 通配符列路径，最多 100 条；`scanTruncated: true` 表示遍历被预算截停，未命中不等于不存在 |
+| `kb_grep` | agentic | 逐行正则（大小写不敏感），可用 `glob` 限定文件，最多 100 条、命中行截断到 300 字符；`fileCount` + `files`（命中最多的前 10 个文件）显示命中是集中还是散落——**是线索，不是置信度** |
 | `kb_read` | agentic | 读文件，`offset`（0-based）/`limit`（默认且上限 2000 行）分页；`truncated: true` 表示需续读 |
 | `kb_search` | 字面检索 | 多 token 字面行检索，不支持正则 |
 | `kb_status` | 只读 | 根路径、文件数、索引条目、待审数 |
 | `kb_propose` | 写入 | 只追加 `_inbox.md`，未审内容不参与检索，必须人工审核后合并 |
 
-除 `kb_propose` 外全部只读，`kb_read` 标记为 evidence。`kb_glob` / `kb_grep` 与 `kb_search` 一样排除 `_inbox.md`、`_about.md` 与 `index.yaml`，并拒绝绝对路径与 `..` 越界。
+除 `kb_propose` 外全部只读，`kb_read` 标记为 evidence。`kb_glob` / `kb_grep` 与 `kb_search` 一样排除 `_inbox.md`、`_about.md` 与 `index.yaml`，并拒绝绝对路径与 `..` 越界；遍历另跳过 `.git`、`node_modules`、`__pycache__`、`.mypy_cache`、`.pytest_cache`、`.venv`、`venv`、`.next`、`.cache`、`dist`、`build`、`out`、`target`（KB_ROOT 被误指向大目录时不至于无限遍历），单次遍历上限 20000 个文件，触顶时 `scanTruncated: true` 且 `count` / `found` 只代表已扫描部分。
 
 **部署形态是 lookup 首跳 + glob/grep/read 的 agentic 循环，不等同于对照实验里被测量的方案 B**（B 的工具面没有 `kb_lookup`）。实验里 B 的 Recall@2 0.925 不能当作本部署的成绩；B 的 H7（KB 外查询拒答）在实验中也未评估（见 `experiments/rag-vs-agentic-search/docs/experiment-report.md` §5 与 `docs/rag-vs-agentic-search-todo.md` §7.4），这个缺口仍在。详见 `mcp-servers/kb/README.md`。先构建再配置：
 

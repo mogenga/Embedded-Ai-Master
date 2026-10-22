@@ -82,7 +82,7 @@ const state = {
   changedFiles: [],
   changes: { files: [], additions: 0, deletions: 0 },
   checkpoints: [],
-  /** True when the last rewind can be put back. */
+  /** True when the last checkpoint restore can itself be undone. */
   checkpointRedo: false,
   selectedChange: null,
   selectedFile: null,
@@ -230,8 +230,6 @@ function applyLocale(locale, { announce = false } = {}) {
   // name — the fallback is then the right answer.
   if (state.models.length > 0) renderModels(state.models, state.model, state.modelsSource, state.modelsError);
   else modelPicker.title = t.refreshModels;
-  // applyLocale also runs during startup, before the voice state is declared.
-  $("voice-button").title = $("voice-button").classList.contains("recording") ? t.voiceStop : t.voiceStart;
   // The session list is built from `t` when it renders, so a language change
   // has to rebuild it. An empty workspace still draws a row (its folder and a
   // "no conversations yet" hint), which means "sessions exist" is no longer the
@@ -445,27 +443,6 @@ function addUserTurn(text, imageCount = 0) {
   );
   node.dataset.queued = queued ? "1" : "";
   return node;
-}
-
-/** Offer "rewind to here" on a user turn once the conversation moved past it. */
-function attachRewind(node, index) {
-  if (!node || !Number.isFinite(index)) return;
-  node.dataset.index = String(index);
-  if (node.querySelector(".rewind-button")) return;
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "rewind-button";
-  button.dataset.i18n = "rewindHere";
-  button.textContent = t.rewindHere;
-  button.title = t.rewindTitle;
-  button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    void confirmAction(t.rewindConfirm, { danger: true }).then((yes) => {
-      if (!yes) return;
-      api.send({ cmd: "rewindTo", index });
-    });
-  });
-  node.appendChild(button);
 }
 
 function markQueuedDelivered() {
@@ -1780,7 +1757,7 @@ function renderModels(models, current, source, error) {
     // Nothing to show: the label must still leave the loading state, or the
     // chip spins forever on a misconfigured endpoint. The key goes *on* here
     // rather than off: this text is dictionary text, so a later language
-    // switch must rewrite it — and rewinding to `loadingModels` would put the
+    // switch must rewrite it — and going back to `loadingModels` would put the
     // spinner back on a chip that has already given up.
     modelLabel.textContent = t.modelsUnavailable;
     modelLabel.setAttribute("data-i18n", "modelsUnavailable");
@@ -3085,8 +3062,7 @@ function handleEvent(message) {
       state.progress = null;
       for (const item of message.messages || []) {
         if (item.role === "user") {
-          const node = addUserTurn(item.text, item.images ?? 0);
-          attachRewind(node, item.index);
+          addUserTurn(item.text, item.images ?? 0);
         }
         else if (item.role === "assistant") {
           const node = addNode(`<div class="turn assistant"><div class="markdown">${md(item.text)}</div></div>`);
@@ -4434,7 +4410,7 @@ function renderCheckpoints() {
   checkpointList.appendChild(restoreAll);
 
   // History grouped by the turn that produced the change. A flat list of
-  // paths lost the "what happened when" that makes a rewind decision possible.
+  // paths lost the "what happened when" that makes a restore decision possible.
   let lastIndex = null;
   for (const entry of [...entries].reverse()) {
     if (entry.messageIndex !== undefined && entry.messageIndex !== lastIndex) {
@@ -4544,71 +4520,6 @@ function renderFilePreview(file) {
       return `<div class="file-line">${gutter}<span class="diff-text">${escapeHtml(line)}</span></div>`;
     })
     .join("")}</pre>`;
-}
-
-/* ---------- voice input ---------- */
-
-/**
- * Dictation uses the Web Speech API. It is only present when Electron was built
- * with speech support and the OS exposes a recognizer, so the button stays
- * hidden when unavailable instead of failing on click.
- */
-const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-let recognition = null;
-let voiceBase = "";
-
-function setupVoice() {
-  if (!SpeechRecognition) return;
-  $("voice-button").hidden = false;
-  $("voice-button").addEventListener("click", () => {
-    if (recognition) {
-      recognition.stop();
-      return;
-    }
-    recognition = new SpeechRecognition();
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    recognition.lang = state.locale === "zh" ? "zh-CN" : "en-US";
-    voiceBase = input.value ? `${input.value} ` : "";
-
-    recognition.onresult = (event) => {
-      let final = "";
-      let interim = "";
-      for (let i = event.resultIndex; i < event.results.length; i++) {
-        const result = event.results[i];
-        if (result.isFinal) final += result[0].transcript;
-        else interim += result[0].transcript;
-      }
-      if (final) {
-        voiceBase += final;
-      }
-      input.value = `${voiceBase}${interim}`;
-      autoSize();
-    };
-    recognition.onerror = () => stopVoice();
-    recognition.onend = () => stopVoice();
-    $("voice-button").classList.add("recording");
-    $("voice-button").title = t.voiceStop;
-    try {
-      recognition.start();
-    } catch {
-      stopVoice();
-    }
-  });
-}
-
-function stopVoice() {
-  if (recognition) {
-    try {
-      recognition.stop();
-    } catch {
-      /* already stopped */
-    }
-    recognition = null;
-  }
-  voiceBase = "";
-  $("voice-button").classList.remove("recording");
-  $("voice-button").title = t.voiceStart;
 }
 
 /* ---------- browser pane ---------- */
@@ -6784,7 +6695,6 @@ bootStep("codeFont", () => {
   const saved = localStorage.getItem("prometheus.codeFont");
   if (saved) applyCodeFont(saved);
 });
-setupVoice();
 void refreshVersion();
 // An update that exists should be visible without opening About. The check is
 // the same one the About page runs and does nothing when no feed is

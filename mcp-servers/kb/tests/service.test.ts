@@ -87,6 +87,24 @@ function errorOf(run: () => unknown): KbServiceError | undefined {
   return undefined
 }
 
+// 独立的临时 KB 根：共享 fixture 里已有 7 个 markdown，任何小上限都会先把它们
+// 数满，测不出「上限恰好等于文件数」这类边界。
+function withIsolatedKb(
+  fileCount: number,
+  run: (root: string) => void,
+  content = '# x\n',
+): void {
+  const isolated = mkdtempSync(path.join(tmpdir(), 'kb-scan-'))
+  try {
+    for (let index = 0; index < fileCount; index += 1) {
+      writeFixture(isolated, `f-${index}.md`, content)
+    }
+    run(isolated)
+  } finally {
+    rmSync(isolated, { recursive: true, force: true })
+  }
+}
+
 describe('KbService', () => {
   let root: string
   let service: KbService
@@ -403,11 +421,14 @@ describe('KbService', () => {
     it('protocols/**/*.md 命中嵌套文件，*.md 只命中根层', () => {
       writeFixture(root, 'overview.md', '# 概览\n')
 
+      // scanTruncated 是本轮新增字段（D-179 ②），不是行为变化：
+      // 遍历未触顶时为 false，与旧断言等价。
       expect(service.glob('protocols/**/*.md')).toEqual({
         found: true,
         matches: ['protocols/uart/garbled-data.md', 'protocols/uart/no-output.md'],
         count: 2,
         truncated: false,
+        scanTruncated: false,
       })
       expect(service.glob('*.md').matches).toEqual(['big.md', 'overview.md'])
       expect(service.glob('**/*.md').matches).toContain('protocols/uart/no-output.md')
@@ -444,6 +465,7 @@ describe('KbService', () => {
         matches: [],
         count: 0,
         truncated: false,
+        scanTruncated: false,
       })
     })
 
@@ -458,6 +480,59 @@ describe('KbService', () => {
       expect(result.count).toBe(150)
       expect(result.truncated).toBe(true)
       expect(result.found).toBe(true)
+      expect(result.scanTruncated).toBe(false)
+    })
+
+    it('遍历触顶时 scanTruncated 为 true，truncated 仍只表示返回条数被截', () => {
+      // 上限做成可注入：只为测试用 3 个文件的小上限，不真造 20001 个文件。
+      withIsolatedKb(
+        5,
+        (isolatedRoot) => {
+          const limited = new KbService(isolatedRoot, { maxWalkFiles: 3 })
+          const result = limited.glob('**/*.md')
+
+          expect(result.scanTruncated).toBe(true)
+          // 已扫描部分仍按名字序返回，且 count 只报已扫描到的。
+          expect(result.matches).toEqual(['f-0.md', 'f-1.md', 'f-2.md'])
+          expect(result.count).toBe(3)
+          // 返回条数没被截：truncated 与 scanTruncated 是两个独立信号。
+          expect(result.truncated).toBe(false)
+        },
+      )
+    })
+
+    it('上限恰好等于文件数时不标记截断', () => {
+      withIsolatedKb(
+        3,
+        (isolatedRoot) => {
+          const exact = new KbService(isolatedRoot, { maxWalkFiles: 3 })
+
+          const result = exact.glob('**/*.md')
+
+          expect(result.matches).toHaveLength(3)
+          expect(result.scanTruncated).toBe(false)
+        },
+      )
+    })
+
+    it('忽略 .git / node_modules 等缓存目录，不访问其内容', () => {
+      for (const dir of ['.git', 'node_modules', 'dist', '__pycache__']) {
+        writeFixture(root, `${dir}/secret.md`, 'UART 不该被检索到\n')
+      }
+      writeFixture(root, 'src/keep.md', 'UART 保留\n')
+
+      const matches = service.glob('**/*.md').matches
+      expect(matches).toContain('src/keep.md')
+      expect(matches.some((item) => item.includes('secret'))).toBe(false)
+
+      const paths = new Set(service.grep('UART 不该').hits.map((hit) => hit.path))
+      expect(paths.size).toBe(0)
+    })
+
+    it('目录名按小写比较，Node_Modules 同样被忽略', () => {
+      writeFixture(root, 'Node_Modules/secret.md', 'UART 不该被检索到\n')
+
+      expect(service.glob('**/*.md').matches.some((item) => item.includes('secret'))).toBe(false)
     })
 
     it('拒绝绝对路径与 .. 段，不越出知识库根', () => {
@@ -501,6 +576,10 @@ describe('KbService', () => {
       ])
       expect(result.count).toBe(1)
       expect(result.truncated).toBe(false)
+      // fileCount / files / scanTruncated 是本轮新增字段（D-179 ②）。
+      expect(result.fileCount).toBe(1)
+      expect(result.files).toEqual([{ path: 'protocols/uart/no-output.md', hits: 1 }])
+      expect(result.scanTruncated).toBe(false)
     })
 
     it('正则语法生效，非法正则抛 invalid_regex 且带原因', () => {
@@ -527,7 +606,15 @@ describe('KbService', () => {
       const limited = service.grep('UART', 'system/*.md')
 
       expect(all.found).toBe(true)
-      expect(limited).toEqual({ found: false, hits: [], count: 0, truncated: false })
+      expect(limited).toEqual({
+        found: false,
+        hits: [],
+        count: 0,
+        truncated: false,
+        fileCount: 0,
+        files: [],
+        scanTruncated: false,
+      })
       expect(service.grep('优化', 'system/*.md').hits).toEqual([
         { path: 'system/toolchain.md', line: 2, text: '链接脚本与优化' },
       ])
@@ -542,7 +629,7 @@ describe('KbService', () => {
       expect(hit?.text.startsWith('UART ')).toBe(true)
     })
 
-    it('超过 100 条时截断并标记 truncated，count 为实际命中总数', () => {
+    it('超过 100 条时截断并标记 truncated，count 与 files[].hits 仍是真实总数', () => {
       const lines = Array.from({ length: 150 }, (_, i) => `needle ${i}`)
       writeFixture(root, 'bulk/hits.md', `${lines.join('\n')}\n`)
 
@@ -554,15 +641,97 @@ describe('KbService', () => {
       expect(result.truncated).toBe(true)
       expect(result.hits[0]).toEqual({ path: 'bulk/hits.md', line: 1, text: 'needle 0' })
       expect(result.hits[99]?.line).toBe(100)
+      // 返回条数被截断不影响文件级统计：files[].hits 是真值，不是前 100 条里的计数。
+      expect(result.fileCount).toBe(1)
+      expect(result.files).toEqual([{ path: 'bulk/hits.md', hits: 150 }])
     })
 
-    it('无命中返回 found: false', () => {
+    it('fileCount 与 files 报出命中集中在几个文件（D-179 ②）', () => {
+      writeFixture(root, 'signal/dense.md', 'topic alpha\nplain\ntopic alpha\ntopic alpha\n')
+      writeFixture(root, 'signal/sparse-a.md', 'topic alpha\n')
+      writeFixture(root, 'signal/sparse-b.md', 'topic alpha\n')
+
+      const result = service.grep('topic alpha')
+
+      expect(result.count).toBe(5)
+      expect(result.fileCount).toBe(3)
+      // 按 hits 降序，同数按 path 升序：dense 在前，两个 1 行的按字典序。
+      expect(result.files).toEqual([
+        { path: 'signal/dense.md', hits: 3 },
+        { path: 'signal/sparse-a.md', hits: 1 },
+        { path: 'signal/sparse-b.md', hits: 1 },
+      ])
+      // 与 count 一致：sum(files[].hits) === count（未超过 10 个文件时）。
+      expect(result.files.reduce((sum, file) => sum + file.hits, 0)).toBe(result.count)
+    })
+
+    it('files 只保留命中最多的前 10 个文件，fileCount 仍是全部命中文件数', () => {
+      for (let index = 0; index < 12; index += 1) {
+        const repeats = (index % 3) + 1
+        const body = Array.from({ length: repeats }, () => 'topic beta').join('\n')
+        writeFixture(root, `many/f-${String(index).padStart(2, '0')}.md`, `${body}\n`)
+      }
+
+      const result = service.grep('topic beta')
+
+      expect(result.fileCount).toBe(12)
+      expect(result.files).toHaveLength(10)
+      expect(result.count).toBe(24)
+      expect(result.files[0]?.hits).toBe(3)
+      // 稳定排序：hits 降序、同 hits 按 path 升序，截断后的前 10 个不随遍历顺序变化。
+      expect(result.files.map((file) => file.path)).toEqual([
+        'many/f-02.md',
+        'many/f-05.md',
+        'many/f-08.md',
+        'many/f-11.md',
+        'many/f-01.md',
+        'many/f-04.md',
+        'many/f-07.md',
+        'many/f-10.md',
+        'many/f-00.md',
+        'many/f-03.md',
+      ])
+    })
+
+    it('无命中返回 found: false，fileCount 与 files 为空', () => {
       expect(service.grep('zzz-not-there')).toEqual({
         found: false,
         hits: [],
         count: 0,
         truncated: false,
+        fileCount: 0,
+        files: [],
+        scanTruncated: false,
       })
+    })
+
+    it('遍历触顶时 scanTruncated 为 true，count 与 files 只代表已扫描部分', () => {
+      withIsolatedKb(
+        5,
+        (isolatedRoot) => {
+          const limited = new KbService(isolatedRoot, { maxWalkFiles: 3 })
+          const result = limited.grep('needle scan')
+
+          expect(result.scanTruncated).toBe(true)
+          expect(result.truncated).toBe(false)
+          // 截断时 count 只覆盖已扫描到的文件，因此严格小于真实总数 5。
+          expect(result.count).toBe(3)
+          expect(result.fileCount).toBe(3)
+          expect(result.files.map((file) => file.path)).toEqual(['f-0.md', 'f-1.md', 'f-2.md'])
+        },
+        'needle scan\n',
+      )
+    })
+
+    it('忽略目录同样不进入 grep', () => {
+      writeFixture(root, 'node_modules/secret.md', 'needle hidden\n')
+      writeFixture(root, '.venv/secret.md', 'needle hidden\n')
+      writeFixture(root, 'src/keep.md', 'needle visible\n')
+
+      const paths = new Set(service.grep('needle').hits.map((hit) => hit.path))
+
+      expect(paths.has('src/keep.md')).toBe(true)
+      expect([...paths].some((item) => item.includes('secret'))).toBe(false)
     })
 
     it('glob 参数拒绝绝对路径与 .. 段', () => {
@@ -621,6 +790,24 @@ describe('KbService', () => {
     it('token 只做字面匹配，不按正则解释', () => {
       expect(service.search(['U.RT'])).toEqual({ found: false, hits: [] })
     })
+
+    it('遍历触顶时显式返回 scanTruncated，不静默少扫', () => {
+      withIsolatedKb(
+        5,
+        (isolatedRoot) => {
+          const limited = new KbService(isolatedRoot, { maxWalkFiles: 3 })
+          const result = limited.search(['needle'])
+
+          expect(result.scanTruncated).toBe(true)
+          expect(result.hits.length).toBeLessThan(5)
+        },
+        'needle scan\n',
+      )
+    })
+
+    it('未触顶时不出现 scanTruncated 字段', () => {
+      expect(service.search(['UART']).scanTruncated).toBeUndefined()
+    })
   })
 
   describe('status', () => {
@@ -631,6 +818,17 @@ describe('KbService', () => {
         indexEntries: 4,
         indexPresent: true,
         inboxPending: 0,
+      })
+    })
+
+    it('遍历触顶时 fileCount 只是下界，并显式给出 scanTruncated', () => {
+      withIsolatedKb(5, (isolatedRoot) => {
+        const limited = new KbService(isolatedRoot, { maxWalkFiles: 3 })
+
+        const status = limited.status()
+
+        expect(status.fileCount).toBe(3)
+        expect(status.scanTruncated).toBe(true)
       })
     })
 
@@ -645,6 +843,7 @@ describe('KbService', () => {
         indexPresent: false,
         inboxPending: 0,
       })
+      expect(ghost.status().scanTruncated).toBeUndefined()
       expect(ghost.lookup('串口')).toEqual({
         found: false,
         candidates: [],
