@@ -22,11 +22,14 @@
  *   getArtifact     GET  /api/file?path=…
  *   saveProviders   PUT  /api/config           { providers }
  *   testProvider    POST /api/providers/test   { baseUrl, apiKey?, apiKeyEnv?, model? }
+ *   listCommands    no request — `/clear` and `/context` only (see below)
  *   live events     GET  /api/events (SSE)
  *
  * Everything else answers with a `notice` naming the command. A silent no-op
  * would leave the operator believing an action happened; R3 applies to the
- * bridge as much as to a tool.
+ * bridge as much as to a tool. `/compact` is in that group on purpose: the
+ * kernel's compaction is reachable from the desktop host only, so the browser
+ * form refuses it out loud instead of listing a row that cannot work.
  *
  * The protocol translation lives in ./protocol.js, shared with the desktop
  * host so both forms produce the same renderer events for the same log.
@@ -652,6 +655,7 @@ export function createBrowserBridge(options = {}) {
     "getUsage",
     "getSetupChecklist",
     "listCommands",
+    "compact",
     "getTree",
     "getKb",
     "setWorkspace",
@@ -1046,6 +1050,61 @@ export function createBrowserBridge(options = {}) {
     // is passed through rather than rebuilt, so a new field is not dropped.
     const entries = Array.isArray(body.entries) ? body.entries : [];
     emit({ type: "tree", nodes: entries, truncated: body.truncated === true });
+  }
+
+  /**
+   * File-name matches for the composer's `@` popup.
+   *
+   * The server owns the walk and the boundary (`/api/files/search` shares
+   * `resolveReadableDirectory` with `/api/tree`), so this is a thin mapping
+   * from the reply to the renderer's event. `currentCwd` is the folder the
+   * open session runs in, which is what the popup should search.
+   *
+   * Quiet by design: the renderer asks on every keystroke, so neither an empty
+   * cwd nor a refused root produces a warning — the popup just stays empty.
+   * Every path still answers with a `file_matches` carrying the query, because
+   * that event is what releases the popup; silence would leave it waiting.
+   */
+  async function searchFiles(query) {
+    const empty = {
+      type: "file_matches",
+      query,
+      files: [],
+      truncated: false,
+      scanned: 0,
+    };
+    if (currentCwd === "") {
+      emit(empty);
+      return;
+    }
+    let response;
+    try {
+      response = await fetchImpl(
+        `/api/files/search?path=${encodeURIComponent(currentCwd)}&query=${encodeURIComponent(query)}`,
+      );
+    } catch {
+      emit(empty);
+      return;
+    }
+    if (!response.ok) {
+      emit(empty);
+      return;
+    }
+    const body = await response.json().catch(() => undefined);
+    if (!isRecord(body)) {
+      emit(empty);
+      return;
+    }
+    const files = Array.isArray(body.files) ? body.files : [];
+    emit({
+      type: "file_matches",
+      query,
+      // The renderer inserts a path and splits it on "/" to show the folder.
+      files: files.map((file) => textOf(isRecord(file) ? file.path : undefined)),
+      // Either kind of truncation means "this is not the whole list" (R3).
+      truncated: body.truncated === true || body.scanTruncated === true,
+      scanned: typeof body.scanned === "number" ? body.scanned : 0,
+    });
   }
 
   /**
@@ -1463,9 +1522,10 @@ export function createBrowserBridge(options = {}) {
     const cmd = payload.cmd;
     if (!supportedCommands.has(cmd)) {
       // The file mention popup asks for matches on every keystroke; a warning
-      // per character would bury the transcript. Answer the query instead.
+      // per character would bury the transcript, so this one answers the query
+      // instead of claiming the command is unsupported.
       if (cmd === "searchFiles") {
-        emit({ type: "file_matches", query: textOf(payload.query), files: [] });
+        void searchFiles(textOf(payload.query));
         return;
       }
       unsupported(cmd);
@@ -1701,7 +1761,25 @@ export function createBrowserBridge(options = {}) {
         emit({ type: "setup_checklist", checks: [] });
         return;
       case "listCommands":
-        emit({ type: "commands", commands: [] });
+        // `/clear` and `/context` need nothing the server does not already
+        // offer: a new conversation is a local reset, and the occupancy
+        // figure arrives on the stream. `/compact` is deliberately absent —
+        // the browser form has no route to the kernel's compaction, and a row
+        // that fails on click is the dead entry R3 forbids.
+        emit({
+          type: "commands",
+          commands: [{ name: "clear" }, { name: "context" }],
+        });
+        return;
+      case "compact":
+        // The desktop host can run this (`handleCompact` in host.js); here
+        // there is no endpoint behind it, so the answer is a refusal that
+        // names the limit. No `run_start`: nothing started.
+        emit({
+          type: "notice",
+          level: "warn",
+          text: "浏览器形态无法执行上下文压缩：内核的压缩只在桌面宿主里运行，请在桌面应用中执行 /compact",
+        });
         return;
       case "getTree":
         void getTree(textOf(payload.path));
@@ -1754,7 +1832,10 @@ export function createBrowserBridge(options = {}) {
     emit({ type: "ready" });
     emit(stateEvent());
     void refreshSessions();
-    emit({ type: "commands", commands: [] });
+    emit({
+      type: "commands",
+      commands: [{ name: "clear" }, { name: "context" }],
+    });
     emit({ type: "setup_checklist", checks: [] });
     // Initial value, not a "not supported" answer: at boot there is no session
     // and no workspace yet, so the sidebar starts blank. Real listings come

@@ -50,6 +50,59 @@ function textOf(value) {
   return typeof value === "string" ? value : "";
 }
 
+/**
+ * Occupancy as the renderer consumes it, or `null` when there is no
+ * measurement.
+ *
+ * `tokens` and `percent` must both be finite numbers: a record carrying one of
+ * them is not a measurement, and filling the other with 0 would paint a figure
+ * the kernel never reported (R3 — unknown is not zero). `window` travels only
+ * when it is a positive finite number; 0 is "no window reported", not "a window
+ * of zero", and it would make the percentage uninterpretable.
+ */
+function measuredContext(value) {
+  if (!isRecord(value)) return null;
+  const { tokens, percent, window } = value;
+  if (typeof tokens !== "number" || !Number.isFinite(tokens)) return null;
+  if (typeof percent !== "number" || !Number.isFinite(percent)) return null;
+  const context = { tokens, percent };
+  if (typeof window === "number" && Number.isFinite(window) && window > 0) {
+    context.window = window;
+  }
+  return context;
+}
+
+/**
+ * Per-category occupancy split as the renderer consumes it, or `null`.
+ *
+ * The kernel's producer guarantees `sum(parts.tokens) === used`; this only
+ * checks the shape, because a translator is not the place to second-guess the
+ * producer. A part whose `key` or `tokens` is unusable is dropped rather than
+ * rounded to zero — a zero-token slice would still add a legend row nobody
+ * measured (R3). A split with no usable part left is no split at all, and so
+ * is one missing any of the four figures: every percentage in the panel
+ * divides by `window`, and 0 is "not reported", not "a window of zero".
+ */
+function measuredBreakdown(value) {
+  if (!isRecord(value)) return null;
+  const { used, window, percent, compactAt, parts } = value;
+  if (typeof used !== "number" || !Number.isFinite(used)) return null;
+  if (typeof window !== "number" || !Number.isFinite(window) || window <= 0) return null;
+  if (typeof percent !== "number" || !Number.isFinite(percent)) return null;
+  if (typeof compactAt !== "number" || !Number.isFinite(compactAt)) return null;
+  if (!Array.isArray(parts)) return null;
+  const kept = [];
+  for (const part of parts) {
+    if (!isRecord(part)) continue;
+    if (typeof part.key !== "string" || part.key === "") continue;
+    const tokens = part.tokens;
+    if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens <= 0) continue;
+    kept.push({ key: part.key, tokens });
+  }
+  if (kept.length === 0) return null;
+  return { used, window, percent, compactAt, parts: kept };
+}
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: false });
 
@@ -461,6 +514,15 @@ export function sessionEventToHostEvents(event, ctx) {
       if (typeof payload.costUsd === "number" && Number.isFinite(payload.costUsd)) {
         message.costUsd = payload.costUsd;
       }
+      // The per-category split is attached only when the payload carries the
+      // field at all. An older log has none, and that absence is the file's
+      // standing convention for "this event says nothing about it" — writing
+      // `null` there would claim the kernel reported "no split". When the
+      // field is present, the validated result travels as-is, `null` included:
+      // a present-but-unusable split is an answer, just not a drawable one.
+      if (isRecord(payload.contextBreakdown)) {
+        message.contextBreakdown = measuredBreakdown(payload.contextBreakdown);
+      }
       out.push(message);
       break;
     }
@@ -527,11 +589,24 @@ export function sessionEventToHostEvents(event, ctx) {
           coversUpToSeq: Number(payload.coversUpToSeq) || 0,
         });
       } else if (kind === "failed") {
-        out.push({
-          type: "notice",
-          level: "warn",
-          text: `压缩失败（${textOf(payload.stage)}）: ${textOf(payload.reason)}`,
-        });
+        // `/compact` now always runs. On a session with nothing new to fold in,
+        // the kernel answers `failed` for two reasons that are not failures:
+        // the last summary already covers this far (`no_progress`), or there is
+        // no user/assistant/tool turn to summarize at all. Reporting either as
+        // a red "压缩失败" would be a false alarm on a perfectly healthy small
+        // session — they are said quietly, and only a real error stays `warn`.
+        const reason = textOf(payload.reason);
+        if (reason === "no_progress") {
+          out.push({ type: "notice", level: "dim", text: "压缩没有进展（上一次摘要已经覆盖到这里）" });
+        } else if (reason === "no summarizable content") {
+          out.push({ type: "notice", level: "dim", text: "没有可压缩的内容" });
+        } else {
+          out.push({
+            type: "notice",
+            level: "warn",
+            text: `压缩失败（${textOf(payload.stage)}）: ${reason}`,
+          });
+        }
       }
       break;
     }
@@ -561,21 +636,21 @@ export function initialState(options = {}) {
     models,
     modelsSource: textOf(options.modelsSource) || "providers.json",
     baseUrl: textOf(options.baseUrl),
-    context: { tokens: 0, percent: 0 },
-    contextBreakdown: null,
+    // Occupancy is unknown until a `usage` event measured it. `null` is the
+    // renderer's explicit "unknown" sentinel: a zeroed record here would paint
+    // "0%" for a session whose fill nobody has measured (R3).
+    context: measuredContext(options.context),
+    // The kernel now measures a per-category split alongside the total
+    // (`src/context/breakdown.ts`); this passes one through when a caller has
+    // it. Without one the popover draws the total only — a split invented from
+    // the total would be a fabricated chart.
+    contextBreakdown: measuredBreakdown(options.contextBreakdown),
     usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0 },
     board: { selection: {}, projectKind: "unknown" },
     serial: { open: false, port: null, baud: null, buffered: 0, queued: 0 },
   };
-  // Spend and occupancy only when the caller has a real figure. A zero here
-  // would read as "known to be free" and blank the meter's honest unknown.
-  if (isRecord(options.context)) {
-    state.context = {
-      tokens: Number(options.context.tokens) || 0,
-      percent: Number(options.context.percent) || 0,
-      ...(Number(options.context.window) ? { window: Number(options.context.window) } : {}),
-    };
-  }
+  // Spend only when the caller has a real figure. A zero here would read as
+  // "known to be free" and blank the meter's honest unknown.
   if (typeof options.costUsd === "number" && Number.isFinite(options.costUsd)) {
     state.costUsd = options.costUsd;
   }

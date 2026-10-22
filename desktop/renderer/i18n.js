@@ -144,16 +144,6 @@ export const dictionaries = {
     subagentCollapse: "Collapse",
     subagentDone: "done",
     subagentFailed: "failed",
-    worktreeLabel: "Isolated worktree",
-    worktreeOff: "Off",
-    worktreeExplain: "Run this session in its own git worktree so your working copy stays untouched.",
-    worktreeActive: "Running in",
-    worktreeEnable: "Start isolated",
-    worktreeDiff: "View diff",
-    worktreeMerge: "Merge back",
-    worktreeDiscard: "Discard",
-    worktreeMergeConfirm: "Merge this worktree into the workspace and remove it?",
-    worktreeDiscardConfirm: "Discard this worktree and everything in it?",
     tabArtifacts: "Artifacts",
     paneArtifact: "Artifact",
     noArtifacts: "No previewable artifacts in this session yet.",
@@ -354,6 +344,23 @@ export const dictionaries = {
     imageOnlyPrompt: "(describe the attached image)",
     imageCount: (n) => `${n} image${n === 1 ? "" : "s"} attached`,
     paletteEmpty: "No matching commands.",
+    /* Slash-command notices. The commands' own descriptions live in
+       ./commands.js next to the catalogue; only what the renderer says about
+       them (a refusal, a measurement) belongs here. */
+    commandUnknownHeading: (name) => `Unknown command: /${name}`,
+    commandAvailable: "Available commands:",
+    commandTakesNoArguments: (name) => `/${name} takes no arguments; nothing ran.`,
+    commandContextUnknown: "Context usage has not been reported yet; there is no figure to show.",
+    commandContextUsed: (used, window, percent) =>
+      `Context ${used} tokens / ${window} tokens (${percent}%)`,
+    commandContextUsedNoWindow: (used, percent) =>
+      `Context ${used} tokens (${percent}% of the window)`,
+    /* The bracketed share that closes a `/context` category line. Its own key
+       because the brackets are full-width in Chinese and ASCII in English; a
+       hard-coded one would be wrong in the other locale. The denominator is
+       stated once in the title line, so it is not repeated per row. */
+    commandContextPartShare: (percent) => ` (${percent}%)`,
+    commandContextFree: (free) => `${free} tokens free`,
     shortcutPalette: "Command palette",
     menuExport: "Export conversation",
     menuNewWindow: "New window",
@@ -635,16 +642,6 @@ export const dictionaries = {
     subagentCollapse: "收起",
     subagentDone: "完成",
     subagentFailed: "失败",
-    worktreeLabel: "隔离工作树",
-    worktreeOff: "关闭",
-    worktreeExplain: "在独立的 git worktree 中运行本会话，不改动你的工作副本。",
-    worktreeActive: "运行于",
-    worktreeEnable: "开始隔离",
-    worktreeDiff: "查看差异",
-    worktreeMerge: "合并回来",
-    worktreeDiscard: "丢弃",
-    worktreeMergeConfirm: "把这个 worktree 合并进工作区并删除它？",
-    worktreeDiscardConfirm: "丢弃这个 worktree 及其中所有改动？",
     tabArtifacts: "产物",
     paneArtifact: "产物",
     noArtifacts: "本会话还没有可预览的产物。",
@@ -845,6 +842,18 @@ export const dictionaries = {
     imageOnlyPrompt: "（请看附带的图片）",
     imageCount: (n) => `附带 ${n} 张图片`,
     paletteEmpty: "没有匹配的命令。",
+    /* 斜杠命令的提示文案。命令自身的描述在 ./commands.js 里与目录放在一起；
+       这里只放渲染器要说的话（拒绝、测量结果）。 */
+    commandUnknownHeading: (name) => `未知命令：/${name}`,
+    commandAvailable: "可用命令：",
+    commandTakesNoArguments: (name) => `/${name} 不接受参数，没有执行。`,
+    commandContextUnknown: "内核还没有报告上下文占用，没有数字可显示。",
+    commandContextUsed: (used, window, percent) =>
+      `上下文 ${used} tokens / 窗口 ${window} tokens（${percent}%）`,
+    commandContextUsedNoWindow: (used, percent) => `上下文 ${used} tokens（窗口的 ${percent}%）`,
+    /* `/context` 分类行末尾的占比后缀：中文用全角括号，英文用半角，所以单独成键。 */
+    commandContextPartShare: (percent) => `（${percent}%）`,
+    commandContextFree: (free) => `剩余 ${free} tokens`,
     shortcutPalette: "命令面板",
     menuExport: "导出对话",
     menuNewWindow: "新窗口",

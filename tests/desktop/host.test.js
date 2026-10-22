@@ -52,6 +52,32 @@ const PROVIDERS_DIST = path.join(REPO_ROOT, "dist", "config", "providers.js");
 const CONFIG_ACCEPTS_API_KEY = DIST_BUILT
   && existsSync(PROVIDERS_DIST)
   && /apiKey:/.test(readFileSync(PROVIDERS_DIST, "utf8"));
+const COMPACT_DIST = path.join(REPO_ROOT, "dist", "context", "compact.js");
+/**
+ * Whether the compiled `compactSession` already understands `force: true`.
+ *
+ * The host passes `force: true` unconditionally — that is the caller side of a
+ * contract whose kernel half (`CompactOptions.force`) lands in
+ * `src/context/compact.ts` separately. A `dist/` compiled before it drops the
+ * option and keeps returning early below the soft threshold, so a test that
+ * asserts "the summary ran anyway" would fail for a reason that is a pending
+ * build, not a regression. Same pending-build window as
+ * `PROBE_FORWARDS_API_KEY`, different module.
+ */
+const COMPACT_FORCES = DIST_BUILT
+  && existsSync(COMPACT_DIST)
+  && /\bforce\b/.test(readFileSync(COMPACT_DIST, "utf8"));
+/**
+ * Whether `dist/context/breakdown.js` exists.
+ *
+ * The host imports it inside `compactModules()` on purpose: a `dist/` without
+ * it must answer `/compact` with "run npm run build" instead of crashing, so
+ * the import's absence is a supported state, not a failure. Tests that need a
+ * split in the `state` event skip until the kernel is rebuilt — the same
+ * pending-build window, stated rather than silently green.
+ */
+const BREAKDOWN_BUILT = DIST_BUILT
+  && existsSync(path.join(REPO_ROOT, "dist", "context", "breakdown.js"));
 // 每个用例都要起一个 Node 宿主进程；满负载下会超过 vitest 的 5s 默认超时。
 const HOST_TIMEOUT_MS = 30_000;
 const tempDirs = [];
@@ -147,8 +173,13 @@ async function tempHome() {
  * Creating it through the host would tie its workdir to whichever folder that
  * host booted in. These cases need a session that *records* a different
  * project — which is exactly what a conversation opened from the sidebar is.
+ *
+ * `extraEvents` appends further log lines after the user event, numbered from
+ * seq 1. Compaction reads the log's own events (a long assistant turn to leave
+ * a summarizable prefix, a `usage` event to measure), so a test that wants
+ * either has to write one; the host is not the only author of a session file.
  */
-async function writeSession(home, { id, workdir, text = "旧会话" }) {
+async function writeSession(home, { id, workdir, text = "旧会话", extraEvents = [] }) {
   const dir = path.join(home, "sessions", id);
   await mkdir(dir, { recursive: true });
   await writeFile(
@@ -161,16 +192,18 @@ async function writeSession(home, { id, workdir, text = "旧会话" }) {
     }),
     "utf8",
   );
-  await writeFile(
-    path.join(dir, "session.v1.jsonl"),
-    `${JSON.stringify({
+  const lines = [
+    JSON.stringify({
       seq: 0,
       ts: new Date().toISOString(),
       type: "user",
       payload: { content: text },
-    })}\n`,
-    "utf8",
-  );
+    }),
+    ...extraEvents.map((event, index) =>
+      JSON.stringify({ seq: index + 1, ts: new Date().toISOString(), ...event }),
+    ),
+  ];
+  await writeFile(path.join(dir, "session.v1.jsonl"), `${lines.join("\n")}\n`, "utf8");
   return dir;
 }
 
@@ -252,8 +285,224 @@ describe("desktop host", () => {
     expect(sessions.sessions).toStrictEqual([]);
     expect(events.find((event) => event.type === "commands")).toStrictEqual({
       type: "commands",
-      commands: [],
+      commands: [{ name: "clear" }, { name: "context" }, { name: "compact" }],
     });
+  }, HOST_TIMEOUT_MS);
+
+  it("listCommands 报三个内置命令，boot 与应答同一份清单", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "listCommands" }],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "ready") &&
+          all.filter((event) => event.type === "commands").length >= 2,
+      },
+    );
+    const commands = events.filter((event) => event.type === "commands");
+    expect(commands).toHaveLength(2);
+    const expected = [{ name: "clear" }, { name: "context" }, { name: "compact" }];
+    expect(commands[0].commands).toStrictEqual(expected);
+    expect(commands[1].commands).toStrictEqual(expected);
+  }, HOST_TIMEOUT_MS);
+
+  it("compact 没有打开的会话时回 warn notice", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "compact" }],
+      { until: (all) => all.some((event) => event.type === "notice") },
+    );
+    const notices = events.filter((event) => event.type === "notice");
+    // Nothing ran and nothing was faked: no run_start, no run_end.
+    expect(notices).toStrictEqual([{ type: "notice", level: "warn", text: "没有打开的会话" }]);
+    expect(events.some((event) => event.type === "run_start")).toBe(false);
+    expect(events.some((event) => event.type === "run_end")).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  /**
+   * `/compact` compacts whether or not the soft threshold was reached.
+   *
+   * The old behaviour answered a small session with "未达阈值，没有压缩" and
+   * returned; the operator's button no longer loses to the threshold. This
+   * case drives the path a small session now takes all the way to the summary
+   * request: `tempHome()`'s gateway answers every completion with 400, so the
+   * summary cannot succeed and the kernel's own reason is what must reach the
+   * transcript — "未达阈值" must not appear anywhere.
+   *
+   * Guarded on the build, not on behaviour: the host passes `force: true`
+   * unconditionally, and a `dist/` compiled before `CompactOptions.force`
+   * landed still returns below the threshold. That is a pending build
+   * (`COMPACT_FORCES`), not a regression, so the case skips until the kernel is
+   * rebuilt — the same window `PROBE_FORWARDS_API_KEY` documents.
+   */
+  it.skipIf(!COMPACT_FORCES)("compact 未达阈值也一律压缩，失败时带内核给出的真实原因", async () => {
+    const home = await tempHome();
+    const sessionId = "sess-forced-compact";
+    // Far below the 6553-token threshold (this whole log is ~2000), but with a
+    // prefix the kernel can summarize and a tail outside `keepTailRatio`: the
+    // forced run then reaches the summary request instead of stopping at
+    // "no summarizable content", which is what makes the gateway's refusal the
+    // reason the operator sees.
+    await writeSession(home, {
+      id: sessionId,
+      workdir: home,
+      text: "STM32 连不上",
+      extraEvents: [
+        { type: "assistant", payload: { content: "先查供电", toolCalls: [] } },
+        { type: "user", payload: { content: "调试日志".repeat(2000) } },
+      ],
+    });
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "loadSession", id: sessionId },
+        { cmd: "compact" },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "session_loaded") &&
+          all.some((event) => event.type === "run_end"),
+      },
+    );
+
+    // The removed behaviour must be gone: no notice says the threshold held it
+    // back, whatever else the run reported.
+    const notices = events.filter((event) => event.type === "notice");
+    expect(notices.some((notice) => notice.text.includes("未达阈值"))).toBe(false);
+
+    // It ran as a command: the host held the busy state for its duration.
+    expect(events.some((event) => event.type === "run_start")).toBe(true);
+    expect(events.some((event) => event.type === "run_end")).toBe(true);
+
+    // The gateway refuses completions with 400, so the summary failed. The
+    // warning carries the kernel's reason (`Model API request failed with
+    // status 400`), not a host-invented one.
+    const warning = notices.find(
+      (notice) => notice.level === "warn" && notice.text.includes("压缩"),
+    );
+    expect(warning).toBeDefined();
+    expect(warning.text).toContain("status 400");
+    expect(warning.text).not.toContain("未达阈值");
+  }, HOST_TIMEOUT_MS);
+
+  /**
+   * The split produced for the post-compaction meter is the kernel's own.
+   *
+   * The summary fails on the 400 gateway, which does not stop the host from
+   * re-measuring the log; the split travels on the `state` event and must
+   * describe the same message build the total came from: `parts` sums to
+   * `used`, and `used`/`window`/`compactAt` match the occupancy and threshold
+   * the host reported.
+   *
+   * Guarded on `BREAKDOWN_BUILT` alone — that is the capability this case
+   * needs. `force` is not: the state is sent whether or not the kernel
+   * compacted anything, so a `dist/` with `breakdown.js` but without `force`
+   * still reaches these assertions.
+   */
+  it.skipIf(!BREAKDOWN_BUILT)(
+    "compact 之后的 state 带上自洽的分类拆分",
+    async () => {
+      const home = await tempHome();
+      const sessionId = "sess-breakdown";
+      await writeSession(home, { id: sessionId, workdir: home, text: "短会话" });
+
+      const events = await runHost(
+        home,
+        [
+          { cmd: "init", cwd: home },
+          { cmd: "loadSession", id: sessionId },
+          { cmd: "compact" },
+        ],
+        {
+          until: (all) =>
+            all.some((event) => event.type === "session_loaded") &&
+            all.some((event) => event.type === "run_end"),
+        },
+      );
+
+      // The last state is the one `handleCompact` sends after re-measuring.
+      const state = events.filter((event) => event.type === "state").at(-1);
+      expect(state).toBeDefined();
+      const breakdown = state.contextBreakdown;
+      expect(breakdown).toBeTruthy();
+      // The configured window is 8192 and the soft ratio 0.8.
+      expect(breakdown.window).toBe(8192);
+      expect(breakdown.compactAt).toBe(Math.floor(8192 * 0.8));
+      // The split describes the same measurement as the occupancy chip.
+      expect(breakdown.used).toBe(state.context.tokens);
+      expect(breakdown.percent).toBe(state.context.percent);
+      // A single user message has one attributable bucket, so the parts must
+      // add up to the total they describe — no slice invented, none dropped.
+      const sum = breakdown.parts.reduce((total, part) => total + part.tokens, 0);
+      expect(sum).toBe(breakdown.used);
+      expect(breakdown.parts.every((part) => part.tokens > 0)).toBe(true);
+    },
+    HOST_TIMEOUT_MS,
+  );
+
+  /**
+   * A stored `usage` event's split survives into the `state` of a reopened
+   * conversation.
+   *
+   * No dist capability is involved: this is `lastMeasure` reading a log the
+   * kernel wrote earlier, which is how a reopened conversation gets its meter
+   * back rather than showing nothing. The figures below are hand-written so
+   * the assertion can state them exactly; the same run also proves the split
+   * is absent before that conversation is opened.
+   */
+  it("loadSession 把 usage 事件里的分类拆分带到 state", async () => {
+    const home = await tempHome();
+    const sessionId = "sess-stored-usage";
+    const contextBreakdown = {
+      used: 3277,
+      window: 8192,
+      percent: 40,
+      compactAt: 6553,
+      parts: [
+        { key: "systemPrompt", tokens: 512 },
+        { key: "messages", tokens: 2765 },
+      ],
+    };
+    await writeSession(home, {
+      id: sessionId,
+      workdir: home,
+      text: "带用量统计的旧会话",
+      extraEvents: [
+        {
+          type: "usage",
+          payload: {
+            promptTokens: 3200,
+            completionTokens: 77,
+            context: { tokens: 3277, percent: 40, window: 8192 },
+            contextBreakdown,
+          },
+        },
+      ],
+    });
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "loadSession", id: sessionId },
+      ],
+      { until: loadedThenState },
+    );
+
+    // The boot `state` describes a session nobody has priced yet: whatever the
+    // protocol's spelling of "no split" is, the stored one must not appear
+    // before the conversation carrying it is opened.
+    expect(events[0].type).toBe("hello");
+    expect(events.find((event) => event.type === "state").contextBreakdown ?? null).toBeNull();
+    // The one `loadSession` sends after the replay carries the stored split.
+    const loadedAt = events.findIndex((event) => event.type === "session_loaded");
+    const state = events.slice(loadedAt).find((event) => event.type === "state");
+    expect(state.context).toStrictEqual({ tokens: 3277, percent: 40, window: 8192 });
+    expect(state.contextBreakdown).toStrictEqual(contextBreakdown);
   }, HOST_TIMEOUT_MS);
 
   it("providers 缺失时仍走完 init 并提示去设置页", async () => {
@@ -726,7 +975,7 @@ describe("desktop host", () => {
     expect(settings[0].settings.mcpServers).toStrictEqual([]);
     expect(settings[0].settings.configPaths.mcp).toContain("mcp.json");
     expect(settings[0].settings.permissions.preset).toBe("diagnose");
-    expect(settings[0].settings.run.maxTurns).toBe(10);
+    expect(settings[0].settings.run.maxTurns).toBeNull();
 
     const written = settings.at(-1).settings.mcpServers;
     expect(written).toStrictEqual([

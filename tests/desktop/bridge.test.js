@@ -516,6 +516,46 @@ describe("bridge: 会话与审批", () => {
 });
 
 describe("bridge: 命令面", () => {
+  it("listCommands 只报 clear 与 context：浏览器形态到不了内核的压缩", () => {
+    const bridge = createBrowserBridge({
+      fetchImpl: fakeFetch([]),
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    bridge.api.send({ cmd: "listCommands" });
+    const commands = events.filter((event) => event.type === "commands");
+    expect(commands).toHaveLength(2);
+    // Boot and the answer carry the same list; two sources is how they drift.
+    expect(commands[0].commands).toStrictEqual([{ name: "clear" }, { name: "context" }]);
+    expect(commands[1].commands).toStrictEqual([{ name: "clear" }, { name: "context" }]);
+  });
+
+  it("compact 回 warn notice，不发任何请求，也不开 run", async () => {
+    const fetchImpl = fakeFetch([["/api/sessions", () => jsonResponse({ sessions: [] })]]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const before = fetchImpl.calls.length;
+    bridge.api.send({ cmd: "compact" });
+    const notice = events.at(-1);
+    expect(notice).toMatchObject({ type: "notice", level: "warn" });
+    expect(notice.text).toContain("浏览器形态无法执行上下文压缩");
+    // No `/api/actions`, no `/api/abort`, nothing: the browser form cannot
+    // compact, and a request would have been a promise it cannot keep.
+    expect(fetchImpl.calls).toHaveLength(before);
+    expect(fetchImpl.calls.some((call) => call.url.includes("/api/actions"))).toBe(false);
+    expect(events.some((event) => event.type === "run_start")).toBe(false);
+  });
+
   it("不支持的命令显式 warn", () => {
     const bridge = createBrowserBridge({
       fetchImpl: fakeFetch([]),
@@ -533,19 +573,112 @@ describe("bridge: 命令面", () => {
     });
   });
 
-  it("searchFiles 返回空匹配而不是每键一条警告", () => {
+  it("searchFiles 请求 /api/files/search 并映射为 file_matches，失败也不发警告", async () => {
+    const fetchImpl = fakeFetch([
+      ["/api/sessions/sess-9", () =>
+        jsonResponse({
+          header: { id: "sess-9", workdir: "E:/p", status: "closed" },
+          events: [],
+        })],
+      ["/api/files/search", () =>
+        jsonResponse({
+          root: "E:/p",
+          query: "read",
+          files: [
+            { path: "E:/p/README.md", name: "README.md", relative: "README.md" },
+            { path: "E:/p/src/readme.ts", name: "readme.ts", relative: "src/readme.ts" },
+          ],
+          scanned: 7,
+          truncated: false,
+          scanTruncated: true,
+        })],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
     const bridge = createBrowserBridge({
-      fetchImpl: fakeFetch([]),
+      fetchImpl,
       EventSourceImpl: FakeEventSource,
       storage: storageStub(),
     });
     const events = [];
     bridge.api.onEvent((event) => events.push(event));
     bridge.boot();
-    const before = events.length;
+    // `currentCwd` is what the popup searches: it comes from the open session.
+    bridge.api.send({ cmd: "loadSession", id: "sess-9" });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "session_loaded").at(-1).cwd).toBe("E:/p");
+    });
+    bridge.api.send({ cmd: "searchFiles", query: "read" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "file_matches")).toBe(true);
+    });
+
+    const call = fetchImpl.calls.find((entry) => entry.url.startsWith("/api/files/search"));
+    expect(call.method).toBe("GET");
+    // `:` and `\` in an absolute Windows path split a hand-built query.
+    expect(call.url).toBe("/api/files/search?path=E%3A%2Fp&query=read");
+    expect(events.filter((event) => event.type === "file_matches").at(-1)).toStrictEqual({
+      type: "file_matches",
+      query: "read",
+      files: ["E:/p/README.md", "E:/p/src/readme.ts"],
+      // A truncated scan is not "no matches" (R3): the flag travels with the list.
+      truncated: true,
+      scanned: 7,
+    });
+    expect(events.some((event) => event.type === "notice")).toBe(false);
+  });
+
+  it("searchFiles 无 cwd 或服务端失败时安静地回空匹配，不每键一条警告", async () => {
+    const fetchImpl = fakeFetch([
+      ["/api/sessions/sess-9", () =>
+        jsonResponse({
+          header: { id: "sess-9", workdir: "E:/p", status: "closed" },
+          events: [],
+        })],
+      ["/api/files/search", () =>
+        jsonResponse({ error: { code: "invalid_path", message: "只能查看工作区" } }, 400)],
+      ["/api/sessions", () => jsonResponse({ sessions: [] })],
+    ]);
+    const bridge = createBrowserBridge({
+      fetchImpl,
+      EventSourceImpl: FakeEventSource,
+      storage: storageStub(),
+    });
+    const events = [];
+    bridge.api.onEvent((event) => events.push(event));
+    bridge.boot();
+
+    // No session loaded → `currentCwd` is empty, so there is nothing to ask.
     bridge.api.send({ cmd: "searchFiles", query: "a" });
-    expect(events).toHaveLength(before + 1);
-    expect(events.at(-1)).toStrictEqual({ type: "file_matches", query: "a", files: [] });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "file_matches")).toBe(true);
+    });
+    expect(events.filter((event) => event.type === "file_matches").at(-1)).toStrictEqual({
+      type: "file_matches",
+      query: "a",
+      files: [],
+      truncated: false,
+      scanned: 0,
+    });
+    expect(fetchImpl.calls.some((call) => call.url.startsWith("/api/files/search"))).toBe(false);
+
+    // With a cwd the request is made; a refusal still answers instead of hanging.
+    bridge.api.send({ cmd: "loadSession", id: "sess-9" });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "session_loaded").at(-1).cwd).toBe("E:/p");
+    });
+    bridge.api.send({ cmd: "searchFiles", query: "b" });
+    await vi.waitFor(() => {
+      expect(events.filter((event) => event.type === "file_matches").at(-1).query).toBe("b");
+    });
+    expect(events.filter((event) => event.type === "file_matches").at(-1)).toStrictEqual({
+      type: "file_matches",
+      query: "b",
+      files: [],
+      truncated: false,
+      scanned: 0,
+    });
+    expect(fetchImpl.calls.some((call) => call.url.startsWith("/api/files/search"))).toBe(true);
+    expect(events.some((event) => event.type === "notice")).toBe(false);
   });
 
   it("newSession 清空会话并停掉事件流", async () => {

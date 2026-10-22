@@ -8,6 +8,7 @@
  */
 
 import { settingsStrings } from "./settings-i18n.js";
+import { availableModelEntries, connectionSummary } from "./settings-models.js";
 import { iconEl, setIcon } from "./icons.js";
 
 /**
@@ -58,8 +59,9 @@ export function createSettings(deps) {
 /* ---------- settings ---------- */
 
 /** Kernel defaults, mirrored so the form has something to compare against
- *  before the host answers (`src/config/app-config.ts`). */
-const DEFAULT_RUN_LIMITS = { maxTurns: 10, maxCostUsd: null, timeoutMs: null, systemPrompt: "" };
+ *  before the host answers (`src/config/app-config.ts`). `maxTurns: null` is
+ *  the kernel's "no cap": a message may take as many model calls as it needs. */
+const DEFAULT_RUN_LIMITS = { maxTurns: null, maxCostUsd: null, timeoutMs: null, systemPrompt: "" };
 const DEFAULT_PERMISSIONS = { preset: "diagnose", approvalTimeoutMs: 120_000, rules: [] };
 /** The kernel's MCP server name rule (`src/mcp/config.ts`). */
 const MCP_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -1212,9 +1214,14 @@ function buildConnectionPage() {
     problem.hidden = true;
 
     /** What the last connection test said. Built fresh with the card, so a
-     *  result never outlives the page that produced it. */
-    const testResult = el("p", "setting-note", "");
+     *  result never outlives the page that produced it. A container rather
+     *  than a paragraph: a successful test draws a structured block, while a
+     *  failure stays one line of text in the same place. `aria-live` because
+     *  the answer arrives after the click, and a result only a sighted user
+     *  can perceive is a click that reported nothing (R3). */
+    const testResult = el("div", "setting-note", "");
     testResult.hidden = true;
+    testResult.setAttribute("aria-live", "polite");
 
     // The protocol is the one fixed fact about a card (the kernel has exactly
     // one), so it stays a chip rather than a field. It lives in the body, not
@@ -1326,6 +1333,18 @@ function buildConnectionPage() {
     let testing = false;
 
     /**
+     * Empty the result area and forget which kind of result it held.
+     *
+     * Both writers start here, so a previous block can never leave a heading,
+     * a chip, or the warning colour behind under a new answer.
+     */
+    const resetTestResult = () => {
+      testResult.textContent = "";
+      testResult.className = "";
+      testResult.style.color = "";
+    };
+
+    /**
      * One line of outcome. A failed test takes the warn colour (the token the
      * transcript's warnings use), not the error red: an endpoint that did not
      * answer is a fact about the endpoint, not a crash. The colour is applied
@@ -1337,39 +1356,109 @@ function buildConnectionPage() {
      */
     const showTestLine = (text, { warn = false } = {}) => {
       setExpanded(true);
+      resetTestResult();
+      testResult.className = "setting-note";
       testResult.textContent = text;
       testResult.style.color = warn ? "var(--warn)" : "";
       testResult.hidden = false;
     };
 
-    /** Model names from a successful test, each one click away from a new row.
-     *  A name already on this card is not offered twice. */
+    /** The enabled chip says what clicking it does; the disabled one says why
+     *  it cannot be clicked. */
+    const chipLabel = (name, { added }) =>
+      added ? `${name} — ${s.connTestAlreadyAdded}` : `${name} — ${s.connTestAddModel}`;
+
+    /**
+     * Turn a chip into the disabled "already added" state, in place.
+     *
+     * The chip stays where it is: removing it would make the list shrink under
+     * the cursor and leave the user unsure whether the click landed. The new
+     * row is what changed, and this chip is the receipt.
+     */
+    const markChipAdded = (chip, name) => {
+      chip.classList.add("added");
+      chip.disabled = true;
+      chip.title = s.connTestAlreadyAdded;
+      chip.setAttribute("aria-label", chipLabel(name, { added: true }));
+      chip.textContent = "";
+      chip.append(
+        iconEl("check", "conn-model-chip-icon"),
+        el("span", "conn-model-chip-name", name),
+        el("span", "conn-model-chip-state", s.connTestAlreadyAdded),
+      );
+    };
+
+    /**
+     * A successful test, drawn as a result block: what answered, how fast, and
+     * every model the endpoint listed.
+     *
+     * The list is complete. A model already on the card is not dropped — it is
+     * drawn in the added state — because a list that quietly hides half the
+     * answer is a wrong answer about the endpoint (R3).
+     */
     const showTestModels = (models, latencyMs) => {
       setExpanded(true);
+      resetTestResult();
+      testResult.className = "conn-test-result";
       testResult.hidden = false;
-      testResult.textContent = "";
-      testResult.style.color = "";
-      const line = el("span", "", s.connTestOk.replace("{n}", String(models.length)));
-      if (Number.isFinite(latencyMs)) line.textContent += ` · ${Math.round(latencyMs)} ms`;
-      testResult.appendChild(line);
-      const chips = el("span", "mcp-actions");
-      const listed = new Set(modelHandles.map((handle) => handle.idInput.value.trim()));
-      for (const name of models) {
-        if (typeof name !== "string" || name.trim() === "" || listed.has(name)) continue;
-        listed.add(name);
-        const button = el("button", "chip-button", name);
-        button.type = "button";
-        button.title = s.connTestAddModel;
-        button.addEventListener("click", () => {
-          addModelRow({ id: name, carried: {} });
-          button.remove();
-          // The row is an edit like any other: the draft is now newer than the
-          // file, and Save is what makes it real.
-          markDirty();
-        });
-        chips.appendChild(button);
+
+      const entries = availableModelEntries(
+        models,
+        modelHandles.map((handle) => handle.idInput.value),
+      );
+      const count = entries.length;
+
+      // The summary is built without a latency (it renders one only when it is
+      // given one): the measurement gets its own muted span here, so folding
+      // it into the sentence would print it twice.
+      const head = el("div", "conn-test-head");
+      // A test that reached the endpoint but got no list back is not the same
+      // outcome as one that found models, and the mark says so rather than
+      // leaving a green check beside a sentence about failure.
+      const status = el("span", `conn-test-status${count === 0 ? " empty" : ""}`);
+      status.append(
+        iconEl("check", "conn-test-status-icon"),
+        el("span", "", connectionSummary(state.locale, { modelCount: count })),
+      );
+      head.appendChild(status);
+      if (Number.isFinite(latencyMs)) {
+        head.appendChild(el("span", "conn-test-latency", `${Math.round(latencyMs)} ms`));
       }
-      if (chips.childElementCount > 0) testResult.append(" ", chips);
+      testResult.appendChild(head);
+
+      // No list, no section: an empty "Available models 0" heading would be a
+      // heading about nothing. The status line already said it.
+      if (count === 0) return;
+
+      const block = el("div", "conn-test-models");
+      const modelsHead = el("div", "conn-test-models-head");
+      modelsHead.append(
+        el("span", "", s.connTestAvailableModels),
+        el("span", "conn-test-count", s.connTestModelsCount.replace("{n}", String(count))),
+      );
+      block.appendChild(modelsHead);
+
+      for (const entry of entries) {
+        const chip = el("button", "conn-model-chip");
+        chip.type = "button";
+        if (entry.alreadyListed) {
+          markChipAdded(chip, entry.name);
+        } else {
+          chip.title = s.connTestAddModel;
+          chip.setAttribute("aria-label", chipLabel(entry.name, { added: false }));
+          chip.append(iconEl("plus", "conn-model-chip-icon"), el("span", "conn-model-chip-name", entry.name));
+          chip.addEventListener("click", () => {
+            addModelRow({ id: entry.name, carried: {} });
+            // The row is an edit like any other: the draft is now newer than
+            // the file, and Save is what makes it real.
+            markDirty();
+            markChipAdded(chip, entry.name);
+          });
+        }
+        block.appendChild(chip);
+      }
+
+      testResult.appendChild(block);
     };
 
     /** The test this card is waiting on, if any. */
@@ -1410,9 +1499,9 @@ function buildConnectionPage() {
       testButton.textContent = s.connTesting;
       // The last answer described a test that has already happened; leaving it
       // on screen while a new one runs would show a result for the wrong try.
+      resetTestResult();
+      testResult.className = "setting-note";
       testResult.hidden = true;
-      testResult.textContent = "";
-      testResult.style.color = "";
       // No key of either kind. Leaving both empty is legal — a local endpoint
       // needs none — so this is not a refusal, but when the test then fails the
       // reason has to name the likely cause instead of leaving the user to
@@ -1896,13 +1985,23 @@ function buildBehaviorPage() {
     type: "number",
     min: 1,
     step: 1,
-    value: run.maxTurns,
+    value: run.maxTurns ?? "",
+    // An optional cap, not a required one: empty is the kernel's "no limit",
+    // said out loud so a blank field does not read as an unfinished setting.
+    placeholder: s.behaviorUnlimited,
     onChange: (value) => {
-      const parsed = Number(String(value).trim());
+      const text = String(value).trim();
+      // Empty is a real value here — the absence of a cap — and it is sent as
+      // null, the shape the kernel reads as "unset".
+      if (text === "") {
+        saveRun({ maxTurns: null });
+        return;
+      }
+      const parsed = Number(text);
       // The kernel stops the loop *before* turn one when this is 0, so a zero
       // here reads as "the agent does nothing" rather than "unlimited".
       if (!Number.isInteger(parsed) || parsed <= 0) {
-        runRefusal.show(s.behaviorMaxTurnsInvalid, maxTurnsInput, run.maxTurns);
+        runRefusal.show(s.behaviorMaxTurnsInvalid, maxTurnsInput, run.maxTurns ?? "");
         return;
       }
       saveRun({ maxTurns: parsed });

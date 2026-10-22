@@ -223,6 +223,9 @@ export const settingsStrings = {
     connTestFailed: "The test failed without saying why.",
     connTestNoKey: "Both key fields are empty, so the request carried no API key. Leave them empty only if this endpoint needs none.",
     connTestAddModel: "Click to add",
+    connTestAvailableModels: "Available models",
+    connTestAlreadyAdded: "Added",
+    connTestModelsCount: "{n}",
     connConfigPath: "Config: {path}",
 
     groupPermissions: "Permissions",
@@ -258,7 +261,7 @@ export const settingsStrings = {
     ruleParamsNote: "Rules can also match on tool arguments, but that editor is not built yet. A rule saved here matches on the tool name alone.",
 
     behaviorMaxTurns: "Turns per message",
-    behaviorMaxTurnsDesc: "The loop stops after this many model calls, even mid-task.",
+    behaviorMaxTurnsDesc: "Leave empty for no limit. With a number, this run stops after that many model calls and the next message starts over.",
     behaviorMaxTurnsInvalid: "Enter a whole number of at least 1. Zero would stop before the first turn.",
     behaviorMaxCost: "Cost ceiling (USD)",
     behaviorMaxCostDesc: "The run stops once the estimated spend reaches this. Empty means no ceiling.",
@@ -620,6 +623,9 @@ export const settingsStrings = {
     connTestFailed: "测试失败，但没有给出原因。",
     connTestNoKey: "两栏密钥都空着，这次请求没有携带 API Key。只有确认这个端点不需要密钥时才可以留空。",
     connTestAddModel: "点击添加",
+    connTestAvailableModels: "可用模型",
+    connTestAlreadyAdded: "已添加",
+    connTestModelsCount: "{n} 个",
     connConfigPath: "配置文件：{path}",
 
     groupPermissions: "权限",
@@ -655,7 +661,7 @@ export const settingsStrings = {
     ruleParamsNote: "规则还可以按工具参数匹配，但那个编辑器还没做。这里保存的规则只按工具名匹配。",
 
     behaviorMaxTurns: "每条消息的轮数上限",
-    behaviorMaxTurnsDesc: "模型调用达到这个次数就停下，哪怕任务还没做完。",
+    behaviorMaxTurnsDesc: "留空表示不限制。填了数字时，这一次运行用完就停，下一条消息重新开始计数。",
     behaviorMaxTurnsInvalid: "请填不小于 1 的整数。填 0 会让循环在第一轮之前就停下。",
     behaviorMaxCost: "花费上限（美元）",
     behaviorMaxCostDesc: "估算花费达到这个数就停止。留空表示不限。",

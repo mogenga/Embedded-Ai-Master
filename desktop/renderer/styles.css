@@ -3272,9 +3272,14 @@ mark.find-hit.current {
   color: var(--text);
 }
 
+/* The occupancy percentage (D-165). Legible as-is at --text-faint; tabular
+   figures keep the chip from reflowing as the number climbs. The global
+   `[hidden]` rule (display: none !important) covers this span, so the
+   renderer hides it by toggling the attribute and needs no rule here. */
 .context-pct {
   font-size: var(--text-xs);
   color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
 
 .effort-picker {
@@ -4149,56 +4154,6 @@ mark.find-hit.current {
   color: var(--text-secondary);
   position: sticky;
   top: 0;
-}
-
-/* Worktree is a top-bar toggle next to the project name: its panel drops
-   under the button instead of sitting permanently in the sidebar. */
-.worktree-toggle {
-  -webkit-app-region: no-drag;
-  position: relative;
-}
-
-.worktree-toggle.active {
-  color: var(--accent);
-}
-
-.worktree-toggle.active::after {
-  content: "";
-  position: absolute;
-  right: 4px;
-  bottom: 4px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.worktree-panel {
-  position: absolute;
-  top: 44px;
-  left: 52px;
-  z-index: 40;
-  width: 300px;
-  padding: 11px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--surface-raised);
-  box-shadow: var(--shadow-popover);
-  -webkit-app-region: no-drag;
-}
-
-.worktree-copy {
-  margin: 0 0 8px;
-  font-size: var(--text-sm);
-  line-height: 1.5;
-  color: var(--text-faint);
-  word-break: break-all;
-}
-
-.worktree-actions {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
 }
 
 /* ---------- git ---------- */
