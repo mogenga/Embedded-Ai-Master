@@ -1,10 +1,13 @@
 /**
  * Kernel session events → Embedded AI Master host events.
  *
- * Pure functions shared by the desktop host (Node) and the browser bridge
- * (renderer). Nothing here touches the DOM, the filesystem, or the network:
- * both adapters feed it `SessionEvent` objects from the kernel log and get
- * back the `{ type }` messages the ported renderer already knows how to draw.
+ * Pure functions shared by the desktop host (Node) and the renderer. Nothing
+ * here touches the DOM, the filesystem, or the network: the host feeds it
+ * `SessionEvent` objects from the kernel log and gets back the `{ type }`
+ * messages the renderer already knows how to draw. (There used to be a second
+ * adapter — a browser bridge over HTTP + SSE — removed on 2026-10-22 when the
+ * desktop form became the only one; this layer was what made the two agree,
+ * and it stays because host and renderer are still two processes.)
  *
  * The kernel's log is the single source of truth. The renderer's expectations
  * differ from it in two ways this module bridges:
@@ -34,6 +37,10 @@ const KNOWN_TYPES = new Set([
   "compaction",
   "permission_decision",
   "approval_request",
+  // `todos` must stay in this set. A type missing here does not pass silently:
+  // it becomes a `未识别的事件类型` warn notice, so every plan update would
+  // print a warning line above the plan card it just drew.
+  "todos",
 ]);
 
 /** Tool output larger than this is truncated before it reaches the DOM. */
@@ -103,6 +110,49 @@ function measuredBreakdown(value) {
   return { used, window, percent, compactAt, parts: kept };
 }
 
+/** The only statuses the kernel writes for a plan item. */
+const TODO_STATUSES = new Set(["pending", "in_progress", "completed"]);
+
+/** The kernel's `todo_write` schema caps item text at 500 characters. */
+const MAX_TODO_CONTENT = 500;
+
+/**
+ * A `todos` payload as the renderer's plan card consumes it, or `null` when
+ * there is no list at all.
+ *
+ * The renderer paints what this returns, so anything it cannot vouch for is
+ * dropped rather than shown: a row with no usable text would put a blank line
+ * on a plan nobody can read, and a status outside the three known values would
+ * become a CSS class that matches no rule. The text, though, is what the model
+ * actually meant to say — a broken status does not make the task disappear —
+ * so such a row survives as `pending`.
+ *
+ * An empty list is *not* `null`: clearing the plan is a legal instruction the
+ * model can give, and the renderer removes the card when it receives it. Only
+ * a payload with no array at all is untranslatable.
+ */
+export function todosEvent(payload) {
+  if (!isRecord(payload) || !Array.isArray(payload.items)) return null;
+  const items = [];
+  for (const raw of payload.items) {
+    if (!isRecord(raw)) continue;
+    if (typeof raw.content !== "string") continue;
+    // `trim` is only the emptiness test: the row keeps the text exactly as the
+    // model wrote it, because that text is the one thing here it is entitled
+    // to say without this module editing it.
+    if (raw.content.trim() === "") continue;
+    // The kernel already enforces the 500 limit; this defends against older
+    // logs and other producers without inventing a different bound.
+    const content =
+      raw.content.length > MAX_TODO_CONTENT
+        ? `${raw.content.slice(0, MAX_TODO_CONTENT)}…`
+        : raw.content;
+    const status = TODO_STATUSES.has(raw.status) ? raw.status : "pending";
+    items.push({ content, status });
+  }
+  return { type: "todos", items };
+}
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: false });
 
@@ -165,6 +215,10 @@ function toolAnnotations(value) {
  *
  * Used when a session is opened: the renderer replaces the whole transcript
  * with these rows and then appends live events on top of them.
+ *
+ * `todos` is deliberately absent. The plan is interface state drawn beside the
+ * transcript, not something the model said, so it travels in `sessionLoadedEvent`'s
+ * own field and never becomes a bubble (which would also put it in an export).
  */
 export function sessionEventsToMessages(events) {
   const out = [];
@@ -461,6 +515,15 @@ export function sessionEventToHostEvents(event, ctx) {
       break;
     }
 
+    case "todos": {
+      // The plan card is interface state, not a message: it is drawn beside
+      // the transcript and never becomes a bubble. `null` (an untranslatable
+      // payload) produces nothing rather than a blank card.
+      const todos = todosEvent(payload);
+      if (todos !== null) out.push(todos);
+      break;
+    }
+
     case "device_status": {
       // The probe MCP reports `{ backend, probe, cpu, serial }` and nothing
       // else — it does not know about targets, ports or the workspace scan.
@@ -723,9 +786,10 @@ export function sessionsEvent(summaries) {
     const id = textOf(record.id);
     const cwd = textOf(record.workdir);
     const createdAt = textOf(record.createdAt);
-    // A caller that already derived a title (the browser bridge reads it from
-    // the first user event) passes it as `title`; without one the row still
-    // needs a non-empty string because the renderer lowercases it.
+    // The host derives a title from the first user event and passes it here;
+    // without one the row still needs a non-empty string because the renderer
+    // lowercases it. An empty title is meaningful — it means "not readable
+    // yet", which the renderer draws as "no messages" rather than as an id.
     const title = textOf(record.title);
     const summary = textOf(record.summary);
     return {
@@ -783,12 +847,39 @@ export function sessionCostUsd(events) {
   return cost;
 }
 
+/**
+ * The plan a session ended on, or `null` when it never had one.
+ *
+ * Scans for the last `todos` event whose payload translates. An event that
+ * does not translate is not an instruction to clear the plan — it is a log
+ * line this module cannot read — so it is skipped instead of erasing the
+ * plan the session honestly had before it. A translated empty list *is*
+ * kept: that is the model clearing its own plan.
+ */
+function latestTodos(events) {
+  if (!Array.isArray(events)) return null;
+  let latest = null;
+  for (const event of events) {
+    if (!isRecord(event) || event.type !== "todos") continue;
+    const translated = todosEvent(isRecord(event.payload) ? event.payload : {});
+    if (translated !== null) latest = translated.items;
+  }
+  return latest;
+}
+
 /** `session_loaded` event for a freshly opened or created conversation. */
 export function sessionLoadedEvent(events, options = {}) {
   const costUsd = sessionCostUsd(events);
   return {
     type: "session_loaded",
     messages: sessionEventsToMessages(events),
+    // The plan card is rebuilt from this, not from `messages`:
+    // `sessionEventsToMessages` only produces chat bubbles, and the plan is
+    // interface state the transcript replay never contained. The last
+    // translatable `todos` is the answer because that is where the work
+    // stopped; a malformed one is skipped rather than erasing a plan the
+    // session really had. `null` means this session never carried one.
+    todos: latestTodos(events),
     cwd: textOf(options.cwd),
     mode: textOf(options.mode) || "diagnose",
     effort: "auto",

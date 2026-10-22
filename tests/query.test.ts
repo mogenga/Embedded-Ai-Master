@@ -19,6 +19,7 @@ import type {
 } from "../src/model/protocol.js";
 import type { SessionHandle } from "../src/session/session.js";
 import { createSession } from "../src/session/session.js";
+import type { TodoItem } from "../src/session/types.js";
 import { echoTool } from "../src/tools/echo.js";
 import { ToolRegistry } from "../src/tools/registry.js";
 import type { ToolDef } from "../src/tools/types.js";
@@ -386,6 +387,83 @@ describe("query 主循环", () => {
     });
     expect(logged[statusIndex]!.parent).toBe(assistant?.seq);
     expect(() => buildMessages(logged)).not.toThrow();
+  });
+
+  it("工具返回 todos 时在 tool_result 之后写一条 todos 事件", async () => {
+    const items: TodoItem[] = [
+      { content: "读 datasheet", status: "completed" },
+      { content: "量波形", status: "in_progress" },
+    ];
+    const planTool: ToolDef<{ items: TodoItem[] }> = {
+      name: "todo_write",
+      description: "替换整份待办列表",
+      schema: z.object({
+        items: z.array(
+          z.object({
+            content: z.string(),
+            status: z.enum(["pending", "in_progress", "completed"]),
+          }),
+        ),
+      }),
+      access: () => "read",
+      execute: async (input) => ({
+        isError: false,
+        code: "ok",
+        message: "",
+        text: `Updated plan: ${input.items.length} items`,
+        detail: { items: input.items },
+        todos: input.items,
+      }),
+    };
+    const provider = scriptedProvider([
+      reply("先列计划", [{ id: "t1", name: "todo_write", arguments: { items } }]),
+      reply("完成"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([planTool]),
+    });
+
+    await collect(query(ctx, "做点事", { maxTurns: 10 }));
+
+    const logged = session.events();
+    const resultIndex = logged.findIndex((event) => event.type === "tool_result");
+    const todosIndex = logged.findIndex((event) => event.type === "todos");
+    const assistant = logged.find((event) => event.type === "assistant");
+    expect(resultIndex).toBeGreaterThanOrEqual(0);
+    // 状态事件必须排在真实结果之后：结果先落盘，状态写入失败也不能把结果补成 lost。
+    expect(todosIndex).toBeGreaterThan(resultIndex);
+    expect(logged[todosIndex]!.payload).toStrictEqual({ callId: "t1", items: [...items] });
+    expect(logged[todosIndex]!.parent).toBe(assistant?.seq);
+    // 计划是界面状态，重开会话时投影不能因为它而失败。
+    expect(() => buildMessages(logged)).not.toThrow();
+  });
+
+  it("todo_write 失败时不写 todos 事件", async () => {
+    const planTool: ToolDef<{ items: unknown[] }> = {
+      name: "todo_write",
+      description: "总是失败",
+      schema: z.object({ items: z.array(z.unknown()) }),
+      access: () => "read",
+      execute: async () => ({
+        isError: true,
+        code: "boom",
+        message: "boom",
+        text: "boom",
+        todos: [{ content: "半成品", status: "pending" }],
+      }),
+    };
+    const provider = scriptedProvider([
+      reply("列计划", [{ id: "t1", name: "todo_write", arguments: { items: [] } }]),
+      reply("完成"),
+    ]);
+    const { ctx, session } = await makeCtx(provider, {
+      tools: new ToolRegistry([planTool]),
+    });
+
+    await collect(query(ctx, "做点事", { maxTurns: 10 }));
+
+    // 失败的工具没有计划成立：result.todos 存在也不该落成事件。
+    expect(session.events().some((event) => event.type === "todos")).toBe(false);
   });
 
   it("工具返回 deviceStatusInvalid 时写 device_status_invalid 状态事件", async () => {

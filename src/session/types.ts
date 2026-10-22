@@ -21,7 +21,8 @@ export type EventType =
   | "interrupted"
   | "compaction"
   | "permission_decision"
-  | "approval_request";
+  | "approval_request"
+  | "todos";
 
 export interface SessionHeader {
   id: string;
@@ -109,6 +110,25 @@ export interface DeviceStatusPayload {
   server: string;
   tool: string;
   state: Record<string, unknown>;
+}
+
+export type TodoStatus = "pending" | "in_progress" | "completed";
+
+export interface TodoItem {
+  content: string;
+  status: TodoStatus;
+}
+
+/**
+ * 模型当前的待办计划。
+ *
+ * 这是界面状态，不是对话内容：投影层忽略它，模型上下文由 `assistant` 与
+ * `tool_result` 重建。每次 `todo_write` 写整份列表（替换而不是追加），
+ * 渲染器据此原地打勾。
+ */
+export interface TodosPayload {
+  callId: string;
+  items: TodoItem[];
 }
 
 export interface AssistantPayload {

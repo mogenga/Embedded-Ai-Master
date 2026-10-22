@@ -292,7 +292,10 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
       case "interrupted":
       case "compaction":
       case "permission_decision":
-      case "approval_request": {
+      case "approval_request":
+      // 计划是界面状态,不是对话内容:模型靠 assistant 与 tool_result 重建上下文,
+      // 把待办列表再投影一遍只会让它复述自己的计划。
+      case "todos": {
         break;
       }
       default: {

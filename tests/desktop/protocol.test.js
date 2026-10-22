@@ -12,6 +12,7 @@ import {
   sessionMarkdown,
   sessionsEvent,
   summarizeToolCall,
+  todosEvent,
 } from "../../desktop/renderer/protocol.js";
 
 function ev(seq, type, payload, parent) {
@@ -564,6 +565,98 @@ describe("sessionEventsToMessages", () => {
     expect(sessionEventsToMessages([])).toStrictEqual([]);
     expect(sessionEventsToMessages(undefined)).toStrictEqual([]);
   });
+
+  it("todos 不变成对话消息", () => {
+    // The plan is interface state, not conversation content: turning it into a
+    // bubble would show the task list twice (once as chat, once as the card)
+    // and would also put it in the exported transcript.
+    const withTodos = sessionEventsToMessages([
+      ...events,
+      ev(5, "todos", { callId: "c2", items: [{ content: "读 datasheet", status: "completed" }] }),
+    ]);
+    expect(withTodos).toStrictEqual(sessionEventsToMessages(events));
+    expect(withTodos).toHaveLength(3);
+  });
+});
+
+describe("todos 计划", () => {
+  it("todosEvent 是导出的纯函数，坏 payload 返回 null", () => {
+    expect(typeof todosEvent).toBe("function");
+    expect(todosEvent(null)).toBeNull();
+    expect(todosEvent({})).toBeNull();
+    expect(todosEvent({ items: null })).toBeNull();
+  });
+
+  it("todos 事件翻译成 {type:'todos', items}，不产生未识别类型 notice", () => {
+    const { out } = translate([
+      ev(0, "assistant", { content: "", toolCalls: [{ id: "c1", name: "todo_write", arguments: {} }] }),
+      ev(1, "todos", { callId: "c1", items: [{ content: "读 datasheet", status: "in_progress" }] }, 0),
+    ]);
+    // `todos` must be in KNOWN_TYPES: otherwise every plan update turns into a
+    // "未识别的事件类型" warning stacked on top of the plan card.
+    expect(out.filter((item) => item.type === "notice")).toStrictEqual([]);
+    expect(out).toStrictEqual([
+      { type: "assistant_start" },
+      { type: "assistant_end" },
+      { type: "todos", items: [{ content: "读 datasheet", status: "in_progress" }] },
+    ]);
+  });
+
+  it("坏项被丢弃，状态非法则保留文字并按 pending", () => {
+    const { out } = translate([
+      ev(0, "todos", {
+        items: [
+          null,
+          {},
+          { content: "" },
+          { content: "   " },
+          { content: 123 },
+          "读 datasheet",
+          { content: "复位时序", status: "weird" },
+          { content: "写测试", status: "completed" },
+        ],
+      }),
+    ]);
+    // A row with no usable text is not a plan item at all; a row with a broken
+    // status is still the text the model meant to say, so it survives as
+    // `pending` rather than vanishing.
+    expect(out).toStrictEqual([
+      {
+        type: "todos",
+        items: [
+          { content: "复位时序", status: "pending" },
+          { content: "写测试", status: "completed" },
+        ],
+      },
+    ]);
+  });
+
+  it("items 不是数组时不产出任何事件", () => {
+    expect(translate([ev(0, "todos", { callId: "c1" })]).out).toStrictEqual([]);
+    expect(translate([ev(0, "todos", { items: "读 datasheet" })]).out).toStrictEqual([]);
+    expect(translate([ev(0, "todos", null)]).out).toStrictEqual([]);
+  });
+
+  it("空 items 是清空计划的合法指令，翻译为空数组而不是丢弃", () => {
+    const { out } = translate([ev(0, "todos", { callId: "c1", items: [] })]);
+    // The renderer removes the card when it receives an empty list; returning
+    // `null` here would leave a stale plan on screen forever.
+    expect(out).toStrictEqual([{ type: "todos", items: [] }]);
+  });
+
+  it("超长 content 截断到 500 字符并带省略号", () => {
+    const long = "x".repeat(600);
+    const { out } = translate([ev(0, "todos", { items: [{ content: long, status: "pending" }] })]);
+    const content = out[0].items[0].content;
+    expect(content).toHaveLength(501);
+    expect(content.endsWith("…")).toBe(true);
+    expect(content.slice(0, 500)).toBe("x".repeat(500));
+    // 500 is the kernel schema's own limit (defensive for older logs only).
+    const exact = translate([
+      ev(0, "todos", { items: [{ content: "y".repeat(500), status: "pending" }] }),
+    ]).out[0].items[0].content;
+    expect(exact).toBe("y".repeat(500));
+  });
 });
 
 describe("state / sessions / session_loaded", () => {
@@ -743,6 +836,8 @@ describe("state / sessions / session_loaded", () => {
     expect(event).toStrictEqual({
       type: "session_loaded",
       messages: [{ role: "user", text: "hi", index: 0, images: 0 }],
+      // This log has no `todos` event, so the field says "never had a plan".
+      todos: null,
       cwd: "E:/p",
       mode: "read-only",
       effort: "auto",
@@ -762,6 +857,51 @@ describe("state / sessions / session_loaded", () => {
     // No priced call at all: the field is absent, so the renderer can hide the
     // row instead of printing "$0.00" for a provider that has no price.
     expect(sessionLoadedEvent([ev(0, "usage", { promptTokens: 1 })])).not.toHaveProperty("costUsd");
+  });
+
+  it("sessionLoadedEvent 取最后一条 todos 的 items", () => {
+    const event = sessionLoadedEvent([
+      ev(0, "user", { content: "hi" }),
+      ev(1, "todos", { callId: "c1", items: [{ content: "旧计划", status: "pending" }] }),
+      ev(2, "todos", { callId: "c2", items: [{ content: "新计划", status: "in_progress" }] }),
+    ]);
+    // The latest plan wins: reopening a session must show where the work
+    // actually stopped, not the first list the model ever wrote.
+    expect(event.todos).toStrictEqual([{ content: "新计划", status: "in_progress" }]);
+  });
+
+  it("sessionLoadedEvent 没有 todos 时为 null", () => {
+    expect(sessionLoadedEvent([ev(0, "user", { content: "hi" })]).todos).toBeNull();
+    expect(sessionLoadedEvent([]).todos).toBeNull();
+    expect(sessionLoadedEvent(undefined).todos).toBeNull();
+  });
+
+  it("sessionLoadedEvent 只有坏 todos 时也为 null", () => {
+    const event = sessionLoadedEvent([ev(0, "todos", { callId: "c1" })]);
+    // A `todos` event that carried no list is not a plan; `null` says the
+    // session never had one, which is what the renderer acts on.
+    expect(event.todos).toBeNull();
+  });
+
+  it("sessionLoadedEvent 跳过坏事件，保留最后一条可翻译的计划", () => {
+    const event = sessionLoadedEvent([
+      ev(0, "todos", { callId: "c1", items: [{ content: "读 datasheet", status: "pending" }] }),
+      ev(1, "todos", { callId: "c2" }),
+    ]);
+    // A malformed line is one this module cannot read, not an instruction to
+    // forget the plan: `null` here would claim the session never had one.
+    expect(event.todos).toStrictEqual([{ content: "读 datasheet", status: "pending" }]);
+  });
+
+  it("sessionLoadedEvent 的最后一条是清空指令时保留空数组", () => {
+    const event = sessionLoadedEvent([
+      ev(0, "todos", { callId: "c1", items: [{ content: "旧计划", status: "pending" }] }),
+      ev(1, "todos", { callId: "c2", items: [] }),
+    ]);
+    // Unlike "no plan ever", this is "the model cleared it": the two are
+    // different states and the renderer draws neither card, but keeping the
+    // distinction honest costs nothing.
+    expect(event.todos).toStrictEqual([]);
   });
 });
 

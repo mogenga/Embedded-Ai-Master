@@ -12,6 +12,7 @@ import type { PermissionGate } from "../permissions/types.js";
 import type { SessionHandle } from "../session/session.js";
 import type {
   PermissionDecisionPayload,
+  TodosPayload,
   ToolResultPayload,
   ToolStartedPayload,
 } from "../session/types.js";
@@ -344,6 +345,19 @@ export async function* query(
     }
   };
 
+  // 与 appendDeviceStatus 同一约定:第一阶段先让真实结果落盘,第二阶段再写状态事件。
+  // 失败的工具没有计划成立,所以 isError 时不写;没有 todos 字段时也不写。
+  const appendTodos = async (
+    call: CompletionResult["toolCalls"][number],
+    result: ToolResult,
+    parent: number,
+  ): Promise<void> => {
+    if (result.isError) return;
+    if (result.todos === undefined) return;
+    const payload: TodosPayload = { callId: call.id, items: result.todos };
+    await session.append({ type: "todos", payload: { ...payload }, parent });
+  };
+
   try {
     while (true) {
       turn += 1;
@@ -584,6 +598,7 @@ export async function* query(
       }
       for (const outcome of outcomes) {
         await appendDeviceStatus(outcome.call, outcome.result, assistantEvent.seq);
+        await appendTodos(outcome.call, outcome.result, assistantEvent.seq);
       }
       pending = undefined;
 

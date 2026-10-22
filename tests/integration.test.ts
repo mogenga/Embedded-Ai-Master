@@ -247,12 +247,23 @@ describe("runSession 端到端装配", () => {
     expect(calls[0].body.model).toBe("flash");
     expect(calls[0].body.max_tokens).toBe(512);
     expect(calls[0].body.stream).toBe(true);
-    expect(calls[0].body.tools).toHaveLength(9);
+    expect(calls[0].body.tools).toHaveLength(10);
     expect(
       (calls[0].body.tools as Array<{ type: string; function: { name: string } }>).map(
         (tool) => tool.function.name,
       ),
-    ).toEqual(["echo", "read", "ls", "write", "edit", "multiedit", "shell", "glob", "grep"]);
+    ).toEqual([
+      "echo",
+      "read",
+      "ls",
+      "todo_write",
+      "write",
+      "edit",
+      "multiedit",
+      "shell",
+      "glob",
+      "grep",
+    ]);
     expect(calls[0].body.tools).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
