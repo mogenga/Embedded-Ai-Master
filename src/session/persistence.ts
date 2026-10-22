@@ -23,6 +23,9 @@ const MAX_ARTIFACT_COPY_ATTEMPTS = 1_000;
 // 读取时的事件类型白名单,**不是**写盘过滤器:写盘不做类型校验,漏登记一项
 // 不会让写入失败,而是让下一次读盘抛 unknown_event_type——整份日志(包括其中
 // 早先写入的真实工具结果)一起不可用。新增事件类型必须同步加进这里。
+//
+// `background_result` 由宿主在后台作业结束时写入(不是本轮 query 写的),
+// 同样必须在这里登记:漏了它,用户重开一个有后台作业的会话就再也读不出来了。
 const EVENT_TYPES: Record<EventType, true> = {
   system: true,
   user: true,
@@ -41,6 +44,7 @@ const EVENT_TYPES: Record<EventType, true> = {
   permission_decision: true,
   approval_request: true,
   todos: true,
+  background_result: true,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {

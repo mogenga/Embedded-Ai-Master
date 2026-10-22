@@ -24,7 +24,7 @@ function makeTool<I>(name: string, schema: z.ZodType<I>): ToolDef<I> {
 }
 
 describe("createBuiltinTools", () => {
-  it("按固定顺序返回 10 个内置工具", () => {
+  it("按固定顺序返回 12 个内置工具", () => {
     expect(createBuiltinTools().map((tool) => tool.name)).toEqual([
       "echo",
       "read",
@@ -34,6 +34,8 @@ describe("createBuiltinTools", () => {
       "edit",
       "multiedit",
       "shell",
+      "terminal_bg",
+      "terminal_bg_check",
       "glob",
       "grep",
     ]);
@@ -42,7 +44,7 @@ describe("createBuiltinTools", () => {
   it("可直接构造注册表且无重复工具名", () => {
     const registry = new ToolRegistry(createBuiltinTools());
 
-    expect(registry.all()).toHaveLength(10);
+    expect(registry.all()).toHaveLength(12);
     expect(registry.lookup("read")?.name).toBe("read");
     expect(registry.lookup("ls")?.name).toBe("ls");
     // fs 已被拆成 read/write/edit/multiedit:留着别名等于留了第二条写路径。
@@ -285,6 +287,8 @@ describe("toModelToolSchemas", () => {
       "edit",
       "multiedit",
       "shell",
+      "terminal_bg",
+      "terminal_bg_check",
       "glob",
       "grep",
     ]);
