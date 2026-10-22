@@ -22,7 +22,8 @@ export type EventType =
   | "compaction"
   | "permission_decision"
   | "approval_request"
-  | "todos";
+  | "todos"
+  | "background_result";
 
 export interface SessionHeader {
   id: string;
@@ -129,6 +130,44 @@ export interface TodoItem {
 export interface TodosPayload {
   callId: string;
   items: TodoItem[];
+}
+
+export type BackgroundJobStatus = "exited" | "signaled" | "timed_out";
+
+export type BackgroundKilledBy = "timeout" | "kill" | "abort";
+
+/**
+ * 一条后台作业的终局。
+ *
+ * 这是**事实记录**，不是界面状态：模型与回放都可能需要知道上一轮那条
+ * `terminal_bg` 最后怎么了。它由宿主的完成泵写成一条 `background_result`
+ * 事件（`parent` 指向发起它的那次 `terminal_bg` 调用），投影层把它原位跳过
+ * ——它不带新的对话内容，模型已经通过 `terminal_bg_check` 或宿主后续的
+ * user 消息看到结果。
+ *
+ * `bytes` 是作业真实产出的字节数，`capturedBytes` 是我们真正留下的字节数；
+ * 两者不等即 `truncated=true`。只报 `capturedBytes` 会把截断说成完整（R3）。
+ */
+export interface BackgroundResultPayload {
+  id: string;
+  command: string;
+  cwd: string;
+  status: BackgroundJobStatus;
+  exitCode: number | null;
+  signal: string | null;
+  killedBy: BackgroundKilledBy | null;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  stdoutBytes: number;
+  stderrBytes: number;
+  /** stdout+stderr 的真实总字节数。 */
+  bytes: number;
+  /** 实际保留的尾部字节数；`bytes` 大于它即发生了截断。 */
+  capturedBytes: number;
+  truncated: boolean;
+  /** 保留的尾部文本（stdout 与 stderr 按到达顺序合并）。 */
+  text: string;
 }
 
 export interface AssistantPayload {

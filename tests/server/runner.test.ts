@@ -204,6 +204,27 @@ describe("createSessionRunner", () => {
     expect(fake.calls).toHaveLength(2);
   });
 
+  it("单次 reasoningEffort 透传给 runSession，非法值在启动前拒绝", async () => {
+    const home = makeHome();
+    const fake = createFakeRunSession();
+    const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+    await runner.start({ text: "hi", reasoningEffort: "high" });
+    expect(fake.calls[0]?.reasoningEffort).toBe("high");
+
+    // `auto` 是界面的哨兵值，到这一层必须变成「没有覆盖」——否则它会作为
+    // 一个字面量等级被发上线，而协议里没有这一档。字段必须真的缺席。
+    await runner.start({ text: "again", reasoningEffort: "auto" });
+    expect(fake.calls[1]?.reasoningEffort).toBeUndefined();
+    expect(Object.hasOwn(fake.calls[1] as object, "reasoningEffort")).toBe(false);
+
+    const error = await startError(runner, { text: "x", reasoningEffort: "max" as never });
+    expect(error.code).toBe("invalid_run_limits");
+    expect(error.message).toContain("reasoningEffort");
+    // 被拒绝的调用从未到达 runSession。
+    expect(fake.calls).toHaveLength(2);
+  });
+
   it("等待 onSession 后才 resolve", async () => {
     const home = makeHome();
     const fake = createFakeRunSession({ delayMs: 50 });

@@ -13,13 +13,59 @@ import { z } from "zod";
 export const DEFAULT_CONTEXT_WINDOW = 128_000;
 export const DEFAULT_MAX_OUTPUT = 4_096;
 
+/**
+ * 推理强度（OpenAI 兼容协议的 `reasoning_effort`）。
+ *
+ * 这五个值是协议自己的枚举，不是本项目的发明：`minimal` / `low` / `medium` /
+ * `high` 是 chat completions 的既有取值，`none` 是较新的一档（显式关闭推理）。
+ * **`none` 与「字段缺席」不是一回事**：缺席表示「不提要求，用服务商默认」，
+ * 而 `none` 是「明确不要推理」。两者必须都能表达，所以这里把 `none` 收进枚举，
+ * 而不是把它当成「等于没填」。
+ *
+ * 刻意不接受 `max` / `xhigh` 之类的网关私有档位：内核只发协议字段，收下一个
+ * 自己不认识的值，只会在某个不支持的网关上换来一个 400，或者更糟——被静默忽略，
+ * 而界面已经显示「已设为 max」。
+ */
+export const REASONING_EFFORTS = ["none", "minimal", "low", "medium", "high"] as const;
+
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === "string" && (REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
+const ReasoningEffortSchema = z.enum(REASONING_EFFORTS);
+
 // 两者都是可选的：要求用户填自己查不到的数值，只会得到凭感觉乱填。
 // 注意这里**不**写 `.default()`——缺省必须保持 undefined，读值方才有机会
 // 区分「用户没填」与「用户填了恰好等于默认值的数」。
-const ModelConfigSchema = z.object({
-  contextWindow: z.number().int().positive().optional(),
-  maxOutput: z.number().int().positive().optional(),
-});
+//
+// 推理强度同理，而且后果更大：凭空补一个默认值会改变每一个既有用户的每一次
+// 请求（有的网关对不认识的字段直接 400，有的会因此关掉自己的默认推理）。
+const ModelConfigSchema = z
+  .object({
+    contextWindow: z.number().int().positive().optional(),
+    maxOutput: z.number().int().positive().optional(),
+    /**
+     * 这个模型接受推理强度参数。
+     *
+     * 可选，且**没有默认值**：OpenAI 兼容协议的 `GET /v1/models` 不报告这项
+     * 能力，内核无从得知，只能由用户声明。不声明就是「没说过」，按不支持处理
+     * （见 `supportsReasoning`），界面据此不摆出一个请求会被丢掉的选项。
+     */
+    supportsReasoning: z.boolean().optional(),
+    /** 未从界面覆盖时使用的默认等级；缺省表示不发该字段。 */
+    reasoningEffort: ReasoningEffortSchema.optional(),
+  })
+  .refine(
+    (model) => !(model.supportsReasoning === false && model.reasoningEffort !== undefined),
+    {
+      // 自相矛盾的配置：说不支持，又指定了一个等级。信哪一半都会让另一半在
+      // 某个界面上被当成事实展示，所以两份都不信——直接报错让用户改。
+      message: "reasoningEffort 不能与 supportsReasoning: false 同时出现",
+      path: ["reasoningEffort"],
+    },
+  );
 
 const PriceSchema = z.number().nonnegative().finite();
 
@@ -74,6 +120,33 @@ export function resolveContextWindow(modelCfg: ModelCfg): number {
 /** 取模型实际使用的单次输出上限；语义同 `resolveContextWindow`。 */
 export function resolveMaxOutput(modelCfg: ModelCfg): number {
   return modelCfg.maxOutput ?? DEFAULT_MAX_OUTPUT;
+}
+
+/**
+ * 这个模型是否声明接受推理强度参数。
+ *
+ * 判据只有一条：用户说过。`supportsReasoning: true` 是明说；写了一个默认等级
+ * 也算——值本身就是声明（schema 已经拒绝了「说不支持又给等级」的矛盾写法）。
+ *
+ * 拿不到声明时一律按**不支持**处理。反过来「猜它支持」会让界面摆出选项、请求
+ * 却把参数丢掉，那正是本次要修的谎。
+ */
+export function supportsReasoning(modelCfg: ModelCfg): boolean {
+  return modelCfg.supportsReasoning === true || modelCfg.reasoningEffort !== undefined;
+}
+
+/**
+ * 这一次请求实际要发的等级：单次覆盖优先，其次是模型配置，都没有则 `undefined`。
+ *
+ * `undefined` 是「不发这个字段」，与 `"none"`（显式关闭推理）是两件事，调用方
+ * 必须原样区分。校验覆盖值由调用方（runner）负责——这一层只解析，不判断运行期
+ * 的合法性。
+ */
+export function resolveReasoningEffort(
+  modelCfg: ModelCfg,
+  override?: ReasoningEffort | undefined,
+): ReasoningEffort | undefined {
+  return override ?? modelCfg.reasoningEffort;
 }
 
 /**

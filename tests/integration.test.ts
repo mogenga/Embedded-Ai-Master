@@ -247,7 +247,7 @@ describe("runSession 端到端装配", () => {
     expect(calls[0].body.model).toBe("flash");
     expect(calls[0].body.max_tokens).toBe(512);
     expect(calls[0].body.stream).toBe(true);
-    expect(calls[0].body.tools).toHaveLength(10);
+    expect(calls[0].body.tools).toHaveLength(12);
     expect(
       (calls[0].body.tools as Array<{ type: string; function: { name: string } }>).map(
         (tool) => tool.function.name,
@@ -261,6 +261,8 @@ describe("runSession 端到端装配", () => {
       "edit",
       "multiedit",
       "shell",
+      "terminal_bg",
+      "terminal_bg_check",
       "glob",
       "grep",
     ]);
@@ -291,6 +293,61 @@ describe("runSession 端到端装配", () => {
       "tool",
       "assistant",
     ]);
+  });
+
+  it("推理强度：模型配置的默认值与单次覆盖分别上线，未配置时字段缺席", async () => {
+    const home = await tempDir();
+    vi.stubEnv("HARNESS_HOME", home);
+    const withEffort = JSON.stringify({
+      gw: {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:9/v1",
+        models: {
+          configured: { contextWindow: 8192, maxOutput: 512, reasoningEffort: "low" },
+          plain: { contextWindow: 8192, maxOutput: 512 },
+        },
+      },
+    });
+
+    // ① 模型配置里的默认等级生效。
+    const configured = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/configured",
+        providersText: withEffort,
+        sessionDir: path.join(home, "case-configured"),
+        fetchImpl: configured.impl,
+      }),
+    );
+    expect(configured.calls[0]?.body.reasoning_effort).toBe("low");
+
+    // ② 单次覆盖压过模型配置。
+    const overridden = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/configured",
+        providersText: withEffort,
+        sessionDir: path.join(home, "case-override"),
+        fetchImpl: overridden.impl,
+        reasoningEffort: "high",
+      }),
+    );
+    expect(overridden.calls[0]?.body.reasoning_effort).toBe("high");
+
+    // ③ 什么都没配：字段必须缺席，而不是发一个默认值。
+    const plain = mockFetch([EMPTY_RESPONSE]);
+    await collect(
+      runSession({
+        input: "hi",
+        model: "gw/plain",
+        providersText: withEffort,
+        sessionDir: path.join(home, "case-plain"),
+        fetchImpl: plain.impl,
+      }),
+    );
+    expect(Object.hasOwn(plain.calls[0]?.body as object, "reasoning_effort")).toBe(false);
   });
 
   it("providersText 缺省且文件不存在时首个 next 抛 providers_not_found", async () => {

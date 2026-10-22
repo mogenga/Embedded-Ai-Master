@@ -1,3 +1,5 @@
+import { isReasoningEffort } from "../config/providers.js";
+import type { ReasoningEffort } from "../config/providers.js";
 import { heuristicCountTokens } from "./count.js";
 import type { CompletionResult, ModelChatMessage, ModelProtocol, ModelToolSchema } from "./protocol.js";
 import { retry, type RetryConfig } from "./retry.js";
@@ -15,6 +17,15 @@ export interface OpenAIProviderCfg {
    * 并记住该网关的结果，不在后续每次请求上重复试探。
    */
   stream?: boolean;
+  /**
+   * 这一次请求要发的 `reasoning_effort`。
+   *
+   * **缺省即不发送**，不是「发服务商默认值」：字段缺席与显式 `"none"` 在不同
+   * 网关上含义不同，凭一个内核默认值替用户做选择，会悄悄改变既有用户的每一次
+   * 请求。调用方（`runSession`）已经用 `resolveReasoningEffort` 合并了单次覆盖
+   * 与模型配置；这一层只负责把拿到的值原样放上线。
+   */
+  reasoningEffort?: ReasoningEffort;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
@@ -497,6 +508,14 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
   const chatCompletionsUrl = resolveChatCompletionsUrl(cfg.baseUrl);
   const requestTimeoutMs = cfg.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const maxResponseBytes = cfg.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+  // 在构造期校验，而不是发请求时才带上：一个内核不认识的等级发出去，只会在
+  // 某个网关上换回 400（甚至被静默忽略而界面显示「已生效」）。这里就拒绝，
+  // 错误立刻落在调用栈上，且不会产生任何出站请求。
+  if (cfg.reasoningEffort !== undefined && !isReasoningEffort(cfg.reasoningEffort)) {
+    throw new TypeError(
+      `reasoningEffort 非法: ${JSON.stringify(cfg.reasoningEffort)}`,
+    );
+  }
   // 降级是 provider 实例的状态而不是全局的：provider 每轮会话都会重建，
   // 全局缓存会让一个网关的结论污染另一个（并发跑不同 baseUrl 的测试就会串）。
   // 实例内的记忆已经足够——同一个 provider 连续几轮不会反复试探。
@@ -536,6 +555,12 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
         };
         if (stream) requestBody.stream_options = { include_usage: true };
         if (tools !== undefined) requestBody.tools = tools;
+        // 只在真的设置了等级时才带上这个字段。缺席 = 「不提要求」，显式
+        // `"none"` = 「明确不要推理」，网关对两者的处理不同，所以这里既不能
+        // 补默认值，也不能把 `"none"` 当成空值省掉。
+        if (cfg.reasoningEffort !== undefined) {
+          requestBody.reasoning_effort = cfg.reasoningEffort;
+        }
 
         let isFirstAttempt = true;
         return await retry(async () => {

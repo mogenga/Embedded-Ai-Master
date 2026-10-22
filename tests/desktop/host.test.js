@@ -226,7 +226,18 @@ function runHost(home, commands, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [HOST], {
       cwd: options.cwd ?? path.dirname(HOST),
-      env: { ...process.env, ...(options.env ?? {}), HARNESS_HOME: home },
+      env: {
+        ...process.env,
+        ...(options.env ?? {}),
+        HARNESS_HOME: home,
+        // `AGENTS_HOME` follows the same rule as `HARNESS_HOME`: a test process
+        // must never read the machine's real `~/.agents/skills`. The store
+        // refuses to default inside a test runner (D-170's rule, applied to
+        // the skill CLI root), so every spawn has to carry one — otherwise the
+        // host boots with a `problems` entry instead of an empty library and
+        // `saveSkill` answers with an error about a missing test fixture.
+        AGENTS_HOME: options.env?.AGENTS_HOME ?? path.join(home, ".agents-fixture"),
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
     const events = [];
@@ -1743,7 +1754,9 @@ describe("desktop host", () => {
     expect(escape.text).toContain("不在当前会话的 artifacts 目录内");
   }, HOST_TIMEOUT_MS);
 
-  it("setEffort 回 warn notice 且不发 state", async () => {
+  it("setEffort 对未声明支持的模型回 warn 且不发 state", async () => {
+    // `tempHome` 的模型没有声明 supportsReasoning；这仍必须是一条拒绝，
+    // 因为请求确实不会携带该参数。接受与持久化的路径见 effort-host.test.js。
     const home = await tempHome();
     const events = await runHost(
       home,
@@ -1757,11 +1770,10 @@ describe("desktop host", () => {
       { until: (all) => all.some((event) => event.type === "sessions") },
     );
     const notice = events.filter((event) => event.type === "notice").at(-1);
-    expect(notice).toStrictEqual({
-      type: "notice",
-      level: "warn",
-      text: "内核不支持调整推理强度",
-    });
+    expect(notice.level).toBe("warn");
+    // 拒绝必须点名模型与原因，用户才知道去 providers.json 改哪一行（R3）。
+    expect(notice.text).toContain("gw/flash");
+    expect(notice.text).toContain("supportsReasoning");
     // Only the boot `state`; claiming success would need a second one.
     expect(events.filter((event) => event.type === "state")).toHaveLength(1);
   }, HOST_TIMEOUT_MS);
@@ -1860,7 +1872,11 @@ describe("desktop host", () => {
     const home = await tempHome();
     const child = spawn(process.execPath, [HOST], {
       cwd: path.dirname(HOST),
-      env: { ...process.env, HARNESS_HOME: home },
+      env: {
+        ...process.env,
+        HARNESS_HOME: home,
+        AGENTS_HOME: path.join(home, ".agents-fixture"),
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
     const events = [];
@@ -1883,5 +1899,316 @@ describe("desktop host", () => {
     expect(events[0].type).toBe("hello");
     expect(events.some((event) => event.type === "notice" && event.text.includes("无法解析"))).toBe(true);
     expect(events.some((event) => event.type === "ready")).toBe(true);
+  }, HOST_TIMEOUT_MS);
+});
+
+/**
+ * Whether the compiled skill store exists.
+ *
+ * `dist/skills/store.js` is the kernel half of the skills page and lands in
+ * `src/skills/` separately from this host. The host imports it namespaced and
+ * `catch`-ed, so a `dist/` from before it existed still boots and answers every
+ * skill command with "run npm run build" — a supported state, not a failure.
+ * These cases need the real store, so they skip until the kernel is rebuilt:
+ * the same pending-build window `PROBE_BUILT` / `BREAKDOWN_BUILT` document.
+ */
+const SKILLS_BUILT = DIST_BUILT && existsSync(path.join(REPO_ROOT, "dist", "skills", "store.js"));
+
+describe.skipIf(!SKILLS_BUILT)("skills", () => {
+  /**
+   * A skill file as the store writes it: front matter, then the body.
+   *
+   * Written by hand here on purpose — the test asserts what the *host* sends,
+   * and building the fixture through `writeSkill` would let a store bug agree
+   * with itself.
+   */
+  async function writeSkillFile(dir, name, { description = "", argumentHint = "", body = "" } = {}) {
+    await mkdir(dir, { recursive: true });
+    const front = [
+      "---",
+      ...(description === "" ? [] : [`description: ${description}`]),
+      ...(argumentHint === "" ? [] : [`argumentHint: ${argumentHint}`]),
+      "---",
+      "",
+      body,
+    ];
+    await writeFile(path.join(dir, `${name}.md`), `${front.join("\n")}\n`, "utf8");
+  }
+
+  it("init 发空 skills 事件，commands 只有三个内置命令", async () => {
+    const home = await tempHome();
+    // No `skills/` directory at all: a library nobody created is empty, not an
+    // error, and the page's empty state is what the operator sees first.
+    const events = await runHost(home, [{ cmd: "init", cwd: home }], {
+      until: (all) => all.some((event) => event.type === "ready"),
+    });
+    const skills = events.find((event) => event.type === "skills");
+    expect(skills).toStrictEqual({ type: "skills", skills: [], problems: [] });
+    const commands = events.find((event) => event.type === "commands");
+    expect(commands.commands).toStrictEqual([
+      { name: "clear" },
+      { name: "context" },
+      { name: "compact" },
+    ]);
+    expect(events.some((event) => event.type === "fatal")).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  it("saveSkill 写盘后广播 skills 与带 source:skill 的 commands", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        {
+          cmd: "saveSkill",
+          skill: {
+            name: "review",
+            description: "Review a diff",
+            argumentHint: "[path]",
+            scope: "user",
+            body: "Look at {{args}} and report findings.",
+          },
+        },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "skills" && event.skills.length > 0)
+          && all.some(
+            (event) =>
+              event.type === "commands"
+              && event.commands.some((command) => command.name === "review"),
+          ),
+      },
+    );
+
+    // The file is the contract: a save that only updated memory is lost on the
+    // next boot, and the settings page would look saved until it wasn't.
+    const file = path.join(home, "skills", "review.md");
+    expect(existsSync(file)).toBe(true);
+    const onDisk = await readFile(file, "utf8");
+    expect(onDisk).toContain("Review a diff");
+    expect(onDisk).toContain("Look at {{args}} and report findings.");
+
+    const skills = events.filter((event) => event.type === "skills").at(-1);
+    expect(skills.skills).toHaveLength(1);
+    // Exactly the five keys the renderer reads — no store-internal field leaks
+    // through, because the page would carry it into the edit form.
+    expect(Object.keys(skills.skills[0]).sort()).toStrictEqual([
+      "argumentHint",
+      "body",
+      "description",
+      "name",
+      "scope",
+    ]);
+    expect(skills.skills[0]).toMatchObject({
+      name: "review",
+      description: "Review a diff",
+      argumentHint: "[path]",
+      scope: "user",
+    });
+    // The body the store wrote came back: the event is a re-read from disk, not
+    // an echo of the payload. Trimmed because a store may normalize the
+    // trailing newline its own writer added.
+    expect(skills.skills[0].body.trim()).toBe("Look at {{args}} and report findings.");
+    expect(skills.problems).toStrictEqual([]);
+
+    // The palette refreshes with the save: same event count as a boot plus the
+    // one this command pushed, and the skill row is the one the renderer keys
+    // its `/name ` insertion on.
+    const commands = events.filter((event) => event.type === "commands").at(-1);
+    const entry = commands.commands.find((command) => command.name === "review");
+    expect(entry).toStrictEqual({
+      name: "review",
+      description: "Review a diff",
+      argumentHint: "[path]",
+      source: "skill",
+    });
+    // The builtins keep their bare shape — the renderer fills in their copy.
+    expect(commands.commands.slice(0, 3)).toStrictEqual([
+      { name: "clear" },
+      { name: "context" },
+      { name: "compact" },
+    ]);
+  }, HOST_TIMEOUT_MS);
+
+  it("saveSkill 名称非法时回 warn notice，不广播 skills，也不落盘", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        // A path separator in the name would decide where the file lands.
+        {
+          cmd: "saveSkill",
+          skill: { name: "../escape", description: "", argumentHint: "", scope: "user", body: "x" },
+        },
+        // A later command marks the end of the queue; a `skills` broadcast would
+        // have been sent before it.
+        { cmd: "listSessions" },
+      ],
+      { until: (all) => all.some((event) => event.type === "sessions") },
+    );
+
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("技能未保存");
+    // Only the boot `skills` event: a broadcast after a refusal would redraw
+    // the page as if the edit had landed.
+    expect(events.filter((event) => event.type === "skills")).toHaveLength(1);
+    // And no file, inside or outside the skills folder.
+    expect(existsSync(path.join(home, "skills"))).toBe(false);
+    expect(existsSync(path.join(home, "escape.md"))).toBe(false);
+    expect(existsSync(path.join(path.dirname(home), "escape.md"))).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  it("removeSkill 对不存在的名字回 warn，说明没找到", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "removeSkill", name: "ghost", scope: "user" },
+        { cmd: "listSessions" },
+      ],
+      { until: (all) => all.some((event) => event.type === "sessions") },
+    );
+
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    // R3: "not found" is not "deleted". The row may have been removed by hand
+    // a moment earlier, and a silent redraw would read as success.
+    expect(notice.text).toContain("技能未删除");
+    expect(notice.text).toContain("ghost");
+    expect(notice.text).toContain("没有");
+    expect(events.filter((event) => event.type === "skills")).toHaveLength(1);
+  }, HOST_TIMEOUT_MS);
+
+  it("project 存到 <cwd>/.harness/skills，user 存到 <home>/skills", async () => {
+    const home = await tempHome();
+    const project = await mkdtemp(path.join(tmpdir(), "eam-skills-project-"));
+    tempDirs.push(project);
+    await writeFile(path.join(project, "main.c"), "int main(void){}\n", "utf8");
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: project },
+        {
+          cmd: "saveSkill",
+          skill: { name: "board", description: "项目技能", argumentHint: "", scope: "project", body: "p" },
+        },
+        {
+          cmd: "saveSkill",
+          skill: { name: "notes", description: "用户技能", argumentHint: "", scope: "user", body: "u" },
+        },
+      ],
+      {
+        until: (all) =>
+          all.some(
+            (event) =>
+              event.type === "skills"
+              && event.skills.some((skill) => skill.name === "board")
+              && event.skills.some((skill) => skill.name === "notes"),
+          ),
+      },
+    );
+
+    expect(existsSync(path.join(project, ".harness", "skills", "board.md"))).toBe(true);
+    expect(existsSync(path.join(home, "skills", "board.md"))).toBe(false);
+    expect(existsSync(path.join(home, "skills", "notes.md"))).toBe(true);
+    expect(existsSync(path.join(project, ".harness", "skills", "notes.md"))).toBe(false);
+
+    // Both scopes reach one list: the page draws a scope badge per row, so the
+    // store's own split has to survive into the event.
+    const skills = events.filter((event) => event.type === "skills").at(-1);
+    const byName = Object.fromEntries(skills.skills.map((skill) => [skill.name, skill]));
+    expect(byName.board.scope).toBe("project");
+    expect(byName.notes.scope).toBe("user");
+  }, HOST_TIMEOUT_MS);
+
+  it("getSkills 遇到坏技能文件时不崩，problems 非空且照常回答", async () => {
+    const home = await tempHome();
+    // A front matter that opens and never closes: the store cannot tell where
+    // the body begins, so the file is a problem rather than a skill.
+    await mkdir(path.join(home, "skills"), { recursive: true });
+    await writeFile(path.join(home, "skills", "broken.md"), "---\ndescription: x\n", "utf8");
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "getSkills" },
+        { cmd: "listSessions" },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "sessions")
+          && all.filter((event) => event.type === "skills").length >= 2,
+      },
+    );
+
+    const skills = events.filter((event) => event.type === "skills").at(-1);
+    expect(skills.problems.length).toBeGreaterThan(0);
+    expect(typeof skills.problems[0].message).toBe("string");
+    expect(skills.problems[0].message).not.toBe("");
+    // The broken file is not a skill, and it did not take the request down.
+    expect(skills.skills).toStrictEqual([]);
+    expect(events.some((event) => event.type === "fatal")).toBe(false);
+    // The release signal for a later command proves nothing hung.
+    expect(events.some((event) => event.type === "sessions")).toBe(true);
+  }, HOST_TIMEOUT_MS);
+});
+
+/**
+ * The other side of the same pending-build window.
+ *
+ * `describe.skipIf(!SKILLS_BUILT)` above covers the built kernel; this covers a
+ * `dist/` without the store, which is what most trees in the wild have today.
+ * Both are asserted so neither can pass as the other: the degraded host must
+ * say it cannot save and must not claim a library it never read.
+ */
+describe.runIf(!SKILLS_BUILT)("skills（内核未编译）", () => {
+  it("getSkills / saveSkill / removeSkill 都回 warn 说先 build，宿主不崩", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "getSkills" },
+        {
+          cmd: "saveSkill",
+          skill: { name: "review", description: "d", argumentHint: "", scope: "user", body: "b" },
+        },
+        { cmd: "removeSkill", name: "review", scope: "user" },
+        { cmd: "listSessions" },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "sessions")
+          && all.filter((event) => event.type === "skills").length >= 2,
+      },
+    );
+
+    const notices = events.filter((event) => event.type === "notice");
+    // One per command that needed the store; all three name the fix.
+    expect(notices.length).toBeGreaterThanOrEqual(3);
+    expect(notices.every((notice) => notice.level === "warn")).toBe(true);
+    expect(notices.filter((notice) => notice.text.includes("npm run build"))).toHaveLength(3);
+
+    // The release signal still arrives, with nothing invented: no skill, no
+    // problem, and no file on disk that a "saved" claim would imply.
+    const skills = events.filter((event) => event.type === "skills").at(-1);
+    expect(skills).toStrictEqual({ type: "skills", skills: [], problems: [] });
+    expect(existsSync(path.join(home, "skills", "review.md"))).toBe(false);
+
+    // Boot still completed, and the builtins are still offered.
+    expect(events.some((event) => event.type === "ready")).toBe(true);
+    expect(events.some((event) => event.type === "fatal")).toBe(false);
+    const commands = events.find((event) => event.type === "commands");
+    expect(commands.commands).toStrictEqual([
+      { name: "clear" },
+      { name: "context" },
+      { name: "compact" },
+    ]);
   }, HOST_TIMEOUT_MS);
 });

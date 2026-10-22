@@ -61,7 +61,21 @@ export function createSettings(deps) {
 /** Kernel defaults, mirrored so the form has something to compare against
  *  before the host answers (`src/config/app-config.ts`). `maxTurns: null` is
  *  the kernel's "no cap": a message may take as many model calls as it needs. */
-const DEFAULT_RUN_LIMITS = { maxTurns: null, maxCostUsd: null, timeoutMs: null, systemPrompt: "" };
+const DEFAULT_RUN_LIMITS = {
+  maxTurns: null,
+  maxCostUsd: null,
+  timeoutMs: null,
+  systemPrompt: "",
+  /**
+   * The operator's effort choice, keyed by `provider/model`.
+   *
+   * It lives here rather than in `providers.json` because that file describes
+   * the endpoint, while this is "what I picked for this run". The form rewrites
+   * `run.json` whole, so the field has to be present in the defaults: without
+   * it, opening 行为 and pressing save would drop every stored choice.
+   */
+  reasoningEffortByModel: {},
+};
 const DEFAULT_PERMISSIONS = { preset: "diagnose", approvalTimeoutMs: 120_000, rules: [] };
 /** The kernel's MCP server name rule (`src/mcp/config.ts`). */
 const MCP_NAME_PATTERN = /^[a-zA-Z0-9_-]{1,64}$/;
@@ -86,6 +100,17 @@ state.rules = [];
 /** `$HARNESS_HOME/run.json`, as the host last reported it. */
 state.runLimits = { ...DEFAULT_RUN_LIMITS };
 state.skills = [];
+/** Skill files the store could not read, as the host reported them. Shown at
+ *  the top of the page: a file silently missing from the list is exactly the
+ *  failure R3 forbids. */
+state.skillProblems = [];
+/** Why the last skill save/delete was refused. Empty = nothing to report.
+ *  The host sends these as `notice{domain:"skills"}`; this page is the only
+ *  surface that can show them while the settings dialog is on top. */
+state.skillError = "";
+/** Set when a save was refused, so the form stays open with the draft in it.
+ *  Bumped rather than read: the form compares against the value it sent with. */
+state.skillSubmitSeq = 0;
 state.memory = { global: [], project: [] };
 /**
  * The last `kb` answer from the host, or null before the first one arrives.
@@ -274,16 +299,20 @@ function settingsPages() {
   // what makes it one of them: the first-run prompt and the host's own warning
   // ("设置 → 模型服务") both point here, so leaving it unlisted sent users to a
   // page that could not exist.
-  // The rest of the builders (usage, skills, memory, instructions, hooks,
-  // packs, system, sessions) stay in this file so restoring a page is a
-  // one-line change, but listing them would produce forms whose save button
-  // cannot work.
+  // `skills` reaches the host too (`getSkills` / `saveSkill` / `removeSkill`),
+  // and the composer's `/` menu draws from the same store — a skill file that
+  // cannot be listed here is one the user can only edit by hand.
+  // The rest of the builders (usage, memory, instructions, hooks, packs,
+  // system, sessions) stay in this file so restoring a page is a one-line
+  // change, but listing them would produce forms whose save button cannot
+  // work.
   return [
     { id: "general", group: s.groupSettings, title: s.pageGeneral, build: buildGeneralPage },
     { id: "connection", group: s.groupSettings, title: s.pageConnection, build: buildConnectionPage },
     { id: "appearance", group: s.groupSettings, title: s.pageAppearance, build: buildAppearancePage },
     { id: "behavior", group: s.groupSettings, title: s.pageBehavior, build: buildBehaviorPage },
     { id: "mcp", group: s.groupSettings, title: s.pageMcp, build: buildMcpPage },
+    { id: "skills", group: s.groupSettings, title: s.pageSkills, build: buildSkillsPage },
     { id: "kb", group: s.groupComputer, title: s.pageKb, build: buildKbPage },
     { id: "about", group: s.groupComputer, title: s.pageAbout, build: buildAboutPage },
   ];
@@ -468,7 +497,6 @@ function applyUiPreference(key, value) {
     case "restartSession":
     case "suggestions":
     case "updateCheck":
-    case "isolateByDefault":
       localStorage.setItem(`prometheus.${key}`, value ? "1" : "0");
       break;
     case "uiScale":
@@ -503,9 +531,6 @@ function applyUiPreference(key, value) {
       break;
     case "keepAwake":
       state.keepAwake = Boolean(value);
-      break;
-    case "branchPrefix":
-      state.branchPrefix = value;
       break;
     case "outputStyle":
       state.outputStyle = value;
@@ -593,14 +618,6 @@ function buildGeneralPage() {
         control: sToggle({
           checked: state.updateCheck !== false,
           onChange: (value) => applyPref("updateCheck", value),
-        }),
-      }),
-      sRow({
-        label: s.isolateByDefault,
-        desc: s.isolateByDefaultDesc,
-        control: sToggle({
-          checked: Boolean(state.isolateByDefault),
-          onChange: (value) => applyPref("isolateByDefault", value),
         }),
       }),
     ]),
@@ -1009,6 +1026,16 @@ function buildConnectionPage() {
       carried: {
         ...(model?.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
         ...(model?.maxOutput !== undefined ? { maxOutput: model.maxOutput } : {}),
+        // Reasoning support is a fact about the model that this form does not
+        // edit, so it has to survive a save. Leaving it out meant one click on
+        // 保存 silently erased it from providers.json — and with it every
+        // effort level the composer was offering a moment earlier.
+        ...(model?.supportsReasoning !== undefined
+          ? { supportsReasoning: model.supportsReasoning }
+          : {}),
+        ...(model?.reasoningEffort !== undefined
+          ? { reasoningEffort: model.reasoningEffort }
+          : {}),
       },
     })),
     extra: {
@@ -2102,21 +2129,6 @@ function buildSessionsPage() {
           onChange: (value) => applyPref("archiveAfterDays", Number(value)),
         }),
       }),
-      sRow({
-        label: s.branchPrefix,
-        desc: s.branchPrefixDesc,
-        control: sText({
-          value: state.branchPrefix ?? "embedded-ai/",
-          mono: true,
-          placeholder: "embedded-ai/",
-          onChange: (value) => applyPref("branchPrefix", value),
-        }),
-      }),
-      sRow({
-        label: s.worktreeLocation,
-        desc: s.worktreeLocationDesc,
-        control: el("code", "setting-code", "<repo>/.embedded-ai/worktrees"),
-      }),
     ]),
   );
   return pane;
@@ -2672,8 +2684,59 @@ function buildSkillsPage() {
   const body = el("div", "skills-body");
   pane.appendChild(body);
 
+  /**
+   * The refusal line, in place, without rebuilding the pane.
+   *
+   * A full re-render would clear `body` and take the open form with it — the
+   * draft is exactly what the user needs after a rejected save. The line is
+   * created once and updated afterwards, so showing a second error replaces
+   * the first instead of stacking.
+   */
+  const showError = (text) => {
+    let line = body.querySelector(".skill-error");
+    if (text === "") {
+      line?.remove();
+      return;
+    }
+    if (line === null) {
+      line = el("p", "setting-note pack-problem skill-error");
+      line.setAttribute("role", "alert");
+      body.prepend(line);
+    }
+    line.textContent = text;
+  };
+
   const render = () => {
     body.innerHTML = "";
+    // Unreadable skill files first: a file that failed to parse is absent from
+    // the list below, and a page that only showed the survivors would read as
+    // "these are all your skills" when it is not (R3).
+    const problems = state.skillProblems.filter(
+      (problem) => problem.file !== "" || problem.message !== "",
+    );
+    if (problems.length > 0) {
+      const block = el("section", "setting-group");
+      block.appendChild(el("h3", "setting-group-title", s.problemsTitle));
+      for (const problem of problems) {
+        block.appendChild(
+          el("p", "setting-note pack-problem", s.skillProblemLine(problem.file, problem.message)),
+        );
+      }
+      body.appendChild(block);
+    }
+    // The last refused save or delete, at the top: the host answers a failure
+    // with a `notice{domain:"skills"}`, and the settings dialog covers the
+    // transcript that used to receive it. Without this line a rejected name
+    // looked exactly like a save that worked and drew nothing (R3).
+    //
+    // Above the problems block, not below it: those describe files already on
+    // disk, while this describes the click the user just made. The newest fact
+    // goes where the eye lands first.
+    if (state.skillError !== "") {
+      const failed = el("p", "setting-note pack-problem skill-error", state.skillError);
+      failed.setAttribute("role", "alert");
+      body.prepend(failed);
+    }
     const search = el("input", "setting-input skill-search");
     search.type = "search";
     search.placeholder = s.searchSkills;
@@ -2681,8 +2744,11 @@ function buildSkillsPage() {
     const draw = () => {
       const query = search.value.trim().toLowerCase();
       list.innerHTML = "";
+      // Rows are the host's `skillRow` shape; optional chaining keeps one
+      // malformed entry from taking the whole page down while the search box
+      // is being typed in.
       const matches = state.skills.filter(
-        (skill) => !query || `${skill.name} ${skill.description}`.toLowerCase().includes(query),
+        (skill) => !query || `${skill?.name ?? ""} ${skill?.description ?? ""}`.toLowerCase().includes(query),
       );
       if (matches.length === 0) {
         const empty = el("div", "settings-empty-card");
@@ -2702,6 +2768,18 @@ function buildSkillsPage() {
         title.appendChild(el("span", `mcp-scope scope-${skill.scope}`, skill.scope === "project" ? s.scopeProject : s.scopeUser));
         main.appendChild(title);
         main.appendChild(el("p", "skill-desc", skill.description || s.skillNoDescription));
+        // The hint is what the composer shows after `/name`, so the row shows
+        // the same text in the same treatment: an edit here and a `/name`
+        // typed in the composer must be recognisably the same command. Its own
+        // line rather than inline, because `skill-desc` truncates with an
+        // ellipsis and would swallow the chip behind a long description.
+        if (typeof skill.argumentHint === "string" && skill.argumentHint !== "") {
+          const line = el("p", "skill-desc");
+          const chip = el("code", "setting-code", skill.argumentHint);
+          chip.title = s.argumentHintShown(skill.argumentHint);
+          line.appendChild(chip);
+          main.appendChild(line);
+        }
         const actions = el("div", "mcp-actions");
         actions.appendChild(sButton(s.edit, () => openForm(skill), { quiet: true }));
         actions.appendChild(
@@ -2753,17 +2831,25 @@ function buildSkillsPage() {
     actions.append(
       sButton(s.cancel, () => form.remove(), { quiet: true }),
       sButton(s.save, () => {
+        name.value = name.value.trim();
+        description.value = description.value.trim();
+        hint.value = hint.value.trim();
         api.send({
           cmd: "saveSkill",
           skill: {
-            name: name.value.trim(),
-            description: description.value.trim(),
-            argumentHint: hint.value.trim(),
+            name: name.value,
+            description: description.value,
+            argumentHint: hint.value,
             scope: scope.value,
             body: bodyArea.value,
           },
         });
-        form.remove();
+        // The form stays up until the host says the save landed. It used to
+        // close here, immediately — so a rejected name made the dialog
+        // disappear, the list stay unchanged, and the draft be lost, which
+        // from the user's seat is indistinguishable from a save that worked
+        // and drew nothing (R3). `skills` (success) re-renders the page and
+        // takes the form with it; a refusal leaves it where the fix is.
       }, { primary: true }),
     );
     form.appendChild(actions);
@@ -2772,7 +2858,23 @@ function buildSkillsPage() {
   };
 
   state.renderSkillsPage = render;
+  // A refusal updates one line in place instead of re-rendering: the open form
+  // holds the draft the user has to fix, and `render` clears `body`. Success,
+  // by contrast, goes through `renderSkillsPage` on the `skills` broadcast,
+  // which rebuilds the page without the form — the edit landed, so the draft
+  // has nothing left to do.
+  state.showSkillsError = showError;
+  // Same reason as the knowledge-base page: the files are hand-editable, so
+  // the copy that arrived at boot may describe a folder nobody has re-read
+  // since. Asking on open is what keeps the page from showing a deleted skill
+  // or hiding a new one until the next launch.
+  //
+  // Deliberately *not* before `render()`: the answer only triggers a redraw
+  // through `state.renderSkillsPage`, so a fresh empty library paints once and
+  // then corrects itself, rather than the page waiting on a round trip to show
+  // anything at all.
   render();
+  api.send({ cmd: "getSkills" });
   return pane;
 }
 
@@ -3594,7 +3696,6 @@ function fillSettings(settings) {
   }
   if (settings.notifications !== undefined) state.notifications = settings.notifications !== false;
   if (settings.keepAwake !== undefined) state.keepAwake = Boolean(settings.keepAwake);
-  if (settings.branchPrefix !== undefined) state.branchPrefix = settings.branchPrefix;
   if (settings.outputStyle !== undefined) state.outputStyle = settings.outputStyle;
   if (settings.archiveAfterDays !== undefined) state.archiveAfterDays = settings.archiveAfterDays;
   if (settings.sandbox !== undefined) state.sandbox = settings.sandbox === "off" ? "off" : "enforce";
@@ -3665,9 +3766,32 @@ function basename(path) {
         state.renderUsagePage?.();
         break;
       case "skills":
-        state.skills = message.skills ?? [];
+        // Both halves are optional in the protocol: a host that answers with
+        // `problems` only, or with neither, must not put a non-array into the
+        // page's `.filter` and blank the whole settings pane.
+        state.skills = Array.isArray(message.skills) ? message.skills : [];
+        state.skillProblems = (Array.isArray(message.problems) ? message.problems : []).map(
+          (problem) => ({
+            file: typeof problem?.file === "string" ? problem.file : "",
+            message: typeof problem?.message === "string" ? problem.message : "",
+          }),
+        );
+        // A fresh library means the last save landed (the host broadcasts only
+        // after a successful write), so the error that belonged to an earlier
+        // attempt must not stay on the page.
+        state.skillError = "";
         state.renderSkillsPage?.();
         break;
+      case "notice": {
+        // Only the skills page is routed here (see `app.js`): the settings
+        // dialog is a modal, so a transcript notice would never be read. Update
+        // the line in place — re-rendering would take the open form, and the
+        // draft it holds, down with it.
+        const text = message.level === "warn" ? String(message.text ?? "") : "";
+        state.skillError = text;
+        state.showSkillsError?.(text);
+        break;
+      }
       case "memory":
         state.memory = { global: message.global ?? [], project: message.project ?? [] };
         state.renderMemoryPage?.();

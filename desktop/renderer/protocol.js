@@ -41,6 +41,10 @@ const KNOWN_TYPES = new Set([
   // it becomes a `未识别的事件类型` warn notice, so every plan update would
   // print a warning line above the plan card it just drew.
   "todos",
+  // Same rule for `background_result`: a long build finishing is exactly the
+  // moment the operator has walked away from the window, and the one line that
+  // says it finished would otherwise be a warning that it could not be read.
+  "background_result",
 ]);
 
 /** Tool output larger than this is truncated before it reaches the DOM. */
@@ -151,6 +155,71 @@ export function todosEvent(payload) {
     items.push({ content, status });
   }
   return { type: "todos", items };
+}
+
+/** Statuses the kernel writes for a finished background job. */
+const BACKGROUND_STATUSES = new Set(["exited", "signaled", "timed_out"]);
+
+function byteCount(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * One line for a finished background terminal job, or `null` when the payload
+ * carries no outcome.
+ *
+ * The level is `warn` exactly when the job did not simply exit zero: a build
+ * that died of a signal, ran out of its timeout or returned non-zero is
+ * something the operator should see without going looking. A clean exit is
+ * `dim` — it is news, not a problem.
+ *
+ * Truncation is stated in the same line, with both figures: the bytes the job
+ * produced and the bytes kept. Printing only the kept count would present a
+ * cut-down tail as the whole output (R3), and this is the one line the
+ * operator reads before deciding whether to run `terminal_bg_check`.
+ *
+ * The command is capped at 120 characters, matching `summarizeToolCall`: this
+ * is a transcript row, and a 4 KB heredoc in it would bury the outcome it is
+ * supposed to announce.
+ */
+export function summarizeBackgroundResult(payload) {
+  if (!isRecord(payload)) return null;
+  const status = textOf(payload.status);
+  if (!BACKGROUND_STATUSES.has(status)) return null;
+  const command = textOf(payload.command);
+  const label = command.length > 120 ? `${command.slice(0, 120)}…` : command;
+  const who = label === "" ? "后台任务" : `后台任务 ${label}`;
+
+  let outcome;
+  if (status === "timed_out") {
+    outcome = "已超时被终止";
+  } else if (status === "signaled") {
+    const signal = textOf(payload.signal);
+    outcome = signal === "" ? "被信号终止" : `被信号 ${signal} 终止`;
+  } else {
+    const exitCode = payload.exitCode;
+    outcome =
+      typeof exitCode === "number" && Number.isFinite(exitCode)
+        ? `已结束，退出码 ${exitCode}`
+        : "已结束，退出码未知";
+  }
+
+  const verdict = status === "exited" && payload.exitCode === 0 ? "dim" : "warn";
+  const parts = [`${who} ${outcome}`];
+
+  const bytes = byteCount(payload.bytes);
+  const capturedBytes = byteCount(payload.capturedBytes);
+  if (payload.truncated === true) {
+    // Both figures, and which end survived. Omitting either turns "we kept a
+    // tail" into "this is the output".
+    const produced = bytes === undefined ? "未知" : String(bytes);
+    const kept = capturedBytes === undefined ? "未知" : String(capturedBytes);
+    parts.push(`输出已截断：共 ${produced} 字节，仅保留最后 ${kept} 字节`);
+  } else if (bytes !== undefined) {
+    parts.push(`${bytes} 字节输出`);
+  }
+
+  return { type: "notice", level: verdict, text: parts.join("；") };
 }
 
 const encoder = new TextEncoder();
@@ -521,6 +590,16 @@ export function sessionEventToHostEvents(event, ctx) {
       // payload) produces nothing rather than a blank card.
       const todos = todosEvent(payload);
       if (todos !== null) out.push(todos);
+      break;
+    }
+
+    case "background_result": {
+      // A background terminal job finished. The renderer has no job panel, so
+      // this is one transcript notice — but it must be one: the whole point of
+      // running the command in the background is that its ending arrives
+      // without anybody asking.
+      const summary = summarizeBackgroundResult(payload);
+      if (summary !== null) out.push(summary);
       break;
     }
 

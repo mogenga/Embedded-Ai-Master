@@ -1,3 +1,4 @@
+import { terminalBgCheckTool, terminalBgTool } from "./background.js";
 import { echoTool } from "./echo.js";
 import { editTool, multieditTool, readTool, writeTool } from "./fs.js";
 import { globTool } from "./glob.js";
@@ -15,6 +16,10 @@ import type { ToolDef } from "./types.js";
 //
 // `todo_write` 排在 `ls` 之后、`write` 之前:它是计划类而不是文件类,对工作区零副作用,
 // 紧挨写工具放,是为了让「先列计划再动手」在模型的选择顺序里贴在一起。
+//
+// `terminal_bg` / `terminal_bg_check` 紧跟在 `shell` 之后:它们回答的是同一个问题
+// (「跑一条命令」),区别只在要不要等。放远了,模型会在该用后台的时候仍然选 `shell`,
+// 然后被十分钟的构建卡住整轮。check 排在 bg 后面,因为先有作业才谈得上查。
 export function createBuiltinTools(): ToolDef<unknown>[] {
   return [
     echoTool,
@@ -25,6 +30,8 @@ export function createBuiltinTools(): ToolDef<unknown>[] {
     editTool,
     multieditTool,
     shellTool,
+    terminalBgTool,
+    terminalBgCheckTool,
     globTool,
     grepTool,
   ];

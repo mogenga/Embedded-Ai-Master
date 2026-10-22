@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   COMMANDS,
+  SKILL_ARGUMENT,
   contextReport,
+  expandSkill,
   mergeCommands,
   parseSlashText,
 } from "../../desktop/renderer/commands.js";
+import { SKILL_NAME_PATTERN } from "../../src/skills/store.js";
 
 describe("commands: catalogue", () => {
   it("三个内置命令都没有参数", () => {
@@ -76,6 +79,148 @@ describe("commands: mergeCommands", () => {
       "clear",
     ]);
   });
+
+  it("技能行保留 source 与宿主自己的描述和参数提示", () => {
+    // The host tags skill rows; without honouring the tag the composer would
+    // run `/review` as a local verb and never expand the saved prompt.
+    expect(
+      mergeCommands(
+        [
+          {
+            name: "review",
+            description: "Review the current diff",
+            argumentHint: "[path]",
+            source: "skill",
+          },
+        ],
+        "zh",
+      ),
+    ).toStrictEqual([
+      {
+        name: "review",
+        description: "Review the current diff",
+        argumentHint: "[path]",
+        source: "skill",
+        known: false,
+      },
+    ]);
+    // The host sends the skill file's own words, not a localized pair; a skill
+    // without a hint keeps an empty string rather than inheriting one.
+    expect(mergeCommands([{ name: "ship", source: "skill" }], "en")[0]).toStrictEqual({
+      name: "ship",
+      description: "",
+      argumentHint: "",
+      source: "skill",
+      known: false,
+    });
+  });
+
+  it("没有 source 和可疑 source 的行仍是内置行", () => {
+    // Only the exact tag the host and this module share makes a skill: a typo
+    // or a hostile value must not open the expansion path.
+    expect(mergeCommands([{ name: "deploy" }], "zh")[0].source).toBe("builtin");
+    expect(mergeCommands([{ name: "deploy", source: "root" }], "zh")[0].source).toBe("builtin");
+    expect(mergeCommands([{ name: "deploy", source: "" }], "zh")[0].source).toBe("builtin");
+    expect(mergeCommands([{ name: "deploy", source: 7 }], "zh")[0].source).toBe("builtin");
+    expect(mergeCommands([{ name: "deploy", source: "Skill" }], "zh")[0].source).toBe("builtin");
+  });
+
+  it("同名的技能行不能改写内置命令的描述", () => {
+    // The host already refuses to store a skill named after a builtin, so this
+    // is defence in depth: a `/clear` that became a skill would hunt for a
+    // body while no longer clearing anything.
+    expect(
+      mergeCommands(
+        [
+          {
+            name: "clear",
+            description: "Something else entirely",
+            argumentHint: "[what]",
+            source: "skill",
+          },
+        ],
+        "zh",
+      ),
+    ).toStrictEqual([
+      {
+        name: "clear",
+        description: "开始新会话",
+        argumentHint: "",
+        source: "builtin",
+        known: true,
+      },
+    ]);
+  });
+});
+
+describe("commands: expandSkill", () => {
+  const skill = (body, extra = {}) => ({ name: "review", body, ...extra });
+
+  it("把每个 $ARGUMENTS 都换成参数", () => {
+    expect(SKILL_ARGUMENT).toBe("$ARGUMENTS");
+    expect(expandSkill(skill("Review $ARGUMENTS now"), "src/main.ts")).toBe(
+      "Review src/main.ts now",
+    );
+    // All occurrences, not just the first.
+    expect(expandSkill(skill("A $ARGUMENTS B $ARGUMENTS C"), "x")).toBe("A x B x C");
+    // The result never carries a literal placeholder when args were supplied.
+    expect(expandSkill(skill("$ARGUMENTS$ARGUMENTS"), "y")).not.toContain(SKILL_ARGUMENT);
+  });
+
+  it("有占位符但没参数时替换为空，不改写作者的空白", () => {
+    // The substitution is the only edit: trimming the double space here would
+    // be rewriting prose this module did not write.
+    expect(expandSkill(skill("Review  $ARGUMENTS  please"), "")).toBe("Review    please");
+    expect(expandSkill(skill("Review $ARGUMENTS"), "   ")).toBe("Review");
+    // Only the edges are trimmed.
+    expect(expandSkill(skill("\n  Review $ARGUMENTS  \n"), "it")).toBe("Review it");
+  });
+
+  it("没有占位符时把参数接成新段落", () => {
+    // `/review src/main.ts` must never lose the path just because the author
+    // forgot the placeholder.
+    expect(expandSkill(skill("Review the diff"), "src/main.ts")).toBe(
+      "Review the diff\n\nsrc/main.ts",
+    );
+    // Trailing newlines in the body do not double up with the separator.
+    expect(expandSkill(skill("Review the diff\n\n"), "a b")).toBe("Review the diff\n\na b");
+  });
+
+  it("没有占位符也没有参数时原文只去两端空白", () => {
+    expect(expandSkill(skill("  Review the diff\n"), "")).toBe("Review the diff");
+    expect(expandSkill(skill("Review  the  diff"), "  ")).toBe("Review  the  diff");
+  });
+
+  it("不可用的技能返回 null", () => {
+    expect(expandSkill(skill("   "), "x")).toBeNull();
+    expect(expandSkill(skill(""), "x")).toBeNull();
+    expect(expandSkill(skill("\n\t \n"), "x")).toBeNull();
+    expect(expandSkill({ name: "no-body" }, "x")).toBeNull();
+    expect(expandSkill({ body: 42 }, "x")).toBeNull();
+    expect(expandSkill(null, "x")).toBeNull();
+    expect(expandSkill(undefined, "x")).toBeNull();
+    expect(expandSkill("body", "x")).toBeNull();
+    expect(expandSkill(["body"], "x")).toBeNull();
+  });
+
+  it("不碰 $HOME、$1 这类不是占位符的美元符号", () => {
+    // A body may legitimately talk about shell variables; only the exact
+    // token is a placeholder.
+    expect(expandSkill(skill("Run $HOME/bin and $1 then $ARGUMENT"), "x")).toBe(
+      "Run $HOME/bin and $1 then $ARGUMENT\n\nx",
+    );
+    expect(expandSkill(skill("Cost is $5; keep $ARGUMENTS"), "the path")).toBe(
+      "Cost is $5; keep the path",
+    );
+  });
+
+  it("参数里的 $& 与 $' 按字面插入", () => {
+    // `String.replace` would expand those in a replacement string; split/join
+    // keeps the user's text literal.
+    expect(expandSkill(skill("Review $ARGUMENTS"), "a $& b $' c $` d")).toBe(
+      "Review a $& b $' c $` d",
+    );
+  });
 });
 
 describe("commands: parseSlashText", () => {
@@ -102,8 +247,46 @@ describe("commands: parseSlashText", () => {
     expect(parseSlashText("please run /clear")).toBeNull();
     expect(parseSlashText("C:/tmp")).toBeNull();
     expect(parseSlashText("/\\server\\share")).toBeNull();
-    // 语法里没有下划线：带下划线的名字按散文处理，原样发给模型。
-    expect(parseSlashText("/foo_bar")).toBeNull();
+    // 含路径分隔符的仍然不是命令：`_` 只是在名字里合法，不能把路径带进来。
+    expect(parseSlashText("/usr_local/bin")).toBeNull();
+  });
+
+  it("下划线是合法的命令名字符", () => {
+    // 内核的 SKILL_NAME_PATTERN 允许 `_`，命令面板的补全正则也允许，唯独
+    // 这里曾经不允许：`/review_diff` 于是被当成散文原样发给模型——不展开、
+    // 不报错。名字规则三处必须一致，否则存在但不可用的技能连提示都没有。
+    expect(parseSlashText("/review_diff")).toStrictEqual({ name: "review_diff", args: "" });
+    expect(parseSlashText("/review_diff src/a.ts")).toStrictEqual({
+      name: "review_diff",
+      args: "src/a.ts",
+    });
+  });
+
+  it("内核接受的每个技能名都能被斜杠语法解析回来", () => {
+    // 「能存在的名字」与「能敲出来的名字」必须是同一个集合（D-198）。两份正则
+    // 分开写、又没有任何一处比较它们，落差就是「文件存在但永远调不动」——
+    // 而且失败时不会报错，整行会当成散文发给模型。这条测试就是那道比较：
+    // SKILL_NAME_PATTERN 说合法的名字，parseSlashText("/" + name) 必须原样还原。
+    const names = [
+      "review",
+      "review-diff",
+      "review_diff",
+      "a",
+      "a1",
+      "r2d2",
+      "x_",
+      "x-y_z9",
+      "a".repeat(64),
+    ];
+    for (const name of names) {
+      expect(SKILL_NAME_PATTERN.test(name), `样例本身应是合法技能名: ${name}`).toBe(true);
+      expect(parseSlashText(`/${name}`), `合法技能名解析不出来: ${name}`).toStrictEqual({
+        name,
+        args: "",
+      });
+      // 带参数时同样要还原，参数原样保留（含空格与斜杠）。
+      expect(parseSlashText(`/${name} a/b c`)).toStrictEqual({ name, args: "a/b c" });
+    }
   });
 
   it("空值与非字符串返回 null", () => {

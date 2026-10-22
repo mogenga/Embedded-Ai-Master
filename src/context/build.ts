@@ -295,7 +295,13 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
       case "approval_request":
       // 计划是界面状态,不是对话内容:模型靠 assistant 与 tool_result 重建上下文,
       // 把待办列表再投影一遍只会让它复述自己的计划。
-      case "todos": {
+      case "todos":
+      // 后台作业的终局是宿主写的事实记录,不是模型说过的内容:它不带新的对话
+      // 内容,模型已经通过 `terminal_bg_check` 或随后的 user 消息看到结果,再
+      // 投影一遍只是让它复述一条自己没说过的话。注意它**不能**被并进 `user`/
+      // `system`/`assistant` 那一类:那三个在工具批次未闭合时会触发上面的守卫,
+      // 而作业完全可能在 assistant 与它的 tool_result 之间结束。
+      case "background_result": {
         break;
       }
       default: {

@@ -306,8 +306,10 @@
                       </button>
                       <div class="model-menu" id="model-menu" role="listbox" hidden></div>
                     </div>
-                    <!-- Reasoning effort is a provider parameter this kernel
-                         does not send; the control would change nothing. -->
+                    <!-- Visible only when the current model declares reasoning
+                         support. `syncEffortControl()` in app.js removes
+                         `hidden` from the host's reported levels, and leaves it
+                         on for a model that would drop the parameter. -->
                     <div class="effort-control" id="effort-control" hidden>
                       <button class="chip-button effort-picker" id="effort-picker" aria-haspopup="menu" aria-expanded="false">
                         <span id="effort-label">Auto</span>

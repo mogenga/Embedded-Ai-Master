@@ -294,3 +294,73 @@ describe("运行上限的 maxTurns 可缺省（null = 不限）", () => {
     });
   });
 });
+
+describe("run.json 的推理强度选择", () => {
+  it("没有 run.json 时是一张空表，不是 undefined", () => {
+    const home = makeHome();
+
+    // 空表是「谁都没选过」，与 `undefined` 的区别是调用方不必先判空。
+    expect(readAppConfig(home).run.reasoningEffortByModel).toStrictEqual({});
+  });
+
+  it("写入后能按模型读回", async () => {
+    const home = makeHome();
+
+    const written = await writeRunLimits(home, {
+      reasoningEffortByModel: { "gw/flash": "high", "gw/pro": "minimal" },
+    });
+
+    expect(written.reasoningEffortByModel).toStrictEqual({
+      "gw/flash": "high",
+      "gw/pro": "minimal",
+    });
+    expect(readAppConfig(home).run.reasoningEffortByModel).toStrictEqual({
+      "gw/flash": "high",
+      "gw/pro": "minimal",
+    });
+  });
+
+  it("auto 不是一个可存的等级", async () => {
+    const home = makeHome();
+
+    // `auto` 是「表里没有这个模型」，存成字面量会让两种含义相同的状态看起来不同。
+    await expect(
+      writeRunLimits(home, { reasoningEffortByModel: { "gw/flash": "auto" } }),
+    ).rejects.toMatchObject({ code: "invalid_config" });
+  });
+
+  it.each<[string, unknown]>([
+    ["未知等级", { "gw/flash": "max" }],
+    ["非字符串值", { "gw/flash": 3 }],
+    ["空模型引用", { "": "high" }],
+    ["不是对象", ["high"]],
+  ])("非法表（%s）被拒绝", async (_label, reasoningEffortByModel) => {
+    const home = makeHome();
+
+    await expect(writeRunLimits(home, { reasoningEffortByModel })).rejects.toMatchObject({
+      code: "invalid_config",
+    });
+  });
+
+  it("__proto__ 作为模型引用必须是普通键", async () => {
+    const home = makeHome();
+
+    await writeRunLimits(home, { reasoningEffortByModel: JSON.parse('{"__proto__":"high"}') });
+    const run = readAppConfig(home).run;
+
+    expect(Object.keys(run.reasoningEffortByModel)).toStrictEqual(["__proto__"]);
+    expect(run.reasoningEffortByModel["__proto__"]).toBe("high");
+    // 原型没有被改写。
+    expect(({} as Record<string, unknown>)["high"]).toBeUndefined();
+  });
+
+  it("与其他运行参数共存：整份写回不丢推理强度", async () => {
+    const home = makeHome();
+
+    await writeRunLimits(home, { maxTurns: 4, reasoningEffortByModel: { "gw/flash": "low" } });
+    const run = readAppConfig(home).run;
+
+    expect(run.maxTurns).toBe(4);
+    expect(run.reasoningEffortByModel).toStrictEqual({ "gw/flash": "low" });
+  });
+});

@@ -350,6 +350,11 @@ export const dictionaries = {
     commandUnknownHeading: (name) => `Unknown command: /${name}`,
     commandAvailable: "Available commands:",
     commandTakesNoArguments: (name) => `/${name} takes no arguments; nothing ran.`,
+    /* A skill command that cannot run, said precisely: no body has arrived for
+       that name, or the body arrived empty. Sending an empty prompt instead
+       would spend a turn on nothing and look like the skill ran (R3). */
+    skillUnavailable: (name) => `/${name} has no prompt loaded yet; nothing was sent.`,
+    skillEmptyPrompt: (name) => `/${name} has an empty prompt; nothing was sent.`,
     commandContextUnknown: "Context usage has not been reported yet; there is no figure to show.",
     commandContextUsed: (used, window, percent) =>
       `Context ${used} tokens / ${window} tokens (${percent}%)`,
@@ -847,6 +852,10 @@ export const dictionaries = {
     commandUnknownHeading: (name) => `未知命令：/${name}`,
     commandAvailable: "可用命令：",
     commandTakesNoArguments: (name) => `/${name} 不接受参数，没有执行。`,
+    /* 技能命令跑不了时说清楚是哪一种：这个名字的提示词还没到，或者到了但是空的。
+       偷偷发一条空消息既浪费一轮，又像是技能真的跑了（R3）。 */
+    skillUnavailable: (name) => `/${name} 的提示词还没加载，没有发送。`,
+    skillEmptyPrompt: (name) => `/${name} 的提示词是空的，没有发送。`,
     commandContextUnknown: "内核还没有报告上下文占用，没有数字可显示。",
     commandContextUsed: (used, window, percent) =>
       `上下文 ${used} tokens / 窗口 ${window} tokens（${percent}%）`,

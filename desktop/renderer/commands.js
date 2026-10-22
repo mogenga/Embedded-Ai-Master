@@ -69,6 +69,18 @@ function hostDescription(value, locale) {
  * hide a working command. Duplicates and entries without a usable name are
  * skipped, and the host's casing/whitespace is normalized so `/Clear` and
  * `/clear` are one command.
+ *
+ * A row the host tags `source: "skill"` stays a skill, so the composer can
+ * expand its body instead of running it as a local verb. Unknown `source`
+ * values are not trusted: only the exact tag the host and this module share
+ * makes a skill, and everything else is a builtin row as before.
+ *
+ * Precedence is the local catalogue first. The three verbs here are the ones
+ * this window implements, so a host row can never redefine `/clear` as a skill
+ * — the expansion path would then hunt for a body that does not exist while
+ * `/clear` stopped clearing. For every other name the host's description and
+ * argument hint pass through verbatim: they are the skill file's own words,
+ * and the catalogue has nothing to say about a name it does not know.
  */
 export function mergeCommands(reported, locale) {
   if (!Array.isArray(reported)) return [];
@@ -81,36 +93,77 @@ export function mergeCommands(reported, locale) {
     if (name === "" || seen.has(name)) continue;
     seen.add(name);
     const local = localCommand(name, locale);
-    out.push(
-      local === undefined
-        ? {
-            name,
-            description: hostDescription(entry.description, locale),
-            argumentHint: typeof entry.argumentHint === "string" ? entry.argumentHint : "",
-            source: "builtin",
-            known: false,
-          }
-        : {
-            name,
-            description: local.description,
-            argumentHint: local.argumentHint,
-            source: "builtin",
-            known: true,
-          },
-    );
+    if (local !== undefined) {
+      out.push({
+        name,
+        description: local.description,
+        argumentHint: local.argumentHint,
+        source: "builtin",
+        known: true,
+      });
+      continue;
+    }
+    out.push({
+      name,
+      description: hostDescription(entry.description, locale),
+      argumentHint: typeof entry.argumentHint === "string" ? entry.argumentHint : "",
+      source: entry.source === "skill" ? "skill" : "builtin",
+      known: false,
+    });
   }
   return out;
 }
 
-const SLASH = /^\/([a-z][a-z0-9-]*)(?:\s+([\s\S]*))?$/i;
+/** The token a skill body uses for the text typed after the command. */
+export const SKILL_ARGUMENT = "$ARGUMENTS";
+
+/**
+ * Expand a skill's prompt body.
+ *
+ * Every `$ARGUMENTS` becomes `args`; a body with no placeholder gets the args
+ * appended as a new paragraph, so `/review src/main.ts` is never silently
+ * dropped. Nothing else in the body is rewritten: substituting an empty args
+ * leaves the author's spacing exactly as written ("Review  please", not
+ * "Review please"), because collapsing it would be editing prose this module
+ * did not write. Only the final result's leading and trailing whitespace is
+ * trimmed.
+ *
+ * Returns `null` when the skill is unusable — not a record, or no body to
+ * send — which is the caller's cue to say so instead of sending an empty
+ * prompt.
+ *
+ * Substitution is `split`/`join`, not `String.replace`: `args` is user text,
+ * and a replacement string would expand `$&` or `$'` inside it.
+ */
+export function expandSkill(skill, args) {
+  if (!isRecord(skill)) return null;
+  const body = typeof skill.body === "string" ? skill.body : "";
+  if (body.trim() === "") return null;
+  const text = typeof args === "string" ? args.trim() : "";
+  if (body.includes(SKILL_ARGUMENT)) {
+    return body.split(SKILL_ARGUMENT).join(text).trim();
+  }
+  const trimmed = body.trim();
+  return text === "" ? trimmed : `${trimmed}\n\n${text}`;
+}
+
+// The name character set has to match the one the kernel accepts for skill
+// files (`SKILL_NAME_PATTERN` in `src/skills/store.ts`) and the one the
+// composer's completion menu uses: `_` is a legal name character everywhere
+// else, so leaving it out here made a `review_diff` skill list and insert but
+// never run — Enter sent `/review_diff` to the model as prose, with no notice.
+// `/` is still excluded, which is what keeps `/usr_local/bin` a sentence.
+const SLASH = /^\/([a-z][a-z0-9_-]*)(?:\s+([\s\S]*))?$/i;
 
 /**
  * `/name rest` at the start of a message.
  *
  * Returns `null` when the text is not a command attempt at all: `// note` is a
- * comment-style line and `/usr/bin/env is broken` is prose, and sending either
- * to the model untouched is the only honest reading. The name is lowercased so
- * `/CONTEXT` reaches the same command the menu lists.
+ * comment-style line, `/usr/bin/env is broken` is prose, and `/usr_local/bin`
+ * is a path — sending any of them to the model untouched is the only honest
+ * reading. The name is lowercased so `/CONTEXT` reaches the same command the
+ * menu lists. `_` is a legal name character, for the reason stated beside
+ * `SLASH` above.
  */
 export function parseSlashText(text) {
   if (typeof text !== "string") return null;

@@ -1,7 +1,7 @@
 /** Embedded AI Master desktop renderer. */
 
 import { detectLocale, getDict } from "./i18n.js";
-import { contextReport, mergeCommands, parseSlashText } from "./commands.js";
+import { contextReport, expandSkill, mergeCommands, parseSlashText } from "./commands.js";
 import { escapeHtml, renderMarkdown, IncrementalRenderer } from "./markdown.js";
 import { createSettings } from "./settings.js";
 import { icon, setIcon } from "./icons.js";
@@ -142,6 +142,20 @@ const state = {
   treePath: "",
   pr: null,
   commands: [],
+  /**
+   * The skill library as the host last sent it, bodies included.
+   *
+   * `commands` only carries a skill's name and blurb; the prompt being
+   * expanded is here, from the `skills` event. A skill command typed before
+   * that event arrives has no body yet, and says so rather than sending an
+   * empty prompt (R3).
+   *
+   * The settings module reads the same field for its page — it was already
+   * initialised there, because this object is the one both modules share. The
+   * write below happens in the renderer's event switch, so it is current even
+   * when Settings was never opened.
+   */
+  skills: [],
   diffScope: "session",
   currentSubagent: null,
   /** Selection and project kind from the last state event; cheap, always current. */
@@ -1262,14 +1276,15 @@ function updateCommandMenu() {
     const row = document.createElement("button");
     row.className = `mention-row command-row${index === 0 ? " active" : ""}`;
     row.setAttribute("role", "option");
-    // A built-in runs; a markdown command inserts its name so arguments can be
-    // typed after it. Showing which is which before the click is what keeps
-    // "Enter" from being a guess.
-    const builtin = command.source === "builtin";
+    // A command with no argument hint runs; one with a hint inserts its name
+    // so arguments can be typed after it. Showing which is which before the
+    // click is what keeps "Enter" from being a guess. Skills follow the same
+    // rule — their hint comes from the skill file, and a skill without one is
+    // a one-shot prompt.
     row.innerHTML =
       `<span class="command-name">/${escapeHtml(command.name)}</span>` +
       `<span class="command-hint">${escapeHtml(command.description || command.argumentHint || "")}</span>` +
-      (builtin ? `<span class="command-arg">${escapeHtml(command.argumentHint || "")}</span>` : "");
+      `<span class="command-arg">${escapeHtml(command.argumentHint || "")}</span>`;
     row.addEventListener("mousedown", (event) => {
       event.preventDefault();
       applyCommand(command);
@@ -1286,9 +1301,12 @@ function closeCommandMenu() {
 
 function applyCommand(command) {
   closeCommandMenu();
-  // A built-in with no arguments runs on the spot. Inserting "/clear " and
+  // A command with no argument hint runs on the spot. Inserting "/clear " and
   // waiting for a second Enter made a one-shot verb feel like a text field.
-  if (command.source === "builtin" && !command.argumentHint) {
+  // A skill with no hint is the same case: it may still contain `$ARGUMENTS`,
+  // and running it with empty args is the only reading of a click that has no
+  // text to give.
+  if (!command.argumentHint) {
     const draft = input.value;
     input.value = "";
     autoSize();
@@ -1354,6 +1372,11 @@ const RUNNABLE_COMMANDS = new Set(["clear", "context", "compact"]);
  * do not echo: a typo or a stray argument must not leave a message in the log
  * that looks like something the kernel accepted.
  *
+ * Resolution order for a name is fixed: a local verb runs here, a skill row
+ * expands into a prompt (`runSkillCommand`), and anything else is reported as
+ * unknown. Both entry points — a typed message and a palette click — go
+ * through this one function, so the three cases cannot be ordered two ways.
+ *
  * `rawText` is what the user actually typed, echoed verbatim. The command
  * palette has no typed text, so it defaults to `/${name}` — the same string
  * the palette would have inserted.
@@ -1364,10 +1387,13 @@ const RUNNABLE_COMMANDS = new Set(["clear", "context", "compact"]);
  */
 function runSlashCommand({ name, args }, rawText = `/${name}`) {
   const available = commandList();
+  const command = available.find((entry) => entry.name === name);
+  if (command !== undefined && command.source === "skill") {
+    return runSkillCommand(command, args, rawText);
+  }
   // Both shipped hosts report exactly the three runnable verbs, so anything
   // else is a stale catalogue entry. Reporting it here rather than in the
   // switch keeps the echo below reachable only by a command that runs.
-  const command = available.find((entry) => entry.name === name);
   if (command === undefined || !RUNNABLE_COMMANDS.has(name)) {
     reportUnknownCommand(name, available);
     return "kept";
@@ -1402,6 +1428,56 @@ function runSlashCommand({ name, args }, rawText = `/${name}`) {
       // Unreachable: `RUNNABLE_COMMANDS` is the same set these cases cover.
       return "kept";
   }
+}
+
+/**
+ * A skill command: expand the saved prompt body, then send it as a message.
+ *
+ * The body comes from `state.skills`, not from the command row: `listCommands`
+ * carries names and blurbs, and the prompt text only travels in the `skills`
+ * event. The two lists can disagree for a moment — boot sends them one after
+ * the other, and a save refreshes both — so a name with no body says exactly
+ * that instead of sending an empty prompt (R3).
+ *
+ * The bubble shows what the user typed, not the expanded prompt. The
+ * expansion is a kernel-side or model-side detail: a transcript that showed
+ * `Review the changes in src/main.ts` instead of the `/review src/main.ts` the
+ * user typed makes their own messages unrecognisable, and the command they
+ * would retype unrecoverable. The typed text is also what goes into the
+ * history, for the same reason.
+ *
+ * Returns `"ran"` or `"kept"` with the same meaning as `runSlashCommand`.
+ */
+function runSkillCommand(command, args, rawText = `/${command.name}${args ? ` ${args}` : ""}`) {
+  const name = command.name;
+  const skill = state.skills.find(
+    (entry) => typeof entry?.name === "string" && entry.name.trim().toLowerCase() === name,
+  );
+  if (skill === undefined) {
+    addNotice("warn", t.skillUnavailable(name));
+    scrollToBottom();
+    return "kept";
+  }
+  const expanded = expandSkill(skill, args ?? "");
+  // An expansion that came out empty is the same answer as a body that was
+  // never there: a body of just `$ARGUMENTS` with no args typed leaves nothing
+  // to send, and the host would reject the empty prompt with its own wording
+  // about a message that cannot be empty. Say it here, where the command is.
+  if (expanded === null || expanded === "") {
+    addNotice("warn", t.skillEmptyPrompt(name));
+    scrollToBottom();
+    return "kept";
+  }
+  addUserTurn(rawText);
+  input.value = "";
+  autoSize();
+  // Recorded here as well as in `submit()`, which does the same for "ran":
+  // the palette path never reaches that code, and a skill clicked twice in a
+  // row must behave like one typed twice. The second call is a no-op — the
+  // history guard drops a text that is already the newest entry.
+  rememberInHistory(rawText);
+  api.send({ cmd: "prompt", text: expanded });
+  return "ran";
 }
 
 /**
@@ -1939,18 +2015,31 @@ function setMode(mode) {
 /**
  * The reasoning levels the active model accepts.
  *
- * `auto` is a sentinel — the host sends nothing and the model uses its own
- * default — and the rest come from the endpoint's `reasoning_efforts`, so the
- * menu shows `max`/`xhigh` for a model that has them and does not offer a
- * level the gateway would refuse.
+ * The host derives this from `providers.json` (`supportsReasoning`), so an
+ * empty list is a fact: the model does not take the parameter. It is not a
+ * prompt to guess a default set — offering `low`/`medium`/`high` to a model
+ * whose request drops the field is the lie this list exists to avoid.
  */
 function effortLevels() {
   return state.effortChoices?.levels ?? [];
 }
 
+/**
+ * Show or hide the chip for the model the host just described.
+ *
+ * A model with no levels has nothing to choose: `auto` is the only value and
+ * the request sends nothing, so the control would be a menu with one row that
+ * cannot change anything. It stays hidden and the reason lives in the menu's
+ * `note`, which the settings page and the refusal notice also carry.
+ */
+function syncEffortControl() {
+  effortControl.hidden = effortLevels().length === 0;
+}
+
 function setEffort(effort) {
   state.effort = effort;
   $("effort-label").textContent = effort === "auto" ? t.effortAuto : effort;
+  syncEffortControl();
   renderEffortMenu();
 }
 
@@ -1964,20 +2053,32 @@ function renderEffortMenu() {
       `<div class="effort-fixed">${escapeHtml(t.effortFixed.replace("{level}", choices.fixed))}</div>`;
     return;
   }
-  const levels = effortLevels();
-  const list = levels.length > 0 ? levels : ["low", "medium", "high"];
+  // Only the levels the host says this model accepts — an empty list renders
+  // no rows instead of a made-up `low`/`medium`/`high` set. `auto` is always
+  // present: it is the way back to whatever `providers.json` defaults to, and
+  // without it a level could never be un-set from this menu.
+  const rows = [{ level: "auto", label: t.effortAuto }]
+    .concat(effortLevels().map((level) => ({ level, label: level })));
   menu.innerHTML =
-    [{ level: "auto", label: t.effortAuto }, ...list.map((level) => ({ level, label: level }))]
+    rows
       .map((row) => {
         const active = row.level === state.effort;
-        const hint = row.level === "auto" && choices.default ? `<span class="effort-hint">${escapeHtml(choices.default)}</span>` : "";
+        // What `auto` will actually send, so the user does not have to open
+        // providers.json to find out.
+        const hint = row.level === "auto" && choices.default
+          ? `<span class="effort-hint">${escapeHtml(choices.default)}</span>`
+          : "";
         return (
           `<button role="menuitemradio" data-effort="${escapeHtml(row.level)}" aria-checked="${active}"` +
           ` class="${active ? "active" : ""}">` +
           `<span>${escapeHtml(row.label)}</span>${hint}</button>`
         );
       })
-      .join("");
+      .join("") +
+    // Why there is nothing to choose, when the host gave a reason. Dim, not a
+    // warning: "this model takes no effort parameter" is a property of the
+    // model, not a fault the operator caused.
+    (choices.note ? `<div class="effort-fixed">${escapeHtml(choices.note)}</div>` : "");
 }
 
 /* ---------- model picker ---------- */
@@ -2826,11 +2927,14 @@ function handleEvent(message) {
       // A preference changed anywhere (Settings sends one at a time). Mirror
       // the ones the transcript reads from localStorage, so a toggle takes
       // effect without a reload.
+      // `isolateByDefault` used to be here. Nothing sends it any more: the
+      // setting was removed from the page, and it never reached a git worktree
+      // anyway — the kernel has no such capability. Keeping the mapping would
+      // leave a localStorage key written by a control that no longer exists.
       const map = {
         restartSession: "restartSession",
         suggestions: "suggestions",
         updateCheck: "updateCheck",
-        isolateByDefault: "isolateByDefault",
       };
       const key = map[message.key];
       if (key) localStorage.setItem(`prometheus.${key}`, message.value === false ? "0" : "1");
@@ -2841,9 +2945,21 @@ function handleEvent(message) {
       settings.handleEvent(message);
       break;
 
+    case "skills":
+      // The library carries the prompt bodies, which `commands` does not: the
+      // composer needs them here to expand `/name args`, and the state object
+      // is the one the settings module shares, so its page draws the same
+      // list. Reading it here rather than only in the settings handler keeps
+      // expansion working when Settings was never opened.
+      //
+      // Skills are global, not per-session, so `session_loaded` leaves them
+      // alone: the library does not change when the transcript does.
+      state.skills = Array.isArray(message.skills) ? message.skills : [];
+      settings.handleEvent(message);
+      break;
+
     case "usage_summary":
     case "mcp_servers":
-    case "skills":
     case "memory":
     case "instructions":
     case "hook_status":
@@ -3161,6 +3277,15 @@ function handleEvent(message) {
       break;
 
     case "notice":
+      // A `domain` tag routes the message to the surface that asked for it.
+      // Skill failures are answered while the settings dialog is open, and a
+      // `showModal()` sits on top of the transcript: the notice would be
+      // complete and still invisible (R3). Everything else stays in the
+      // transcript, where it has always been.
+      if (message.domain === "skills") {
+        settings.handleEvent(message);
+        break;
+      }
       addNotice(message.level, message.text);
       scrollToBottom();
       break;
@@ -5430,6 +5555,10 @@ function submit() {
   // the typed text — but that bubble is this window's own record, not a
   // `prompt` command: the kernel has no slash verbs, so forwarding `/clear`
   // would only buy a model reply saying it cannot clear the conversation.
+  //
+  // A skill name is in the same list and is resolved by the same function: it
+  // expands to a prompt and is sent as one, while the bubble keeps the typed
+  // `/name args`.
   const slash = parseSlashText(text);
   if (slash !== null && commandList().some((command) => command.name === slash.name)) {
     if (runSlashCommand(slash, text) === "ran") {
@@ -5636,10 +5765,15 @@ document.addEventListener("keydown", (event) => {
     openWorkbench("board");
   } else if (key === "e") {
     event.preventDefault();
-    // Cycle through what this model actually accepts, not a fixed four.
-    const order = ["auto", ...(effortLevels().length > 0 ? effortLevels() : ["low", "medium", "high"])];
+    // Silent when the model has no levels: the control is hidden, and sending
+    // anyway would earn one warning per keypress for a setting the user cannot
+    // see (D-169's complaint about this exact shortcut).
+    if (effortLevels().length === 0) return;
+    // Cycle through what this model actually accepts, not a fixed four. The
+    // index advances from the chip's current value, and the host's answering
+    // `state` is what moves it — same rule as the menu click above.
+    const order = ["auto", ...effortLevels()];
     const next = order[(order.indexOf(state.effort) + 1) % order.length];
-    setEffort(next);
     api.send({ cmd: "setEffort", effort: next });
   } else if (key === "\\") {
     event.preventDefault();
@@ -5914,10 +6048,13 @@ function paletteEntries() {
     entries.push({
       label: `/${command.name}`,
       hint: command.description || command.argumentHint || "",
-      // The same path the popup and a typed command take. Inserting the text
-      // instead made the palette a second, weaker way to run the same verb.
+      // The same rule as the popup: no argument hint runs it, a hint inserts
+      // the name and waits. The palette does not go through `applyCommand`
+      // because that one empties the composer first — right for a click in a
+      // draft, wrong here, where the palette opened over text the user is
+      // still writing.
       run: () => {
-        if (command.source === "builtin" && !command.argumentHint) {
+        if (!command.argumentHint) {
           runSlashCommand({ name: command.name, args: "" });
           return;
         }
@@ -6332,7 +6469,10 @@ effortMenu.addEventListener("click", (event) => {
   if (!button) return;
   setEffortMenu(false);
   if (button.dataset.effort === state.effort) return;
-  setEffort(button.dataset.effort);
+  // The label moves when the host answers with a `state`, not here. This host
+  // can refuse a level (a stale menu, a model reloaded from disk), and moving
+  // the chip first would show a value the next request does not carry — the
+  // exact lie this control used to tell. The refusal notice is the feedback.
   api.send({ cmd: "setEffort", effort: button.dataset.effort });
 });
 
