@@ -85,6 +85,13 @@ state.rules = [];
 state.runLimits = { ...DEFAULT_RUN_LIMITS };
 state.skills = [];
 state.memory = { global: [], project: [] };
+/**
+ * The last `kb` answer from the host, or null before the first one arrives.
+ *
+ * Null is not "empty": the page has to say it is still reading rather than
+ * draw an empty corpus, and only an answer can tell those apart (R3).
+ */
+state.kb = null;
 state.systemState = null;
 state.packState = null;
 state.packProgress = null;
@@ -156,6 +163,33 @@ function renameExpansion(from, to) {
 }
 
 /**
+ * The MCP cards the user opened, by server name.
+ *
+ * Same reasoning as `connectionExpanded`: the host pushes a whole new
+ * `mcp.json` snapshot after every save, which rebuilds the list, so the mark
+ * cannot live in the DOM. Only the name is a safe key — the name is the key in
+ * the file, and the edit form locks it, so unlike a provider card there is no
+ * rename to follow here. Empty means every card closed, which is the default
+ * the page opens with.
+ */
+const mcpExpanded = new Set();
+/** Names the `aria-controls` ids, so two cards never point at one body. */
+let mcpCardSeq = 0;
+
+/**
+ * The knowledge-base folders the user opened, by path.
+ *
+ * The same rule as the cards above: the tree is redrawn whenever a fresh `kb`
+ * answer lands, so a folder the user opened would snap shut on every refresh.
+ * A path is the only identity a folder has. Empty means every folder is closed,
+ * which is how the tree opens — a corpus of a hundred files is a wall of text
+ * if it starts expanded.
+ */
+const kbExpanded = new Set();
+/** Names the `aria-controls` ids of the tree's folder bodies. */
+let kbNodeSeq = 0;
+
+/**
  * Drop every test still waiting on an answer, and cancel their timers.
  *
  * Called when the pane that started them goes away — a rebuild, or a switch to
@@ -216,6 +250,7 @@ const SETTINGS_ICON_NAMES = {
   behavior: "sliders",
   sessions: "layers",
   mcp: "robot",
+  kb: "book",
   skills: "sparkle",
   memory: "book",
   instructions: "file-code",
@@ -247,6 +282,7 @@ function settingsPages() {
     { id: "appearance", group: s.groupSettings, title: s.pageAppearance, build: buildAppearancePage },
     { id: "behavior", group: s.groupSettings, title: s.pageBehavior, build: buildBehaviorPage },
     { id: "mcp", group: s.groupSettings, title: s.pageMcp, build: buildMcpPage },
+    { id: "kb", group: s.groupComputer, title: s.pageKb, build: buildKbPage },
     { id: "about", group: s.groupComputer, title: s.pageAbout, build: buildAboutPage },
   ];
 }
@@ -1002,7 +1038,7 @@ function buildConnectionPage() {
     // collapsed card is that a page of services stays scannable. Nothing else
     // goes here — the endpoint and the keys are what collapsing is meant to
     // put away.
-    const modelSummary = el("span", "settings-card-models", "");
+    const modelSummary = el("span", "settings-card-summary", "");
     toggle.append(chevron, title, modelSummary);
     const body = el("div", "settings-form-card-body");
     body.id = `settings-card-body-${connectionCardSeq++}`;
@@ -1999,7 +2035,10 @@ function buildSessionsPage() {
 function buildMcpPage() {
   const s = S();
   const pane = sPage(s.pageMcp, s.pageMcpDesc);
-  const list = el("div", "mcp-list");
+  // A plain container, like the model-services list: the cards carry their own
+  // spacing, and a flex gap on top of it would space them twice as far apart
+  // as the cards on the other page.
+  const list = el("div");
   pane.appendChild(list);
 
   /** null = adding, a name = editing that server, undefined = list only.
@@ -2139,6 +2178,121 @@ function buildMcpPage() {
     return card;
   };
 
+  /**
+   * The one line a collapsed server card shows.
+   *
+   * The executable's basename says what kind of server this is (`npx`, `node`,
+   * `python`), and the count says how much configuration is under it. The
+   * arguments themselves stay in the body: that is what opening the card is
+   * for. A command with no arguments prints as itself — `node · 0 args` would
+   * be a count of nothing.
+   */
+  const summaryOf = (server) => {
+    const command = String(server.command ?? "").trim();
+    const name = basename(command) || command;
+    const count = (server.args ?? []).length;
+    if (count === 0) return name;
+    // `mcpArgsCountOne` is optional: a locale without a plural form (zh) omits
+    // it, and the fallback must be the plural key rather than `undefined`.
+    const template = count === 1 && s.mcpArgsCountOne !== undefined ? s.mcpArgsCountOne : s.mcpArgsCount;
+    return `${name} · ${template.replace("{n}", String(count))}`;
+  };
+
+  /**
+   * One saved server as a collapsible card.
+   *
+   * The header is what a closed list shows, so it has to say which server this
+   * is without opening it. The line is the command's basename plus its argument
+   * count (`kb · 2 args`), not the command line: the words a stdio server is
+   * launched with are long, mostly paths, and identical across `npx` servers —
+   * printing them would fill the header with the one thing the expanded body is
+   * there to show, and still not tell two servers apart. A bare command (no
+   * args) is stated as itself, so a `node server.js` entry does not read as
+   * "node · 0 args".
+   */
+  const serverCard = (server) => {
+    const card = el("section", "settings-form-card");
+    let expanded = mcpExpanded.has(server.name);
+
+    const head = el("div", "settings-card-head");
+    const toggle = el("button", "settings-card-toggle");
+    toggle.type = "button";
+    const chevron = iconEl("chevron-right", "settings-card-chevron");
+    const title = el("span", "settings-card-name", server.name);
+    toggle.append(chevron, title);
+    // A disabled server stays in the list, so the fact has to survive the
+    // collapse: the switch that would say it is in the body.
+    if (server.disabled) toggle.appendChild(el("span", "mcp-scope disabled", s.disabled));
+    toggle.appendChild(el("span", "settings-card-summary", summaryOf(server)));
+
+    const body = el("div", "settings-form-card-body");
+    body.id = `mcp-card-body-${mcpCardSeq++}`;
+    toggle.setAttribute("aria-controls", body.id);
+
+    // Outside the toggle: the switch and the two buttons all take a click, and
+    // a click on them must not also be a click on the header (which would fold
+    // the card the user is about to edit).
+    const headActions = el("div", "mcp-actions");
+    headActions.append(
+      sToggle({
+        checked: !server.disabled,
+        onChange: (value) => {
+          api.send({ cmd: "saveMcpServer", server: payloadOf(server, !value) });
+        },
+      }),
+      sButton(
+        s.edit,
+        () => {
+          mcpEditing = server.name;
+          render();
+        },
+        { quiet: true },
+      ),
+      sButton(s.remove, () => api.send({ cmd: "removeMcpServer", name: server.name }), {
+        quiet: true,
+        danger: true,
+      }),
+    );
+    head.append(toggle, headActions);
+
+    // The full command line lives here, and only here: `code` keeps the
+    // arguments legible as separate words rather than re-joined prose.
+    const commandLine = el("code", "setting-code mcp-card-command", [server.command, ...(server.args ?? [])].filter(Boolean).join(" "));
+    /** An unset optional field says so instead of disappearing: a missing row
+     *  would leave the user unsure whether the value is empty or the page just
+     *  does not show it. */
+    const optional = (value) =>
+      value ? el("code", "setting-code", value) : el("span", "setting-desc", s.mcpNotSet);
+    body.append(
+      sRow({ label: s.command, desc: s.argumentsDesc, control: commandLine, wide: true }),
+      sRow({ label: s.mcpCwd, control: optional(server.cwd) }),
+      sRow({
+        label: s.mcpTimeout,
+        control: optional(server.timeoutMs ? `${server.timeoutMs} ms` : ""),
+      }),
+    );
+    card.append(head, body);
+
+    const setExpanded = (open) => {
+      expanded = open;
+      body.hidden = !open;
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      toggle.setAttribute(
+        "aria-label",
+        (open ? s.mcpCollapseNamed : s.mcpExpandNamed).replace("{name}", server.name),
+      );
+      setIcon(chevron, open ? "chevron-down" : "chevron-right");
+      // The set is the only copy that survives a rebuild, so it is written on
+      // every change — there is no draft here to protect, and an unopened card
+      // is simply absent.
+      if (open) mcpExpanded.add(server.name);
+      else mcpExpanded.delete(server.name);
+    };
+    toggle.addEventListener("click", () => setExpanded(!expanded));
+    setExpanded(expanded);
+    return card;
+  };
+
   const render = () => {
     list.innerHTML = "";
     // A refresh can drop the server being edited (removed in an editor, or
@@ -2176,45 +2330,7 @@ function buildMcpPage() {
     }
 
     for (const server of state.mcpServers) {
-      const row = el("div", "mcp-row");
-      const main = el("div", "mcp-main");
-      const title = el("div", "mcp-title");
-      title.appendChild(el("strong", "", server.name));
-      if (server.disabled) title.appendChild(el("span", "mcp-scope disabled", s.disabled));
-      main.appendChild(title);
-      main.appendChild(
-        el("code", "mcp-command", [server.command, ...(server.args ?? [])].filter(Boolean).join(" ")),
-      );
-      const meta = [server.cwd, server.timeoutMs ? `${server.timeoutMs} ms` : ""].filter(Boolean).join(" · ");
-      if (meta) main.appendChild(el("span", "setting-desc", meta));
-
-      const actions = el("div", "mcp-actions");
-      actions.appendChild(
-        sToggle({
-          checked: !server.disabled,
-          onChange: (value) => {
-            api.send({ cmd: "saveMcpServer", server: payloadOf(server, !value) });
-          },
-        }),
-      );
-      actions.appendChild(
-        sButton(
-          s.edit,
-          () => {
-            mcpEditing = server.name;
-            render();
-          },
-          { quiet: true },
-        ),
-      );
-      actions.appendChild(
-        sButton(s.remove, () => api.send({ cmd: "removeMcpServer", name: server.name }), {
-          quiet: true,
-          danger: true,
-        }),
-      );
-      row.append(main, actions);
-      list.appendChild(row);
+      list.appendChild(serverCard(server));
     }
 
     if (mcpEditing === undefined) {
@@ -2237,6 +2353,216 @@ function buildMcpPage() {
   };
 
   state.renderMcpPage = render;
+  render();
+  return pane;
+}
+
+/**
+ * The knowledge base: the local corpus the `kb` MCP server serves its tools
+ * from.
+ *
+ * The corpus is not in the version library (see `mcp-servers/kb/README.md`),
+ * so this page can only report what the host found on *this* computer. Every
+ * state it can be in has to look different: still reading, no root at all, a
+ * root that holds no files, and a tree. Drawing two of those the same would be
+ * the page telling the user their corpus is empty when it is really missing
+ * (R3) — and "empty" is the one answer that would make them stop looking.
+ */
+function buildKbPage() {
+  const s = S();
+  const pane = sPage(s.pageKb, s.pageKbDesc);
+  const body = el("div", "kb-body");
+  pane.appendChild(body);
+
+  const refresh = () => {
+    // Reading is a request, not a state to cache: until the answer lands the
+    // page shows its "reading" line again, because the previous tree describes
+    // a moment the user has just asked it to re-check.
+    state.kb = null;
+    api.send({ cmd: "getKb" });
+    render();
+  };
+
+  /** The root's provenance, in words: a path with no explanation is a fact the
+   *  user cannot check or change. Each `source` value gets its own sentence —
+   *  a fall-through would make an unknown source read as the repository
+   *  default, which is a claim this page is in no position to make. */
+  const sourceNote = (kb) => {
+    const name =
+      kb.source === "mcp.json"
+        ? s.kbSourceMcp
+        : kb.source === "env"
+          ? s.kbSourceEnv
+          : kb.source === "default"
+            ? s.kbSourceDefault
+            : s.kbSourceUnknown;
+    return s.kbSourceNote.replace("{source}", name);
+  };
+
+  /**
+   * One folder of the tree.
+   *
+   * Folders open on click and files do not: there is no preview endpoint, and a
+   * row that looks clickable but does nothing is a lie about what the app can
+   * do. A file is a name, in a folder the user chose to open.
+   */
+  const treeNode = (node, depth, truncated) => {
+    const wrap = el("div", "kb-node");
+    const isDir = node.kind === "dir";
+    const children = Array.isArray(node.children) ? node.children : [];
+    if (!isDir) {
+      const row = el("div", "kb-row");
+      row.style.paddingLeft = `${depth * 16}px`;
+      row.append(iconEl("file"), el("span", "kb-file", node.name));
+      wrap.appendChild(row);
+      return wrap;
+    }
+
+    const open = kbExpanded.has(node.path);
+    const row = el("div", "kb-row");
+    row.style.paddingLeft = `${depth * 16}px`;
+    const toggle = el("button", "kb-toggle");
+    toggle.type = "button";
+    const chevron = iconEl(open ? "chevron-down" : "chevron-right", "kb-chevron");
+    toggle.append(chevron, iconEl("folder"), el("span", "kb-dir", node.name));
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    toggle.setAttribute(
+      "aria-label",
+      (open ? s.kbCollapseNamed : s.kbExpandNamed).replace("{name}", node.name),
+    );
+    const kids = el("div", "kb-children");
+    kids.id = `kb-node-${kbNodeSeq++}`;
+    kids.hidden = !open;
+    toggle.setAttribute("aria-controls", kids.id);
+    for (const child of children) kids.appendChild(treeNode(child, depth + 1, truncated));
+    // An empty folder still says so when opened: a toggle that reveals nothing
+    // is indistinguishable from one that is broken. Under truncation it must
+    // not claim to be empty — the scan stopped, so "no children" may just mean
+    // "not reached".
+    if (children.length === 0) {
+      kids.appendChild(
+        el("p", "setting-note kb-note", truncated ? s.kbFolderNotListed : s.kbFolderEmpty),
+      );
+    }
+    toggle.addEventListener("click", () => {
+      const next = !kbExpanded.has(node.path);
+      if (next) kbExpanded.add(node.path);
+      else kbExpanded.delete(node.path);
+      kids.hidden = !next;
+      toggle.setAttribute("aria-expanded", next ? "true" : "false");
+      toggle.setAttribute("aria-label", (next ? s.kbCollapseNamed : s.kbExpandNamed).replace("{name}", node.name));
+      setIcon(chevron, next ? "chevron-down" : "chevron-right");
+    });
+    row.appendChild(toggle);
+    wrap.append(row, kids);
+    return wrap;
+  };
+
+  const render = () => {
+    body.innerHTML = "";
+    const kb = state.kb;
+
+    const head = el("div", "kb-head");
+    const refreshButton = sButton(s.kbRefresh, refresh, { quiet: true });
+    head.append(el("p", "setting-note kb-head-note", s.kbLocalNote), refreshButton);
+    body.appendChild(head);
+
+    if (kb === null) {
+      // Not an empty corpus: the host has not answered yet.
+      body.appendChild(el("p", "setting-note", s.kbLoading));
+      return;
+    }
+
+    // A read failure is stated as itself, before anything the page might
+    // otherwise imply about the corpus, and it changes what the rest may say:
+    // an answer that failed halfway is not evidence that a folder is empty or
+    // that a root has nothing in it.
+    const failed = typeof kb.error === "string" && kb.error !== "";
+    if (failed) {
+      const problem = el("p", "setting-note pack-problem kb-error", `${s.kbError} ${kb.error}`);
+      body.appendChild(problem);
+    }
+
+    const root = typeof kb.root === "string" ? kb.root : "";
+    const tree = Array.isArray(kb.tree) ? kb.tree : [];
+    const truncated = kb.truncated === true;
+    const missing = root === "";
+
+    if (missing) {
+      // `root` is only empty when the backend could not even name a candidate.
+      // That is the hard "no corpus here" state, and it must not be drawn as an
+      // empty knowledge base: the user would read it as "the corpus loaded and
+      // has nothing in it" and stop looking. The note says where it looked,
+      // which is what makes the state actionable.
+      const empty = el("div", "settings-empty-card");
+      empty.appendChild(el("h3", "", s.kbMissingTitle));
+      empty.appendChild(el("p", "", s.kbMissingBody));
+      if (typeof kb.note === "string" && kb.note !== "") {
+        empty.appendChild(el("p", "kb-note", kb.note));
+      }
+      empty.appendChild(el("p", "kb-note", s.kbHowToGet));
+      body.appendChild(empty);
+      return;
+    }
+
+    body.appendChild(
+      sGroup(s.kbGroupStatus, [
+        sRow({ label: s.kbRoot, desc: sourceNote(kb), control: el("code", "setting-code", root), wide: true }),
+        sRow({
+          label: s.kbFileCount,
+          control: el("span", "", s.kbFileCountValue.replace("{n}", String(kb.fileCount ?? 0))),
+        }),
+        sRow({
+          label: s.kbIndex,
+          control: kb.indexPresent
+            ? el("span", "setting-badge ok", s.kbIndexPresent)
+            : el("span", "setting-badge warn", s.kbIndexAbsent),
+        }),
+      ]),
+    );
+
+    if (truncated) {
+      // The count and the tree are both partial. Saying "108 files" beside a
+      // tree that stops early would read as a complete listing.
+      body.appendChild(el("p", "setting-note kb-truncated", s.kbTruncated));
+    }
+
+    const treeGroup = el("section", "setting-group");
+    treeGroup.appendChild(el("h3", "setting-group-title", s.kbGroupTree));
+    if (tree.length === 0) {
+      const empty = el("div", "settings-empty-card");
+      if (failed || truncated) {
+        // "No files" would be a claim the read cannot back up.
+        empty.appendChild(el("p", "", s.kbTreeUnknown));
+      } else {
+        // `root` is non-empty here, but that does not mean the folder exists:
+        // the backend keeps the candidate path when the directory is missing,
+        // so it can tell the user where to put the corpus. The page cannot stat
+        // anything itself, so it states only what it knows — nothing was listed
+        // — and quotes the backend's own note, which is what says which of the
+        // two it is. Claiming "the folder exists but is empty" would be the one
+        // sentence this page must never get wrong (R3).
+        empty.appendChild(el("h3", "", s.kbNoFilesTitle));
+        empty.appendChild(el("p", "", s.kbNoFilesBody));
+        if (typeof kb.note === "string" && kb.note !== "") {
+          empty.appendChild(el("p", "kb-note", kb.note));
+        }
+        empty.appendChild(el("p", "kb-note", s.kbHowToGet));
+      }
+      treeGroup.appendChild(empty);
+    } else {
+      const treeBox = el("div", "kb-tree");
+      for (const node of tree) treeBox.appendChild(treeNode(node, 0, truncated));
+      treeGroup.appendChild(treeBox);
+    }
+    body.appendChild(treeGroup);
+  };
+
+  state.renderKbPage = render;
+  // The page asks on open: the answer is per computer and per file on disk, so
+  // a cached tree from the last visit would be a claim about a corpus nobody
+  // re-read.
+  api.send({ cmd: "getKb" });
   render();
   return pane;
 }
@@ -3246,6 +3572,12 @@ function basename(path) {
       case "memory":
         state.memory = { global: message.global ?? [], project: message.project ?? [] };
         state.renderMemoryPage?.();
+        break;
+      case "kb":
+        state.kb = message.kb ?? null;
+        // The page may not be open (the command is only sent from it), but a
+        // stale answer must not land on whatever is on screen now.
+        if (state.settingsTab === "kb" && !settingsDialog.hidden) state.renderKbPage?.();
         break;
       case "instructions":
         state.instructionsText = message.text ?? "";

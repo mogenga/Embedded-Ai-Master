@@ -17,8 +17,6 @@ function makeHome(): string {
   }));
   writeFileSync(path.join(home, "sessions", "s1", "session.v1.jsonl"),
     JSON.stringify({ seq: 0, ts: "t", type: "user", payload: { content: "你好" } }) + "\n");
-  mkdirSync(path.join(home, "kb", "protocols"), { recursive: true });
-  writeFileSync(path.join(home, "kb", "protocols", "uart.md"), "# uart\n");
   return home;
 }
 
@@ -362,12 +360,93 @@ describe("ui api", () => {
     expect(res.status).toBe(405);
   });
 
-  it("知识库树扫描真实目录", async () => {
-    const s = await startUi({ harnessHome: makeHome() });
+  it("知识库树按 mcp.json 的 KB_ROOT 扫描并如实报告来源", async () => {
+    const home = makeHome();
+    const kb = mkdtempSync(path.join(tmpdir(), "eam-kb-fixture-"));
+    mkdirSync(path.join(kb, "protocols"), { recursive: true });
+    writeFileSync(path.join(kb, "protocols", "uart.md"), "# uart\n");
+    writeFileSync(path.join(kb, "top.md"), "# top\n");
+    writeFileSync(path.join(kb, "index.yaml"), "entries: []\n");
+    writeFileSync(path.join(kb, "manifest.sha256"), "");
+    // 这台机器上的 KB_ROOT 若是开发者在跑真实语料，会让下面的 mcp.json 不生效；
+    // 清空它才能断言「来源就是 mcp.json」。
+    vi.stubEnv("KB_ROOT", "");
+    writeFileSync(path.join(home, "mcp.json"), JSON.stringify({
+      mcpServers: {
+        kb: { command: "node", args: ["dist-mcp/kb/server.js"], env: { KB_ROOT: kb } },
+      },
+    }));
+    const s = await startUi({ harnessHome: home });
     close = s.close;
-    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/kb`)).json() as { root: string | null; tree: Array<{ name: string; kind: string }> };
-    expect(body.root).toContain("kb");
-    expect(body.tree).toEqual([expect.objectContaining({ name: "protocols", kind: "dir" })]);
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/kb`)).json() as {
+      root: string;
+      source: string;
+      note?: string;
+      fileCount: number;
+      indexPresent: boolean;
+      truncated: boolean;
+      tree: Array<{ name: string; kind: string; children?: Array<{ name: string }> }>;
+      error?: string;
+    };
+    expect(body).toMatchObject({
+      root: path.resolve(kb),
+      source: "mcp.json",
+      fileCount: 2,
+      indexPresent: true,
+      truncated: false,
+    });
+    expect(body.note).toContain("kb");
+    expect(body.error).toBeUndefined();
+    expect(body.tree.map((node) => [node.name, node.kind])).toStrictEqual([
+      ["protocols", "dir"],
+      ["index.yaml", "file"],
+      ["manifest.sha256", "file"],
+      ["top.md", "file"],
+    ]);
+    expect(body.tree[0]?.children?.map((node) => node.name)).toStrictEqual(["uart.md"]);
+  });
+
+  it("知识库根不存在时保留候选路径并说明，不伪装成空知识库", async () => {
+    const home = makeHome();
+    const missing = path.join(mkdtempSync(path.join(tmpdir(), "eam-kb-gone-")), "kb");
+    vi.stubEnv("KB_ROOT", "");
+    writeFileSync(path.join(home, "mcp.json"), JSON.stringify({
+      mcpServers: { kb: { command: "node", env: { KB_ROOT: missing } } },
+    }));
+    const s = await startUi({ harnessHome: home });
+    close = s.close;
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/kb`)).json() as {
+      root: string;
+      source: string;
+      note?: string;
+      fileCount: number;
+      tree: unknown[];
+    };
+    expect(body.root).toBe(path.resolve(missing));
+    expect(body.source).toBe("mcp.json");
+    expect(body.note).toContain("目录不存在");
+    expect(body.fileCount).toBe(0);
+    expect(body.tree).toStrictEqual([]);
+  });
+
+  it("KB_ROOT 环境变量覆盖 mcp.json，来源报 env", async () => {
+    const home = makeHome();
+    const envKb = mkdtempSync(path.join(tmpdir(), "eam-kb-env-"));
+    writeFileSync(path.join(envKb, "note.md"), "# note\n");
+    vi.stubEnv("KB_ROOT", envKb);
+    writeFileSync(path.join(home, "mcp.json"), JSON.stringify({
+      mcpServers: { kb: { command: "node", env: { KB_ROOT: path.join(home, "elsewhere") } } },
+    }));
+    const s = await startUi({ harnessHome: home });
+    close = s.close;
+    const body = await (await fetch(`http://127.0.0.1:${s.port}/api/kb`)).json() as {
+      root: string;
+      source: string;
+      fileCount: number;
+    };
+    expect(body.root).toBe(path.resolve(envKb));
+    expect(body.source).toBe("env");
+    expect(body.fileCount).toBe(1);
   });
 
   it("GET /api/file 只读允许目录内的文本，越界与二进制如实标注", async () => {

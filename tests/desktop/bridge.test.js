@@ -1455,6 +1455,50 @@ describe("bridge: 文件树与工作区", () => {
     const posted = fetchImpl.calls.find((call) => call.url === "/api/actions");
     expect(JSON.parse(posted.body)).toMatchObject({ text: "看下目录", cwd: "E:/p" });
   });
+
+  it("getKb 把 /api/kb 的整份结果原样交给 kb 事件", async () => {
+    const kb = {
+      root: "E:/repo/mcp-servers/kb/kb",
+      source: "mcp.json",
+      note: '来自 mcp.json 的 server "kb"',
+      fileCount: 108,
+      indexPresent: true,
+      truncated: false,
+      tree: [
+        { name: "protocols", path: "E:/repo/mcp-servers/kb/kb/protocols", kind: "dir", children: [] },
+        { name: "index.yaml", path: "E:/repo/mcp-servers/kb/kb/index.yaml", kind: "file" },
+      ],
+    };
+    const { bridge, events, fetchImpl } = treeBridge([["/api/kb", () => jsonResponse(kb)]]);
+    bridge.api.send({ cmd: "getKb" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "kb")).toBe(true);
+    });
+
+    const call = fetchImpl.calls.find((entry) => entry.url === "/api/kb");
+    expect(call.method).toBe("GET");
+    // The server owns the precedence and the note; the bridge must not pick
+    // fields and drop the ones it does not know about.
+    expect(events.find((event) => event.type === "kb").kb).toStrictEqual(kb);
+  });
+
+  it("getKb 失败时回显式 warn，不发 kb 事件", async () => {
+    const { bridge, events } = treeBridge([
+      ["/api/kb", () => jsonResponse({ error: { code: "internal_error", message: "内部错误" } }, 500)],
+    ]);
+    bridge.api.send({ cmd: "getKb" });
+    await vi.waitFor(() => {
+      expect(events.some((event) => event.type === "notice")).toBe(true);
+    });
+
+    const notice = events.find((event) => event.type === "notice");
+    expect(notice).toMatchObject({ type: "notice", level: "warn" });
+    expect(notice.text).toContain("知识库读取失败");
+    expect(notice.text).toContain("内部错误");
+    // An empty `kb` here would let the page say "there is no knowledge base",
+    // which is a claim the bridge cannot make.
+    expect(events.some((event) => event.type === "kb")).toBe(false);
+  });
 });
 
 describe("bridge: providers 保存", () => {

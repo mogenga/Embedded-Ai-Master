@@ -94,17 +94,21 @@ describe('kbTools', () => {
     rmSync(root, { recursive: true, force: true })
   })
 
-  it('注册 5 个工具，其中 4 个只读，kb_read 标记为证据工具', () => {
+  it('注册 7 个工具，其中 6 个只读，kb_read 标记为证据工具', () => {
     expect(tools.map((tool) => tool.name).sort()).toEqual([
+      'kb_glob',
+      'kb_grep',
       'kb_lookup',
       'kb_propose',
       'kb_read',
       'kb_search',
       'kb_status',
     ])
-    for (const name of ['kb_lookup', 'kb_read', 'kb_search', 'kb_status']) {
+    for (const name of ['kb_lookup', 'kb_read', 'kb_search', 'kb_status', 'kb_glob', 'kb_grep']) {
       expect(findTool(tools, name).annotations?.readOnlyHint, name).toBe(true)
     }
+    expect(findTool(tools, 'kb_glob').annotations?.destructiveHint).toBeUndefined()
+    expect(findTool(tools, 'kb_grep').annotations?.destructiveHint).toBeUndefined()
     expect(findTool(tools, 'kb_propose').annotations?.readOnlyHint).toBe(false)
     expect(findTool(tools, 'kb_propose').annotations?.destructiveHint).toBe(true)
     expect(findTool(tools, 'kb_read').meta?.evidence).toBe(true)
@@ -173,6 +177,136 @@ describe('kbTools', () => {
 
     expect(result.isError).toBe(true)
     expect(errorCode(result)).toBe('not_found')
+  })
+
+  it('kb_read 支持 offset/limit 并返回窗口元数据', async () => {
+    const tool = findTool(tools, 'kb_read')
+
+    const first = structured(await tool.handler({ path: 'protocols/uart/no-output.md' }))
+    expect(first).toMatchObject({ offset: 0, lines: 9, totalLines: 9, truncated: false })
+
+    const window = structured(
+      await tool.handler({ path: 'protocols/uart/no-output.md', offset: 6, limit: 2 }),
+    )
+    expect(window).toMatchObject({ offset: 6, lines: 2, totalLines: 9, truncated: true })
+    expect(window.content).toBe('第一行正文\nUART 接线要共地\n')
+    expect(window.reviewStatus).toBe('reviewed')
+  })
+
+  it('kb_read 拒绝负 offset 与非正 limit，超过 2000 的 limit 夹到上限', async () => {
+    const tool = findTool(tools, 'kb_read')
+
+    for (const args of [
+      { path: 'protocols/uart/no-output.md', offset: -1 },
+      { path: 'protocols/uart/no-output.md', limit: 0 },
+    ]) {
+      const result = await tool.handler(args)
+      expect(result.isError).toBe(true)
+      expect(errorCode(result)).toBe('invalid_argument')
+    }
+
+    const clamped = structured(
+      await tool.handler({ path: 'protocols/uart/no-output.md', limit: 100000 }),
+    )
+    expect(clamped).toMatchObject({ offset: 0, lines: 9, totalLines: 9, truncated: false })
+  })
+
+  it('kb_read 描述说明 truncated 的续读语义', () => {
+    const description = findTool(tools, 'kb_read').description
+
+    expect(description).toContain('truncated: true')
+    expect(description).toContain('offset')
+  })
+
+  it('kb_glob 按模式列文件并排除导航文件', async () => {
+    const tool = findTool(tools, 'kb_glob')
+
+    const result = await tool.handler({ pattern: '**/*.md' })
+    expect(result.isError).toBeUndefined()
+    expect(structured(result)).toEqual({
+      found: true,
+      matches: ['protocols/i2c/nack.md', 'protocols/uart/no-output.md'],
+      count: 2,
+      truncated: false,
+    })
+
+    expect(structured(await tool.handler({ pattern: '*.md' })).matches).toEqual([])
+  })
+
+  it('kb_glob 空 pattern 返回 invalid_pattern，无匹配 found=false', async () => {
+    const tool = findTool(tools, 'kb_glob')
+
+    const invalid = await tool.handler({ pattern: '  ' })
+    expect(invalid.isError).toBe(true)
+    expect(errorCode(invalid)).toBe('invalid_pattern')
+
+    const miss = await tool.handler({ pattern: 'no-such-dir/*.md' })
+    expect(miss.isError).toBeUndefined()
+    expect(structured(miss)).toEqual({ found: false, matches: [], count: 0, truncated: false })
+  })
+
+  it('kb_glob 拒绝越界路径', async () => {
+    const tool = findTool(tools, 'kb_glob')
+
+    for (const pattern of ['../*.md', 'protocols/../../*.md', '/etc/*.md']) {
+      const result = await tool.handler({ pattern })
+      expect(result.isError).toBe(true)
+      expect(errorCode(result)).toBe('path_denied')
+    }
+  })
+
+  it('kb_grep 大小写不敏感并返回 1-based 行号', async () => {
+    const tool = findTool(tools, 'kb_grep')
+
+    const result = await tool.handler({ pattern: 'uart 接线' })
+    expect(result.isError).toBeUndefined()
+    expect(structured(result)).toEqual({
+      found: true,
+      hits: [{ path: 'protocols/uart/no-output.md', line: 8, text: 'UART 接线要共地' }],
+      count: 1,
+      truncated: false,
+    })
+  })
+
+  it('kb_grep 非法正则返回 invalid_regex，空 pattern 返回 invalid_pattern', async () => {
+    const tool = findTool(tools, 'kb_grep')
+
+    const invalid = await tool.handler({ pattern: '([' })
+    expect(invalid.isError).toBe(true)
+    expect(errorCode(invalid)).toBe('invalid_regex')
+    expect(structured(invalid).message).toMatch(/\[/)
+
+    const empty = await tool.handler({ pattern: '' })
+    expect(empty.isError).toBe(true)
+    expect(errorCode(empty)).toBe('invalid_pattern')
+  })
+
+  it('kb_grep 的 glob 参数限定文件并排除导航文件', async () => {
+    const tool = findTool(tools, 'kb_grep')
+
+    const all = structured(await tool.handler({ pattern: 'UART' }))
+    const paths = new Set((all.hits as Array<{ path: string }>).map((hit) => hit.path))
+    expect(paths.has('_inbox.md')).toBe(false)
+    expect(paths.has('_about.md')).toBe(false)
+    expect(paths.has('index.yaml')).toBe(false)
+
+    const limited = structured(await tool.handler({ pattern: 'UART', glob: 'protocols/i2c/*.md' }))
+    expect(limited).toEqual({ found: false, hits: [], count: 0, truncated: false })
+
+    const denied = await tool.handler({ pattern: 'UART', glob: '../*.md' })
+    expect(denied.isError).toBe(true)
+    expect(errorCode(denied)).toBe('path_denied')
+  })
+
+  it('新工具描述写明无命中必须如实告知，且不含实验数字', () => {
+    for (const name of ['kb_glob', 'kb_grep']) {
+      const description = findTool(tools, name).description
+      expect(description, name).toContain('found=false')
+      expect(description, name).toContain('不得编造')
+      expect(description, name).not.toMatch(/\d+\.\d+|\d{2,}%/)
+    }
+    expect(findTool(tools, 'kb_lookup').description).toContain('kb_grep')
+    expect(findTool(tools, 'kb_search').description).toContain('kb_grep')
   })
 
   it('kb_search 返回命中上下文，空 token 返回 empty_query，无命中 found=false', async () => {

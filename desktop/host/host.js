@@ -140,6 +140,20 @@ send({ type: "hello" });
  */
 const probeModule = await import(dist("model/probe.js")).catch(() => undefined);
 
+/**
+ * The kernel's knowledge-base locator, loaded lazily by `getKb`.
+ *
+ * Same reasoning as `probeModule`, one step further: `dist/server/kb-locate.js`
+ * is newer than most `dist/` trees in the wild, and putting it in the startup
+ * `Promise.all` would make an un-rebuilt kernel refuse to boot at all. The
+ * settings page can retry this command, so it reports the gap instead.
+ */
+let kbModulePromise;
+function kbModule() {
+  kbModulePromise ??= import(dist("server/kb-locate.js")).catch(() => undefined);
+  return kbModulePromise;
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
@@ -1405,6 +1419,62 @@ const handlers = {
    */
   getSettings() {
     configEvent();
+  },
+
+  /**
+   * Where the knowledge base is and what is under it.
+   *
+   * The root is not `$HARNESS_HOME/kb`: the real corpus lives wherever the KB
+   * MCP server's `KB_ROOT` points (default `<repo>/mcp-servers/kb/kb`). The
+   * kernel's `resolveKbRoot` owns that precedence so this handler cannot drift
+   * from what the MCP server itself would read; `source` and `note` travel to
+   * the settings page, which has to be able to say "not found" instead of
+   * drawing an empty knowledge base (R3).
+   */
+  async getKb() {
+    const located = await kbModule();
+    if (typeof located?.resolveKbRoot !== "function" || typeof located.scanKbRoot !== "function") {
+      // A `dist/` built before the locator landed. One settings-page command
+      // must not take the host down, so the failure is reported and the
+      // renderer's pending request is released with an empty answer.
+      send({
+        type: "notice",
+        level: "warn",
+        text: "知识库不可用：内核未编译，请先 npm run build",
+      });
+      send({
+        type: "kb",
+        kb: { root: "", source: "none", fileCount: 0, indexPresent: false, truncated: false, tree: [] },
+      });
+      return;
+    }
+    const location = located.resolveKbRoot({ harnessHome, repoRoot });
+    try {
+      const scan = await located.scanKbRoot(location.root);
+      send({
+        type: "kb",
+        kb: {
+          ...location,
+          fileCount: scan.fileCount,
+          indexPresent: scan.indexPresent,
+          truncated: scan.truncated,
+          tree: scan.tree,
+        },
+      });
+    } catch (error) {
+      // A read failure is a fact the page shows, not a reason to send nothing.
+      send({
+        type: "kb",
+        kb: {
+          ...location,
+          fileCount: 0,
+          indexPresent: false,
+          truncated: false,
+          tree: [],
+          error: messageOf(error),
+        },
+      });
+    }
   },
 
   /**

@@ -13,6 +13,7 @@
  *   listSessions    GET  /api/sessions
  *   loadSession     GET  /api/sessions/:id
  *   getTree         GET  /api/tree?path=…
+ *   getKb           GET  /api/kb               (root precedence reported by the server)
  *   setModel        local choice, sent as `model` by the next new session
  *   refreshModels   GET  /api/config
  *   setWorkspace    POST /api/workspace        { path }
@@ -652,6 +653,7 @@ export function createBrowserBridge(options = {}) {
     "getSetupChecklist",
     "listCommands",
     "getTree",
+    "getKb",
     "setWorkspace",
     "getFile",
     "getArtifacts",
@@ -1044,6 +1046,40 @@ export function createBrowserBridge(options = {}) {
     // is passed through rather than rebuilt, so a new field is not dropped.
     const entries = Array.isArray(body.entries) ? body.entries : [];
     emit({ type: "tree", nodes: entries, truncated: body.truncated === true });
+  }
+
+  /**
+   * Where the knowledge base is, as `GET /api/kb` resolved it.
+   *
+   * The server owns the precedence (env → mcp.json → repo default) and reports
+   * which one it used; the bridge forwards the whole body rather than picking
+   * fields, so a root the server could not find still reaches the page with
+   * its `note`. A failed request is a warning, never an empty knowledge base:
+   * "could not read" and "there is nothing here" are different facts (R3).
+   */
+  async function getKb() {
+    const label = "知识库读取失败";
+    let response;
+    try {
+      response = await fetchImpl("/api/kb");
+    } catch (error) {
+      emit({
+        type: "notice",
+        level: "warn",
+        text: `${label}：${error instanceof Error ? error.message : String(error)}`,
+      });
+      return;
+    }
+    if (!response.ok) {
+      emit({ type: "notice", level: "warn", text: `${label}：${await readError(response)}` });
+      return;
+    }
+    const body = await response.json().catch(() => undefined);
+    if (!isRecord(body)) {
+      emit({ type: "notice", level: "warn", text: `${label}：服务端返回了无法解析的内容` });
+      return;
+    }
+    emit({ type: "kb", kb: body });
   }
 
   /**
@@ -1669,6 +1705,9 @@ export function createBrowserBridge(options = {}) {
         return;
       case "getTree":
         void getTree(textOf(payload.path));
+        return;
+      case "getKb":
+        void getKb();
         return;
       case "setWorkspace":
         void setWorkspace(textOf(payload.path));

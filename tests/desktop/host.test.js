@@ -25,6 +25,8 @@ const PROBE_SOURCE = path.join(REPO_ROOT, "src", "model", "probe.ts");
 const DIST_BUILT = existsSync(path.join(REPO_ROOT, "dist", "model", "openai.js"));
 const PROBE_BUILT = existsSync(path.join(REPO_ROOT, "dist", "model", "probe.js"));
 const PROBE_DIST = path.join(REPO_ROOT, "dist", "model", "probe.js");
+/** Same split for the knowledge-base locator that `getKb` imports lazily. */
+const KB_MODULE_BUILT = existsSync(path.join(REPO_ROOT, "dist", "server", "kb-locate.js"));
 /**
  * Whether the compiled probe already accepts a directly-typed `apiKey`.
  *
@@ -158,7 +160,7 @@ function runHost(home, commands, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [HOST], {
       cwd: options.cwd ?? path.dirname(HOST),
-      env: { ...process.env, HARNESS_HOME: home },
+      env: { ...process.env, ...(options.env ?? {}), HARNESS_HOME: home },
       stdio: ["pipe", "pipe", "pipe"],
     });
     const events = [];
@@ -1387,6 +1389,73 @@ describe("desktop host", () => {
     expect(notice.level).toBe("warn");
     expect(notice.text).toContain("该设置没有后端");
     expect(notice.text).toContain("theme");
+  }, HOST_TIMEOUT_MS);
+
+  /**
+   * Whether the locator this test is about has been compiled.
+   *
+   * `getKb` imports `dist/server/kb-locate.js` lazily for exactly this reason:
+   * a `dist/` from before the locator landed still boots, and the command says
+   * "not built" instead. Both states are asserted, so neither can pass as the
+   * other — same split as the probe tests above.
+   */
+  it.runIf(KB_MODULE_BUILT)("getKb 按 KB_ROOT 报告根与树，失败不崩宿主", async () => {
+    const home = await tempHome();
+    const kbRoot = await mkdtemp(path.join(tmpdir(), "eam-host-kb-"));
+    tempDirs.push(kbRoot);
+    await mkdir(path.join(kbRoot, "protocols"), { recursive: true });
+    await writeFile(path.join(kbRoot, "protocols", "uart.md"), "# uart\n");
+    await writeFile(path.join(kbRoot, "top.md"), "# top\n");
+    await writeFile(path.join(kbRoot, "index.yaml"), "entries: []\n");
+
+    const events = await runHost(home, [{ cmd: "init", cwd: home }, { cmd: "getKb" }], {
+      env: { KB_ROOT: kbRoot },
+      until: (all) => all.some((event) => event.type === "kb"),
+    });
+    const event = events.find((entry) => entry.type === "kb");
+    expect(event.kb).toMatchObject({
+      root: path.resolve(kbRoot),
+      source: "env",
+      fileCount: 2,
+      indexPresent: true,
+      truncated: false,
+    });
+    expect(event.kb.error).toBeUndefined();
+    expect(event.kb.tree.map((node) => [node.name, node.kind])).toStrictEqual([
+      ["protocols", "dir"],
+      ["index.yaml", "file"],
+      ["top.md", "file"],
+    ]);
+  }, HOST_TIMEOUT_MS);
+
+  it.runIf(KB_MODULE_BUILT)("getKb 的根不存在时保留候选并说明，而不是回空知识库", async () => {
+    const home = await tempHome();
+    const missing = path.join(tmpdir(), `eam-host-kb-missing-${Date.now()}`);
+    const events = await runHost(home, [{ cmd: "init", cwd: home }, { cmd: "getKb" }], {
+      env: { KB_ROOT: missing },
+      until: (all) => all.some((event) => event.type === "kb"),
+    });
+    const event = events.find((entry) => entry.type === "kb");
+    expect(event.kb.root).toBe(path.resolve(missing));
+    expect(event.kb.source).toBe("env");
+    expect(event.kb.note).toContain("目录不存在");
+    expect(event.kb.tree).toStrictEqual([]);
+    expect(events.some((entry) => entry.type === "ready")).toBe(true);
+  }, HOST_TIMEOUT_MS);
+
+  it.runIf(!KB_MODULE_BUILT)("kb 未编译时 getKb 说明先 build，宿主照常握手", async () => {
+    const home = await tempHome();
+    const events = await runHost(home, [{ cmd: "init", cwd: home }, { cmd: "getKb" }], {
+      until: (all) => all.some((event) => event.type === "kb"),
+    });
+    const notice = events.find(
+      (entry) => entry.type === "notice" && entry.text.includes("知识库不可用"),
+    );
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("npm run build");
+    const event = events.find((entry) => entry.type === "kb");
+    expect(event.kb).toMatchObject({ root: "", source: "none", tree: [] });
+    expect(events.some((entry) => entry.type === "ready")).toBe(true);
   }, HOST_TIMEOUT_MS);
 
   it("无法解析的指令被拒绝而不是让宿主崩溃", async () => {

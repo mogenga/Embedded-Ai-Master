@@ -26,6 +26,18 @@ const lookupSchema = z.object({
 
 const readSchema = z.object({
   path: z.string(),
+  offset: z.number().int().min(0).optional(),
+  // 上限由 service 夹到 2000：让模型多要几行时直接拿到上限，而不是白丢一轮去改参数。
+  limit: z.number().int().min(1).optional(),
+})
+
+const globSchema = z.object({
+  pattern: z.string(),
+})
+
+const grepSchema = z.object({
+  pattern: z.string(),
+  glob: z.string().optional(),
 })
 
 const searchSchema = z.object({
@@ -108,7 +120,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const lookup: KbToolSpec = {
     name: 'kb_lookup',
     description:
-      '按自然语言问题检索知识库索引，返回候选条目（path/title/summary/score）。无命中时返回 found=false、reason="no_match"；命中证据不足时返回 found=false、reason="low_confidence"。两种情况都必须如实告知用户，不得编造条目或内容。',
+      '按自然语言问题检索知识库索引，返回候选条目（path/title/summary/score）。无命中时返回 found=false、reason="no_match"；命中证据不足时返回 found=false、reason="low_confidence"。两种情况都必须如实告知用户，不得编造条目或内容。索引可能漏召回：未命中时改用 kb_grep / kb_glob 继续检索，不要直接断言知识库没有相关内容。',
     inputSchema: lookupSchema,
     annotations: { readOnlyHint: true },
     handler: withSchema(lookupSchema, async (args) => {
@@ -124,13 +136,13 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const read: KbToolSpec = {
     name: 'kb_read',
     description:
-      '读取知识库中的文件。path 必须是相对知识库根的 .md/.yaml 路径，禁止绝对路径与 .. 越界。返回原文 content；不得根据文件名或摘要猜测未读取到的内容。',
+      '读取知识库中的文件。path 必须是相对知识库根的 .md/.yaml 路径，禁止绝对路径与 .. 越界。可选 offset（0-based 行号，默认 0）与 limit（默认且上限 2000 行）只取一段窗口；content 是该窗口的原文，同时返回 offset/lines/totalLines/truncated。truncated: true 表示还有后续内容，应带上新的 offset 继续读，不要假设读完了。frontmatter 与 reviewStatus 始终按整份文件解析。不得根据文件名或摘要猜测未读取到的内容。',
     inputSchema: readSchema,
     annotations: { readOnlyHint: true },
     meta: { evidence: true },
     handler: withSchema(readSchema, async (args) => {
       try {
-        return ok(service.read(args.path))
+        return ok(service.read(args.path, { offset: args.offset, limit: args.limit }))
       } catch (error) {
         if (error instanceof KbServiceError) return fail(error.code, error.message)
         return fail('read_failed', errorMessage(error))
@@ -138,10 +150,42 @@ export function kbTools(service: KbService): KbToolSpec[] {
     }),
   }
 
+  const glob: KbToolSpec = {
+    name: 'kb_glob',
+    description:
+      '按通配符列出知识库中的文件路径（相对知识库根，如 protocols/**/*.md）。支持 *（不跨目录）、**（跨目录）、?（单个字符）；已排除导航文件与 index.yaml，最多返回 100 条。无命中时返回 found=false、matches=[]，必须如实告知用户，不得编造路径。truncated: true 表示还有更多匹配，应收窄 pattern。',
+    inputSchema: globSchema,
+    annotations: { readOnlyHint: true },
+    handler: withSchema(globSchema, async (args) => {
+      try {
+        return ok(service.glob(args.pattern))
+      } catch (error) {
+        if (error instanceof KbServiceError) return fail(error.code, error.message)
+        return fail('glob_failed', errorMessage(error))
+      }
+    }),
+  }
+
+  const grep: KbToolSpec = {
+    name: 'kb_grep',
+    description:
+      '按正则（大小写不敏感）逐行检索知识库正文，返回命中行（path/line/text，line 为 1-based，text 截断到 300 字符）。可选 glob 限定文件（如 **/*.md）；已排除导航文件与 index.yaml；最多返回 100 条。无命中时返回 found=false、hits=[]，必须如实告知用户，不得编造。truncated: true 表示命中超过 100 条，应收窄正则。',
+    inputSchema: grepSchema,
+    annotations: { readOnlyHint: true },
+    handler: withSchema(grepSchema, async (args) => {
+      try {
+        return ok(service.grep(args.pattern, args.glob))
+      } catch (error) {
+        if (error instanceof KbServiceError) return fail(error.code, error.message)
+        return fail('grep_failed', errorMessage(error))
+      }
+    }),
+  }
+
   const search: KbToolSpec = {
     name: 'kb_search',
     description:
-      '按关键词或十六进制 token 在知识库中逐行检索，返回命中行及上下文。无命中时返回 found=false，必须如实告知用户，不得编造。',
+      '按关键词或十六进制 token 在知识库中逐行检索，返回命中行及上下文。字面多 token 检索，不支持正则；需要正则时用 kb_grep。无命中时返回 found=false，必须如实告知用户，不得编造。',
     inputSchema: searchSchema,
     annotations: { readOnlyHint: true },
     handler: withSchema(searchSchema, async (args) => {
@@ -198,5 +242,5 @@ export function kbTools(service: KbService): KbToolSpec[] {
     }),
   }
 
-  return [lookup, read, search, propose, status]
+  return [lookup, glob, grep, read, search, propose, status]
 }

@@ -5,6 +5,7 @@ import type { Dirent } from "node:fs";
 import os from "node:os";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveHarnessHome } from "../config/harness-home.js";
 import { createLogTailEventSource } from "../events/log-tail.js";
 import type { SessionEventSource } from "../events/types.js";
@@ -33,6 +34,7 @@ import {
   resolveWorkspaceCandidates,
 } from "./files-api.js";
 import { HttpError, sendError, sendJson } from "./http.js";
+import { resolveKbRoot, scanKbRoot } from "./kb-locate.js";
 import { createSessionAdmin } from "./session-admin.js";
 import type { PermissionPreset } from "../permissions/types.js";
 import { createSessionRunner, RunnerError } from "./runner.js";
@@ -73,17 +75,6 @@ export interface SessionSummary {
   archived?: boolean;
   updatedAt?: string;
 }
-
-export interface KbNode {
-  name: string;
-  path: string;
-  kind: "dir" | "file";
-  children?: KbNode[];
-}
-
-const KB_MAX_DEPTH = 8;
-
-const KB_MAX_ENTRIES = 2000;
 
 const MIME_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
@@ -629,47 +620,42 @@ async function handleSession(
   sendJson(res, 200, { header: result.header, events: result.events });
 }
 
-function compareNames(left: Dirent, right: Dirent): number {
-  return left.name.localeCompare(right.name);
-}
+/**
+ * 仓库根：`src/server/` 与 `dist/server/` 都是仓库根的二级目录。
+ *
+ * 知识库的默认位置是 `<repoRoot>/mcp-servers/kb/kb`，所以这个换算必须对
+ * 编译前（tsx/vitest 直接跑 src）与编译后（跑 dist）同时成立。
+ */
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-async function scanKb(
-  dir: string,
-  depth: number,
-  counter: { count: number },
-): Promise<KbNode[]> {
-  let entries: Dirent[] = [];
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const dirs = entries.filter((entry) => entry.isDirectory()).sort(compareNames);
-  const files = entries.filter((entry) => entry.isFile()).sort(compareNames);
-  const nodes: KbNode[] = [];
-  for (const entry of [...dirs, ...files]) {
-    if (counter.count >= KB_MAX_ENTRIES) break;
-    counter.count += 1;
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      const children = depth < KB_MAX_DEPTH ? await scanKb(full, depth + 1, counter) : [];
-      nodes.push({ name: entry.name, path: full, kind: "dir", children });
-    } else {
-      nodes.push({ name: entry.name, path: full, kind: "file" });
-    }
-  }
-  return nodes;
-}
-
+/**
+ * 知识库定位与树。
+ *
+ * 扫描失败按 200 + `error` 返回：这是设置页的信息展示，读不到目录要说原因，
+ * 而不是把整个设置页变成一个错误页。根不存在不是错误——它会带着候选路径和
+ * `note` 一起回来，前端据此说「没找到」而不是「是空的」（R3）。
+ */
 async function handleKb(res: ServerResponse, harnessHome: string): Promise<void> {
-  const kbDir = path.join(harnessHome, "kb");
-  const info = await stat(kbDir).catch(() => undefined);
-  if (info === undefined || !info.isDirectory()) {
-    sendJson(res, 200, { root: null, tree: [] });
-    return;
+  const location = resolveKbRoot({ harnessHome, repoRoot: REPO_ROOT });
+  try {
+    const scan = await scanKbRoot(location.root);
+    sendJson(res, 200, {
+      ...location,
+      fileCount: scan.fileCount,
+      indexPresent: scan.indexPresent,
+      truncated: scan.truncated,
+      tree: scan.tree,
+    });
+  } catch (error) {
+    sendJson(res, 200, {
+      ...location,
+      fileCount: 0,
+      indexPresent: false,
+      truncated: false,
+      tree: [],
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
-  const tree = await scanKb(kbDir, 1, { count: 0 });
-  sendJson(res, 200, { root: kbDir, tree });
 }
 
 async function serveStatic(

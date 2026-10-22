@@ -2575,6 +2575,10 @@ function handleEvent(message) {
       break;
     }
 
+    case "kb":
+      settings.handleEvent(message);
+      break;
+
     case "usage_summary":
     case "mcp_servers":
     case "skills":

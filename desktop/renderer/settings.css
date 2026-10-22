@@ -721,7 +721,10 @@
   color: var(--text);
 }
 
-/* MCP and skills lists */
+/* MCP and skills lists.
+   The MCP page is a stack of collapsible cards now (`.settings-form-card`,
+   `.settings-card-*` below), so its old flat-row layout is gone; these rules
+   are what the skills list still uses, kept under their own names. */
 .mcp-list,
 .skills-list {
   display: flex;
@@ -730,7 +733,6 @@
   margin-top: 4px;
 }
 
-.mcp-row,
 .skill-row {
   display: flex;
   align-items: center;
@@ -741,7 +743,6 @@
   background: var(--surface);
 }
 
-.mcp-main,
 .skill-main {
   flex: 1;
   min-width: 0;
@@ -750,30 +751,19 @@
   gap: 3px;
 }
 
-.mcp-title,
 .skill-title {
   display: flex;
   align-items: center;
   gap: 8px;
 }
 
-.mcp-title strong {
-  font-size: var(--text-base);
-}
-
-.mcp-command,
 .skill-name {
   font-family: var(--mono);
   font-size: var(--text-sm);
-  color: var(--text-faint);
+  color: var(--accent-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.skill-name {
-  font-size: var(--text-sm);
-  color: var(--accent-text);
 }
 
 .skill-desc {
@@ -785,12 +775,16 @@
   white-space: nowrap;
 }
 
+/* A badge is a fixed fact, not a length of text: in a flex row it must keep its
+   size and let the name beside it truncate instead. */
 .mcp-scope {
+  flex: 0 0 auto;
   padding: 1px 7px;
   border-radius: 999px;
   border: 1px solid var(--border-strong);
   font-size: var(--text-xs);
   color: var(--text-faint);
+  white-space: nowrap;
 }
 
 .mcp-scope.scope-project {
@@ -898,10 +892,11 @@
   font-weight: 600;
 }
 
-/* The one thing a collapsed card is for: what this service offers. It takes
-   the remaining width and truncates rather than wraps, so the header stays a
-   single line whatever the models are called. */
-.settings-card-models {
+/* The one thing a collapsed card is for: the summary line. It takes the
+   remaining width and truncates rather than wraps, so the header stays a
+   single line whatever it holds. Shared by the model-services cards (their
+   model names) and the MCP cards (command basename and argument count). */
+.settings-card-summary {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -911,9 +906,9 @@
   color: var(--text-secondary);
 }
 
-/* No models is a state, not a value: saying it in the same colour as a model
-   name would make an empty service look configured. */
-.settings-card-models.empty {
+/* Nothing to show is a state, not a value: saying it in the same colour as a
+   real value would make an empty card look configured. */
+.settings-card-summary.empty {
   font-style: italic;
   color: var(--text-faint);
 }
@@ -925,6 +920,16 @@
   flex-direction: column;
   gap: 2px;
   padding-top: 6px;
+}
+
+/* The command line of an MCP card: one long shell command, wrapped rather than
+   truncated. A cut-off argument list is the one thing a user opened the card to
+   read, so nothing here may be hidden. */
+.mcp-card-command {
+  display: block;
+  width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 /* The protocol chip sits above the fields, on its own line: it is a fact
@@ -947,6 +952,118 @@
 
 .settings-form-card .setting-label {
   font-size: var(--text-sm);
+}
+
+/* knowledge base */
+/* A flex column so the note's margins do not collapse into the group below —
+   the same reason `skills-body` has its own container. */
+.kb-body {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The head sits above the first group, and `.kb-body` is a zero-gap flex
+   column: without a margin of its own the group title lands flush against the
+   note and reads as a third line of it rather than as a heading. Measured at
+   0px before this; the groups below already get their separation from
+   `.setting-group`'s own `margin-bottom`. */
+.kb-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+/* The standing note sits above the status rows, so its own top margin would
+   push it away from the button it belongs beside. */
+.kb-head-note {
+  margin: 0;
+  max-width: 56ch;
+}
+
+.kb-error {
+  margin: 0 0 12px;
+}
+
+.kb-note {
+  margin: 6px 0 0;
+}
+
+.kb-truncated {
+  margin: 8px 0 0;
+  color: var(--warn);
+}
+
+.kb-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 4px 2px;
+}
+
+.kb-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  padding-right: 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.kb-row .icon {
+  color: var(--text-faint);
+}
+
+/* Only folders are buttons; a file row is plain text, because there is no
+   preview endpoint to open it with. */
+.kb-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  padding: 1px 6px;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--fast) var(--ease);
+}
+
+.kb-toggle:hover {
+  background: var(--surface-hover);
+}
+
+.kb-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.kb-chevron {
+  color: var(--text-faint);
+}
+
+.kb-dir {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kb-file {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.kb-children {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 /* memory */

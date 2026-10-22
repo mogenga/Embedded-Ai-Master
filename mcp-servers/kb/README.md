@@ -90,8 +90,36 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 
 ## 工具面与沉淀流程
 
-- `kb_lookup` / `kb_read` / `kb_search` / `kb_status` 为只读工具。
-- `kb_propose` 把新知识写入 `<KB 根>/_inbox.md`，返回 `proposalId` 与 `status: "pending_review"`。它**只写待审区**：`kb_search` 排除 `_inbox.md`，`kb_lookup` 只读 `index.yaml`，因此未审内容不会进入检索。
+### 部署形态：lookup（廉价首跳）+ glob/grep/read（agentic 循环）
+
+| 工具 | 作用 | 关键返回值 |
+|---|---|---|
+| `kb_lookup(query, limit?)` | 索引关键词打分，廉价首跳 | `found` / `candidates[{path,title,summary,score}]` / `reason` |
+| `kb_glob(pattern)` | 按通配符列路径（`*` / `**` / `?`，相对 KB 根） | `found` / `matches[]` / `count` / `truncated` |
+| `kb_grep(pattern, glob?)` | 逐行正则检索，大小写不敏感，可选 glob 限定 | `found` / `hits[{path,line,text}]` / `count` / `truncated` |
+| `kb_read(path, offset?, limit?)` | 读文件，分页窗口 | `content` / `offset` / `lines` / `totalLines` / `truncated` / `frontmatter` / `reviewStatus` |
+| `kb_search(tokens, limit?)` | 字面多 token 行检索（不支持正则） | `found` / `hits[{path,line,text,token}]` |
+| `kb_status()` | 根路径、文件数、索引条目、待审数 | `root` / `fileCount` / `indexEntries` / `indexPresent` / `inboxPending` |
+| `kb_propose(...)` | 写待审 inbox | `proposalId` / `status: "pending_review"` |
+
+除 `kb_propose` 外全部 `readOnlyHint: true`，`kb_read` 另带 `meta.evidence: true`。
+
+- 上限：`kb_glob` / `kb_grep` 单次最多 100 条，超出置 `truncated: true`；两者的 `count` 都是**实际命中总数**，可以大于返回条数。`kb_grep` 的命中行截断到 300 字符。
+- `kb_read` 的 `offset` 是 0-based 行号，`limit` 默认且上限均为 2000 行；`content` 只是该窗口的原文切片，`frontmatter` 与 `reviewStatus` 始终按整份文件解析。`truncated: true` 表示还有后续内容，应带新 `offset` 续读。单文件 1 MiB 上限保留。
+- 两者都排除 `_inbox.md`、`_about.md` 与 `index.yaml`，只列/搜 `.md` 与 `.yaml`（即 `kb_read` 读得到的文件），拒绝绝对路径与 `..` 越界（`path_denied`）。空 pattern → `invalid_pattern`，非法正则 → `invalid_regex`，均为 `isError: true` 的结构化错误。
+
+> 本目录是 TypeScript 源码；MCP server 实际加载的是 `dist-mcp/kb/`。改动工具面后必须先 `npm run build:mcp`，否则运行中的 server 仍是旧工具面（`dist-mcp/` 不在版本库内，也没有热重载）。
+
+### 与对照实验方案 B 的关系（必须如实披露）
+
+`docs/rag-vs-agentic-search-todo.md` §7 与 `experiments/rag-vs-agentic-search/docs/experiment-report.md` 里被测量的是**方案 B**：工具面只有 `glob` / `grep` / `read` / `submit`，**没有 `kb_lookup`**，由 LLM 从零开始多轮检索并最终 `submit` 候选。本目录部署的是 **lookup 首跳 + glob/grep/read 循环**，模型可以先吃索引再决定要不要展开，形态与 B 不同。
+
+因此：**不能把 B 的 Recall@2 0.925 当作本部署的成绩**。本部署没有在 B 的评测协议下跑过，也没有对应的测量数字；B 的成绩只说明「agentic 检索这条路值得走」。
+
+同样的原因，实验里 **B 的 H7（KB 外查询拒答）整块未评估**——B 没有负样本跑批实现（`experiments/rag-vs-agentic-search/docs/experiment-report.md` §5）。本部署的拒答能力只剩 `kb_lookup` 那一道门槛（当前负样本拒答率 0.84，见下），一旦模型改用 `kb_grep` / `kb_glob`，就不存在任何拒答机制。**该缺口已登记为 D-179**（`docs/deferred-issues.md`）；召回质量与拒答的相邻问题由 D-159 跟踪。
+
+- `kb_lookup` / `kb_glob` / `kb_grep` / `kb_read` / `kb_search` / `kb_status` 为只读工具。
+- `kb_propose` 把新知识写入 `<KB 根>/_inbox.md`，返回 `proposalId` 与 `status: "pending_review"`。它**只写待审区**：`kb_search` / `kb_grep` / `kb_glob` 均排除 `_inbox.md`，`kb_lookup` 只读 `index.yaml`，因此未审内容不会进入检索。
 - 同一 `kind + domain + content` 重复提交不会重复写入，返回已有 `proposalId` 与 `duplicate: true`。
 - 审核是人工步骤：先把内容合并进正式条目，再运行 `npm run kb:review -- --accept <id> --target <正式条目路径>`；回归指标低于基线时脚本拒绝接受、inbox 不变。拒绝用 `npm run kb:review -- --reject <id> --reason "..."`。
 - `kb_status.inboxPending` 报告待审条数；inbox 读取失败时返回 `inboxError`，不把错误吞成 0。
@@ -100,7 +128,7 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 ## 测试
 
 ```bash
-npx vitest run mcp-servers/kb/tests/yaml.test.ts
+npx vitest run mcp-servers/kb
 ```
 
-测试使用内联夹具，不依赖本地语料；另有一条真实语料测试，仅当 `mcp-servers/kb/kb/index.yaml` 存在时运行并断言解析出 90 条，语料缺失时自动 skip（不伪造数据）。
+测试使用内联夹具，不依赖本地语料；另有一条真实语料测试，仅当 `mcp-servers/kb/kb/index.yaml` 存在时运行并断言解析出 90 条，语料缺失时自动 skip（不伪造数据）。`tests/regression.test.ts` 的双轨回归同理，缺本地语料时 `describe.skip`。

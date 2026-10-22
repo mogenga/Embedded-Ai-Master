@@ -30,9 +30,38 @@ export interface KbSearchResult {
   hits: KbSearchHit[]
 }
 
+export interface KbGlobResult {
+  found: boolean
+  matches: string[]
+  count: number
+  truncated: boolean
+}
+
+export interface KbGrepHit {
+  path: string
+  line: number
+  text: string
+}
+
+export interface KbGrepResult {
+  found: boolean
+  hits: KbGrepHit[]
+  count: number
+  truncated: boolean
+}
+
+export interface KbReadOptions {
+  offset?: number
+  limit?: number
+}
+
 export interface KbReadResult {
   path: string
   content: string
+  offset: number
+  lines: number
+  totalLines: number
+  truncated: boolean
   frontmatter?: Record<string, string | string[]>
   frontmatterParsed: boolean
   reviewStatus: 'reviewed' | 'unreviewed'
@@ -47,7 +76,12 @@ export interface KbStatus {
   inboxError?: string
 }
 
-export type KbServiceErrorCode = 'path_denied' | 'file_too_large' | 'not_found'
+export type KbServiceErrorCode =
+  | 'path_denied'
+  | 'file_too_large'
+  | 'not_found'
+  | 'invalid_pattern'
+  | 'invalid_regex'
 
 export class KbServiceError extends Error {
   constructor(
@@ -65,6 +99,17 @@ const NAVIGATION_FILES = new Set(['_inbox.md', '_about.md'])
 const INDEX_FILE = 'index.yaml'
 const DEFAULT_LOOKUP_LIMIT = 2
 const DEFAULT_SEARCH_LIMIT = 20
+// 与实验 B 的工具面一致：grep/glob 单次最多 100 条，read 单次最多 2000 行。
+const MAX_GLOB_MATCHES = 100
+const MAX_GREP_HITS = 100
+const GREP_TEXT_LIMIT = 300
+const DEFAULT_READ_LINES = 2000
+const MAX_READ_LINES = 2000
+const GLOB_META_CHARS = new Set(['.', '+', '^', '$', '{', '}', '(', ')', '|', '[', ']', '\\'])
+// 内核 `src/tools/glob.ts` 的两个同值常量。这里再写一遍是因为 MCP server 不能
+// import 内核（那会把领域进程绑到平台层的构建产物上）；值必须一致，理由见 D-086。
+const MAX_PATTERN_LENGTH = 256
+const MAX_PATTERN_SEGMENTS = 64
 const TAG_WEIGHT = 2
 const CONFIDENCE_THRESHOLD = 1.75
 const OOV_PENALTY = 0.75
@@ -287,6 +332,85 @@ function toPosix(relativePath: string): string {
   return relativePath.split(path.sep).join('/')
 }
 
+function isNavigationFile(relative: string): boolean {
+  const base = path.posix.basename(relative)
+  return NAVIGATION_FILES.has(base) || base === INDEX_FILE
+}
+
+function normalizePattern(pattern: string): string {
+  const raw = pattern.trim()
+  if (raw === '') {
+    throw new KbServiceError('invalid_pattern', 'pattern 不能为空')
+  }
+  // 与内核 `src/tools/glob.ts` 的 MAX_PATTERN_LENGTH / MAX_PATTERN_SEGMENTS 同值：
+  // 这不是审美限制，而是把 `(?:.*/)?` 的层数关进笼子。每一段 `**/` 都会给回溯
+  // 多一个可选出口，长模式在匹配失败时是多项式级的（D-086 记的就是这一条）。
+  if (raw.length > MAX_PATTERN_LENGTH) {
+    throw new KbServiceError(
+      'invalid_pattern',
+      `pattern 超过 ${MAX_PATTERN_LENGTH} 字符上限: ${raw.length}`,
+    )
+  }
+  if (
+    path.isAbsolute(raw) ||
+    /^[A-Za-z]:/.test(raw) ||
+    raw.startsWith('/') ||
+    raw.startsWith('\\')
+  ) {
+    throw new KbServiceError('path_denied', `pattern 必须是相对知识库根的路径: ${pattern}`)
+  }
+
+  const normalized = raw.replace(/\\/g, '/')
+  const segments = normalized.split('/').filter((segment) => segment !== '')
+  if (segments.some((segment) => segment === '..')) {
+    throw new KbServiceError('path_denied', `pattern 不允许 .. 越界: ${pattern}`)
+  }
+  if (segments.length > MAX_PATTERN_SEGMENTS) {
+    throw new KbServiceError(
+      'invalid_pattern',
+      `pattern 超过 ${MAX_PATTERN_SEGMENTS} 段上限: ${segments.length}`,
+    )
+  }
+  return normalized
+}
+
+function globToRegExp(pattern: string): RegExp {
+  let source = ''
+  for (let index = 0; index < pattern.length; index += 1) {
+    const char = pattern[index]
+    if (char === '*') {
+      if (pattern[index + 1] === '*') {
+        if (pattern[index + 2] === '/') {
+          // `**/` 允许零层目录，否则 protocols/**/*.md 会漏掉 protocols/x.md。
+          source += '(?:.*/)?'
+          index += 2
+        } else {
+          source += '.*'
+          index += 1
+        }
+        continue
+      }
+      source += '[^/]*'
+      continue
+    }
+    if (char === '?') {
+      source += '[^/]'
+      continue
+    }
+    source += GLOB_META_CHARS.has(char) ? `\\${char}` : char
+  }
+  return new RegExp(`^${source}$`)
+}
+
+function splitKeepingTerminators(content: string): string[] {
+  if (content === '') return []
+  return content.split(/(?<=\n)/)
+}
+
+function truncateLine(text: string): string {
+  return text.length > GREP_TEXT_LIMIT ? text.slice(0, GREP_TEXT_LIMIT) : text
+}
+
 export class KbService {
   private readonly root: string
   private readonly rootExists: boolean
@@ -361,7 +485,7 @@ export class KbService {
     return { found: true, candidates }
   }
 
-  read(relativePath: string): KbReadResult {
+  read(relativePath: string, options: KbReadOptions = {}): KbReadResult {
     const { absolute, relative } = this.resolveRelative(relativePath)
     const info = statSync(absolute)
     if (!info.isFile()) {
@@ -375,15 +499,110 @@ export class KbService {
     }
 
     const content = readFileSync(absolute, 'utf8')
+    const offset = Math.max(0, Math.trunc(options.offset ?? 0))
+    const limit = Math.min(
+      Math.max(0, Math.trunc(options.limit ?? DEFAULT_READ_LINES)),
+      MAX_READ_LINES,
+    )
+    const allLines = splitKeepingTerminators(content)
+    const window = allLines.slice(offset, offset + limit)
+
+    // frontmatter 与 reviewStatus 永远按整份文件判定：它们描述文件属性，不是窗口属性。
     const parsed = parseFrontmatter(content)
     const result: KbReadResult = {
       path: relative,
-      content,
+      content: window.join(''),
+      offset,
+      lines: window.length,
+      totalLines: allLines.length,
+      truncated: offset + window.length < allLines.length,
       frontmatterParsed: parsed.parsed,
       reviewStatus: NAVIGATION_FILES.has(path.posix.basename(relative)) ? 'unreviewed' : 'reviewed',
     }
     if (parsed.parsed) result.frontmatter = parsed.data
     return result
+  }
+
+  glob(pattern: string): KbGlobResult {
+    const matcher = globToRegExp(normalizePattern(pattern))
+    if (!this.rootExists) {
+      return { found: false, matches: [], count: 0, truncated: false }
+    }
+
+    // 与 grep 同一口径：`count` 是真实总数，但只保留能返回的那几条（D-078）。
+    const matches: string[] = []
+    let count = 0
+    for (const filePath of this.walkFiles(ALLOWED_EXTENSIONS)) {
+      const relative = toPosix(path.relative(this.root, filePath))
+      if (isNavigationFile(relative)) continue
+      if (!matcher.test(relative)) continue
+      if (matches.length < MAX_GLOB_MATCHES) matches.push(relative)
+      count += 1
+    }
+
+    return {
+      found: count > 0,
+      matches,
+      count,
+      truncated: count > MAX_GLOB_MATCHES,
+    }
+  }
+
+  grep(pattern: string, globPattern?: string): KbGrepResult {
+    const needle = pattern.trim()
+    if (needle === '') {
+      throw new KbServiceError('invalid_pattern', 'pattern 不能为空')
+    }
+
+    let regex: RegExp
+    try {
+      regex = new RegExp(needle, 'i')
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error)
+      throw new KbServiceError('invalid_regex', `正则非法: ${reason}`)
+    }
+
+    const trimmedGlob = globPattern?.trim() ?? ''
+    const matcher = trimmedGlob === '' ? undefined : globToRegExp(normalizePattern(trimmedGlob))
+
+    // `count` 要报真实总数，但**不为此把每一行都留在内存里**：命中行一旦超过
+    // 返回上限就只计数、不再保存文本。否则 `kb_grep(".")` 会把整份语料的每一行
+    // 都复制一遍——这就是内核 grep 的 D-078（先收集再截断）。总数照样准确，
+    // 因为这里只丢掉了「本来就返回不出去」的部分。
+    const hits: KbGrepHit[] = []
+    let matched = 0
+    for (const filePath of this.walkFiles(ALLOWED_EXTENSIONS)) {
+      const relative = toPosix(path.relative(this.root, filePath))
+      if (isNavigationFile(relative)) continue
+      if (matcher !== undefined && !matcher.test(relative)) continue
+
+      let content: string
+      try {
+        const info = statSync(filePath)
+        if (!info.isFile() || info.size > MAX_FILE_BYTES) continue
+        content = readFileSync(filePath, 'utf8')
+      } catch {
+        continue
+      }
+
+      const lines = content.split(/\r?\n/)
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index] ?? ''
+        if (!regex.test(line)) continue
+        if (hits.length < MAX_GREP_HITS) {
+          hits.push({ path: relative, line: index + 1, text: truncateLine(line.trim()) })
+        }
+        matched += 1
+      }
+    }
+
+    // count 报告真实命中总数（可以大于返回条数），truncated 说明 hits 被截断。
+    return {
+      found: matched > 0,
+      hits,
+      count: matched,
+      truncated: matched > MAX_GREP_HITS,
+    }
   }
 
   search(tokens: string[], limit = DEFAULT_SEARCH_LIMIT): KbSearchResult {
@@ -517,7 +736,7 @@ export class KbService {
     return { absolute: real, relative }
   }
 
-  private walkMarkdown(): string[] {
+  private walkFiles(extensions?: Set<string>): string[] {
     const files: string[] = []
     const visit = (directory: string): void => {
       let entries
@@ -534,11 +753,20 @@ export class KbService {
           continue
         }
         if (!entry.isFile()) continue
-        if (entry.name.toLowerCase().endsWith('.md')) files.push(full)
+        if (extensions === undefined) {
+          files.push(full)
+          continue
+        }
+        const extension = path.posix.extname(entry.name).toLowerCase()
+        if (extensions.has(extension)) files.push(full)
       }
     }
     visit(this.root)
     return files
+  }
+
+  private walkMarkdown(): string[] {
+    return this.walkFiles(new Set(['.md']))
   }
 
   private isDirectory(target: string): boolean {

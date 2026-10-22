@@ -208,7 +208,21 @@ OpenOCD 后端本轮只做“连接已运行的 OpenOCD telnet”，`attach` 不
 
 ## 领域 MCP：知识库（BR-3）
 
-`mcp-servers/kb` 以 stdio MCP server 暴露 `kb_lookup` / `kb_read` / `kb_search` / `kb_status` 与写入待审区的 `kb_propose`；前四个只读，`kb_read` 标记为 evidence。`kb_propose` 只追加 `_inbox.md`，未审内容不参与检索，必须人工审核后合并。先构建再配置：
+`mcp-servers/kb` 以 stdio MCP server 暴露 7 个工具：
+
+| 工具 | 形态 | 说明 |
+|---|---|---|
+| `kb_lookup` | 索引首跳 | 关键词打分；可能漏召回，未命中应继续用 `kb_grep` / `kb_glob`，不要断言 KB 没有相关内容 |
+| `kb_glob` | agentic | 按 `*` / `**` / `?` 通配符列路径，最多 100 条 |
+| `kb_grep` | agentic | 逐行正则（大小写不敏感），可用 `glob` 限定文件，最多 100 条、命中行截断到 300 字符 |
+| `kb_read` | agentic | 读文件，`offset`（0-based）/`limit`（默认且上限 2000 行）分页；`truncated: true` 表示需续读 |
+| `kb_search` | 字面检索 | 多 token 字面行检索，不支持正则 |
+| `kb_status` | 只读 | 根路径、文件数、索引条目、待审数 |
+| `kb_propose` | 写入 | 只追加 `_inbox.md`，未审内容不参与检索，必须人工审核后合并 |
+
+除 `kb_propose` 外全部只读，`kb_read` 标记为 evidence。`kb_glob` / `kb_grep` 与 `kb_search` 一样排除 `_inbox.md`、`_about.md` 与 `index.yaml`，并拒绝绝对路径与 `..` 越界。
+
+**部署形态是 lookup 首跳 + glob/grep/read 的 agentic 循环，不等同于对照实验里被测量的方案 B**（B 的工具面没有 `kb_lookup`）。实验里 B 的 Recall@2 0.925 不能当作本部署的成绩；B 的 H7（KB 外查询拒答）在实验中也未评估（见 `experiments/rag-vs-agentic-search/docs/experiment-report.md` §5 与 `docs/rag-vs-agentic-search-todo.md` §7.4），这个缺口仍在。详见 `mcp-servers/kb/README.md`。先构建再配置：
 
 ```bash
 npm run build:mcp
@@ -470,7 +484,7 @@ npm --prefix desktop run desktop
   | GET | `/api/config` | `{ mcpServers, permissions, run, providers, mcpPath, permissionsPath, runPath, providersPath, providersError? }`——四份配置文件的当前内容。`providers.json` 读失败时其余三份照常返回，原因放 `providersError`（设置页要靠它把用户带去修文件） |
   | PUT | `/api/config` | 整份写其中一份：`{ mcpServers }` / `{ permissions }` / `{ run }` / `{ providers }`；400 `invalid_config` 带具体字段原因 |
   | POST | `/api/providers/test` | 探测一个模型服务：`{ baseUrl, apiKeyEnv?, model? }` → **200** `{ ok, baseUrl, models?, error?, code?, latencyMs? }`。探测失败是正常答案不是 HTTP 错误，所以 `ok:false` 也回 200；只有 `baseUrl` 形状非法才 400 `invalid_base_url`。先请求 `GET {baseUrl}/models`；非 2xx 且给了 `model` 时退一步发一次 `max_tokens: 1` 的极小请求。`code` ∈ `invalid_base_url` / `unreachable` / `unauthorized` / `http_error`。`models` 拿不到时字段不存在（不是空数组）。走 `requireWriteRequest`，与其它写端点一致 |
-  | GET | `/api/kb` | `{ root, tree }`；未配置 `kb/` 时返回 `{ root: null, tree: [] }` |
+  | GET | `/api/kb` | `{ root, source, note?, fileCount, indexPresent, truncated, tree, error? }`。根解析优先级：`KB_ROOT` 环境变量 → `$HARNESS_HOME/mcp.json` 里任一 server 的 `env.KB_ROOT` → 仓库默认 `mcp-servers/kb/kb`；`source` ∈ `env` / `mcp.json` / `default` / `none` 如实回报来自哪一级，`note` 说明理由。根不存在不是错误：`root` 保留候选路径、`tree: []`、`note` 含「目录不存在」。`fileCount` 只数 `.md`；`truncated` 表示触顶（深度 8 / 条目 2000 / 文件数 20000），此时 `fileCount` 是下界而非精确值。读取失败（权限/IO）仍回 200，原因在 `error` |
   | GET | `/api/device` | 当前恒为 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }` |
   | GET | `/api/file?path=…` | `{ path, content, truncated, binary }`；只读，256 KiB 上限。只允许读会话目录、会话工作目录与已登记工作区内的路径（`realpath` 后判定），越界 400 `invalid_path`、不存在 404、目录/非普通文件 400。含 NUL 字节按二进制返回 `content: ""` |
   | GET | `/api/tree?path=…` | `{ path, entries: [{ name, path, type }], truncated }`；列一层直接子项，边界同上。目录在前、各自按名排序（大小写不敏感），跳过符号链接，超过 500 项截断并置 `truncated`。缺 `path` 400 `invalid_path` |
@@ -718,7 +732,7 @@ MCP：
 - 内核不支持的能力仍无前端入口：MCP 配置、权限规则、系统提示词、fork、会话改名/删除等需手编配置文件或直接调用内核；见 `docs/deferred-issues.md` D-169。
 - 前端未覆盖的能力（git/PR、终端、worktree、导出、回放等）在 UI 隐藏入口，宿主/bridge 回显式 `notice`；清单见 `desktop/MATRIX.md`（D-166）。
 - 会话列表的坏目录进 `errors`，界面在会话面板底部显示「N 个会话目录不可读」（D-065 已解决）。
-- 知识库扫描深度上限 8、条目上限 2000，超出会静默截断（D-064）。
+- 知识库扫描深度上限 8、条目上限 2000、文件计数上限 20000；触顶时 `GET /api/kb` 置 `truncated`，`fileCount` 只作「至少 N」读（D-064 的静默截断已在此端点消除，`scanKb` 的旧实现一并移除）。
 
 ## 设计文档
 

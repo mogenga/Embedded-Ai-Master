@@ -44,6 +44,7 @@
 | `setEffort` | ✅（如实拒绝） | ✅（如实拒绝） | 内核模型适配层不发 reasoning effort 参数。回 warn notice，**不发 `state`** —— 假装生效比不支持更糟 |
 | `saveSettings` | ✅（窄） | ✅（窄） | 只接 `settings.locale`（en/zh），转调 `setLocale`；其他字段回 warn。不提供万能写配置入口——配置写入口是 `saveProviders`/`saveMcpServer`/`savePermissions`/`saveRunLimits` |
 | `getTree` | ✅ | ✅ | 列一层子项（`listDirectory` / `GET /api/tree`）。边界＝已登记工作区 ∪ 会话目录 ∪ 会话工作目录，`realpath` 后判定；目录在前、按名排序、跳过符号链接、超 500 项截断。失败先发 warn notice **再**发空 `tree`——空树是释放 `pendingTreeTarget` 的信号，不是「目录是空的」 |
+| `getKb` | ✅ | ✅ | 知识库定位 + 树（`dist/server/kb-locate.js` / `GET /api/kb`）。根解析优先级：`KB_ROOT` 环境变量 → `$HARNESS_HOME/mcp.json` 里任一 server 的 `env.KB_ROOT` → 仓库默认 `mcp-servers/kb/kb`；`source` 如实回报来自哪一级，`note` 说明选择理由。根不存在时**保留候选路径** + 空树 + `note`（「没找到」≠「是空的」）。`fileCount` 只数 `.md`；`truncated` 表示触顶（深度 8 / 条目 2000 / 文件数 20000），此时 `fileCount` 是「至少 N」而不是精确值。桌面端惰性 import：旧 `dist/` 缺该模块时回 warn「请先 npm run build」并回空 `kb`，不崩宿主 |
 | `setWorkspace` | ✅ | ✅ | 发 `POST /api/workspace` 登记，再委托给 `setCwd` 的全部语义（运行中拒绝、仅新建会话生效）。登记是进程内的，重启失效 |
 | `searchFiles` | ✅（空匹配） | ✅（空匹配） | 内核没有文件名搜索 API（无索引、无 walker）；不每键刷警告，理由写在宿主代码里 |
 | `searchSessions` | ✅ | ✅（已加载的列表） | 桌面按标题/工作目录/id 搜索；浏览器只过滤已加载的行（HTTP API 无查询参数） |

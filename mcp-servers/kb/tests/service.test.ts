@@ -78,6 +78,15 @@ function errorCode(run: () => unknown): string | undefined {
   return undefined
 }
 
+function errorOf(run: () => unknown): KbServiceError | undefined {
+  try {
+    run()
+  } catch (error) {
+    return error instanceof KbServiceError ? error : undefined
+  }
+  return undefined
+}
+
 describe('KbService', () => {
   let root: string
   let service: KbService
@@ -319,6 +328,251 @@ describe('KbService', () => {
 
     it('超过 1 MiB 返回 file_too_large', () => {
       expect(errorCode(() => service.read('big.md'))).toBe('file_too_large')
+    })
+
+    it('默认读取小文件返回全文与总行数', () => {
+      const result = service.read('protocols/uart/no-output.md')
+
+      expect(result.offset).toBe(0)
+      expect(result.lines).toBe(9)
+      expect(result.totalLines).toBe(9)
+      expect(result.truncated).toBe(false)
+      expect(result.content.endsWith('第三行正文\n')).toBe(true)
+    })
+
+    it('offset/limit 只截取窗口，frontmatter 与 reviewStatus 仍按整份文件解析', () => {
+      const result = service.read('protocols/uart/no-output.md', { offset: 6, limit: 2 })
+
+      expect(result.content).toBe('第一行正文\nUART 接线要共地\n')
+      expect(result.offset).toBe(6)
+      expect(result.lines).toBe(2)
+      expect(result.totalLines).toBe(9)
+      expect(result.truncated).toBe(true)
+      expect(result.frontmatterParsed).toBe(true)
+      expect(result.frontmatter?.['name']).toBe('evidence-no-output')
+      expect(result.reviewStatus).toBe('reviewed')
+    })
+
+    it('窗口读到文件末尾时 truncated 为 false', () => {
+      const result = service.read('protocols/uart/no-output.md', { offset: 8, limit: 50 })
+
+      expect(result.content).toBe('第三行正文\n')
+      expect(result.lines).toBe(1)
+      expect(result.truncated).toBe(false)
+    })
+
+    it('offset 越过文件末尾返回空窗口且不报错', () => {
+      const result = service.read('protocols/uart/no-output.md', { offset: 100, limit: 10 })
+
+      expect(result.content).toBe('')
+      expect(result.offset).toBe(100)
+      expect(result.lines).toBe(0)
+      expect(result.totalLines).toBe(9)
+      expect(result.truncated).toBe(false)
+    })
+
+    it('limit 默认与上限都是 2000 行', () => {
+      writeFixture(root, 'long.md', `${Array.from({ length: 2100 }, (_, i) => `行 ${i}`).join('\n')}\n`)
+
+      const byDefault = service.read('long.md')
+      expect(byDefault.lines).toBe(2000)
+      expect(byDefault.totalLines).toBe(2100)
+      expect(byDefault.truncated).toBe(true)
+
+      expect(service.read('long.md', { limit: 5000 }).lines).toBe(2000)
+
+      const tail = service.read('long.md', { offset: 2000 })
+      expect(tail.lines).toBe(100)
+      expect(tail.totalLines).toBe(2100)
+      expect(tail.truncated).toBe(false)
+      expect(tail.content.startsWith('行 2000\n')).toBe(true)
+      expect(tail.content.endsWith('行 2099\n')).toBe(true)
+    })
+
+    it('窗口按原文切片，CRLF 原样保留', () => {
+      writeFixture(root, 'crlf.md', '第一行\r\n第二行\r\n')
+
+      const result = service.read('crlf.md', { offset: 1, limit: 1 })
+
+      expect(result.totalLines).toBe(2)
+      expect(result.content).toBe('第二行\r\n')
+    })
+  })
+
+  describe('glob', () => {
+    it('protocols/**/*.md 命中嵌套文件，*.md 只命中根层', () => {
+      writeFixture(root, 'overview.md', '# 概览\n')
+
+      expect(service.glob('protocols/**/*.md')).toEqual({
+        found: true,
+        matches: ['protocols/uart/garbled-data.md', 'protocols/uart/no-output.md'],
+        count: 2,
+        truncated: false,
+      })
+      expect(service.glob('*.md').matches).toEqual(['big.md', 'overview.md'])
+      expect(service.glob('**/*.md').matches).toContain('protocols/uart/no-output.md')
+    })
+
+    it('? 只匹配单个非分隔字符', () => {
+      writeFixture(root, 'a.md', '# a\n')
+      writeFixture(root, 'ab.md', '# ab\n')
+
+      expect(service.glob('?.md').matches).toEqual(['a.md'])
+      expect(service.glob('??.md').matches).toEqual(['ab.md'])
+    })
+
+    it('排除 _inbox.md、_about.md 与 index.yaml（含子目录同名文件）', () => {
+      const matches = service.glob('**/*').matches
+
+      expect(matches).not.toContain('_inbox.md')
+      expect(matches).not.toContain('_about.md')
+      expect(matches).not.toContain('cases/_about.md')
+      expect(matches).not.toContain('index.yaml')
+      expect(matches).not.toContain('notes.txt')
+      expect(matches).toContain('big.md')
+    })
+
+    it('空 pattern 与空白 pattern 抛 invalid_pattern', () => {
+      for (const pattern of ['', '   ']) {
+        expect(errorCode(() => service.glob(pattern))).toBe('invalid_pattern')
+      }
+    })
+
+    it('无匹配返回 found: false 与空数组', () => {
+      expect(service.glob('no-such-dir/**/*.md')).toEqual({
+        found: false,
+        matches: [],
+        count: 0,
+        truncated: false,
+      })
+    })
+
+    it('超过 100 条时截断并标记 truncated，count 为实际命中总数', () => {
+      const names = Array.from({ length: 150 }, (_, i) => `bulk/file-${String(i).padStart(3, '0')}.md`)
+      for (const name of names) writeFixture(root, name, '# x\n')
+
+      const result = service.glob('bulk/*.md')
+
+      expect(result.matches).toHaveLength(100)
+      expect(result.matches[0]).toBe('bulk/file-000.md')
+      expect(result.count).toBe(150)
+      expect(result.truncated).toBe(true)
+      expect(result.found).toBe(true)
+    })
+
+    it('拒绝绝对路径与 .. 段，不越出知识库根', () => {
+      const outside = mkdtempSync(path.join(tmpdir(), 'kb-glob-outside-'))
+      try {
+        writeFixture(outside, 'secret.md', '# 外部\n')
+        for (const pattern of ['../*.md', 'protocols/../../*.md', path.join(outside, '*.md'), '/*.md']) {
+          expect(errorCode(() => service.glob(pattern)), pattern).toBe('path_denied')
+        }
+        expect(service.glob('**/*.md').matches.some((item) => item.includes('secret'))).toBe(false)
+      } finally {
+        rmSync(outside, { recursive: true, force: true })
+      }
+    })
+
+    it('反斜杠分隔符按 POSIX 分隔符处理', () => {
+      expect(service.glob('protocols\\uart\\*.md').matches).toEqual([
+        'protocols/uart/garbled-data.md',
+        'protocols/uart/no-output.md',
+      ])
+    })
+
+    it('超长或超深 pattern 被拒，把 (?:.*/)? 的层数关进笼子（D-086）', () => {
+      // 每一段 `**/` 都是回溯时的一个可选出口：不设上限时 pattern 长度就是
+      // 攻击面，而 pattern 来自模型输出，不是可信输入。
+      expect(errorCode(() => service.glob('a'.repeat(257)))).toBe('invalid_pattern')
+      expect(errorCode(() => service.glob(`${'**/'.repeat(65)}x.md`))).toBe('invalid_pattern')
+      // 边界：上限不能顺手砍掉正常用法。
+      expect(service.glob(`${'a'.repeat(252)}.md`).found).toBe(false)
+      expect(service.glob(`${'**/'.repeat(20)}*.md`).found).toBe(true)
+    })
+  })
+
+  describe('grep', () => {
+    it('大小写不敏感，返回相对路径与 1-based 行号', () => {
+      const result = service.grep('uart 接线')
+
+      expect(result.found).toBe(true)
+      expect(result.hits).toEqual([
+        { path: 'protocols/uart/no-output.md', line: 8, text: 'UART 接线要共地' },
+      ])
+      expect(result.count).toBe(1)
+      expect(result.truncated).toBe(false)
+    })
+
+    it('正则语法生效，非法正则抛 invalid_regex 且带原因', () => {
+      expect(service.grep('第.行正文').hits).toHaveLength(2)
+      expect(service.grep('^UART\\s+接线').hits).toHaveLength(1)
+
+      const error = errorOf(() => service.grep('(['))
+      expect(error?.code).toBe('invalid_regex')
+      expect(error?.message).toMatch(/\[/)
+    })
+
+    it('排除 _inbox.md、_about.md 与 index.yaml', () => {
+      const paths = new Set(service.grep('UART').hits.map((hit) => hit.path))
+
+      expect(paths.has('_inbox.md')).toBe(false)
+      expect(paths.has('_about.md')).toBe(false)
+      expect(paths.has('cases/_about.md')).toBe(false)
+      expect(paths.has('index.yaml')).toBe(false)
+      expect(paths.has('protocols/uart/no-output.md')).toBe(true)
+    })
+
+    it('glob 参数限定检索文件', () => {
+      const all = service.grep('UART')
+      const limited = service.grep('UART', 'system/*.md')
+
+      expect(all.found).toBe(true)
+      expect(limited).toEqual({ found: false, hits: [], count: 0, truncated: false })
+      expect(service.grep('优化', 'system/*.md').hits).toEqual([
+        { path: 'system/toolchain.md', line: 2, text: '链接脚本与优化' },
+      ])
+    })
+
+    it('命中行文本截断到 300 字符', () => {
+      writeFixture(root, 'long-line.md', `UART ${'x'.repeat(400)}\n`)
+
+      const hit = service.grep('UART', 'long-line.md').hits[0]
+
+      expect(hit?.text).toHaveLength(300)
+      expect(hit?.text.startsWith('UART ')).toBe(true)
+    })
+
+    it('超过 100 条时截断并标记 truncated，count 为实际命中总数', () => {
+      const lines = Array.from({ length: 150 }, (_, i) => `needle ${i}`)
+      writeFixture(root, 'bulk/hits.md', `${lines.join('\n')}\n`)
+
+      const result = service.grep('needle')
+
+      expect(result.found).toBe(true)
+      expect(result.hits).toHaveLength(100)
+      expect(result.count).toBe(150)
+      expect(result.truncated).toBe(true)
+      expect(result.hits[0]).toEqual({ path: 'bulk/hits.md', line: 1, text: 'needle 0' })
+      expect(result.hits[99]?.line).toBe(100)
+    })
+
+    it('无命中返回 found: false', () => {
+      expect(service.grep('zzz-not-there')).toEqual({
+        found: false,
+        hits: [],
+        count: 0,
+        truncated: false,
+      })
+    })
+
+    it('glob 参数拒绝绝对路径与 .. 段', () => {
+      expect(errorCode(() => service.grep('UART', '../*.md'))).toBe('path_denied')
+      expect(errorCode(() => service.grep('UART', 'protocols/../../*.md'))).toBe('path_denied')
+      expect(errorCode(() => service.grep('UART', '/etc/**'))).toBe('path_denied')
+    })
+
+    it('空正则按空模式处理为 invalid_pattern，而不是匹配每一行', () => {
+      expect(errorCode(() => service.grep(''))).toBe('invalid_pattern')
     })
   })
 
