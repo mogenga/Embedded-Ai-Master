@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "preset": "diagnose",
+  "rules": [
+    {
+      "tool": "mcp__embedded__embed_build",
+      "params": [],
+      "action": "ask",
+      "reason": "构建会执行工程内脚本,默认人工确认"
+    },
+    {
+      "tool": "mcp__embedded__embed_flash",
+      "action": "ask",
+      "reason": "烧录是破坏性操作,默认人工确认"
+    },
+    {
+      "tool": "mcp__embedded__embed_registers",
+      "action": "allow",
+      "reason": "SVD 寄存器知识检索,只读"
+    },
+    {
+      "tool": "mcp__embedded__embed_targets",
+      "action": "allow",
+      "reason": "目标枚举,只读"
+    },
+    {
+      "tool": "mcp__embedded__embed_ports",
+      "action": "allow",
+      "reason": "端口/探针枚举,只读"
+    },
+    {
+      "tool": "mcp__embedded__embed_serial",
+      "action": "ask",
+      "reason": "串口写为破坏性;可仿照 probe 示例按端口白名单收窄为 allow"
+    },
+    {
+      "tool": "mcp__embedded__embed_pack",
+      "action": "ask",
+      "reason": "工具链包安装/移除改变本机环境"
+    }
+  ]
+}

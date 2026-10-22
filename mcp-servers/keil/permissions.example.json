@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "preset": "diagnose",
+  "rules": [
+    {
+      "tool": "mcp__keil__keil_debug",
+      "params": [
+        { "key": "action", "in": ["state", "stack", "registers", "variables", "memory_read", "disassemble"] }
+      ],
+      "action": "allow",
+      "reason": "示例:调试会话内的只读取证动作"
+    },
+    {
+      "tool": "mcp__keil__keil_debug",
+      "params": [
+        { "key": "action", "in": ["halt", "resume", "step"] },
+        { "key": "action", "not_in": [] }
+      ],
+      "action": "ask",
+      "reason": "运行控制影响真机/仿真状态,默认确认"
+    },
+    {
+      "tool": "mcp__keil__keil_debug",
+      "params": [
+        { "key": "action", "in": ["flash_download"] }
+      ],
+      "action": "ask",
+      "reason": "Keil 下载烧录,默认确认"
+    },
+    {
+      "tool": "mcp__keil__keil_project",
+      "action": "ask",
+      "reason": "工程文件编辑(.uvprojx/.uvoptx)默认确认;只读动作可在正式配置中拆出 allow"
+    }
+  ]
+}
