@@ -223,11 +223,13 @@ describe('kbTools', () => {
 
     const result = await tool.handler({ pattern: '**/*.md' })
     expect(result.isError).toBeUndefined()
+    // scanTruncated 是本轮新增字段（D-179 ②），不是行为变化：未触顶时为 false。
     expect(structured(result)).toEqual({
       found: true,
       matches: ['protocols/i2c/nack.md', 'protocols/uart/no-output.md'],
       count: 2,
       truncated: false,
+      scanTruncated: false,
     })
 
     expect(structured(await tool.handler({ pattern: '*.md' })).matches).toEqual([])
@@ -242,7 +244,13 @@ describe('kbTools', () => {
 
     const miss = await tool.handler({ pattern: 'no-such-dir/*.md' })
     expect(miss.isError).toBeUndefined()
-    expect(structured(miss)).toEqual({ found: false, matches: [], count: 0, truncated: false })
+    expect(structured(miss)).toEqual({
+      found: false,
+      matches: [],
+      count: 0,
+      truncated: false,
+      scanTruncated: false,
+    })
   })
 
   it('kb_glob 拒绝越界路径', async () => {
@@ -260,12 +268,32 @@ describe('kbTools', () => {
 
     const result = await tool.handler({ pattern: 'uart 接线' })
     expect(result.isError).toBeUndefined()
+    // fileCount / files / scanTruncated 是本轮新增字段（D-179 ②）。
     expect(structured(result)).toEqual({
       found: true,
       hits: [{ path: 'protocols/uart/no-output.md', line: 8, text: 'UART 接线要共地' }],
       count: 1,
       truncated: false,
+      fileCount: 1,
+      files: [{ path: 'protocols/uart/no-output.md', hits: 1 }],
+      scanTruncated: false,
     })
+  })
+
+  it('kb_grep 的 fileCount/files 让集中与散落可区分', async () => {
+    writeFixture(root, 'signal/dense.md', 'topic alpha\ntopic alpha\nplain\n')
+    writeFixture(root, 'signal/sparse.md', 'topic alpha\n')
+
+    const data = structured(
+      await findTool(tools, 'kb_grep').handler({ pattern: 'topic alpha' }),
+    )
+
+    expect(data.count).toBe(3)
+    expect(data.fileCount).toBe(2)
+    expect(data.files).toEqual([
+      { path: 'signal/dense.md', hits: 2 },
+      { path: 'signal/sparse.md', hits: 1 },
+    ])
   })
 
   it('kb_grep 非法正则返回 invalid_regex，空 pattern 返回 invalid_pattern', async () => {
@@ -291,7 +319,15 @@ describe('kbTools', () => {
     expect(paths.has('index.yaml')).toBe(false)
 
     const limited = structured(await tool.handler({ pattern: 'UART', glob: 'protocols/i2c/*.md' }))
-    expect(limited).toEqual({ found: false, hits: [], count: 0, truncated: false })
+    expect(limited).toEqual({
+      found: false,
+      hits: [],
+      count: 0,
+      truncated: false,
+      fileCount: 0,
+      files: [],
+      scanTruncated: false,
+    })
 
     const denied = await tool.handler({ pattern: 'UART', glob: '../*.md' })
     expect(denied.isError).toBe(true)
@@ -307,6 +343,30 @@ describe('kbTools', () => {
     }
     expect(findTool(tools, 'kb_lookup').description).toContain('kb_grep')
     expect(findTool(tools, 'kb_search').description).toContain('kb_grep')
+  })
+
+  it('kb_search / kb_status 描述说明 scanTruncated 的含义（R3：不静默少扫）', () => {
+    expect(findTool(tools, 'kb_search').description).toContain('scanTruncated: true')
+    expect(findTool(tools, 'kb_status').description).toContain('scanTruncated: true')
+  })
+
+  it('kb_glob / kb_grep 描述写明命中只是候选、必须 kb_read 原文确认（D-179 ①）', () => {
+    for (const name of ['kb_glob', 'kb_grep']) {
+      const description = findTool(tools, name).description
+      expect(description, name).toContain('kb_read')
+      expect(description, name).toContain('原文')
+      // 两个截断信号必须分开解释，否则模型分不清「返回被截」与「扫描被截」。
+      expect(description, name).toContain('truncated: true')
+      expect(description, name).toContain('scanTruncated: true')
+      expect(description, name).toContain('未命中不等于不存在')
+    }
+    // 集中度只是线索，不得被描述成置信度或分数。
+    const grepDescription = findTool(tools, 'kb_grep').description
+    expect(grepDescription).toContain('fileCount')
+    expect(grepDescription).toContain('不是置信度')
+    for (const name of ['kb_glob', 'kb_grep']) {
+      expect(findTool(tools, name).description, name).not.toMatch(/confidence|score/i)
+    }
   })
 
   it('kb_search 返回命中上下文，空 token 返回 empty_query，无命中 found=false', async () => {

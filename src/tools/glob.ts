@@ -1,7 +1,7 @@
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod";
-import { walkFiles, MAX_SCANNED_FILES } from "./fs-walk.js";
+import { walkFiles, MAX_SCANNED_FILES, SCAN_TRUNCATED_HINT } from "./fs-walk.js";
 import { resolveInWorkdir, ToolPathError } from "./path-safety.js";
 import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
 
@@ -157,7 +157,10 @@ export const globTool: ToolDef<GlobInput> = {
     const returned = matches.slice(0, MAX_RESULTS);
     const lines = returned.length === 0 ? ["(no matches)"] : [...returned];
     if (matches.length > MAX_RESULTS) lines.push("[truncated]");
-    if (state.scanTruncated) lines.push(`[scan truncated at ${MAX_SCANNED_FILES} files]`);
+    if (state.scanTruncated) {
+      lines.push(`[scan truncated at ${MAX_SCANNED_FILES} files]`);
+      lines.push(SCAN_TRUNCATED_HINT);
+    }
     if (state.skipped > 0) lines.push(`[skipped ${state.skipped} unreadable entries]`);
 
     return {

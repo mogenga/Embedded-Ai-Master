@@ -95,8 +95,8 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 | 工具 | 作用 | 关键返回值 |
 |---|---|---|
 | `kb_lookup(query, limit?)` | 索引关键词打分，廉价首跳 | `found` / `candidates[{path,title,summary,score}]` / `reason` |
-| `kb_glob(pattern)` | 按通配符列路径（`*` / `**` / `?`，相对 KB 根） | `found` / `matches[]` / `count` / `truncated` |
-| `kb_grep(pattern, glob?)` | 逐行正则检索，大小写不敏感，可选 glob 限定 | `found` / `hits[{path,line,text}]` / `count` / `truncated` |
+| `kb_glob(pattern)` | 按通配符列路径（`*` / `**` / `?`，相对 KB 根） | `found` / `matches[]` / `count` / `truncated` / `scanTruncated` |
+| `kb_grep(pattern, glob?)` | 逐行正则检索，大小写不敏感，可选 glob 限定 | `found` / `hits[{path,line,text}]` / `count` / `truncated` / `fileCount` / `files[{path,hits}]` / `scanTruncated` |
 | `kb_read(path, offset?, limit?)` | 读文件，分页窗口 | `content` / `offset` / `lines` / `totalLines` / `truncated` / `frontmatter` / `reviewStatus` |
 | `kb_search(tokens, limit?)` | 字面多 token 行检索（不支持正则） | `found` / `hits[{path,line,text,token}]` |
 | `kb_status()` | 根路径、文件数、索引条目、待审数 | `root` / `fileCount` / `indexEntries` / `indexPresent` / `inboxPending` |
@@ -105,6 +105,9 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 除 `kb_propose` 外全部 `readOnlyHint: true`，`kb_read` 另带 `meta.evidence: true`。
 
 - 上限：`kb_glob` / `kb_grep` 单次最多 100 条，超出置 `truncated: true`；两者的 `count` 都是**实际命中总数**，可以大于返回条数。`kb_grep` 的命中行截断到 300 字符。
+- **两种截断不是一回事**：`truncated` 是「返回条数被截」（收窄 pattern / 正则即可），`scanTruncated` 是「遍历预算被用完」（单次 20000 个文件），后者意味着 `count` / `found` 只覆盖**已扫描到的部分**，未命中不代表不存在。两者都出现时优先按 `scanTruncated` 处理。
+- **`fileCount` 与 `files` 是线索，不是置信度**（D-179）：`files` 只列命中最多的前 10 个文件（`hits` 是真实行数，不随返回条数截断），用来看命中是「集中在 1 个文件」还是「散落在 20 个文件各 1 行」。它能暴露散落型假候选，但**识别不了集中型假候选**（一篇反复提到关键词的无关文档和真答案长得一样），也没有绝对标度（`fileCount: 3` 在 108 文件语料里算集中、在 5 文件语料里算散落）。所以它不构成拒答机制，工具描述里写死的是「断言前必须 `kb_read` 原文确认」。
+- 遍历跳过缓存目录（`.git`、`node_modules`、`__pycache__`、`.mypy_cache`、`.pytest_cache`、`.venv`、`venv`、`.next`、`.cache`、`dist`、`build`、`out`、`target`，按目录名小写比较）。这是内核 `src/tools/fs-walk.ts` 忽略清单的**同名子集但不是同一份**——MCP server 不能 import 内核（理由同 D-086 的重复常量），两份清单会各自演化。
 - `kb_read` 的 `offset` 是 0-based 行号，`limit` 默认且上限均为 2000 行；`content` 只是该窗口的原文切片，`frontmatter` 与 `reviewStatus` 始终按整份文件解析。`truncated: true` 表示还有后续内容，应带新 `offset` 续读。单文件 1 MiB 上限保留。
 - 两者都排除 `_inbox.md`、`_about.md` 与 `index.yaml`，只列/搜 `.md` 与 `.yaml`（即 `kb_read` 读得到的文件），拒绝绝对路径与 `..` 越界（`path_denied`）。空 pattern → `invalid_pattern`，非法正则 → `invalid_regex`，均为 `isError: true` 的结构化错误。
 
@@ -117,6 +120,8 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 因此：**不能把 B 的 Recall@2 0.925 当作本部署的成绩**。本部署没有在 B 的评测协议下跑过，也没有对应的测量数字；B 的成绩只说明「agentic 检索这条路值得走」。
 
 同样的原因，实验里 **B 的 H7（KB 外查询拒答）整块未评估**——B 没有负样本跑批实现（`experiments/rag-vs-agentic-search/docs/experiment-report.md` §5）。本部署的拒答能力只剩 `kb_lookup` 那一道门槛（当前负样本拒答率 0.84，见下），一旦模型改用 `kb_grep` / `kb_glob`，就不存在任何拒答机制。**该缺口已登记为 D-179**（`docs/deferred-issues.md`）；召回质量与拒答的相邻问题由 D-159 跟踪。
+
+2026-10-22 这一轮按 D-179 的**建议 ① 与 ②** 做了一半：工具描述里写死「命中只是候选，断言前必须 `kb_read` 原文确认」，`kb_grep` 增加了命中文件级分布（`fileCount` / `files`）。**建议 ③（补 B 的负样本跑批、按同一评测协议拿真实拒答率）没有做**，所以 D-179 的状态仍是「未解决」——本轮只是把不可见的歧义变成可见的数字，拒答率依然未知，也**没有**因此设置任何阈值。
 
 - `kb_lookup` / `kb_glob` / `kb_grep` / `kb_read` / `kb_search` / `kb_status` 为只读工具。
 - `kb_propose` 把新知识写入 `<KB 根>/_inbox.md`，返回 `proposalId` 与 `status: "pending_review"`。它**只写待审区**：`kb_search` / `kb_grep` / `kb_glob` 均排除 `_inbox.md`，`kb_lookup` 只读 `index.yaml`，因此未审内容不会进入检索。

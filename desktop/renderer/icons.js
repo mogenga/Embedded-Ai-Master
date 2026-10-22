@@ -94,7 +94,6 @@ const ICONS = {
   keyboard: '<rect x="2.5" y="6" width="19" height="12" rx="2.5"/><path d="M6 10h.01M9.5 10h.01M13 10h.01M16.5 10h.01"/><path d="M7 14h10"/>',
   'new-window': '<rect x="3.5" y="7" width="12" height="12" rx="2"/><path d="M8.5 7V5.5A1.5 1.5 0 0 1 10 4h8.5A1.5 1.5 0 0 1 20 5.5V14a1.5 1.5 0 0 1-1.5 1.5H17"/>',
   archive: '<rect x="3" y="4" width="18" height="4.5" rx="1.5"/><path d="M5 8.5v10A1.5 1.5 0 0 0 6.5 20h11a1.5 1.5 0 0 0 1.5-1.5v-10"/><path d="M10 12.5h4"/>',
-  mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><path d="M12 17.5V21"/>',
   alert: '<path d="M12 3.5 21 20H3Z"/><path d="M12 10v4"/><path d="M12 17h.01"/>',
 };
 

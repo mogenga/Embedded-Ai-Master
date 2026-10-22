@@ -1570,6 +1570,20 @@ body.resizing-sidebar .sidebar {
   background: linear-gradient(to right, transparent, var(--surface-hover) 12px);
 }
 
+/* While the actions button is on screen it owns the right edge, so the date
+   steps to its left instead of painting underneath it. Both used to be pinned
+   to the same edge — the date at `right: 8px`, the button flush with the row's
+   9px inset — and the 20px button sat squarely on top of the date, leaving a
+   truncated "15h a…" on exactly the rows where the date matters. The offset is
+   built from the row inset plus the button's own width plus a gap, so the two
+   stay apart if either is retuned. Only hover and focus-within shift it: those
+   are the two states that display the button, and an active-but-idle row still
+   keeps its date against the edge. */
+.session-item:hover .session-meta,
+.session-item:focus-within .session-meta {
+  right: calc(9px + 20px + 6px);
+}
+
 /* Shared by the tree, the Tasks pane and the artifact list as well as this
    column, so it carries no indent of its own. */
 .sidebar-empty {
@@ -2165,37 +2179,12 @@ mark.find-hit.current {
   gap: 8px;
 }
 
-.rewind-button {
-  /* `order: -1` puts the action before the bubble so it sits in the empty
-     space on the left. Without it the button — which `attachRewind` appends
-     after the bubble — became the last flex item and `justify-content:
-     flex-end` pushed it hard right, so a turn with a rewind button had a
-     bubble that stopped short of the right edge while a turn without one
-     reached it. Two consecutive messages then looked ragged. */
-  order: -1;
-  flex: 0 0 auto;
-  margin-top: 6px;
-  padding: 2px 7px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: var(--surface-raised);
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  opacity: 0;
-  transition: opacity 120ms ease;
-}
-
 /* The bubble keeps its own float out of the way: the flex row owns the
    alignment now, and a float inside a flex item does nothing useful. */
 .turn.user .user-bubble {
   float: none;
   clear: none;
   margin-left: auto;
-}
-
-.turn.user:hover .rewind-button,
-.rewind-button:focus-visible {
-  opacity: 1;
 }
 
 /* The clearfix that used to live here existed for the floated bubble. The
@@ -2298,6 +2287,14 @@ mark.find-hit.current {
   padding-left: 14px;
   border-left: 2px solid var(--border-strong);
   color: var(--text-secondary);
+}
+
+/* A thematic break sits between blocks, so it gets the same breathing room as
+   the other block-level elements rather than the 12px paragraph rhythm. */
+.markdown hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
 }
 
 .markdown table {
@@ -3360,20 +3357,6 @@ mark.find-hit.current {
 .stop-button:hover {
   color: var(--text);
   background: var(--surface-hover);
-}
-
-.voice-button.recording {
-  color: var(--danger);
-}
-
-.voice-button.recording svg {
-  animation: voice-pulse 1.1s ease-in-out infinite;
-}
-
-@keyframes voice-pulse {
-  50% {
-    opacity: 0.35;
-  }
 }
 
 .queued-badge {

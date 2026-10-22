@@ -79,7 +79,6 @@ export const dictionaries = {
     rulesEmpty: "No saved approvals yet.",
     rulesRemove: "Remove",
 
-    rewindHere: "Rewind to here",
     compactedLabel: (removed, level) => `context compacted · ${removed} earlier message${removed === 1 ? "" : "s"} (${level})`,
     compactedDetail: (before, after) => `About ${before} tokens summarized into ${after}`,
     compactedSummary: (seq) => `Earlier context compacted (through event ${seq})`,
@@ -87,9 +86,6 @@ export const dictionaries = {
     /** Approval bar: the call's arguments, and how long is left to answer. */
     pendingParamsTruncated: "more arguments not shown",
     pendingExpires: (seconds) => `expires in ${seconds}s`,
-
-    rewindTitle: "Undo this turn and every turn after it, restoring the files it changed",
-    rewindConfirm: "Rewind to this message? Later turns are dropped and the files they changed are restored.",
 
     clearConfirm: "Start a new conversation? The current session stays saved in the sidebar.",
     close: "Close",
@@ -175,8 +171,6 @@ export const dictionaries = {
     commentMessageIntro: "Review comments on the current changes:",
     browserUsePage: "Use page",
     browserUsePrefix: "Here is the text of the page currently open in the browser pane; answer from it:",
-    voiceStart: "Dictate",
-    voiceStop: "Stop dictation",
     settingsAbout: "About",
     checkUpdate: "Check for updates",
     updateAvailableBanner: (version) => `Embedded AI Master ${version} is available (About → Check for updates).`,
@@ -576,7 +570,6 @@ export const dictionaries = {
     rulesEmpty: "还没有保存的批准规则。",
     rulesRemove: "删除",
 
-    rewindHere: "回退到这里",
     compactedLabel: (removed, level) => `上下文已压缩 · 早先 ${removed} 条消息（${level}）`,
     compactedDetail: (before, after) => `约 ${before} tokens 被总结为 ${after}`,
     compactedSummary: (seq) => `早先上下文已压缩（截至事件 ${seq}）`,
@@ -584,9 +577,6 @@ export const dictionaries = {
     /** 审批条：这次调用的参数，以及还剩多久。 */
     pendingParamsTruncated: "其余参数未显示",
     pendingExpires: (seconds) => `${seconds} 秒后超时`,
-
-    rewindTitle: "撤销这一轮及其之后的所有轮次，并恢复被改动的文件",
-    rewindConfirm: "回退到这条消息？之后的对话会被删除，相关文件改动会恢复。",
 
     clearConfirm: "新建一个对话？当前会话仍保存在侧栏中。",
     close: "关闭",
@@ -672,8 +662,6 @@ export const dictionaries = {
     commentMessageIntro: "对当前改动的审阅意见：",
     browserUsePage: "取用页面内容",
     browserUsePrefix: "以下是浏览器面板当前页面的正文，请据此回答：",
-    voiceStart: "语音输入",
-    voiceStop: "停止语音输入",
     settingsAbout: "关于",
     checkUpdate: "检查更新",
     updateAvailableBanner: (version) => `有新版 Embedded AI Master ${version}（关于 → 检查更新）。`,

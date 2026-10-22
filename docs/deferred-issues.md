@@ -710,6 +710,7 @@
 - **影响**: 标记本身不再误报「刚好扫满」;但仍无法区分后续条目里是否真有可扫描文件,例如 5000 个文件后跟一个空目录或被忽略目录也会标记,可能触发不必要的缩小范围重试。
 - **触发升级条件**: 需要精确判断是否遗漏文件,或出现因误报截断导致的重复扫描。
 - **修复建议**: 仅当后续存在可扫描文件时标记;或在 `detail` 增加 `scanned`/`maxScanned` 与 `possiblyTruncated` 字段,把保守语义显式化。
+- **2026-10-22 补充（D-181 把 `walkFiles` 改成惰性 BFS 之后）**: 上面描述的「循环顶部判断」原来只有条目循环内那一处，BFS 下「预算已满但队列里还有未访问目录」不再被条目循环覆盖，于是 `while` 循环顶部另加了一道 `state.scanned >= maxScanned` 检查再返回，把记录在案的保守语义原样保住。既有用例「恰好 5000 个文件不标记」仍然通过。本条**状态不变**（保守语义本身是已知限制，未改成精确判断）。
 
 ### D-081 · `glob` 的 `*` 与 `**` 匹配点开头的隐藏文件
 
@@ -1538,6 +1539,42 @@
 - **修复建议**: 1 让 runner 透传 `trustProjectConfig`（默认仍为 false，由设置页显式开启，因为项目配置是仓库内容）；2 需要 `main.js` 支持第二个窗口并处理会话锁；4 在 bridge 形态下隐藏连接页（或把它做成只读展示）。
 - **状态**: 大部分解决（2026-10-21 第四轮后，第 3 项仅剩 `@` 提及的文件名搜索，第 4 项已完成；第 1、2 项仍是内核/外壳能力缺口）。
 
+### D-182 · 桌面宿主打开会话时顶栏被改回启动目录（`state.cwd` 与 `session_loaded.cwd` 打架）
+
+- **发现**: 2026-10-22，用户原话「选择会话，上方的文件夹不会随会话所在文件夹变化」。
+- **现象**: 从侧栏点开一个属于别的项目的会话，顶栏仍显示窗口启动（或上一个工作区）的目录。浏览器形态没有这个 bug。
+- **根因**: `desktop/host/host.js` 的模块级 `cwd` 只在 `init` / `setCwd` / `setWorkspace` 更新，**`handleLoadSession` 从不更新它**。`handleLoadSession` 把会话 header 的 workdir 正确放进了 `session_loaded.cwd`，但紧接着 `send(stateEvent())` 用的是模块级 `cwd`——仍是旧目录；而 `desktop/renderer/app.js` 的 `case "state"` 里 `state.cwd = message.cwd` 是**无条件覆盖**，`renderTopbarLocation()` 随即按旧目录重画。两条事件对同一个事实说了两种话，后到的那条赢。
+- **连带症状**（同一根因）：①`getTree` 用 `cwd` 解析相对路径，文件树停在旧项目；②`getFile` 的 `allowedReadRoots()` 只含 `cwd` + 会话目录，打开别的项目的会话后预览该会话工作目录里的文件被拒。`src/server/files-api.ts` 的 `allowedRoots()` 本来就把每个会话 header 的 workdir 算作可读根，所以内核侧不缺边界，只是宿主没跟上。对照 `desktop/renderer/bridge.js`：`currentCwd = header.workdir` 在 `emit(stateEvent())` 之前执行，所以浏览器形态正确。
+- **修复**: 新增 `adoptSessionWorkdir(workdir)`：单个 `statSync` 判定目录存在（不 `exists` 再 `stat`，两步之间目录可能消失；`stat` 跟随符号链接，与 `registerWorkspaceRoot` 的 realpath 语义一致）→ 存在则 `cwd = resolved` 并 `pendingRoot = registerRoot(cwd)`；不存在/不是目录/读不了则**不改 `cwd`** 并发 warn `notice`，措辞按 errno 区分（`ENOENT`/`ENOTDIR` → 「已不存在」，非目录 → 「不是目录」，其他 → 「无法访问（EACCES）」）——把「读不了」说成「不存在」同样是 R3 问题。`handleLoadSession` 用它返回的 cwd 重建 ctx，并在 `stateEvent()` 之前 `await settleRoot()`。**不重建 runner**：`handlePrompt` 新建会话时显式传 `cwd`（覆盖 runner 构造默认值），续聊不传 cwd（内核读 header），所以采纳的目录就是下一个新会话的目录，而重建 runner 会丢状态。
+- **验证**: `tests/desktop/host.test.js` 新增 2 例，RED 阶段分别失败在「`session_loaded` 之后那条 `state` 带的是启动目录」与「完全没有 warn notice」。用例 A 顺带断言 `getTree` 的 `.` 与 `getFile` 的相对路径都解析到会话目录。该文件 **47 passed | 2 skipped**（连跑三次一致）。
+- **仍未统一**: `bridge.js` 对**已消失**的 workdir 不做校验就直接采纳，浏览器形态因此会把 cwd 指向一个不存在的目录（顶栏显示已删除的项目）。两端在这一个边角上行为不一致，桌面端现在更严格。触发升级条件：出现浏览器形态因已消失目录导致的连续报错。
+- **状态**: **已解决**（2026-10-22）。`bridge.js` 一侧的严格化未做。
+
+### D-181 · `glob` / `grep` 从缓存目录里起扫，5000 文件预算耗尽后根目录的 `README.md` 从未被访问
+
+- **发现**: 2026-10-22，用户原话「会话我输入查找README.md，似乎并没有从项目文件夹开始找」。
+- **复现**: 真实会话日志里模型调 `glob {"pattern":"**/README.md"}`，在 `E:\Project\personal\AI-Customer-Service`（根下就有 `README.md`）返回 `(no matches)` + `[scan truncated at 5000 files]`。只读复现：旧 DFS 命中 **0** 次；BFS + 新忽略清单命中第 **4** 个文件。该目录未被忽略的文件共 **25089** 个，远超 5000；根条目字母序里 `.mypy_cache/`、`.pytest_cache/`、`.venv/` 都排在 `README.md` 之前，旧 DFS 一进 `.mypy_cache` 就递归到 `altair/…` 深层把预算耗尽。
+- **根因**: `src/tools/fs-walk.ts` 的 `walkFiles` 是**深度优先**且 `readdir` 结果**未排序**，而 `IGNORED_DIRS` 只有 9 项（`.git` / `node_modules` / `.harness` / `dist` / `coverage` / `build` / `out` / `target` / `.pio` + `cmake-build-*`）。预算按**文件**计，缓存目录里的文件与用户代码的文件同等计价。
+- **修复**:
+  - 忽略清单扩到 24 项（新增 `.mypy_cache`、`__pycache__`、`.pytest_cache`、`.ruff_cache`、`.tox`、`.venv`、`venv`、`.next`、`.nuxt`、`.turbo`、`.cache`、`.parcel-cache`、`.gradle`、`.idea`、`.svelte-kit`）并新增 `IGNORED_DIR_SUFFIXES = [".egg-info"]`。**刻意不忽略** `.vscode`（用户常放设置）与 `vendor`（可能是源码），并有负向测试锁定这一点。
+  - `walkFiles` 改为**惰性 BFS**：队列只存目录路径 + `head` 游标，出队时才 `readdir`（内存 O(宽度)，预算耗尽时不为尚未轮到的目录白读）。每层 `entries.sort(byName)`，遍历顺序只由名字决定，与 `readdir` 返回顺序无关。
+  - 截断时在既有 `[scan truncated at 5000 files]`（原文保留，README 与既有测试依赖它）之后追加 `SCAN_TRUNCATED_HINT`：「结果不完整 + 用子目录或 glob 收窄」。未截断时不输出。
+  - **D-080 的保守语义显式保留**：`while` 循环顶部另加一道预算检查——BFS 下「预算已满但队列里还有目录」不再由条目循环覆盖，不补这道判断会退化成「队列里剩个空目录也不算截断」。
+- **输出稳定性**: 三处排序点保证「遍历顺序变了但输出不变」——`walkFiles` 每层排序、`glob` 的 `matches.sort()` 后 `slice`、`grep` 的 `(file, line)` 全序 `sort` 后 `slice`。新增用例用乱序 `readdir` mock + `maxResults:1` 锁定：输出恰为 `a.txt:1:hit\n[truncated]`，`{matched:2, returned:1, truncated:true}`。
+- **验证**: `tests/glob.test.ts` + `tests/grep.test.ts` **124 passed**；端到端在真实目录上 `glob "**/README.md"` → 3 条命中（`scanned:501, scanTruncated:false`，43ms）。
+- **仍未解决（同一遍历器，未在本轮动）**: ①`grep` 仍是同步正则，ReDoS 不可中断（D-085）；②BFS 队列内存 O(宽度)，超深且超宽目录下队列会较大；③D-078 仍在——`grep` 命中密集时仍先压入全部命中再排序截断，`maxResults` 不限制收集量。
+- **维护提醒**: 忽略清单是**列举式**的，新出现的缓存目录不会自动被跳过；`mcp-servers/kb/service.ts` 里另有一份同名子集（MCP server 不能 import 内核，理由同 D-086），两份会各自演化。
+- **状态**: **已解决**（2026-10-22）。
+
+### D-180 · `tests/assistant-delta.test.ts` 的超限用例在测磁盘延迟，不是测「超限立刻落盘」
+
+- **发现**: 2026-10-22，第十三轮全量 `npx vitest run` 唯一失败项。此前一次全量也失败过一次，当时未登记。
+- **现象**: `超过 maxChars 时立刻落盘，不等 flush` 先 `sleep(10)` 再断言 `assistant_delta.length >= 1`。单独连跑 5 次：**5 次全红**；同一文件的其它 4 条全绿。
+- **根因**: `session.append` 是带 fsync 的真实写盘。实测首次落盘耗时 18.0 / 18.4 / 19.5 / 24.8 / 25.5ms（10ms 时一律 0 条，随后 1ms 轮询才看见）。所以这条用例测的是**这台机器的磁盘速度**，不是 `push` 超限后不等 `flush` 这个行为。它不是「并发负载下的偶发抖动」——在空闲机器上也稳定失败，只是本机比写测试时更慢。
+- **修复**: 改成 `vi.waitFor`，轮询到状态出现为止（`timeout: 2000, interval: 5`）。**不 flush**，仍然证明「不靠定时器也不靠显式 flush 就会落盘」，但不再把 IO 速度写进判据。
+- **验证（含反向验证）**: 修复后连跑 5 次全绿；随后**故意把 `push` 的超限分支改成 `schedule()`（即退回定时器路径）**，用例立刻变红（`expected 0 to be greater than or equal to 1`），确认新写法仍然抓得住真正的回归；探针随后完整回滚，`git diff src/loop/assistant-delta.ts` 为空。
+- **状态**: **已解决**（2026-10-22，只改测试，未改生产代码）。
+
 ### D-179 · 新增的 `kb_grep` / `kb_glob` 没有任何拒答机制（H7 缺口）
 
 - **发现**: 2026-10-22（第十二轮），由实现 agentic 工具面的子代理主动上报；复核确认 `docs/deferred-issues.md` 当时确实没有对应条目。
@@ -1546,7 +1583,11 @@
 - **为什么本轮不修**: 拒答需要置信度信号，而 grep/glob 的输出里没有分数可用。给正则命中数量编一个阈值，本质是拿一个未测过的数字冒充结论——那比不做更糟。
 - **触发升级条件**: ①出现"模型对 KB 外问题给出有据可查其实是假答案"的实际案例；②要对外声称拒答率达到某个值；③`kb_grep`/`kb_glob` 成为默认检索路径。
 - **修复建议**: ①在工具描述与系统提示里写死"grep/glob 命中不等于答案存在，必须 `kb_read` 原文确认后再说"；②给 `kb_grep` 增加**命中文件级**的区分度信号（例如命中行数占文件行数比例、命中集中在几个文件），让模型能看出"散落在 20 个文件里的零星命中"和"集中在 1 个文件里的密集命中"不是一回事；③按 todo §7.4 补 B 的负样本跑批，并把本部署形态纳入同一评测协议，拿到真实数字后再设阈值。**不要**未测先调阈值。
-- **状态**: 未解决（已知缺口，已登记）。同一问题在 `mcp-servers/kb/README.md` 的「与对照实验方案 B 的关系」一节对用户可见。
+- **本轮进展（2026-10-22，建议 ① 与 ② 已落地，③ 未做）**:
+  - ① `kb_glob` / `kb_grep` / `kb_search` / `kb_status` 的 `description` 里写死「命中只是候选，断言前必须 `kb_read` 原文确认」，并说明 `truncated`（返回条数被截）与 `scanTruncated`（遍历被截，未命中不等于不存在）的区别。
+  - ② `KbGrepResult` 增加 `fileCount`（命中文件总数）与 `files`（命中最多的前 10 个文件及其真实命中行数，排序为 `hits` 降序、同数按 path 升序）。**没有**加 `score` / `confidence` / `related` 之类字段——未评测的数字会被当成结论。同时**没有**做「命中行数占文件总行数比例」：那要为每个命中文件再读一遍全文，收益不确定。
+  - **③ 未做，所以本条不关闭**。本轮的价值只是把不可见的歧义变成可见的数字，**不构成拒答机制**。三条实测理由：**集中度无方向**（1 个文件 25 行的真答案与 1 个文件 25 行的无关文档在 `files` 里长得一样，只能识别散落型假候选）；**没有绝对标度**（`fileCount: 3` 在 108 文件语料里算集中、在 5 文件语料里算散落）；**grep 连语义相邻都不保证**。拒答率依然未知，也**没有**因此设置任何阈值。
+- **状态**: 未解决（已知缺口，已登记；建议 ① ② 已落地，③ 缺失未变）。同一问题在 `mcp-servers/kb/README.md` 的「与对照实验方案 B 的关系」一节对用户可见。
 
 ### D-178 · 窄屏断点曾写了两份（900 / 860），抽屉会盖住整个聊天区
 
@@ -1724,3 +1765,4 @@
 | 2026-10-21 | 第十轮(用户「鉴权失败…派子代理修复」「浏览器无法打开文件夹」「所有前端不要出现Prometheus这个移植过来的项目名称」):①**根因是设计缺陷不是 bug**:`providers.json` 的 schema 只有 `apiKeyEnv`、没有存密钥本身的字段,用户把密钥填进「环境变量名」后被当作变量名去查 `process.env`,自然查不到。新增 `apiKey` 字段与 `resolveProviderApiKey`(`apiKey` 优先于 `apiKeyEnv`,空值一律视为未配置),设置页新增密码框(带显示/隐藏)、环境变量栏降级为「或者」,`looksLikeSecret` 在误填时**当场**行内警告但不阻止保存;bridge/host 全程 `redact` 密钥,实测网关在 401 响应里回显密钥时事件流仍不含原文。录入 D-174(`GET /api/config` 回传明文密钥,受 loopback 保护但本机进程可读,未修)。②浏览器打开文件夹:新增 `POST /api/workspace/resolve` + `resolveWorkspaceCandidates`,把 `showDirectoryPicker()` 只给的裸文件夹名在本机有界搜索(深度 4 / 条目 20000 / 300ms 三重预算,跳过符号链接与 `.` 开头目录,**永不登记、只返回候选**),1 个候选直接用、多个弹选择、0 个回落手输并说明是「没找到」还是「超出预算」。**浏览器不暴露绝对路径这一限制没有被突破**,主目录外且未登记过的目录仍只能手输。③前端品牌清理:用户可见文案里的 Prometheus 全部清除(改用「Agent / the agent」而非把品牌名塞进每句),同时删掉三条**假路径**(`~/.prometheus/usage.jsonl`、`~/.prometheus/config.json`、`.prometheus/hooks.json` —— 均不存在,内核也没有 hooks 机制);`window.prometheus`、`localStorage` 的 `prometheus.*` 键名、preload 的 `exposeInMainWorld` 属运行时契约,**一律未改** |
 | 2026-10-22 | 第十一轮(用户「模型服务，应该可隐藏完整内容，只显示名称+模型」「侧边栏会话应该这个层级：一级：工作区（文件夹），二级：会话」「聊天界面的模型选择有问题，优化一下前端」「前端没做视觉对齐」,并发 4 个子代理):①设置页「模型服务」的 provider 卡片改为默认折叠,折叠态只有名称 + 模型名 + 测试连接/移除;保存校验失败与测试结果到达时强制展开(R3:错误不能藏在折叠卡里),首启强制展开第一张卡,展开态跨重建按 provider 名保持;②侧栏层级改为「工作区 → 会话」,`#sidebar-workspace` 从两行条目改为节标题行的图标按钮(保留 id),一级用文件夹图标 + 更大的字重、二级缩进到一级名字的左缘(`--group-lead` 单变量推导,不写魔数),当前工作区无会话也占一行并给出新建入口;顺带删掉 `.sidebar-foot`/`.locale-switch` 等死 CSS 与死 i18n 键;③**根因在内核不在 bridge**:`ActionInput` 没有 `model` 字段,`POST /api/actions` 也不接受,模型选择器点了只能落到 `unsupported()`。补 `ActionInput.model`(优先级 `sessionModel ?? input.model ?? opts.model ?? env/first`)、`invalid_model` 错误码、`/api/actions` 透传,`bridge.setModel`/`refreshModels` 接上,并把 `lastModel`(新建会话用)与 `sessionModel`(当前会话 header)拆开;④视觉对齐按实测而不是目测:用 headless Chrome + CDP 量光学左缘/字号/间距越界/裁切/对比度(`.tmp/visual-audit/`),修掉三处实测确认的缺陷——D-175 模型弹层被 `overflow:hidden` 裁掉、D-178 窄屏断点写了两份(900/860)导致抽屉必现遮挡聊天区、D-177 回放历史会话时失败工具行伪装成成功(R3,并补波浪下划线使失败不只靠颜色);另把 composer 三个 chip 的三套内边距统一为 `4px 8px`、品牌图标从别家首字母「P」改为方波、设置页头像的同源「P」改为文件夹图标。**未改** `window.prometheus` / `localStorage` 的 `prometheus.*` 键名(运行时契约) |
 | 2026-10-22 | 第十二轮(用户「MCP 也应该可隐藏（默认都应该是隐藏）」「现在推进 Agentic Search 作为知识库检索（见实验结论）」「设置界面可见知识库」,并发 3 个子代理):①设置页「MCP 服务器」列表改为默认折叠卡片,复用「模型服务」的 `.settings-card-*` 结构,折叠态只有名称 + `命令 basename · N args`(无参数只留名字),完整命令行/cwd/timeoutMs 进展开体,开关与编辑/删除放在折叠按钮**外面**;英文补 `mcpArgsCountOne`(「1 arg」不是「1 args」),中文无复数不加键、代码按 `!== undefined` 回退。②**推进 agentic 检索**:`mcp-servers/kb` 新增 `kb_glob(pattern)` 与 `kb_grep(pattern, glob?)`,`kb_read` 补 `offset`/`limit` 分页与 `truncated`;上限对齐实验 B(单次 100 条 / 2000 行 / 命中行 300 字符),`count` 报真实命中总数;补齐内核 `glob.ts` 同值的 pattern 长度 256 与段数 64 上限(每段 `**/` 都是回溯出口,D-086 的同一个坑),并在命中超上限后只计数不留文本(D-078 的同一个坑)。**部署形态 ≠ 实验 B**(B 无 `kb_lookup`),0.925 不能算到本部署头上,已在两处 README 如实披露;新增的 glob/grep **没有任何拒答机制**,登记 **D-179**。③**设置界面可见知识库**:`GET /api/kb` 原来只扫 `$HARNESS_HOME/kb`(对真实用户恒为空),新增 `src/server/kb-locate.ts` 按 `KB_ROOT` → `mcp.json` 的 `env.KB_ROOT` → 仓库默认解析并如实回报 `source`/`note`,根不存在时保留候选路径而不是装作空知识库;`truncated` 覆盖深度/条目/文件数三种触顶与子目录读不动,触顶时 `fileCount` 只作「至少 N」;**D-064 已解决**。宿主 `getKb` 用惰性 import(旧 `dist/` 缺模块不拖垮宿主),bridge 走 `GET /api/kb`、失败只发 notice 不发空 kb;设置页新增「知识库」页,目录默认折叠、文件不可点(无预览端点,死按钮违反 R3),空状态区分「没找到根」与「根下没文件」,`error`/`truncated` 时拒绝断言目录为空。**主控实测补的**:`.kb-body` 无 `gap` 导致「Status」标题与说明行间距为 0(实测 `top === bottom === 178`),加 `.kb-head { margin-bottom: 14px }` 后为 192 |
+| 2026-10-22 | 第十三轮(用户「删除语言输入UI」「选择会话，上方的文件夹不会随会话所在文件夹变化」「会话操作与时间重合」「桌面宿主暂不支持该命令：rewindTo」「表格、分割线 md 语法渲染有误」「查找README.md 似乎并没有从项目文件夹开始找」「继续完善 Agentic Search」,并发 5 个子代理):①删除语音输入 UI(用户确认指麦克风按钮,界面语言切换保留);②**顶栏不跟会话目录**——`handleLoadSession` 从不更新宿主模块级 `cwd`,而 `stateEvent()` 用的就是它,渲染器 `state.cwd` 又无条件覆盖,两条事件对同一事实说了两种话;新增 `adoptSessionWorkdir`(单次 `statSync` 判定,目录消失/非目录/读不了分别告警且不改 cwd),顶栏/文件树/`getFile` 边界一起收敛,**登记 D-182**;③会话行三点按钮压住日期——`:hover`/`:focus-within` 时 meta 让位 `calc(9px+20px+6px)`,CDP 强制真实 `:hover` 实测由相交 20px 变为 6px 间隙;④删除「回退到这里」按钮(内核无 rewind 能力,按 R3 删而不是伪造;检查点面板整块仍是死代码,已记录);⑤Markdown 表格与分割线(渲染器原本不产出 `<table>`/`<hr>`,样式一直是死代码;新增 26 例测试,`\|` 与 code-span 内竖线不拆列);⑥**`glob`/`grep` 从缓存目录起扫**——旧 DFS 未排序,`.mypy_cache` 等先递归进 5000 文件预算,根目录 README.md 从未被访问(真实项目 25089 个未忽略文件,复现命中 0 次);改惰性 BFS + 忽略清单扩到 24 项 + `*.egg-info`,截断追加可行动提示,**登记 D-181**;⑦Agentic Search 按 D-179 建议①②(`kb_grep` 的 `fileCount`/`files`、描述写死「必须 kb_read 原文确认」、KB 遍历上限与 `scanTruncated`),**③未做故 D-179 不关闭**;⑧**`tests/assistant-delta.test.ts` 的超限用例在测磁盘延迟**(实测首次 fsync 18–25ms,原断言固定睡 10ms,空闲机器上 5/5 稳定红),改 `vi.waitFor` 并做反向验证(把超限分支改回定时器路径 → 立刻变红),**登记 D-180** |

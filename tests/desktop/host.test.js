@@ -141,6 +141,39 @@ async function tempHome() {
   return dir;
 }
 
+/**
+ * Write a saved conversation by hand: one header plus one user event.
+ *
+ * Creating it through the host would tie its workdir to whichever folder that
+ * host booted in. These cases need a session that *records* a different
+ * project — which is exactly what a conversation opened from the sidebar is.
+ */
+async function writeSession(home, { id, workdir, text = "旧会话" }) {
+  const dir = path.join(home, "sessions", id);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    path.join(dir, "header.json"),
+    JSON.stringify({
+      id,
+      createdAt: new Date().toISOString(),
+      status: "closed",
+      ...(workdir === undefined ? {} : { workdir }),
+    }),
+    "utf8",
+  );
+  await writeFile(
+    path.join(dir, "session.v1.jsonl"),
+    `${JSON.stringify({
+      seq: 0,
+      ts: new Date().toISOString(),
+      type: "user",
+      payload: { content: text },
+    })}\n`,
+    "utf8",
+  );
+  return dir;
+}
+
 afterEach(async () => {
   for (const server of servers.splice(0)) {
     await new Promise((resolve) => server.close(resolve)).catch(() => undefined);
@@ -435,6 +468,90 @@ describe("desktop host", () => {
     const loaded = events.find((event) => event.type === "session_loaded");
     expect(loaded).toBeDefined();
     expect(loaded.messages[0]).toMatchObject({ role: "user", text: "症状" });
+  }, HOST_TIMEOUT_MS);
+
+  /**
+   * True once a `session_loaded` has been followed by a `state`.
+   *
+   * The `state` that matters is the one `loadSession` emits *after* replaying
+   * the transcript; the boot handshake already sent one for the host's own
+   * workspace, so "a state exists" would not prove anything.
+   */
+  function loadedThenState(all) {
+    const loadedAt = all.findIndex((event) => event.type === "session_loaded");
+    return loadedAt >= 0 && all.slice(loadedAt).some((event) => event.type === "state");
+  }
+
+  it("loadSession 把会话记录的工作目录切换为当前工作目录", async () => {
+    const home = await tempHome();
+    const project = await mkdtemp(path.join(tmpdir(), "eam-open-project-"));
+    tempDirs.push(project);
+    await writeFile(path.join(project, "main.c"), "int main(void){}\n", "utf8");
+    const workdir = path.resolve(project);
+    const sessionId = "sess-opened-in-project";
+    await writeSession(home, { id: sessionId, workdir, text: "上个项目的问题" });
+
+    const events = await runHost(
+      home,
+      [
+        // The window boots in `home`; the conversation was recorded in `project`.
+        { cmd: "init", cwd: home },
+        { cmd: "loadSession", id: sessionId },
+        { cmd: "getTree", path: "." },
+        { cmd: "getFile", path: "main.c" },
+      ],
+      // Queued commands still run before the shutdown line behind them, so the
+      // tree/file replies are read below without waiting on them here.
+      { until: loadedThenState },
+    );
+
+    const loaded = events.find((event) => event.type === "session_loaded");
+    expect(loaded.cwd).toBe(workdir);
+    // The `state` that follows the replay is what the renderer's topbar obeys.
+    const afterLoad = events.slice(events.indexOf(loaded)).filter((event) => event.type === "state");
+    expect(afterLoad.at(-1).cwd).toBe(workdir);
+    // And it stays that way: no later state falls back to the boot folder.
+    expect(events.filter((event) => event.type === "state").at(-1).cwd).toBe(workdir);
+
+    // The connected symptoms: `.` and a relative file name resolve against the
+    // conversation's own project, not the folder the window happened to open in.
+    const tree = events.find((event) => event.type === "tree");
+    expect(tree.nodes.map((node) => node.name)).toContain("main.c");
+    const file = events.find((event) => event.type === "file");
+    expect(file.file).toStrictEqual({
+      path: "main.c",
+      content: "int main(void){}\n",
+      truncated: false,
+      binary: false,
+    });
+  }, HOST_TIMEOUT_MS);
+
+  it("会话记录的工作目录已不存在时，保留原 cwd 并显式 warn", async () => {
+    const home = await tempHome();
+    const gone = path.join(home, "deleted-project");
+    const sessionId = "sess-workdir-gone";
+    await writeSession(home, { id: sessionId, workdir: gone, text: "项目已被删除" });
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "loadSession", id: sessionId },
+      ],
+      { until: loadedThenState },
+    );
+
+    // R3: the mismatch is said out loud, with the path that no longer exists.
+    const warning = events.find(
+      (event) => event.type === "notice" && event.level === "warn" && event.text.includes(gone),
+    );
+    expect(warning).toBeDefined();
+    // The transcript still opens; the record is honest about its own workdir.
+    const loaded = events.find((event) => event.type === "session_loaded");
+    expect(loaded).toBeDefined();
+    expect(loaded.cwd).toBe(gone);
+    // But the host does not point itself at a directory that is not there.
+    expect(events.filter((event) => event.type === "state").at(-1).cwd).toBe(path.resolve(home));
   }, HOST_TIMEOUT_MS);
 
   it("setModel 只接受 providers.json 里的引用", async () => {

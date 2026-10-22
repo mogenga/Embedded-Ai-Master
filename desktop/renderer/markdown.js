@@ -4,6 +4,87 @@ export function escapeHtml(text) {
   return text.replace(/[&<>"']/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch]);
 }
 
+/**
+ * A thematic break: three or more of the same `-`, `*` or `_`, optionally
+ * separated by spaces, with at most three leading spaces. Anchored and with a
+ * fixed-width character class, so it cannot backtrack catastrophically.
+ */
+const THEMATIC_BREAK = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
+
+/** One cell of a table's delimiter row: optional colons around 3+ hyphens. */
+const DELIMITER_CELL = /^:?-{3,}:?$/;
+
+/**
+ * Split a table row on unescaped, non-code-span pipes.
+ *
+ * `\|` becomes a literal pipe and a pipe inside `` `code` `` never splits, so
+ * `` | a | `x|y` | `` stays two columns. Backslashes are otherwise preserved
+ * (`C:\Users` must survive). Outer pipes are optional, so the empty cells they
+ * create at either end are dropped.
+ */
+function splitTableRow(line) {
+  const cells = [];
+  let current = "";
+  let inCode = false;
+  let escaped = false;
+  for (const ch of line.trim()) {
+    if (escaped) {
+      current += ch === "|" ? "|" : `\\${ch}`;
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\") {
+      escaped = true;
+      continue;
+    }
+    if (ch === "`") {
+      inCode = !inCode;
+      current += ch;
+      continue;
+    }
+    if (ch === "|" && !inCode) {
+      cells.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  if (escaped) current += "\\";
+  cells.push(current);
+  if (cells.length > 0 && cells[0].trim() === "") cells.shift();
+  if (cells.length > 0 && cells[cells.length - 1].trim() === "") cells.pop();
+  return cells.map((cell) => cell.trim());
+}
+
+/** `:---` → left, `:---:` → center, `---:` → right, `---` → none. */
+function alignmentOf(cell) {
+  const left = cell.startsWith(":");
+  const right = cell.endsWith(":");
+  if (left && right) return "center";
+  if (right) return "right";
+  if (left) return "left";
+  return "";
+}
+
+/**
+ * Recognise a GFM table header at `lines[index]`.
+ *
+ * Minimal set: the header row contains a pipe and the next line is a delimiter
+ * row with the same number of `:?-{3,}:?` cells. Both rows must contain a pipe
+ * so a bare `---` can never be mistaken for a one-column delimiter.
+ */
+function matchTable(lines, index) {
+  const headerLine = lines[index];
+  if (!headerLine.includes("|")) return null;
+  const delimiterLine = lines[index + 1];
+  if (delimiterLine === undefined || !delimiterLine.includes("|")) return null;
+  const header = splitTableRow(headerLine);
+  const delimiter = splitTableRow(delimiterLine);
+  if (header.length === 0 || delimiter.length !== header.length) return null;
+  if (!delimiter.every((cell) => DELIMITER_CELL.test(cell))) return null;
+  return { header, alignments: delimiter.map(alignmentOf) };
+}
+
 /** Minimal, dependency-free markdown renderer (headings, lists, code, inline). */
 export function renderMarkdown(source, copyLabel = "copy") {
   const lines = source.replace(/\r\n/g, "\n").split("\n");
@@ -49,6 +130,48 @@ export function renderMarkdown(source, copyLabel = "copy") {
       flushParagraph();
       const level = Math.min(3, heading[1].length);
       out.push(`<h${level}>${inline(heading[2])}</h${level}>`);
+      i++;
+      continue;
+    }
+
+    const table = matchTable(lines, i);
+    if (table) {
+      flushParagraph();
+      const { header, alignments } = table;
+      const columns = header.length;
+      // The delimiter row is consumed here; `i` lands on the first data line.
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim() !== "" && lines[i].includes("|")) {
+        const cells = splitTableRow(lines[i]);
+        // A short row is padded and a long one truncated so every `<tr>` has
+        // exactly one cell per column; a ragged row must not break the layout.
+        const normalized = Array.from({ length: columns }, (_unused, index) => cells[index] ?? "");
+        rows.push(normalized);
+        i++;
+      }
+      const alignStyle = (index) => (alignments[index] ? ` style="text-align: ${alignments[index]}"` : "");
+      const headerHtml = header
+        .map((cell, index) => `<th${alignStyle(index)}>${inline(cell)}</th>`)
+        .join("");
+      const bodyHtml = rows
+        .map((row) => `<tr>${row.map((cell, index) => `<td${alignStyle(index)}>${inline(cell)}</td>`).join("")}</tr>`)
+        .join("");
+      out.push(`<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`);
+      continue;
+    }
+
+    // Checked before the list rule, because `- - -` is also "a bullet followed
+    // by text". GFM would read a `---` on the line after paragraph text as a
+    // setext heading underline; this renderer has no setext headings, so a
+    // break-looking line inside a paragraph stays plain text. That also keeps
+    // `* * *` and `- - -` from being reinterpreted as a one-item bullet list.
+    if (THEMATIC_BREAK.test(line)) {
+      if (paragraph.length === 0) {
+        out.push("<hr>");
+      } else {
+        paragraph.push(line.trim());
+      }
       i++;
       continue;
     }
