@@ -434,7 +434,7 @@ it("a register can be named the way a person types it", () => {
 /* ---------- the Keil downloader ---------- */
 
 // 依赖 A 侧未迁移模块：flash.ts（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("UV4 -f is the download command, and its log is where the verdict lives", async () => {
+it("UV4 -f is the download command, and its log is where the verdict lives", async () => {
   const { commandFor, validate, classifyOutput } = await import("../flash.js");
   const args = commandFor({ kind: "keil", program: "UV4.exe", firmware: "app.axf", project: "P.uvprojx", logFile: "L.log" });
   expect(args).toEqual(["-f", "P.uvprojx", "-j0", "-o", "L.log"]);
@@ -447,7 +447,7 @@ it.skip("UV4 -f is the download command, and its log is where the verdict lives"
 });
 
 // 依赖 A 侧未迁移模块：flash.ts（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("a failed download is not read as success", async () => {
+it("a failed download is not read as success", async () => {
   const { classifyOutput } = await import("../flash.js");
   const log = ["Load app.axf", "Error: Flash Download failed  -  Target DLL has been cancelled"].join(String.fromCharCode(10));
   const verdict = classifyOutput("keil", log, 0);
@@ -455,7 +455,7 @@ it.skip("a failed download is not read as success", async () => {
 });
 
 // 依赖 A 侧未迁移模块：flash.ts（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("a .axf is only accepted by the Keil downloader", async () => {
+it("a .axf is only accepted by the Keil downloader", async () => {
   const { validate } = await import("../flash.js");
   const { writeFileSync, mkdtempSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -481,7 +481,7 @@ it.skip("a .axf is only accepted by the Keil downloader", async () => {
 /* ---------- the UV4 command line ---------- */
 
 // 依赖 A 侧未迁移模块：project.ts (buildCommand)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("a Keil build names its target instead of inheriting the last one", async () => {
+it("a Keil build names its target instead of inheriting the last one", async () => {
   const { buildCommand, detectProject } = await import("../project.js");
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -514,12 +514,12 @@ it.skip("a Keil build names its target instead of inheriting the last one", asyn
 /* ---------- a session that "entered" without loading anything ---------- */
 
 // 依赖 A 侧未迁移模块：project.ts (detectProject)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("a debug session that could not load the image is not reported as open", async () => {
+it("a debug session that could not load the image is not reported as open", async () => {
   // Measured: with the .axf deleted, uVision prints `*** error 56: cannot open
   // file` and enters debug mode anyway. Every later action then answers
   // NOT_DEBUGGING, so treating the entry as success hid the real cause.
   const { default: fs } = await import("node:fs");
-  const source = fs.readFileSync("src/embedded/keilSession.ts", "utf8");
+  const source = fs.readFileSync("mcp-servers/keil/keilSession.ts", "utf8");
   expect(source).toMatch(/cannot open file/);
   expect(source).toMatch(/session\.debugging = false/);
 });
@@ -527,7 +527,7 @@ it.skip("a debug session that could not load the image is not reported as open",
 /* ---------- the CMSIS-Toolbox ---------- */
 
 // 依赖 A 侧未迁移模块：project.ts (detectProject/buildCommand)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("a csolution project is recognised and built with cbuild", async () => {
+it("a csolution project is recognised and built with cbuild", async () => {
   const { detectProject, buildCommand } = await import("../project.js");
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -548,7 +548,7 @@ it.skip("a csolution project is recognised and built with cbuild", async () => {
 });
 
 // 依赖 A 侧未迁移模块：toolchain.ts (TOOLCHAIN_INFO)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("the three toolbox tools are first-class toolchains", async () => {
+it("the three toolbox tools are first-class toolchains", async () => {
   const { TOOLCHAIN_INFO } = await import("../toolchain.js");
   for (const kind of ["cbuild", "cpackget", "svdconv"] as const) {
     expect(TOOLCHAIN_INFO[kind]).toBeTruthy();
@@ -556,7 +556,7 @@ it.skip("the three toolbox tools are first-class toolchains", async () => {
   }
   // The toolbox ships inside a Keil install, so the search must look there.
   const { readFileSync } = await import("node:fs");
-  const source = readFileSync("src/embedded/toolchain.ts", "utf8");
+  const source = readFileSync("mcp-servers/keil/toolchain.ts", "utf8");
   expect(source).toMatch(/cmsis-toolbox/);
 });
 
@@ -676,7 +676,7 @@ it("a user's own compiler registration is not overwritten", async () => {
 });
 
 // 依赖 A 侧未迁移模块：build.ts (findArtifactsIn)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("`**` in an artifact pattern walks nested output directories", async () => {
+it("`**` in an artifact pattern walks nested output directories", async () => {
   const { findArtifactsIn } = await import("../build.js");
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -770,7 +770,7 @@ it.skip("the capability report is reachable and does not claim a working op is r
 /* ---------- project detection must not wander into a sibling ---------- */
 
 // 依赖 A 侧未迁移模块：project.ts (detectProject)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("a directory with no project of its own does not adopt a sibling's", async () => {
+it("a directory with no project of its own does not adopt a sibling's", async () => {
   const { detectProject } = await import("../project.js");
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -913,7 +913,7 @@ it("run falls back to the command channel when the core does not move", async ()
 });
 
 // 依赖 A 侧未迁移模块：build.ts (parseFromelf)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("an image read by fromelf reports its real ZI, not the totals row's zero", async () => {
+it("an image read by fromelf reports its real ZI, not the totals row's zero", async () => {
   const { parseFromelf } = await import("../build.js");
   // Measured on MDK 5.43a, `fromelf --text -z TOUCH.axf`: the per-object row
   // carries the real ZI (2050364), and the `ROM Totals` row prints 0 in that
@@ -1017,7 +1017,7 @@ it("an evaluation error is a failure, not a value", async () => {
 });
 
 // 依赖 A 侧未迁移模块：project.ts (keilOutputDirs)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it.skip("artifact roots cover every target, not just the first", async () => {
+it("artifact roots cover every target, not just the first", async () => {
   const { keilOutputDirs } = await import("../project.js");
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
