@@ -1,6 +1,6 @@
 # AGENTS.md — Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 工具。当前处于 **M2 阶段 3 已合并**：P0 内核（`src/`）与桌面/浏览器双形态前端（`desktop/`）已实现，测试在 `tests/`（`tests/desktop` 为协议层与宿主），构建与脚本配置见 `package.json` / `tsconfig*.json` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
+面向嵌入式调试场景的 agent 工具。当前处于 **M2 阶段 3 已合并**：P0 内核（`src/`）与桌面前端（`desktop/`）已实现，测试在 `tests/`（`tests/desktop` 为协议层与宿主），构建与脚本配置见 `package.json` / `tsconfig*.json` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
 
 ## 事实源（先读这些，别猜）
 - `docs/BRD.md` — 业务需求（领域层 BR-xx / 平台层 PLAT-xx）、硬性规则 R1-R9、路线图 M1-M4。
@@ -19,7 +19,7 @@
 ## 常用命令（以 `package.json` 与 `README.md` 为准）
 
 - 测试与构建：`npm test`（vitest run，不触网）、`npm run coverage`（lines 阈值 85%）、`npm run typecheck`、`npm run lint`（当前等同 `tsc --noEmit`，见 D-006）、`npm run build`。
-- 前端：`npm run serve:ui`（浏览器形态，静态托管 `desktop/renderer`）、`npm run test:desktop`（协议层与桌面宿主测试）；桌面形态需用户先执行 `npm --prefix desktop install`，再 `npm --prefix desktop run desktop`。
+- 前端：`npm run test:desktop`（协议层与桌面宿主测试）；桌面形态需用户先执行 `npm --prefix desktop install`，再 `npm --prefix desktop run desktop`。
 - live 测试默认跳过；开启方式见 README「live 测试」。
 - **依赖安装禁令同样适用于此**：只输出命令给用户，不代为执行（见下文）。
 
@@ -30,7 +30,7 @@
    - **内核（必须自研，禁止整体引入现成 harness）**：主循环 / 会话 / 工具系统 / 上下文管理 / MCP 生命周期。可借鉴 Claude Code / dsh / opencode 源码语义，但不得 vendor 任何现成 harness。
    - **模型适配层（必须自研）**：极简适配器，仅 `complete` / `countTokens` 两方法；P0 只实现 OpenAI 兼容（`/v1/chat/completions`）；可借鉴 dsh llm-pi-ai 语法，但不整体引 pi-ai。
    - **测试**：vitest。
-   - **前端（2026-10-20 移植定案）**：纯 ES 模块，**无框架、无打包器、无构建步骤**——`desktop/renderer/` 直接被浏览器与 Electron 加载，渲染层是 JavaScript（内核才是 TypeScript）。不要引入 Vite/Preact/React 等构建链或 UI 框架。桌面形态经 `desktop/host/host.js`（NDJSON over stdio）接内核，浏览器形态经 `desktop/renderer/bridge.js`（HTTP + SSE）接内核，两者共用 `desktop/renderer/protocol.js` 这一层纯映射。内核不支持的能力**隐藏入口**而不是伪造（宿主/bridge 回显式 `notice`，R3）。
+   - **前端（2026-10-20 移植定案）**：纯 ES 模块，**无框架、无打包器、无构建步骤**——`desktop/renderer/` 直接被 Electron 加载，渲染层是 JavaScript（内核才是 TypeScript）。不要引入 Vite/Preact/React 等构建链或 UI 框架。桌面形态经 `desktop/host/host.js`（NDJSON over stdio）接内核，宿主与渲染器共用 `desktop/renderer/protocol.js` 这一层纯映射。内核不支持的能力**隐藏入口**而不是伪造（宿主回显式 `notice`，R3）。
    - **查证规则**：凡涉及库/框架用法（含上列已定案库的 API 细节），**必须先经 Context7 MCP 查证**（已配置：`.codeartsdoer/mcp/mcp_settings.json` → context7）核实版本、运行时要求与用法后再引入；禁止凭记忆臆造任何 API、版本号或配置项。
 2. 安全边界（散见于 BRD §8）：R1 LLM 永不直接控制仪器；R2 探针写内存/复位前先声明；R3 工具必须诚实（读失败显式报错、全 0 不得解码为"无故障"）。
 
