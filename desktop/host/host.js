@@ -249,6 +249,33 @@ function corpusModule() {
 }
 
 /**
+ * The first-run seeding module (`dist/corpus/seed.js`), loaded lazily by the
+ * boot sequence.
+ *
+ * Same stale-`dist/` reasoning as `kbModule`, and here it matters more: seeding
+ * runs before the operator has done anything, so an import that threw at boot
+ * would take the window down over a feature nobody has asked for yet. A kernel
+ * built before seeding landed simply skips it — the knowledge base then behaves
+ * exactly as it did before, and `getKb` still answers from whatever `mcp.json`
+ * and the checkout hold.
+ *
+ * `snapshot.js` rides along because the host needs `getKbLayout` to name the
+ * two paths `seedKbMcpEntry` writes (`kb/current`, `kb/inbox/_inbox.md`); those
+ * must come from the kernel's own layout function rather than being spelled out
+ * here, or the OTA writer and the MCP config would disagree about §3's layout.
+ */
+let seedModulePromise;
+function seedModule() {
+  seedModulePromise ??= Promise.all([
+    import(dist("corpus/seed.js")),
+    import(dist("corpus/snapshot.js")),
+  ])
+    .then(([seed, snapshot]) => ({ seed, snapshot }))
+    .catch(() => undefined);
+  return seedModulePromise;
+}
+
+/**
  * Where `<resources>/corpus.json` would live, or `undefined` when this install
  * has no such level.
  *
@@ -829,6 +856,16 @@ async function registerRoot(target) {
  * handshake wait on the filesystem.
  */
 let pendingRoot = Promise.resolve(false);
+
+/**
+ * The first-run seed, started once by `init`.
+ *
+ * `undefined` until `init` runs. Kept as a promise (rather than fired and
+ * forgotten) so a second `init` — the renderer reloading does not send one, but
+ * a re-handshake would — cannot start a second copy, and so `getKb` can await
+ * it before reporting a root that is about to change.
+ */
+let seedFirstRunPromise;
 
 async function settleRoot() {
   try {
@@ -2178,6 +2215,109 @@ async function readCorpusConfig(modules) {
 }
 
 /**
+ * First-run seeding: materialise the bundled corpus and wire up the `kb` MCP
+ * server.
+ *
+ * Two facts this closes, both of them "nothing happened on a fresh install":
+ * with no `$HARNESS_HOME/mcp.json` the KB server is never started, so the model
+ * has no `kb_*` tools; and with no `kb/current` the settings page can only say
+ * `unavailable`. Seeding is what makes a fresh install usable without the
+ * operator hand-copying a corpus.
+ *
+ * **Development and packaged differ in exactly one input.** A checkout holds no
+ * `resources/corpus/`, so `resourcesRoot` stays `undefined` and the kernel
+ * answers `no_bundled_corpus` — the same shape `corpusResourcesRoot` already
+ * uses for `corpus.json`. That is deliberate: a developer's `~/.harness/kb`
+ * must not be filled with a shipped corpus that then looks like an OTA result.
+ *
+ * **Nothing here blocks or fails the boot.** Every outcome is reported at most
+ * as a warn notice, and only when something actually went wrong: a successful
+ * seed and a deliberate skip are both silent, because neither is the
+ * operator's problem. `ready` has already been sent by the time this runs, so a
+ * slow disk cannot delay the handshake either.
+ *
+ * Not queued with `enqueueCorpus` on purpose. That queue orders commands the
+ * page issued; seeding happens once before anyone can click, and putting it
+ * behind the queue would let a status read answer `unavailable` for a corpus
+ * that is about to exist.
+ */
+async function seedFirstRun() {
+  const modules = await seedModule();
+  if (modules === undefined) return;
+
+  const { seed, snapshot } = modules;
+  if (typeof seed.seedCorpus !== "function" || typeof seed.seedKbMcpEntry !== "function") {
+    return;
+  }
+
+  // The layout is the kernel's (§3): deriving these paths here would be a
+  // second copy of a contract that already has one owner.
+  let layout;
+  try {
+    layout = snapshot.getKbLayout(harnessHome);
+  } catch (error) {
+    send({
+      type: "notice",
+      level: "warn",
+      text: `知识库初始化跳过：${messageOf(error)}`,
+    });
+    return;
+  }
+
+  // 1. The corpus itself. Packaged, `roots.distParent` is `resources/`, where
+  //    the build puts `corpus/` — the same value `readCorpusConfig` already
+  //    uses for `corpus.json`.
+  try {
+    await seed.seedCorpus({
+      harnessHome,
+      ...(roots.form === "packaged" ? { resourcesRoot: roots.distParent } : {}),
+    });
+  } catch (error) {
+    // A broken install (unreadable corpus, malformed `latest.json`) has to be
+    // visible: the alternative is a knowledge base that quietly is not there.
+    send({
+      type: "notice",
+      level: "warn",
+      text: `内置知识库初始化失败：${messageOf(error)}`,
+    });
+  }
+
+  // 2. The MCP entry, so the model gets the `kb_*` tools and `getKb`/OTA point
+  //    at the same root.
+  //
+  //    Runs in development too, and the kernel skips it when `kb/current` does
+  //    not exist. That skip is the whole point of this ordering: writing
+  //    `mcp.json` on a machine with no corpus would make `getKb` report a
+  //    missing directory instead of falling back to the checkout's
+  //    `mcp-servers/kb/kb`, which is strictly worse — and the MCP server it
+  //    would launch would answer from an empty root.
+  try {
+    // The answer is deliberately not branched on. `kb_entry_exists`,
+    // `no_current_snapshot`, `kb_server_missing` and `kb_root_env_override` are
+    // all legitimate states, not failures: the user configured their own
+    // server, this machine has no corpus yet, the kernel's MCP server is not
+    // built, or the operator pinned `KB_ROOT`. Announcing any of them at every
+    // launch would be noise about a situation the operator created.
+    await seed.seedKbMcpEntry({
+      harnessHome,
+      kernelRoot: roots.distParent,
+      currentKbRoot: layout.currentLink,
+      inboxPath: path.join(layout.inboxDir, "_inbox.md"),
+      mcpModules: { readAppConfig: kernel.readAppConfig, writeMcpServers: kernel.writeMcpServers },
+    });
+  } catch (error) {
+    // This one is a failure: `readAppConfig` refused to read a file it cannot
+    // parse, or the write did not land. Either way the operator has to know
+    // why the `kb` tools are missing.
+    send({
+      type: "notice",
+      level: "warn",
+      text: `知识库 MCP 配置写入失败：${messageOf(error)}`,
+    });
+  }
+}
+
+/**
  * `latest.json`'s address, joined the way `src/corpus/update.ts` joins it.
  *
  * This is the one piece of the kernel's URL handling copied here, and it is
@@ -2284,6 +2424,11 @@ function sendCorpusKernelMissing() {
 }
 
 async function handleCorpusStatus() {
+  // Same reason as `getKb`: a seed still copying the bundled corpus would have
+  // this answer `unavailable` for a corpus that is about to exist, and nothing
+  // would refresh the page afterwards. The seed never throws.
+  if (seedFirstRunPromise !== undefined) await seedFirstRunPromise;
+
   const modules = await corpusModule();
   if (modules === undefined) {
     sendCorpusKernelMissing();
@@ -2333,6 +2478,12 @@ async function handleCorpusStatus() {
 }
 
 async function handleCorpusCheck() {
+  // A check started before the seed finished would compare the remote version
+  // against a local version that is still being materialised, and could even
+  // race `setCurrent`. The seed is a one-off filesystem copy and never throws,
+  // so waiting costs at most that copy on the very first launch.
+  if (seedFirstRunPromise !== undefined) await seedFirstRunPromise;
+
   const modules = await corpusModule();
   if (modules === undefined) {
     sendCorpusKernelMissing();
@@ -2424,6 +2575,10 @@ async function resolveCorpusManifest(modules, config) {
 }
 
 async function handleCorpusApply() {
+  // Same reason as the check: an apply racing the seed would have two writers
+  // switching `current` over one `snapshots/` tree.
+  if (seedFirstRunPromise !== undefined) await seedFirstRunPromise;
+
   const modules = await corpusModule();
   if (modules === undefined) {
     sendCorpusKernelMissing();
@@ -2597,6 +2752,15 @@ const handlers = {
         level: "dim",
         text: `模型服务配置有误：${providersError}。可在设置 → 模型服务中修改`,
       });
+    }
+
+    // First-run seeding runs *after* the handshake, not inside it: a fresh
+    // install may have a corpus to copy and a disk to wait on, and `init` must
+    // not make `ready` wait on the filesystem. Parked like `pendingRoot` above,
+    // and swallowed for the same reason — `seedFirstRun` reports its own
+    // failures as notices, so a rejected promise here would only duplicate them.
+    if (seedFirstRunPromise === undefined) {
+      seedFirstRunPromise = seedFirstRun().catch(() => undefined);
     }
   },
 
@@ -2903,6 +3067,11 @@ const handlers = {
       });
       return;
     }
+    // Settle the first-run seed first: it may be writing `mcp.json` right now,
+    // and a root resolved a moment earlier would describe a corpus that is
+    // already superseded. The seed never throws, so this cannot turn a page
+    // opening into a failure.
+    if (seedFirstRunPromise !== undefined) await seedFirstRunPromise;
     const location = located.resolveKbRoot({ harnessHome, repoRoot });
     try {
       const scan = await located.scanKbRoot(location.root);
