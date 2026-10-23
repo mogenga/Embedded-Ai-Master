@@ -120,7 +120,13 @@ export const debugInputSchema = z
   .object({
     action: z.enum(DEBUG_ACTIONS),
     project: z.string().optional(),
-    target: z.enum(["hardware", "simulator"]).optional(),
+    // The recurring mistake: the model passes the Keil `<TargetName>` here.
+    // The message names the two legal values and points at `target_name`.
+    target: z
+      .enum(["hardware", "simulator"], {
+        message: 'expected "hardware" or "simulator" (the debug backend) — for the Keil <TargetName> use `target_name`',
+      })
+      .optional(),
     target_name: z.string().optional(),
     port: z.number().int().min(1).max(65535).optional(),
     location: z.string().optional(),

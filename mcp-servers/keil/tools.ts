@@ -25,7 +25,6 @@ import { debugInputSchema, projectInputSchema, DEBUG_DESCRIPTION, PROJECT_DESCRI
 import { declarationFor } from "./declarations.js";
 import { selectionFromEnv } from "./resolve.js";
 import type { ProbeToolResult, ProbeToolSpec } from "../probe/tools.js";
-import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import type { KeilSelection } from "./resolve.js";
@@ -47,9 +46,6 @@ import {
   currentLocation,
   currentTarget,
   eraseFlash,
-  massEraseCommand,
-  massEraseSucceeded,
-  massEraseUnavailableReason,
   evaluate,
   evalInWindow,
   flashInIde,
@@ -136,33 +132,6 @@ interface LegacyTool {
   parameters: Record<string, unknown>;
   summarize?: (input: Record<string, unknown>) => string;
   execute(input: Record<string, unknown>, ctx: ToolContext): Promise<LegacyResult>;
-}
-
-/**
- * STM32CubeProgrammer 的最小发现。
- *
- * A 侧走完整的 toolchain 探测（9 种工具链）；Keil 闭包只需要 `erase` 用的这一个
- * CLI，因此按 PATH 与 ST 的标准安装目录查找（keil-porting-spec.md §5.3 的同一
- * 取舍：不全量搬探测）。
- */
-async function findStm32Programmer(): Promise<{ path: string } | null> {
-  const names = process.platform === "win32"
-    ? ["STM32_Programmer_CLI.exe", "STM32_Programmer_CLI"]
-    : ["STM32_Programmer_CLI"];
-  const sep = process.platform === "win32" ? ";" : ":";
-  for (const dir of (process.env.PATH ?? "").split(sep).filter(Boolean)) {
-    for (const name of names) {
-      const candidate = join(dir, name);
-      if (existsSync(candidate)) return { path: candidate };
-    }
-  }
-  const roots = [process.env["ProgramFiles"], process.env["ProgramFiles(x86)"], process.env.LOCALAPPDATA, process.env.USERPROFILE]
-    .filter((value): value is string => Boolean(value));
-  for (const root of roots) {
-    const candidate = join(root, "STMicroelectronics", "STM32Cube", "STM32CubeProgrammer", "bin", "STM32_Programmer_CLI.exe");
-    if (existsSync(candidate)) return { path: candidate };
-  }
-  return null;
 }
 
 const hex = (value: number) => `0x${value.toString(16)}`;
@@ -341,46 +310,6 @@ async function closeAndReport(cwd: string): Promise<LegacyResult> {
     else lines.push(`${file} is unchanged; there were no edits to write, or they were already on disk`);
   }
   return { content: lines.join("\n"), display: "closed" };
-}
-
-/**
- * Erase the whole chip, which uVision on this target cannot do.
- *
- * `PRJ_FLASH_ERASE` never answers and a download only erases the sectors its
- * image occupies (both measured — see `FLASH_ERASE_LIMITATION`). ST's CLI talks
- * to the same ST-Link and has the chip's mass-erase command, so it is what
- * "erase" means here.
- *
- * The debug sessions are closed first: one probe cannot be owned by uVision and
- * ST's CLI at the same time.
- */
-async function massErase(cwd: string): Promise<{ ok: boolean; lines: string[] }> {
-  const found = await findStm32Programmer();
-  if (!found) return { ok: false, lines: [massEraseUnavailableReason()] };
-  const closed = await closeAndReport(cwd);
-  const run = () =>
-    new Promise<{ code: number | null; out: string }>((resolve) => {
-      execFile(
-        found.path,
-        massEraseCommand({ cli: found.path }).slice(1),
-        { cwd, timeout: 3 * 60_000, windowsHide: true, maxBuffer: 4 * 1024 * 1024, env: toolEnv() },
-        (error, stdout, stderr) => {
-          const code = error ? (typeof error.code === "number" ? error.code : 1) : 0;
-          resolve({ code, out: `${stdout ?? ""}${stderr ?? ""}` });
-        },
-      );
-    });
-  const result = await run();
-  const kept = String(closed.content ?? "").split("\n").filter((line) => line.startsWith("closed"));
-  const lines = [...kept, `mass erase through ${basename(found.path)}`];
-  const shown = result.out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  lines.push(...shown.filter((line) => /erase|error|fail|No STM32/i.test(line)).slice(-6));
-  if (!massEraseSucceeded(result.out)) {
-    lines.push(`the mass erase did not report success (exit ${result.code})`);
-    return { ok: false, lines };
-  }
-  lines.push("mass erase achieved: the whole flash is 0xFF");
-  return { ok: true, lines };
 }
 
 /** The stop, in the words a person would use. */function describeStop(info: { stopped: boolean; reason?: string; reasonCode?: number; pc?: number; slot?: number; reasonText?: string; output: string[] }): string[] {
@@ -622,12 +551,24 @@ const keilDebugTool: LegacyTool = {
         const ran = await run(session, Number(input.timeout_ms ?? 30_000));
         lines.push(...describeStop(ran));
         if (!ran.stopped) {
+          const breakpoints = await listBreakpoints(session);
           const stalled = didNotStop(ran, {
             ...(pcBefore !== undefined ? { pcBefore } : {}),
             ...((await currentLocation(session))?.address !== undefined ? { pcAfter: (await currentLocation(session))!.address } : {}),
-            breakpoints: await listBreakpoints(session),
+            breakpoints,
           });
-          if (stalled) fail(stalled);
+          // A "run" that never stops is the **expected** outcome when the image
+          // has no breakpoint to reach — measured, the model's flash-and-run
+          // flow reported "still running after 30 s" as an error when the board
+          // had simply started doing its job. That is reported as success, in
+          // the words that say the program is running; only a start that was
+          // refused, or a stop that never came while a breakpoint could have
+          // caught the core, stays an error.
+          if (stalled && (breakpoints.length > 0 || ran.reason?.startsWith("the debugger refused"))) {
+            fail(stalled);
+          } else if (stalled) {
+            lines.push("the program is running and no breakpoint will stop it — this is what a successful run looks like; `halt` to stop it, or set a breakpoint first to catch a specific spot.");
+          }
         }
         const where = await currentLocation(session);
         if (where) lines.push(`at ${describeWhere(where)}`);
@@ -1121,19 +1062,13 @@ const keilDebugTool: LegacyTool = {
       } else if (action === "erase") {
         const erased = await eraseFlash(session);
         if (!erased.ok) {
-          // `PRJ_FLASH_ERASE` is not answered on this build, and a download is
-          // not a full-chip erase — it erases only its own image's sectors.
-          // The action is still "erase the flash", so the fallback runs rather
-          // than reporting a timeout with nowhere to go.
-          const full = await massErase(ctx.cwd);
-          if (full.ok) {
-            lines.push(...full.lines);
-          } else {
-            return { isError: true, content: `${erased.message ?? erased.statusName}\n${full.lines.join("\n")}`, display: "erase unavailable" };
-          }
-        } else {
-          lines.push("flash erase accepted by the configured algorithm");
+          // `PRJ_FLASH_ERASE` never answers on this build (measured — see
+          // `FLASH_ERASE_LIMITATION`), and a download is not a full-chip
+          // erase: it erases only its own image's sectors. Full-chip erase is
+          // not offered here by design; the limitation is the honest answer.
+          return { isError: true, content: erased.message ?? erased.statusName, display: "erase unavailable" };
         }
+        lines.push("flash erase accepted by the configured algorithm");
       } else {
         return { isError: true, content: `unknown action \`${action}\``, display: "unknown action" };
       }

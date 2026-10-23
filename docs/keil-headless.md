@@ -13,7 +13,6 @@
 | Keil MDK（含 `UV4.exe`） | 一般在 `C:\Keil_v5\UV4\UV4.exe`，也可能装在别处（本项目实测在 `G:\software\keil5`） | `keil_debug` 所有动作返回「Keil MDK is not installed」 |
 | 可用的 MDK License | 打开 uVision 能正常编译/调试 | 构建或调试被 Keil 拒绝，日志里能看到 |
 | 调试探针（ST-Link / J-Link / ULINK） | `.uvoptx` 里配置的适配器 | 进入调试时报连接失败 |
-| STM32CubeProgrammer（仅整片擦除需要） | `STM32_Programmer_CLI.exe` 在 PATH 或 `Program Files\STMicroelectronics\STM32Cube\STM32CubeProgrammer\bin` | `erase` 返回明确原因，其他动作不受影响 |
 
 找到 `UV4.exe` 后，`fromelf.exe` 会自动在同一安装根下查找（AC6 在 `ARM\ARMCLANG\bin`，AC5 在 `ARM\ARM_Compiler_*\bin`），不需要单独配置。
 
@@ -89,16 +88,15 @@
 
 `target_name` 是多 Target 工程的 Keil `<TargetName>`，**不是** `target`（后者只选真机/仿真器）。不传就用工程当前 target。
 
-### 烧录与整片擦除
+### 烧录
 
 ```jsonc
 { "action": "flash" }   // UV4 -f，烧完回读校验
-{ "action": "erase" }   // 整片擦除，走 STM32_Programmer_CLI
 ```
 
-**`flash` 会自动关闭同工程的调试会话**：下载跑在 plain 工程会话上，而一个 ST-Link 不能被两个 uVision 同时占用。服务会先结束调试会话、再启动下载，所以**断点与运行位置会丢失**，需要重新 `open`。`erase` 同样会先关闭所有会话。
+**`flash` 会自动关闭同工程的调试会话**：下载跑在 plain 工程会话上，而一个 ST-Link 不能被两个 uVision 同时占用。服务会先结束调试会话、再启动下载，所以**断点与运行位置会丢失**，需要重新 `open`。
 
-`flash` 只擦除镜像自身占用的扇区（Keil 的行为），不是整片。要整片必须 `erase`。
+`flash` 只擦除镜像自身占用的扇区（Keil 的行为），不是整片。`erase` 在 MDK 5.43 上不可用（`PRJ_FLASH_ERASE` 无响应），整片擦除不在本工具的能力范围内——要清掉镜像外的扇区，用带全片擦除选项的外部工具自己操作。
 
 ### 调试
 
@@ -122,7 +120,7 @@
 { "action": "close_project" }  // 关工程会话，并把编辑写回 .uvprojx
 ```
 
-**不关闭的后果**：探针被占用，其他工具（ST-Link Utility、CubeProgrammer）连不上；工程编辑只留在 uVision 内存里，磁盘上的 `.uvprojx` 没变。
+**不关闭的后果**：探针被占用，其他工具（ST-Link Utility 等）连不上；工程编辑只留在 uVision 内存里，磁盘上的 `.uvprojx` 没变。
 
 ---
 
@@ -144,9 +142,9 @@
 | `NOT_DEBUGGING` | 是否先调用了 `open` | 工程结构类动作需要进入调试模式后才能回答 |
 | `Target is in debug mode` | 是否在调试会话里改工程 | 先 `close`，再改工程，再重新 `open` |
 | 工程改了但文件没变 | 是否调用了 `close` / `close_project` | uVision 在退出时才写盘；本服务不会直接改 `.uvprojx` |
-| `Flash Download failed` | 芯片型号、Flash 算法、是否整片擦除过 | 选项字节/读保护；先 `erase` 再 `flash` |
+| `Flash Download failed` | 芯片型号、Flash 算法、选项字节/读保护 | 用 `clean_rebuild` 后重试；仍失败看 uVision 日志 |
 | `Target DLL has been cancelled` | 是否还有另一个 uVision 开着同一工程 | 探针被占用；本服务的 `flash` 会自动关调试会话，手动开着的 uVision 仍需先关 |
-| `erase` 说不可用 | 是否装了 STM32CubeProgrammer | 整片擦除必须走 ST 的 CLI，UVSOCK 的擦除在 5.43a 无响应 |
+| `erase` 说不可用 | 预期行为 | `PRJ_FLASH_ERASE` 在 MDK 5.43 上无响应，整片擦除不在本工具范围内 |
 | 中文组名/路径乱码 | 工程文件编码 | 协议按 GBK 编解码；工程文件本身若是 UTF-8，新建中文组名仍会按 GBK 发送 |
 
 ---
@@ -156,6 +154,6 @@
 1. 构建失败只给 UV4 日志原文与退出码，不做结构化的「文件:行号」（诊断解析未迁移）。
 2. 只支持 Keil 生态；Zephyr / ESP-IDF / PlatformIO / Arduino / Cargo / CMake / Make 不在本服务范围。
 3. UVSOCK 是未公开协议，偏移来自 MDK 5.43a 实测；换版本需要重新验证。
-4. 整片擦除依赖外部 CLI，且会先关闭所有会话（一个探针不能被两个程序同时占用）。
+4. 整片擦除不可用：`PRJ_FLASH_ERASE` 在 MDK 5.43 上无响应，本工具不做外部 CLI 替代；`flash` 只覆盖镜像自身扇区。
 
 条目登记在 `docs/deferred-issues.md`（D-199 起）。

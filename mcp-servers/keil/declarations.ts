@@ -72,7 +72,7 @@ export function declarationFor(tool: string, action: string, input: Record<strin
   if (action === "erase") {
     return {
       operation: "chip_erase",
-      effect: "整片擦除(A 实测走 STM32_Programmer_CLI -e all,UVSOCK 的 PRJ_FLASH_ERASE 在 5.43a 无响应)",
+      effect: "擦除目标 Flash(UVSOCK 的 PRJ_FLASH_ERASE 在 MDK 5.43 上无响应,该动作预期返回不可用)",
     };
   }
   if (BUILD_ACTIONS.has(action)) {
