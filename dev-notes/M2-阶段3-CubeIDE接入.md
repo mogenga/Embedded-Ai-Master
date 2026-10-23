@@ -12,3 +12,10 @@
 - 被拒绝/纠偏：无（方案 A 之前给过 A/B 两个选项，用户选 A）。
 - 翻车与返工：一次端到端冒烟误把 keil `info` 转发跑了（会拉起 uVision），300s 超时进后台后 taskkill 停掉——真机动作不该在冒烟里顺手跑，identify-only 验证就够了。
 - 测试：20 个离线单测全过；`npm test` 3 处失败（skills-store ×2、kb-review ×1）在干净树上同样失败，与本轮无关。`npm run build:mcp` 通过，dist-mcp/cubeide/ 产出验证。
+
+## 2026-10-23（续）— ESP-IDF 后端
+
+- 用户原话：「我想的是嵌入式有一个总的路由入口 然后分不同系列 这样是可以的吗 我们现在是不是就是这样」「我们现在只做ESP32吧 不做ESP8266了 后续做arduino」；中途问 push（答：未推，随后推送 debug 分支 4 提交）。
+- 关键产出：`mcp-servers/espidf/` 8 文件；路由表加 espidf；`docs/espidf-headless.md`；D-204/D-205。
+- 实测驱动：idf.py 需要的最小 env 三件套是踩错跑出来的（缺 ESP_IDF_VERSION 直接 TypeError；MSYSTEM 从 git-bash 派生会让它走警告分支）；烧录参数不自己算，flasher_args.json 是 IDF 自己写的事实源；board cfg 同理来自 project_description.json。
+- 真实构建验证：ESP32S3 LVGL 工程首建 122s、增量 1.9s，exit 0。无板接入，flash/debug 未真机验证（probe 实测 COM3 不存在，报错路径符合预期）。

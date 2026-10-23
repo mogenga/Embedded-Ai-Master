@@ -1907,10 +1907,29 @@
 - **修复建议**: `gdbserver.ts` 增加 backend 参数（stlink | jlink | openocd），openocd 需要板级配置文件参数（没有默认值，fail-closed）。
 - **状态**: 未解决。
 
+### D-204 · ESP-IDF 串口监控输出流未接入
+
+- **发现**: 2026-10-23，ESP-IDF 接入。
+- **现象**: `esp_build` 只有构建/烧录/擦除/探测；`idf.py monitor` 的持续串口输出（固件日志）没有等价动作。probe MCP 已有串口后端，但那是裸串口，没有 IDF 的 ELF 解码（backtrace → 行号）。
+- **影响**: 调 ESP32 固件日志仍要自己开串口工具；backtrace 解码缺位。
+- **触发升级条件**: 用户要求读固件日志或解码 backtrace。
+- **修复建议**: 接 esptool 的 Serial 通道或直接串口读流，叠加 `xtensa-esp32s3-elf-addr2line` 做 backtrace 解码。
+- **状态**: 未解决。
+
+### D-205 · ESP-IDF menuconfig / sdkconfig 编辑未做
+
+- **发现**: 2026-10-23，ESP-IDF 接入。
+- **现象**: 换 target 走 `-DIDF_TARGET`（rebuild），但 sdkconfig 的选项编辑没有动作面。IDF 的 menuconfig 是交互式 TUI，headless 等价物是 `idf.py set-target` + 直接改 sdkconfig 文件（有 Kconfig 语义，不能盲改）。
+- **影响**: 改配置要用 IDF IDE/命令行本体。
+- **触发升级条件**: agent 化配置修改成为高频需求。
+- **修复建议**: 最小动作面 `get_config`/`set_config`（读 sdkconfig 的 `CONFIG_x=y` 行、写回并触发重配置），复杂选项仍留给 menuconfig。
+- **状态**: 未解决。
+
 ## 变更记录
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-23 | ESP-IDF（ESP32）后端接入（用户定案：只做 ESP32 不做 ESP8266，Arduino 后续）：新增 `mcp-servers/espidf/`（发现 IDF_PATH→`C:\Espressif\frameworks\esp-idf-*` glob、venv/esptool/openocd/gdb 全从 IDF_TOOLS_PATH 解析；实测最小环境变量集 IDF_PATH+IDF_PYTHON_ENV_PATH+ESP_IDF_VERSION 且须清 MSYSTEM；烧录读 build/flasher_args.json 照单拼 write-flash；调试 board cfg 读 project_description.json 的 debug_arguments_openocd，openocd:3333+esp-gdb 复用 cubeide 的 gdbMi.ts）。`embed_project` 路由表加 espidf 判定（CMakeLists include project.cmake）。真实 ESP32S3 LVGL 工程实测：构建 122s/增量 1.9s 均 exit 0，识别/描述/flasher_args 全对。12 个离线单测全过。录入 D-204（串口监控未接）与 D-205（sdkconfig 编辑未做）。文档 `docs/espidf-headless.md`。 |
 | 2026-10-23 | CubeIDE 接入 + 统一路由门面（用户「我想做的就是遇到什么工程调用哪个mcp」，方案 A 定案）：新增 `mcp-servers/cubeide/`（安装发现 CUBEIDE_HOME→默认路径、Eclipse 工程识别、headlessbuild 构建、内置 STM32_Programmer_CLI 烧录/整片擦除、GDB/MI 协议层 gdbMi、ST-LINK gdbserver、单会话 gdbSession、cubeide_debug/cubeide_build 两工具 35 动作）；`embed_project` 门面挂进 keil 与 cubeide 两个 server，识别 `.uvprojx` vs `.project+.cproject` 后转发，mixed 拒绝要求显式 project，none 报构建系统线索。实测修复两处：newestPlugin glob 必须排除 `.jar` 只取目录（字符串排序会把 jar 排在 win32 目录后）；GDB/MI result-class 边界是空格或逗号。`CUBEIDE_HOME` 是自选安装位（本机 G:\software）的指定通道。20 个离线单测全过；npm test 3 处失败（skills-store ×2、kb-review ×1）在干净树上同样失败，与本轮无关。录入 D-202（工程编辑未实现）与 D-203（J-Link/OpenOCD 未接）。文档 `docs/cubeide-headless.md`；规格 `docs/cubeide-porting-spec.md`。 |
 | 2026-10-22 | 第十七轮（用户「增加功能：思考强度设置；设置里面的worktree隔离也需要删掉；新增功能：长耗时终端后台运行，运行完毕后反馈」，并发 3 个子代理）：①**思考强度真正上线**——`providers.json` 的模型项新增 `supportsReasoning` / `reasoningEffort`，请求体只在解析出等级时才写 `reasoning_effort`（**缺席 ≠ 显式 `none`**，`auto` 在 runner 层转成「无覆盖」，绝不作为字面量上线）；操作者的选择按 `provider/model` 存 `run.json` 的 `reasoningEffortByModel`（缺席即 auto）。`setEffort` 从「永远回 warn」改为真正生效并回 `state`；`supportsReasoning` 不再写死 false；模型未声明能力时不提供等级、`Ctrl+E` 静默。顺带修两处谎：设置页保存 provider 会抹掉这两个字段（`carried` 漏项），渲染器在等级为空时伪造 `low/medium/high` 并把控件永久 `hidden`。**D-169 的 setEffort 结论作废**，D-188 的 `Ctrl+E` 一项已解决。②**删除 worktree 隔离设置**——行为页的 `isolateByDefault` 与会话页的 `branchPrefix` / `worktreeLocation` 三行、六个 i18n 键、`pageSessionsDesc` 里「隔离工作区」的说法一并删除；`app.js` 的 `ui_preference` 映射里最后一处残留也清掉。这三个控件本来就都是假的：`isolateByDefault` 只写 localStorage 无人读，`branchPrefix` 连 localStorage 都没写、每次重建就丢，内核也没有 worktree 能力。③**长耗时终端后台运行**——新增 `terminal_bg` / `terminal_bg_check`（`src/tools/background.ts`）：立即返回、`detached` + `unref` 启动、`timeoutMs` 到点终止整棵进程树（复用 `shell.ts` 的 `terminateTree`，危险命令同一套谓词拦截、有「先断言谓词再断言未 spawn」的两层测试）、输出取 64 KiB 尾巴并**同时报总字节与保留字节**。完成时经新事件 `background_result` 写进会话日志（不是临时提示：作业按定义比它所属的回合长，重开窗口还得看得见）；该事件在 `types.ts` / `persistence.ts` 的 `EVENT_TYPES` / `build.ts` 的投影 switch / `protocol.js` 的 `KNOWN_TYPES` **四处**登记，并用变异探针逐一验证过少任何一处都会整份日志读不出来或整屏「未识别事件」。宿主新增 1s 的完成泵与退出时的 `killAllBackgroundJobs`（只发信号、不谎称已停止）。**登记 D-199**（完成队列在进程内存、作业表不淘汰、孤儿进程风险）。 |
 | 2026-10-17 | 建档,录入 D-001 ~ D-008 |

@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { findUvprojx } from "../keil/projectLookup.js";
@@ -22,7 +22,7 @@ import type { LegacyTool } from "../keil/tools.js";
  * findEclipseProjects 同样遵守。
  */
 
-export type ProjectKind = "keil" | "cubeide" | "mixed" | "none";
+export type ProjectKind = "keil" | "cubeide" | "espidf" | "mixed" | "none";
 
 export interface RouteResult {
   kind: ProjectKind;
@@ -33,18 +33,36 @@ export interface RouteResult {
   hints?: string[];
 }
 
+/** ESP-IDF 工程签名：CMakeLists.txt include 了 IDF 的 project.cmake。 */
+function isIdfProjectDir(dir: string): boolean {
+  try {
+    return /tools\/cmake\/project\.cmake/.test(readFileSync(join(dir, "CMakeLists.txt"), "utf8"));
+  } catch {
+    return false;
+  }
+}
+
 export function routeProject(root: string): RouteResult {
   const keilFile = findUvprojx(root) ?? undefined;
   const eclipse = findEclipseProjects(root);
-  if (keilFile && eclipse.length === 0) return { kind: "keil", keilFile };
-  if (!keilFile && eclipse.length > 0) return { kind: "cubeide", eclipseProjects: eclipse.map((entry) => entry.dir) };
-  if (keilFile && eclipse.length > 0) {
-    return { kind: "mixed", keilFile, eclipseProjects: eclipse.map((entry) => entry.dir) };
+  // IDF 工程的 CMakeLists 在工程根；不往下钻（IDF 组件目录里有同名文件，会误判）。
+  const idf = isIdfProjectDir(root);
+  const kinds: ProjectKind[] = [];
+  if (keilFile) kinds.push("keil");
+  if (eclipse.length > 0) kinds.push("cubeide");
+  if (idf) kinds.push("espidf");
+  if (kinds.length === 1) {
+    if (kinds[0] === "keil") return { kind: "keil", keilFile };
+    if (kinds[0] === "cubeide") return { kind: "cubeide", eclipseProjects: eclipse.map((entry) => entry.dir) };
+    return { kind: "espidf" };
+  }
+  if (kinds.length > 1) {
+    return { kind: "mixed", ...(keilFile ? { keilFile } : {}), ...(eclipse.length > 0 ? { eclipseProjects: eclipse.map((entry) => entry.dir) } : {}) };
   }
   const hints: string[] = [];
   try {
     const entries = readdirSync(root);
-    for (const marker of ["Makefile", "CMakeLists.txt", "platformio.ini", "Cargo.toml", "package.json", "CMakePresets.json"]) {
+    for (const marker of ["Makefile", "CMakeLists.txt", "platformio.ini", "Cargo.toml", "package.json", "CMakePresets.json", "sdkconfig"]) {
       if (entries.includes(marker)) hints.push(marker);
     }
   } catch {
@@ -64,9 +82,9 @@ export const embedProjectSchema = z.object({
 
 export const EMBED_PROJECT_DESCRIPTION =
   "Work on the embedded project in the working directory — the router picks the right backend for you. " +
-  "A Keil MDK project (.uvprojx) is routed to the Keil uVision backend; an STM32CubeIDE / Eclipse CDT project (.project + .cproject) is routed to the CubeIDE backend (headless build, STM32_Programmer_CLI flash, and full-chip erase — which the Keil backend cannot do). " +
-  "Pass action `identify` to only ask what kind of project this is and what files were found. Other actions are forwarded verbatim to the backend tool that owns them (keil_debug / keil_project / cubeide_debug / cubeide_build); unknown or unsupported actions are reported honestly, never guessed. " +
-  "When the directory holds both kinds, the router refuses and asks for an explicit `project` argument.";
+  "A Keil MDK project (.uvprojx) is routed to the Keil uVision backend; an STM32CubeIDE / Eclipse CDT project (.project + .cproject) is routed to the CubeIDE backend (headless build, STM32_Programmer_CLI flash, and full-chip erase — which the Keil backend cannot do); an ESP32 ESP-IDF project (CMakeLists.txt including tools/cmake/project.cmake) is routed to the ESP-IDF backend (idf.py build, esptool flash/erase, openocd+gdb debug). " +
+  "Pass action `identify` to only ask what kind of project this is and what files were found. Other actions are forwarded verbatim to the backend tool that owns them (keil_debug / keil_project / cubeide_debug / cubeide_build / esp_debug / esp_build); unknown or unsupported actions are reported honestly, never guessed. " +
+  "When the directory holds more than one kind, the router refuses and asks for an explicit `project` argument.";
 
 /** 路由 + 转发。keil 侧的 LegacyTool 由 createKeilTools 的输入提供。 */
 export function createEmbedProjectTool(keilLegacy: LegacyTool[]): ProbeToolSpec {
@@ -124,10 +142,13 @@ export function createEmbedProjectTool(keilLegacy: LegacyTool[]): ProbeToolSpec 
       if (explicit) {
         const isKeil = /\.uvprojx?$/i.test(explicit) && existsSync(explicit);
         const isEclipse = existsSync(join(explicit, ".project")) || explicit.endsWith(".project");
-        if (isKeil && !isEclipse) kind = "keil";
-        else if (isEclipse && !isKeil) kind = "cubeide";
-        else if (!isKeil && !isEclipse) {
-          return { content: [{ type: "text", text: `${explicit} is neither a .uvprojx nor a CubeIDE project directory; nothing was routed.` }], isError: true };
+        const isIdf = isIdfProjectDir(explicit);
+        const matched = [isKeil, isEclipse, isIdf].filter(Boolean).length;
+        if (matched === 1) kind = isKeil ? "keil" : isEclipse ? "cubeide" : "espidf";
+        else if (matched === 0) {
+          return { content: [{ type: "text", text: `${explicit} is not a recognisable project (.uvprojx / .project+.cproject / IDF CMakeLists); nothing was routed.` }], isError: true };
+        } else {
+          return { content: [{ type: "text", text: `${explicit} matches more than one project kind; pass the project directory itself.` }], isError: true };
         }
       }
 
@@ -142,6 +163,11 @@ export function createEmbedProjectTool(keilLegacy: LegacyTool[]): ProbeToolSpec 
           structuredContent: { tool: "embed_project", action, backend: "keil", ...(result.data && typeof result.data === "object" ? (result.data as Record<string, unknown>) : {}) },
           ...(result.isError ? { isError: true } : {}),
         };
+      }
+      if (kind === "espidf") {
+        // espidf 后端经动态 import，避免 keil/cubeide 侧硬依赖。
+        const { handleEspIdfAction } = await import("../espidf/route-esp.js");
+        return handleEspIdfAction(input);
       }
       // cubeide 动作直接在本文件里可用——通过动态 import 避免硬依赖
       // keil 与 cubeide 互相引用（keil 不 import 本文件）。
