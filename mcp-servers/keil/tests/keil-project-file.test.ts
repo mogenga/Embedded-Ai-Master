@@ -178,3 +178,23 @@ it("the fixture keeps its BOM and Chinese path bytes", async () => {
   expect(decodeGbk(bytes.subarray(3))).toContain("中文目录");
   expect(decodeGbk(bytes.subarray(3))).toContain("STM32F4xx_1024.FLM");
 });
+
+it("both fixture files parse as XML right after the BOM", async () => {
+  // uVision refuses a project file whose first XML byte is not `<` ("Cannot
+  // read project file"), and a stray byte after the BOM once shipped here —
+  // the unit tests still passed because none of them fed the fixture to a
+  // parser. Guard both files so that cannot come back.
+  const { xmlParser } = await import("node:expat").catch(() => ({ xmlParser: undefined }));
+  void xmlParser;
+  for (const name of ["TOUCH.uvprojx", "TOUCH.uvoptx"]) {
+    const bytes = readFileSync(join(SAMPLE, name));
+    const start = bytes.subarray(0, 3).toString("hex") === "efbbbf" ? 3 : 0;
+    const text = bytes.subarray(start).toString("latin1");
+    expect(text.startsWith("<?xml"), `${name} must start with <?xml after the BOM`).toBe(true);
+    // The project-file surgery regexes are anchored to real element structure:
+    // `readProjectFacts` returning real facts proves the elements parse back
+    // out of these bytes.
+    const facts = readProjectFacts(join(SAMPLE, name.replace(".uvoptx", ".uvprojx")));
+    expect(facts.device).toBe("STM32F429IGTx");
+  }
+});
