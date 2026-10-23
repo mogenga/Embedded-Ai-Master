@@ -2196,8 +2196,8 @@ export const FLASH_ERASE_LIMITATION =
   "uVision 5.43.1 never answers PRJ_FLASH_ERASE (no reply, no error frame, no message box), " +
   "and a download is not a full-chip erase: it erases only the sectors its own image occupies " +
   "(measured — a marker at 0x08010000 survived `UV4 -f` untouched). " +
-  "What does work: download to clear the image's sectors, or mass-erase the chip with " +
-  "`STM32_Programmer_CLI -c port=SWD -e all` (measured on this bench).";
+  "Full-chip erase is therefore not available through this tool; a download that covers the " +
+  "sectors you want cleared is the closest it does.";
 
 /**
  * Erase the target's flash.
@@ -2210,43 +2210,6 @@ export async function eraseFlash(session: KeilSession): Promise<Reply> {
   const reply = await session.client.send(OP.PRJ_FLASH_ERASE, Buffer.alloc(0), 20_000);
   if (reply.timedOut) return { ...reply, ok: false, message: FLASH_ERASE_LIMITATION };
   return reply;
-}
-
-/**
- * The command that really erases the whole chip.
- *
- * uVision offers no full-chip erase on this target: `PRJ_FLASH_ERASE` never
- * answers, and a download erases only its own image's sectors (measured — see
- * `FLASH_ERASE_LIMITATION`). The chip's own mass-erase command is reached
- * through ST's CLI, which talks to the same ST-Link:
- *
- *   STM32_Programmer_CLI -c port=SWD -e all
- *
- * Measured on this bench: after writing markers at `0x08010000` and
- * `0x080C0000`, running this left both reading `0xFF`, along with the image at
- * `0x08000000`.
- */
-export function massEraseCommand(input: { cli: string; port?: string; sn?: string }): string[] {
-  const connect = [`port=${input.port ?? "SWD"}`];
-  // With more than one probe attached ST's CLI refuses to guess and asks for
-  // the serial number; naming it is the only way to pick one.
-  if (input.sn) connect.push(`sn=${input.sn}`);
-  return [input.cli, "-c", connect.join(" "), "-e", "all"];
-}
-
-/** Whether the CLI's own output says the chip was erased. */
-export function massEraseSucceeded(output: string): boolean {
-  return /mass erase successfully achieved/i.test(output);
-}
-
-/** Why a mass erase cannot run here, and what it would take. */
-export function massEraseUnavailableReason(): string {
-  return (
-    "a full-chip erase needs STM32_Programmer_CLI (STM32CubeProgrammer), and it was not found. " +
-    "uVision cannot do it on this target: it never answers PRJ_FLASH_ERASE, and a download only erases " +
-    "the sectors its own image occupies — measured, a marker past the image survived a download untouched. " +
-    "With the CLI installed, `-c port=SWD -e all` erases the whole chip."
-  );
 }
 
 /* ---------- struct members ---------- */
@@ -2346,12 +2309,20 @@ export async function getOutputName(session: KeilSession): Promise<string> {
  * Comparing it with the bare name the caller sent made every successful rename
  * report "still reports ..., nothing was changed". The comparison is therefore
  * on the last path segment, case-insensitively, which is the rule Windows
- * itself applies to the file it names.
+ * itself applies to the file it named.
+ *
+ * The stem form is also accepted: measured on 5.43.1, setting `TOUCH2` stores
+ * the stem and `PRJ_GET_OUTPUTNAME` answers `..\OBJ\TOUCH2.axf` — uVision
+ * appends the image extension itself. Comparing stems (dropping one
+ * extension) treats that as the same name instead of a failed rename.
  */
 export function sameOutputName(stored: string, wanted: string): boolean {
   const base = (value: string) => (value.split(/[\\/]/).pop() ?? value).trim().toLowerCase();
-  if (!stored.trim()) return false;
-  return base(stored) === base(wanted);
+  if (!stored.trim() || !wanted.trim()) return false;
+  if (base(stored) === base(wanted)) return true;
+  // `TOUCH.axf` vs `TOUCH`: the stored name is the wanted stem plus an
+  // extension uVision added.
+  return base(stored).replace(/\.[a-z0-9]+$/i, "") === base(wanted).replace(/\.[a-z0-9]+$/i, "");
 }
 
 /**

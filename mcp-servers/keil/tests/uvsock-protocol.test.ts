@@ -768,7 +768,8 @@ it("the capability report is reachable and does not claim a working op is refuse
 /* ---------- project detection must not wander into a sibling ---------- */
 
 // 依赖 A 侧未迁移模块：project.ts (detectProject)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-it("a directory with no project of its own does not adopt a sibling's", async () => {
+// 15s 而非默认 5s：detectProject 要走目录树，机器慢或并行跑全量时 2s+ 是实测常态。
+it("a directory with no project of its own does not adopt a sibling's", { timeout: 15_000 }, async () => {
   const { detectProject } = await import("../project.js");
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");
@@ -847,6 +848,12 @@ it("an output name is compared by its file name, because the reply is a path", a
   expect(sameOutputName(["..", "OBJ", "APP.AXF"].join(B), "app.axf")).toBe(true);
   expect(sameOutputName(["..", "OBJ", "other.axf"].join(B), "app.axf")).toBe(false);
   expect(sameOutputName("", "app.axf")).toBe(false);
+  // Measured on 5.43.1: setting the stem `TOUCH2` answers `..\OBJ\TOUCH2.axf`
+  // — uVision appends the image extension. Stem and full name are the same
+  // setting; only a genuinely different name may read as unchanged.
+  expect(sameOutputName(["..", "OBJ", "TOUCH2.axf"].join(B), "TOUCH2")).toBe(true);
+  expect(sameOutputName(["..", "OBJ", "TOUCH2.axf"].join(B), "TOUCH")).toBe(false);
+  expect(sameOutputName(["..", "OBJ", "app.axf"].join(B), "app")).toBe(true);
 });
 
 it("a watchpoint is confirmed by the breakpoint list, not by the reply", async () => {

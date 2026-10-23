@@ -8,6 +8,7 @@
  * pretending an empty result means "nothing found".
  */
 
+import { execFileSync } from "node:child_process";
 import type { Reply } from "./uvsock.js";
 import { decodeGbk } from "./gbk.js";
 import {
@@ -292,11 +293,39 @@ export async function disassemble(session: KeilSession, address: number, bytes =
 export async function ideVersionText(session: KeilSession): Promise<{ uv: string; socket: string } | null> {
   const reply = await session.client.send(OP.GEN_GET_EXTVERSION, Buffer.alloc(0), 8_000);
   if (!reply.ok) return null;
-  // Measured tail: "µVision=V5.43.1.0UVSOCK=V2.29".
-  const text =decodeGbk( reply.data);
-  const uv = /µVision=V([0-9.]+)/.exec(text)?.[1] ?? "";
-  const socket = /UVSOCK=V([0-9.]+)/.exec(text)?.[1] ?? "";
-  return { uv, socket };
+  // Two shapes measured:
+  // - MDK 5.43a answers a text tail "µVision=V5.43.1.0UVSOCK=V2.29";
+  // - MDK 5.43.1.0 answers two LE words only — {ide, socket×100} (measured:
+  //   {1, 18} with no "µVision=" anywhere in the payload). The ide word does
+  //   not decode to a version on that build, so only the socket is read from
+  //   it; the µVision version then comes from the UV4.exe file version, which
+  //   every install carries.
+  const text = decodeGbk(reply.data);
+  let uv = /µVision=V([0-9.]+)/.exec(text)?.[1] ?? "";
+  let socket = /UVSOCK=V([0-9.]+)/.exec(text)?.[1] ?? "";
+  if (!socket && reply.data.length >= 8) {
+    const word = reply.data.readUInt32LE(4);
+    if (word > 0) socket = (word / 100).toFixed(2);
+  }
+  if (!uv) uv = uv4FileVersion(session.client.programPath) ?? "";
+  return uv || socket ? { uv, socket } : null;
+}
+
+/** The version stamped on UV4.exe, e.g. "5.43.1.0" — null when unreadable. */
+function uv4FileVersion(uv4Path: string): string | null {
+  if (!uv4Path || process.platform !== "win32") return null;
+  try {
+    const out = execFileSync("powershell", [
+      "-NoProfile", "-Command",
+      `(Get-Item -LiteralPath @'
+${uv4Path}
+'@ -ErrorAction Stop).VersionInfo.ProductVersion`,
+    ], { encoding: "utf8", timeout: 10_000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    const version = out.trim();
+    return /^\d+(\.\d+)+$/.test(version) ? version : null;
+  } catch {
+    return null;
+  }
 }
 
 /* ---------- menus, trace, recorder ---------- */
@@ -494,7 +523,7 @@ export const UNSUPPORTED_ON_MDK_5_43: Record<string, string> = {
   // A download is not a substitute for a full-chip erase — it erases only its
   // own image's sectors (measured with markers left past the image). See
   // `FLASH_ERASE_LIMITATION`.
-  "PRJ_FLASH_ERASE": "never replies; a download erases only its own image's sectors, and a full-chip erase is STM32_Programmer_CLI -e all",
+  "PRJ_FLASH_ERASE": "never replies; a download erases only its own image's sectors, and no full-chip erase exists over UVSOCK on this build",
   // Re-measured on MDK 5.43a + STM32F429. `DBG_ENUM_VTR` lists CURR_TID,
   // STCLK, STLINK_PM, CORE_CLK and TRACE_CLK, and `VTR_GET` answers every one
   // of them. `TRAPS` is not in that list and answers `Unknown VTR-name`. One
