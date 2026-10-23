@@ -5697,3 +5697,41 @@ mark.find-hit.current {
   overflow: auto;
   white-space: pre-wrap;
 }
+
+/* ---------- serial send row ---------- */
+
+.serial-send-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.serial-send-input {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  outline: none;
+}
+
+.serial-send-input:focus {
+  border-color: var(--accent);
+}
+
+.serial-send-crlf {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+  cursor: pointer;
+}

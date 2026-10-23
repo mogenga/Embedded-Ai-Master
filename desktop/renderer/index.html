@@ -129,6 +129,10 @@
               <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
               <span data-i18n="menuBrowseFiles">Browse workspace files</span>
             </button>
+            <button class="menu-row" id="menu-open-serial" role="menuitem">
+              <svg class="icon" aria-hidden="true"><use href="#i-terminal"></use></svg>
+              <span data-i18n="menuOpenSerial">Open serial monitor</span>
+            </button>
             <div class="menu-separator"></div>
             <div class="menu-setting" role="group" aria-label="Theme">
               <span class="menu-setting-label" data-i18n="settingsTheme">Theme</span>
@@ -365,17 +369,14 @@
           <section class="workbench" id="workbench" hidden>
             <div class="workbench-head">
               <div class="workbench-tabs" id="workbench-tabs" role="tablist">
-                <!-- Three panes have a real source: the board reads
-                     `device_status`, the file pane reads `GET /api/file`
-                     (or the host's `getFile`), and the artifact pane lists
-                     what `pipeline.writeArtifact` wrote. The rest — diff,
-                     history, tasks, terminal, browser — have no kernel
-                     counterpart, and the serial monitor needs commands this
-                     host does not provide; an empty tab that can never fill is
-                     a dead end, not a placeholder. File and artifact start
-                     hidden because they are opened by an action (a tool row
-                     click), not by browsing. -->
+                <!-- Panes with a real source: the board reads `device_status`,
+                     the file pane reads `getFile`, the artifact pane lists
+                     what `pipeline.writeArtifact` wrote, and the serial pane
+                     is fed by the host's PowerShell serial bridge. File and
+                     artifact start hidden because they are opened by an
+                     action (a tool row click), not by browsing. -->
                 <button role="tab" aria-selected="true" tabindex="0" data-pane="board" class="active" data-i18n="paneBoard">Board</button>
+                <button role="tab" aria-selected="false" tabindex="-1" data-pane="serial" data-i18n="paneSerial">Serial</button>
                 <button role="tab" aria-selected="false" tabindex="-1" data-pane="file" data-i18n="paneFile" hidden>File</button>
                 <button role="tab" aria-selected="false" tabindex="-1" data-pane="files" data-i18n="paneFiles" hidden>Files</button>
                 <button role="tab" aria-selected="false" tabindex="-1" data-pane="artifact" data-i18n="paneArtifact" hidden>Artifact</button>
@@ -497,6 +498,21 @@
                   <span class="serial-status" id="serial-status"></span>
                 </div>
                 <div class="serial-output" id="serial-output" tabindex="0"></div>
+                <div class="serial-send-row">
+                  <input
+                    class="serial-send-input"
+                    id="serial-send-input"
+                    spellcheck="false"
+                    autocomplete="off"
+                    data-i18n-placeholder="serialSendPlaceholder"
+                    placeholder="Send to the port…"
+                  />
+                  <button class="btn btn-primary small" id="serial-send" data-i18n="serialSend">Send</button>
+                  <label class="serial-send-crlf" data-i18n-title="serialSendCrlf">
+                    <input type="checkbox" id="serial-send-crlf" checked />
+                    <span data-i18n="serialSendCrlf">CRLF</span>
+                  </label>
+                </div>
               </div>
               <div class="artifact-root" id="artifact-root" hidden></div>
               <div class="browser-root" id="browser-root" hidden>

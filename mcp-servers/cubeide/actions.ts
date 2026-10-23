@@ -117,3 +117,28 @@ export const DEBUG_DESCRIPTION =
 
 export const BUILD_DESCRIPTION =
   "The STM32Cube toolchain, headless — three tools with one job each: CubeMX generates the project (from an MCU part number or an existing .ioc, with correct clock tree and peripheral config), CubeIDE builds it (Eclipse headlessbuild) and debugs it (gdb + ST-LINK_gdbserver), CubeProgrammer flashes it (with verify; full-chip erase included). Requires all three installed: CUBEMX_HOME for CubeMX, CUBEIDE_HOME for CubeIDE (the bundled CubeProgrammer is used). Typical flow: generate → build → flash, then debug via cubeide_debug.";
+
+// ---- embed_serial -----------------------------------------------------------
+
+export const SERIAL_ACTIONS = ["read", "write", "ports", "status"] as const;
+export type SerialAction = (typeof SERIAL_ACTIONS)[number];
+
+export const SERIAL_EVIDENCE_ACTIONS: ReadonlySet<string> = new Set(["read", "ports", "status"]);
+export const SERIAL_DESTRUCTIVE_ACTIONS: ReadonlySet<string> = new Set(["write"]);
+
+export const serialInputSchema = z
+  .object({
+    action: z.enum(SERIAL_ACTIONS),
+    // `read` without port → the panel's ring mirror; with port+baud → open
+    // the port directly for durationMs and read the line tail.
+    port: z.string().optional(),
+    baud: z.number().int().min(300).max(4_000_000).optional(),
+    max_lines: z.number().int().min(1).max(500).optional(),
+    since: z.number().int().min(0).optional(),
+    duration_ms: z.number().int().min(50).max(30_000).optional(),
+    data: z.string().max(4096).optional(),
+  })
+  .strict();
+
+export const SERIAL_DESCRIPTION =
+  "Serial monitor access for the agent — the same data the desktop panel shows. action `read` without `port` returns the panel's live ring buffer (the desktop host keeps writing it to <home>/.harness/serial/ring.json); action `read` with `port`+`baud`+`duration_ms` opens the COM port directly for that window and returns the lines captured (fails honestly if the panel already owns the port — COM ports are exclusive). action `write` sends data out through the panel's open port or a transient one. action `ports` lists COM ports with friendly names. action `status` reports which port is open and who owns it.";

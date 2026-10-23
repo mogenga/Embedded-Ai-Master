@@ -1484,6 +1484,7 @@
 - **修复建议**: 逐项在 `desktop/MATRIX.md` 标记“已支持/隐藏/待接”,新增能力时先补内核后端再放开前端入口。
 - **状态**: 未解决(已知边界,清单见 `desktop/MATRIX.md`)。
 - **2026-10-22 更新（第十六轮「接入skills功能」）**: 本条隐藏清单里的 **skills 一项已解决**——本轮的接入方式与其余各项相反：技能不是「内核已有、前端没接」，而是**内核里根本没有这个能力**，所以先补内核（`src/skills/`），再接宿主（`getSkills` / `saveSkill` / `removeSkill` + `skills` 事件）与渲染层（`/name args` 展开、设置页「技能」页），符合本条修复建议里「新增能力时先补内核后端再放开前端入口」的顺序。**清单里其余各项（git/PR、终端、worktree、packs、browser、memory/instructions/hooks、subagents、goals、检查点、压缩、板卡/串口控制）一条未动**，本条继续有效。技能自身的四条边界（无权限语义、无自动调用、参数只有字符串替换、项目作用域无信任门与同名覆盖）另立 **D-198**，不在本条跟踪。
+- **2026-10-23 更新（串口监视器接通）**: 隐藏清单里的**串口控制已解决**：宿主新增 `desktop/host/serial-bridge.js`（PowerShell .NET SerialPort 泵，零 npm 依赖、无 native/ABI 风险）与六个 handler（`serialOpen`/`serialClose`/`serialStatus`/`serialClear`/`serialWrite`/`listSerialPorts`），渲染层 Serial tab 解禁（`SUPPORTED_PANES` + tab 条常驻 + `serial_ports` 事件回填端口下拉）。agent 侧经 cubeide server 的 `embed_serial` 工具读面板环形缓冲镜像（`$HARNESS_HOME/serial/ring.json`，host 每次 flush 原子重写）或开一次性捕获；同口冲突诚实报错 `port_busy`。实现细节、坑与实测证据见 `dev-notes/M3-串口面板.md`。
 
 ### D-167 · 前端文档与实现存在 4 处偏差(重写 frontend-design v2.0 时核出)
 
@@ -1925,10 +1926,21 @@
 - **修复建议**: 最小动作面 `get_config`/`set_config`（读 sdkconfig 的 `CONFIG_x=y` 行、写回并触发重配置），复杂选项仍留给 menuconfig。
 - **状态**: 未解决。
 
+### D-206 · 杀软/策略可能拦截宿主 spawn PowerShell 泵（spawn EPERM）
+
+- **发现**: 2026-10-23,串口面板实现期。测试脚本从 `.mjs` 文件（无论 Temp 还是工程目录）通过 `node file.mjs` 运行时,宿主 spawn `powershell -Command <泵脚本>` 稳定得到 **EPERM**；同一代码经 `node -e`（stdin）运行则从不复现。
+- **现象**: 本机行为与 Kaspersky 启发式的已知模式一致——按「脚本文件 → node → powershell」的进程链评估,拦下孙代 spawn;BRD §13 已记载 Kaspersky 会静默干预。`-e` 与 Electron 主进程（已签名）两条链不受影响,真实桌面形态预计可用,但**未在实机 Electron 上验证**。
+- **影响**: 被拦时 `serialOpen` 诚实报错「无法启动 PowerShell 泵：spawn EPERM」（R3 ✓）,面板显示错误状态,不静默。
+- **触发升级条件**: 真实桌面环境出现该错误;或用户机器杀软行为不同。
+- **修复建议**: 泵脚本落盘为签名随附的 `.ps1` 资源而非命令行注入;或二期换 node-serialport(native 模块免 PowerShell)。
+- **状态**: 未解决(已如实报错,有降级路径——agent 侧 `embed_serial` 的泵同样可能被拦,同报错)。
+- **2026-10-23 补充（桌面实测）**: 用户实机点 Start **成功**——Electron 主进程链不被杀软拦,本条风险降级为「仅影响 node file.mjs 测试链」。同轮发现并修复**孤儿泵**缺陷:宿主死后 PowerShell 泵不自动退(Windows 无 PDEATHSIG),COM 口被攥死;修复为父 PID 看门狗(泵每 2s 查 `Get-Process -Id parent_pid`,宿主不在即关口退出;搜网确认是社区标准模式,Job Object 方案需 native 调用不合零依赖),实测孤儿 ~500ms 自退,已并入 D-206 相关实现记录(dev-notes/M3-串口面板.md)。
+
 ## 变更记录
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-23 | 串口面板一期(用户「先转过头做右侧面板 顺便内嵌一个功能完善的串口助手 也方便agent直接读取」):宿主新增 `desktop/host/serial-bridge.js`(PowerShell .NET SerialPort 泵,零 npm 依赖)。**实测钉死四个坑**:①PS 的 `Register-ObjectEvent` Action 在主线程阻塞于 ReadLine 期间**永不执行**;②`[Console]::In.ReadLineAsync()` 同步阻塞,内部轮询 spin=0;③管道 stdin 上 `DataAvailable` 恒 false,必须 `BeginRead`+`IsCompleted` 轮询且 PS 函数作用域变量必须 `$script:` 前缀;④`[Console]::OutputEncoding` 默认 gb2312,中文行乱码,泵开头强制 UTF-8。**双口互发实测**(用户交叉接两 CH340):5 条消息全通、warn/error 分级、9000 字符长行按 8192 截断、中文往返无损、ring 500 行封顶计 dropped、mirror 落盘。宿主六命令与五个 serial 事件全链路协议实测;agent 侧 cubeide server 新增 `embed_serial`(read 镜像/一次性捕获/write/ports/status,冲突诚实报 `port_busy`);渲染层 Serial tab 解禁。11 bridge 单测 + 5 工具单测全绿;`npm test` 2793 过,3 失败为既有遗留(skills-store×2、kb-review×1)。**EPERM 风险登记 D-206**(文件脚本链路杀软拦 spawn,`-e`/Electron 链不受影响,桌面实机待验) |
 | 2026-10-23 | Cube 三件套真机全链路测试（正点原子阿波罗 F429IGT6 核心板 + ST-Link V2J48S7 + CH340）：①修复 `-c SWD`→`-c port=SWD`（v2.23 CLI 真机语法）；②`-import` 必须用 `file:///` URI（EFS 不认盘符路径）；③构建失败保留 workspace（.metadata/.log 是唯一诊断源）；④CubeMX 无头生成接入（`-q` 脚本模式，UM1718 Table 1 命令实测：load/project name/toolchain/path/generate，`STM32CubeMX.exe -q` 直跑退出码不可靠 → `jre/bin/java -jar` 路线）；⑤ST gdbserver 对 S7 后缀固件报 "No device found"（ST 克隆限制，社区多案例），**OpenOCD 回退**实现并真机通过（espidf 的 openocd-esp32 + stm32f4x.cfg，halt/寄存器/读写内存全通）；⑥真实 harness 层 E2E（loadMcpConfig→McpManager→call）：version/probe/generate(33.8s)/build(10.6s)/flash(verified) 全过。遗留：调试会话中途目标进入 "Unable to get core ID" 状态（CLI 也连不上，AP 号 1→0），需物理复位；用户工程的 `.cproject` MCU 正则是 `value="STM32\w+"` 宽匹配（target_mcu.value. 假设错误）。 |
 | 2026-10-23 | Arduino 后端接入（用户「开始做arduino路线」；范围：编译+烧录+查询，无调试——AVR 无调试硬件，`debug check` 实测不支持，不做假面）：新增 `mcp-servers/arduino/`（arduino-cli 发现 = ARDUINO_CLI→IDE 自带位置→PATH；sketch 判据 = 目录名与 .ino 同名；compile --output-dir、upload --input-dir 拒绝隐式编译；boards/search_board/libs 现查，lib 过滤为本地子串——CLI 的过滤词是精确匹配实测）。`embed_project` 路由表加 arduino（第 4 系）。真机冒烟：Blink 编译 arduino:avr:uno 924 bytes；upload 无板报错路径诚实。9 个离线单测全过；CLI JSON 形状三处实测修正（platforms 嵌套 releases、board fqbn 小写、installed_libraries 包装）。文档 `docs/arduino-headless.md`。 |
 | 2026-10-23 | ESP-IDF（ESP32）后端接入（用户定案：只做 ESP32 不做 ESP8266，Arduino 后续）：新增 `mcp-servers/espidf/`（发现 IDF_PATH→`C:\Espressif\frameworks\esp-idf-*` glob、venv/esptool/openocd/gdb 全从 IDF_TOOLS_PATH 解析；实测最小环境变量集 IDF_PATH+IDF_PYTHON_ENV_PATH+ESP_IDF_VERSION 且须清 MSYSTEM；烧录读 build/flasher_args.json 照单拼 write-flash；调试 board cfg 读 project_description.json 的 debug_arguments_openocd，openocd:3333+esp-gdb 复用 cubeide 的 gdbMi.ts）。`embed_project` 路由表加 espidf 判定（CMakeLists include project.cmake）。真实 ESP32S3 LVGL 工程实测：构建 122s/增量 1.9s 均 exit 0，识别/描述/flasher_args 全对。12 个离线单测全过。录入 D-204（串口监控未接）与 D-205（sdkconfig 编辑未做）。文档 `docs/espidf-headless.md`。 |

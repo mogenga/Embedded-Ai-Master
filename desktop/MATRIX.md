@@ -60,11 +60,11 @@
 
 ### 已隐藏（前端不渲染入口，宿主回显式 `notice`）
 
-git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi`）、终端（`terminalOpen`/`terminalRun`/`terminalInterrupt`/`terminalRestart`）、worktree（`worktreeStart`/`worktreeMerge`/`worktreeDiscard`/`worktreeDiff`；**顶栏与面板已在 2026-10-22 整块删除**，用户点它只得到「桌面宿主暂不支持该命令」）、packs（`getPacks`/`installPack`/…）、browser（`browserOpen`/`browserNavigate`/…）、memory / instructions / hooks、subagents、goals、检查点（`getCheckpoints`/`restoreCheckpoint`/`restoreFile`）、压缩（`compact`）、板卡/串口控制（`getBoardState`/`serialOpen`/…）。
+git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi`）、终端（`terminalOpen`/`terminalRun`/`terminalInterrupt`/`terminalRestart`）、worktree（`worktreeStart`/`worktreeMerge`/`worktreeDiscard`/`worktreeDiff`；**顶栏与面板已在 2026-10-22 整块删除**，用户点它只得到「桌面宿主暂不支持该命令」）、packs（`getPacks`/`installPack`/…）、browser（`browserOpen`/`browserNavigate`/…）、memory / instructions / hooks、subagents、goals、检查点（`getCheckpoints`/`restoreCheckpoint`/`restoreFile`）、压缩（`compact`）、板卡控制（`getBoardState`）；串口已移出（见下）。
 
 > **`skills` 已于 2026-10-22 第十六轮移出本清单**（见下表 `getSkills` / `saveSkill` / `removeSkill`）。它当初在这里的原因和别的项不一样：git/终端/worktree 那些是「内核有能力、前端没接」，技能是**内核根本没有这个能力**，所以这一轮先补内核再加前端入口。
 
-串口监视器同样隐藏：`serialOpen` / `serialStatus` / `serialRead` 没有宿主实现，内核只把串口能力暴露为模型调用的 MCP 工具，探针的串口状态改在板卡面板「设备」段显示。工作台有 Board / File / Artifact 三个 tab——后两个由动作打开（点工具行、点产物），不在 tab 条上常驻。
+串口监视器**已在 2026-10-23 接通**：`serialOpen` / `serialClose` / `serialStatus` / `serialClear` / `serialWrite` / `listSerialPorts` 都有宿主实现（`desktop/host/serial-bridge.js`，PowerShell .NET SerialPort 泵，零 npm 依赖），工作台 tab 条常驻 Serial tab。面板与 agent 双通道共享数据但不共享口：面板持口并镜像环形缓冲到 `$HARNESS_HOME/serial/ring.json`，agent 经 `embed_serial`（cubeide server）读镜像或开一次性捕获；同口冲突诚实报错 `port_busy`。
 
 原因逐项登记在 `docs/deferred-issues.md` 的 D-166 与 D-169。技能的边界（没有权限语义、模型不能自己挑、参数只有字符串替换、项目作用域没有信任门）另见 D-198。
 

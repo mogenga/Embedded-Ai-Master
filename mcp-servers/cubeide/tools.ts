@@ -6,8 +6,13 @@ import {
   CUBEIDE_DESTRUCTIVE_ACTIONS,
   DEBUG_DESCRIPTION,
   BUILD_DESCRIPTION,
+  SERIAL_ACTIONS,
+  SERIAL_EVIDENCE_ACTIONS,
+  SERIAL_DESTRUCTIVE_ACTIONS,
+  SERIAL_DESCRIPTION,
   cubeideDebugInputSchema,
   cubeideBuildInputSchema,
+  serialInputSchema,
 } from "./actions.js";
 import { declarationFor } from "./declarations.js";
 import { findCubeIdeTools, type CubeIdeTools } from "./cubeideInstall.js";
@@ -24,6 +29,7 @@ import {
   openSession,
 } from "./gdbSession.js";
 import { GdbMiError, frameFields, unquote } from "./gdbMi.js";
+import { captureSerialPort, captureThenWrite, listSerialPorts, readRingMirror, ringMirrorPath } from "./serial.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -517,8 +523,144 @@ const cubeideBuildTool: ProbeToolSpec = {
   },
 };
 
+// ---- embed_serial -----------------------------------------------------------
+
+/**
+ * The agent's window onto the serial monitor. The panel (desktop host) owns
+ * the port and mirrors its ring to `<harnessHome>/serial/ring.json`; this
+ * tool reads that mirror, or opens its own transient capture when the panel
+ * is not using the port. One tool, two channels, honest conflict errors.
+ */
+const embedSerialTool: ProbeToolSpec = {
+  name: "embed_serial",
+  description: SERIAL_DESCRIPTION,
+  inputSchema: serialInputSchema,
+  annotations: { readOnlyHint: false, destructiveHint: true },
+  meta: {
+    evidence: true,
+    evidenceActions: [...SERIAL_EVIDENCE_ACTIONS],
+    destructiveActions: [...SERIAL_DESTRUCTIVE_ACTIONS],
+  },
+  handler: async (args: unknown): Promise<ProbeToolResult> => {
+    const input = (args ?? {}) as Record<string, unknown>;
+    const action = String(input.action);
+    try {
+      switch (action) {
+        case "read": {
+          const port = input.port ? String(input.port) : undefined;
+          if (port === undefined) {
+            // Panel channel: read the host's ring mirror.
+            const mirror = readRingMirror();
+            if (mirror === null) {
+              return fail(
+                "no_monitor",
+                `没有串口监视器的缓冲可读（${ringMirrorPath()} 不存在）。桌面面板没开过串口，本进程也没写过镜像；要主动抓一段就用 read 带 port+baud+duration_ms。`,
+              );
+            }
+            const entry = mirror.ports[0];
+            if (entry === undefined) {
+              return fail("no_monitor", "镜像里没有已打开的串口会话（面板可能刚关掉）；用 read 带 port+baud+duration_ms 主动抓。");
+            }
+            const maxLines = Number(input.max_lines ?? 80);
+            const since = Number(input.since ?? 0);
+            const start = since > 0 ? Math.min(since, entry.lines.length) : Math.max(0, entry.lines.length - maxLines);
+            const lines = entry.lines.slice(start, start + maxLines);
+            const text = [
+              `port ${entry.port} @ ${entry.baud} (panel-owned, ring ${entry.lines.length} lines, ${entry.dropped} dropped early)`,
+              ...lines.map((line) => `${new Date(line.at).toISOString().slice(11, 23)} ${line.text}`),
+              since > 0 ? `(cursor ${start + lines.length}/${entry.lines.length})` : `(ring index ${entry.lines.length})`,
+            ];
+            return ok(text, {
+              tool: "embed_serial",
+              action,
+              port: entry.port,
+              baud: entry.baud,
+              ringIndex: entry.lines.length,
+              dropped: entry.dropped,
+              lineCount: lines.length,
+            });
+          }
+          // Transient channel: open our own capture window.
+          const baud = Number(input.baud ?? 115200);
+          const durationMs = Number(input.duration_ms ?? 2000);
+          const ownership = mirrorHasPort(port);
+          if (ownership) {
+            return fail(
+              "port_busy",
+              `面板正在使用 ${port}。串口是独占的，打不开第二个句柄——读面板已经收到的数据就用 read 不带 port 参数（面板缓冲副本），或者先让用户停掉面板的串口。`,
+            );
+          }
+          const capture = await captureSerialPort(port, baud, durationMs);
+          if (!capture.ok && capture.lines.length === 0) {
+            return fail("capture_failed", capture.error ?? `${port} 捕获失败`);
+          }
+          const text = [
+            `captured ${capture.lines.length} line(s) from ${port} @ ${baud} in ${durationMs}ms`,
+            ...(capture.error ? [`warning: ${capture.error}`] : []),
+            ...capture.lines.slice(-Number(input.max_lines ?? 200)).map((line) => line.text),
+          ];
+          return ok(text, { tool: "embed_serial", action, port, baud, lineCount: capture.lines.length });
+        }
+        case "write": {
+          const data = input.data !== undefined ? String(input.data) : "";
+          if (data === "") return fail("missing_argument", "write needs `data`");
+          const port = input.port ? String(input.port) : undefined;
+          if (port === undefined) {
+            return fail("missing_argument", "write needs `port`（经面板打开的口写：传面板正在用的那个口；本工具没有常驻句柄，写入走一次性泵）");
+          }
+          const baud = Number(input.baud ?? 115200);
+          // A write through a transient pump: open, write, brief settle for
+          // the echo/reply, capture, exit. duration_ms applies to the reply
+          // window, not the write.
+          const ownership = mirrorHasPort(port);
+          if (ownership) {
+            return fail(
+              "port_busy",
+              `面板正在使用 ${port}，无法开第二个句柄写。让用户在面板里发，或者先停掉面板串口再试。`,
+            );
+          }
+          const capture = await captureThenWrite(port, baud, data, Number(input.duration_ms ?? 1500));
+          const text = [
+            `wrote ${JSON.stringify(data.length > 60 ? `${data.slice(0, 60)}…` : data)} to ${port} @ ${baud}`,
+            `captured ${capture.lines.length} line(s) in reply window (${Number(input.duration_ms ?? 1500)}ms)`,
+            ...capture.lines.slice(-Number(input.max_lines ?? 100)).map((line: { text: string }) => line.text),
+          ];
+          return ok(text, { tool: "embed_serial", action, port, baud, lineCount: capture.lines.length });
+        }
+        case "ports": {
+          const ports = await listSerialPorts();
+          const mirror = readRingMirror();
+          const text = [
+            ...(ports.length === 0 ? ["no COM ports present"] : ports.map((p) => `${p.path}  ${p.description}`)),
+            ...(mirror?.ports.length ? [`panel holds: ${mirror.ports.map((p) => `${p.port}@${p.baud}`).join(", ")}`] : []),
+          ];
+          return ok(text, { tool: "embed_serial", action, ports, panelPorts: mirror?.ports.map((p) => p.port) ?? [] });
+        }
+        case "status": {
+          const mirror = readRingMirror();
+          if (mirror === null) return ok(["no serial monitor state (panel never opened a port this boot)"]);
+          const text = mirror.ports.length === 0
+            ? ["serial monitor idle (mirror exists but no open port)"]
+            : mirror.ports.map((p) => `open: ${p.port} @ ${p.baud} (panel) · ring ${p.lines.length} lines · dropped ${p.dropped} · mirror updated ${new Date(mirror.updatedAt).toISOString()}`);
+          return ok(text, { tool: "embed_serial", action, open: mirror.ports.length > 0 });
+        }
+        default:
+          return fail("unknown_action", `unknown action \`${action}\`; serial actions are: ${SERIAL_ACTIONS.join(", ")}`);
+      }
+    } catch (error) {
+      return fail("serial_error", error instanceof Error ? error.message : String(error));
+    }
+  },
+};
+
+/** True when the mirror says the panel currently holds `port`. */
+function mirrorHasPort(port: string): boolean {
+  const mirror = readRingMirror();
+  return mirror?.ports.some((entry) => entry.port === port) ?? false;
+}
+
 export function createCubeIdeTools(): ProbeToolSpec[] {
-  return [cubeideDebugTool, cubeideBuildTool];
+  return [cubeideDebugTool, cubeideBuildTool, embedSerialTool];
 }
 
 export { declarationFor as cubeideDeclarationFor };

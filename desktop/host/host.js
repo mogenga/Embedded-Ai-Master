@@ -28,6 +28,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { kernelMissingMessage, RESOURCES_PATH_ENV, resolveRoots } from "./roots.js";
+import { SerialBridge, listSerialPorts } from "./serial-bridge.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // `distParent` is the directory that holds `dist/` — the checkout root in
@@ -49,6 +50,9 @@ const dist = (name) => pathToFileURL(path.join(roots.distDir, name)).href;
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
+
+/** One bridge per host process; its events leave through the same `send`. */
+const serialBridge = new SerialBridge(send);
 
 function fatal(message) {
   send({ type: "fatal", message });
@@ -3876,6 +3880,7 @@ const handlers = {
   shutdown() {
     stopFollow();
     stopBackgroundPump();
+    void serialBridge.closeAll();
     // Detached builds must not survive the window that started them: they are
     // `unref`-ed on purpose (so a finished one cannot hold the process open),
     // which also means nothing else will reap a running one. The kernel sends
@@ -3891,6 +3896,68 @@ const handlers = {
     }
     void runner?.close().finally(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
+  },
+
+  // -------------------------------------------------------------------------
+  // Serial monitor. The renderer's pane has been waiting on these since it
+  // was written (D-166); the bridge owns the port through a PowerShell pump,
+  // and the agent reads the same ring through the embed_serial MCP tool —
+  // the port is exclusive, the data is shared.
+  // -------------------------------------------------------------------------
+  async serialOpen({ port, baud }) {
+    const baudNum = Number(baud) || 115200;
+    const result = await serialBridge.open(String(port ?? ""), baudNum);
+    if (!result.ok) {
+      send({ type: "serial_state", open: false, port: String(port ?? ""), baud: baudNum, error: result.error });
+      return;
+    }
+    send({ type: "serial_snapshot", ...result.snapshot });
+  },
+
+  async serialClose() {
+    const ports = serialBridge.openPorts;
+    await Promise.all(ports.map((port) => serialBridge.close(port)));
+    if (ports.length === 0) {
+      // Nothing was open; the renderer's toggle still wants the state back.
+      send({ type: "serial_state", open: false });
+    }
+  },
+
+  serialStatus() {
+    const port = serialBridge.openPorts[0];
+    if (port === undefined) {
+      send({ type: "serial_state", open: false });
+      return;
+    }
+    send({ type: "serial_snapshot", open: true, port, baud: serialBridge.sessionOf(port).baud, lines: [], dropped: 0 });
+  },
+
+  serialClear() {
+    const port = serialBridge.openPorts[0];
+    if (port !== undefined) {
+      const session = serialBridge.sessionOf(port);
+      session.ring.length = 0;
+      session.dropped = 0;
+    }
+    send({ type: "serial_cleared" });
+  },
+
+  serialWrite({ data }) {
+    const port = serialBridge.openPorts[0];
+    if (port === undefined || typeof data !== "string" || data === "") {
+      send({ type: "notice", level: "warn", text: "serialWrite：无已打开的串口或数据为空" });
+      return;
+    }
+    if (!serialBridge.write(port, data)) {
+      send({ type: "notice", level: "warn", text: `serialWrite：${port} 写入失败` });
+    }
+  },
+
+  async listSerialPorts() {
+    const ports = await listSerialPorts();
+    // The pane's port dropdown also feeds from board_state.ports; serial
+    // enumeration is the authoritative one for the monitor, so it ships here.
+    send({ type: "serial_ports", ports });
   },
 };
 

@@ -169,6 +169,7 @@ const state = {
   boardTargetStatus: { kind: "unloaded", candidates: [], total: 0 },
   boardSuggested: [],
   /** The serial monitor is renderer-local except for the stream itself. */
+  serialPorts: [],
   serial: {
     open: false,
     port: null,
@@ -2693,6 +2694,11 @@ function handleEvent(message) {
       renderSerialStatus();
       break;
 
+    case "serial_ports":
+      state.serialPorts = message.ports ?? [];
+      fillSerialControls();
+      break;
+
     case "models":
       renderModels(message.models, message.model, message.source, message.error);
       break;
@@ -3696,15 +3702,14 @@ function renderSubagents() {
 /**
  * Panes with a backend in this kernel. Everything else is unreachable.
  *
- * The serial monitor is not here: its commands (`serialOpen`/`serialRead`/…)
- * have no host implementation, so the tab was removed rather than left as a
- * pane whose Start button answers "unsupported". The probe's serial state is
- * visible as a field in the board pane's Device section.
+ * The serial monitor is host-backed since the PowerShell serial bridge
+ * landed: `serialOpen`/`serialStatus`/… have real handlers, the events feed
+ * the pane below, and the agent reads the same ring through `embed_serial`.
  *
  * `files` is the workspace tree: `getTree` is real in the host, and a
  * directory row expands through the same `getTree` the pane's root uses.
  */
-const SUPPORTED_PANES = new Set(["board", "file", "files", "artifact"]);
+const SUPPORTED_PANES = new Set(["board", "file", "files", "artifact", "serial"]);
 
 /**
  * Fill the tree pane from `path`.
@@ -4373,14 +4378,16 @@ const SERIAL_MAX_LINES = 4000;
 function openSerialPane() {
   fillSerialControls();
   // Never open the port automatically: asserting DTR resets most boards, and
-  // the agent may be using it. A status read only fetches the ring.
+  // the agent may be using it. A status read only fetches the ring, and the
+  // port list is the monitor's own enumeration (friendly names from WMI).
   api.send({ cmd: "serialStatus" });
+  api.send({ cmd: "listSerialPorts" });
 }
 
 function fillSerialControls() {
   const portSelect = $("serial-port");
   const baudSelect = $("serial-baud");
-  const ports = state.boardState?.ports ?? [];
+  const ports = state.serialPorts ?? state.boardState?.ports ?? [];
   const selection = state.board.selection ?? {};
   const wantedPort = state.serial.port || selection.port || (ports.length === 1 ? ports[0].path : "");
 
@@ -4629,6 +4636,30 @@ $("serial-filter").addEventListener("click", (event) => {
 
 $("serial-port").addEventListener("change", () => {
   saveBoardSelection({ port: $("serial-port").value, baud: Number($("serial-baud").value) || 115200 });
+});
+
+/* ---------- serial send ---------- */
+
+function sendSerialLine() {
+  const input = $("serial-send-input");
+  const text = input.value;
+  if (text === "") return;
+  if (!state.serial.open) {
+    renderSerialStatus();
+    return;
+  }
+  const eol = $("serial-send-crlf").checked ? "\r\n" : "";
+  api.send({ cmd: "serialWrite", data: text + eol });
+  input.value = "";
+  input.focus();
+}
+
+$("serial-send").addEventListener("click", sendSerialLine);
+$("serial-send-input").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.isComposing) {
+    event.preventDefault();
+    sendSerialLine();
+  }
 });
 
 /* ---------- inline review comments ---------- */
@@ -7058,6 +7089,7 @@ topbarMenu.addEventListener("click", (event) => {
   if (row.id === "menu-export") api.send({ cmd: "exportSession" });
   else if (row.id === "menu-shortcuts") openShortcuts();
   else if (row.id === "menu-browse-files") openWorkbench("files");
+  else if (row.id === "menu-open-serial") openWorkbench("serial");
   else if (row.id === "menu-clear") clearConversation();
 });
 
