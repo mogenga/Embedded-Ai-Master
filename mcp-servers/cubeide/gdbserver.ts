@@ -59,6 +59,12 @@ export interface StartGdbServerOptions {
   /** ST-Link 序列号（多探针机器用）。 */
   serial?: string;
   timeoutMs?: number;
+  /** ST gdbserver 起不来时的 OpenOCD 回退（S7 固件克隆必需，见上）。 */
+  openocdFallback?: {
+    openocd: string;
+    scripts: string;
+    target: string;
+  };
 }
 
 export async function startStlinkGdbServer(options: StartGdbServerOptions): Promise<GdbServerHandle> {
@@ -81,9 +87,71 @@ export async function startStlinkGdbServer(options: StartGdbServerOptions): Prom
     } catch {
       /* already gone */
     }
+    // ST-Link 固件带 "S7" 后缀（如 V2J48S7）时，gdbserver 会被 ST 的固件限制
+    // 挡住（"No device found on target"），而 STM32_Programmer_CLI 与 OpenOCD
+    // 都能正常连接——S7 检测克隆只拒绝自家的 gdbserver（ST 社区多个同款案例）。
+    // 回退 OpenOCD（espidf 后端那份带全部脚本），失败才真正报错。
+    if (options.openocdFallback) {
+      try {
+        const fallback = await startOpenOcdServer({
+          openocd: options.openocdFallback.openocd,
+          scripts: options.openocdFallback.scripts,
+          target: options.openocdFallback.target,
+          port,
+        });
+        return fallback;
+      } catch (fallbackError) {
+        throw new Error(
+          `ST-LINK_gdbserver did not open port ${port} in time${tail ? `; its last lines: ${tail}` : "; no output"}. ` +
+            `OpenOCD fallback also failed: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+        );
+      }
+    }
     throw new Error(
       `ST-LINK_gdbserver did not open port ${port} in time${tail ? `; its last lines: ${tail}` : "; no output"}`,
     );
+  }
+  active = handle;
+  child.once("exit", () => {
+    if (active === handle) active = null;
+  });
+  return handle;
+}
+
+export interface OpenOcdFallbackOptions {
+  openocd: string;
+  scripts: string;
+  /** target cfg 名（如 stm32f4x.cfg）；由调用方从芯片族给。 */
+  target: string;
+}
+
+export interface StartOpenOcdOptions extends OpenOcdFallbackOptions {
+  port?: number;
+  timeoutMs?: number;
+}
+
+/** OpenOCD 起 gdbserver（绕开 ST gdbserver 的 S7 固件限制，实测可用）。 */
+export async function startOpenOcdServer(options: StartOpenOcdOptions): Promise<GdbServerHandle> {
+  if (active) return active;
+  const port = options.port ?? STLINK_GDBSERVER_DEFAULT_PORT;
+  const args = [
+    "-s", options.scripts,
+    "-f", "interface/stlink.cfg",
+    "-f", `target/${options.target}.cfg`,
+    "-c", `gdb_port ${port}`,
+  ];
+  const child = spawn(options.openocd, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  const handle: GdbServerHandle = { port, process: child, log: [] };
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => handle.log.push(chunk));
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => handle.log.push(chunk));
+  const deadline = Date.now() + (options.timeoutMs ?? 15_000);
+  const ready = await waitForPort(port, deadline);
+  if (!ready) {
+    const tail = handle.log.join("").split(/\r?\n/).filter(Boolean).slice(-6).join(" | ");
+    try { child.kill(); } catch { /* gone */ }
+    throw new Error(`openocd did not open port ${port} in time${tail ? `; last lines: ${tail}` : ""}`);
   }
   active = handle;
   child.once("exit", () => {

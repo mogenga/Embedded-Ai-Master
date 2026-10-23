@@ -49,6 +49,9 @@ export const CUBEIDE_BUILD_ACTIONS = [
   "erase",
   "version",
   "capabilities",
+  // CubeMX 三件套集成（用户定案：三件全装、各司其职）
+  "generate",       // CubeMX 无头生成工程（MCU 名 → CubeIDE 工程）
+  "ioc_generate",   // 从已有 .ioc 重新生成
 ] as const;
 
 export type CubeIdeDebugAction = (typeof CUBEIDE_DEBUG_ACTIONS)[number];
@@ -101,6 +104,11 @@ export const cubeideBuildInputSchema = z
     address: z.number().int().min(0).max(0xffffffff).optional(),
     verify: z.boolean().optional(),
     port: z.number().int().min(1024).max(65535).optional(),
+    // generate: CubeMX 参数
+    mcu: z.string().optional(),
+    name: z.string().optional(),
+    path: z.string().optional(),
+    toolchain: z.enum(["STM32CubeIDE", "MDK-ARM", "EWARM", "Makefile", "CMake"]).optional(),
   })
   .strict();
 
@@ -108,4 +116,4 @@ export const DEBUG_DESCRIPTION =
   "Debug an STM32CubeIDE (Eclipse CDT) project through arm-none-eabi-gdb + ST-LINK_gdbserver, headless: set breakpoints, run, step, halt, read registers, variables, memory and the stack. The probe, device and flash algorithm come from the CubeIDE install itself — nothing is bundled. The project argument is the directory that holds .project and .cproject. Sessions stay open between calls; pass action `close` to release the probe.";
 
 export const BUILD_DESCRIPTION =
-  "Build, flash and erase an STM32CubeIDE project, headless: build through the IDE's own headless Eclipse builder, download the image with the bundled STM32_Programmer_CLI (with read-back verification), and — unlike the Keil backend — full-chip erase IS available here (`erase`). The project argument is the directory that holds .project and .cproject. Flash and erase end any open debug session first, because one probe cannot serve both.";
+  "The STM32Cube toolchain, headless — three tools with one job each: CubeMX generates the project (from an MCU part number or an existing .ioc, with correct clock tree and peripheral config), CubeIDE builds it (Eclipse headlessbuild) and debugs it (gdb + ST-LINK_gdbserver), CubeProgrammer flashes it (with verify; full-chip erase included). Requires all three installed: CUBEMX_HOME for CubeMX, CUBEIDE_HOME for CubeIDE (the bundled CubeProgrammer is used). Typical flow: generate → build → flash, then debug via cubeide_debug.";

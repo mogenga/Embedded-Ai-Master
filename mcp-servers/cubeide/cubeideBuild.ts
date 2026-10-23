@@ -44,6 +44,8 @@ export interface HeadlessBuildResult {
   durationMs: number;
   /** 构建失败时最后几行诊断，供直接展示。 */
   errors?: string[];
+  /** 构建失败时保留的 workspace 目录（.metadata/.log 里有完整诊断）。 */
+  workspace?: string;
 }
 
 function run(file: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number | null; out: string }> {
@@ -83,14 +85,18 @@ export async function headlessBuild(options: HeadlessBuildOptions): Promise<Head
     "-nosplash",
     "-application", "org.eclipse.cdt.managedbuilder.core.headlessbuild",
     "-data", workspace,
-    "-import", projectDir,
+    // 实测（CubeIDE 2.2.0 / Win）：-import 不接受裸盘符路径（EFS 报
+    // "No file system is defined for scheme: C"），必须给 file:/// URI。
+    "-import", `file:///${projectDir.replace(/\\/g, "/")}`,
     buildFlag, target,
     "-printErrorMarkers",
   ];
   const command = `${tools.idec} ${args.join(" ")}`;
   const { code, out } = await run(tools.idec, args, join(projectDir, ".."), options.timeoutMs ?? 10 * 60_000);
   try {
-    rmSync(workspace, { recursive: true, force: true });
+    // 构建成功才清 workspace；失败时留着——.metadata/.log 是失败的唯一诊断
+    // 来源（stdout 只有一句 "See the log file"），第一版无条件删导致无法排障。
+    if (code === 0) rmSync(workspace, { recursive: true, force: true });
   } catch {
     /* 删不掉就留着：临时目录不碍事 */
   }
@@ -103,5 +109,11 @@ export async function headlessBuild(options: HeadlessBuildOptions): Promise<Head
     log: out,
     durationMs: Date.now() - started,
     ...(code !== 0 && errorLines.length > 0 ? { errors: errorLines.slice(-20) } : {}),
+    ...(code !== 0
+      ? {
+          // 失败时把 workspace log 的 !MESSAGE 摘出来附上（R3：失败必须可诊断）。
+          workspace,
+        }
+      : {}),
   };
 }

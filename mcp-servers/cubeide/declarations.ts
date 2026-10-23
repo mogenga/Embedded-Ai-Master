@@ -54,5 +54,11 @@ export function declarationFor(tool: string, action: string, input: Record<strin
   if (BUILD_ACTIONS.has(action) && tool === "cubeide_build") {
     return { operation: "project_build", effect: "调用 CubeIDE headless 构建工程,产物覆盖输出目录" };
   }
+  if (action === "generate") {
+    return { operation: "project_generate", effect: "用 CubeMX 无头生成全新工程(写文件到目标目录)" };
+  }
+  if (action === "ioc_generate") {
+    return { operation: "project_generate", effect: "用 CubeMX 从现有 .ioc 重新生成工程代码(覆盖生成区文件)" };
+  }
   return undefined;
 }

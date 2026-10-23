@@ -28,3 +28,17 @@
 - 真机冒烟：Blink 编译 924 bytes 与 CLI 直跑一致；无板 upload 报错原文带出。
 - 翻车与返工：测试里 resolveSketchShape 少传了对象包装（root vs {project: root}），报错文案断言也改了一次。
 - 测试：9 个离线单测全过；MCP 全量 410 过 + kb-review 存量失败（与本轮无关）。
+
+## 2026-10-23（续3）— 三件套真机全链路（阿波罗 F429IGT6）
+
+- 用户原话：「插上设备了 全量测试cubeide链路」→「我用的是核心板 没用底板」→「核心板有一个串口 我就是接的这个串口」→「HSI是25mhz啊」→「高速晶振是25Mhz」→「我把cubemx也装好了 全套应该都在了 先把cubemx接进去」→「先全网搜索学习一下 别埋头苦干不出活」→「cube这个系列工具应该封装在一起 要求用户必须三者全部安装 一个用来生成工程 一个写工程 一个烧录工程 各司其职」→「我睡觉了 你慢慢测 记得要代入我们真实的harness层也测试」。
+- 真机修复（全部实测驱动）：
+  - `-c SWD` → `-c port=SWD`（CLI v2.23 真机语法）。
+  - `-import` 要 `file:///` URI（EFS "No file system is defined for scheme: C"）。
+  - 构建失败保留 workspace（stdout 只有 "See the log file"，.metadata/.log 是唯一诊断）。
+  - `.cproject` MCU 提取正则：GUI 建的工程是 `value="STM32F429IGTx"`，CubeMX 生成的是 `target_mcu.value.stm32...`——最初按后者写，用户工程匹配不到，回退靠手工正则试错三次（教训：先看真实文件再写正则）。
+- CubeMX 无头生成：UM1718 Table 1 命令（本地 PDF 提取，没用错网传语法）；`STM32CubeMX.exe -q` 退出码不可靠（timeout 124 但工程生成完了）→ `jre/bin/java -jar STM32CubeMX.exe -q` 稳定。CUBEMX_HOME 发现。
+- S7 固件与 gdbserver：全网学习确认 ST 对 S7（V2J4xS7）固件做克隆检测，只拒自家 gdbserver；CubeProgrammer CLI 和 OpenOCD 都能连。实现 OpenOCD 回退（espidf 的 openocd-esp32 + stm32f4x.cfg），真机 open/halt/寄存器/读写内存全通。
+- 真实 harness 层 E2E：mcp.json 加 cubeide server（env 传 CUBEIDE_HOME/CUBEMX_HOME）→ loadMcpConfig → McpManager.connectAll → call。五项过：version/probe/generate(33.8s)/build(10.6s)/flash(verified)。与 desktop 宿主同一代码路径。
+- 翻车与返工：手工拼 .cproject 被 CDT 拒（fBuildData null，结构太深放弃，用户 GUI 建工程）；调试会话中途目标进入 "Unable to get core ID"（CLI 也连不上，AP 1→0），等物理复位才能继续——原因未定（可能 halt 后 detach 时序，登记 deferred）。
+- 测试：cubeide 20 + espidf 12 全过；typecheck 干净；E2E 脚本 .smoke/harness-e2e-cube.mjs。

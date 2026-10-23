@@ -1,5 +1,6 @@
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
-import { existsSync } from "node:fs";
 import { GdbMi, GdbMiError, frameFields, unquote } from "./gdbMi.js";
 import { reuseOrStartGdbServer, stopGdbServer, type GdbServerHandle } from "./gdbserver.js";
 import type { CubeIdeTools } from "./cubeideInstall.js";
@@ -44,6 +45,50 @@ export interface OpenOptions {
   port?: number;
   /** 是否下载镜像到目标（默认 true：CubeIDE 工作流的"进调试"含下载）。 */
   load?: boolean;
+  /** OpenOCD 回退用的 target cfg 名（如 stm32f4x）；不给就从 cproject 推。 */
+  targetCfg?: string;
+}
+
+/**
+ * OpenOCD 回退：ST gdbserver 被 S7 固件挡时用 OpenOCD（espidf 那份，带全量
+ * scripts）。target 从 .cproject 的 target_mcu 推（STM32F429 → stm32f4x 等）。
+ */
+function findOpenOcdFallback(projectDir: string | undefined, explicitCfg: string | undefined): { openocd: string; scripts: string; target: string } | null {
+  if (!explicitCfg && !projectDir) return null;
+  let target = explicitCfg ?? "";
+  if (!target && projectDir) {
+    try {
+      const cproject = readFileSync(join(projectDir, ".cproject"), "utf8");
+      // 两种实测格式：CubeMX 生成 `target_mcu.value.stm32...`（option id 里带
+      // value），GUI 建的 `option target_mcu" ... value="STM32F429IGTx"`。
+      // 直接找 value="STM32..." 的属性值最稳。
+      const mcu = /value\s*=\s*"(STM32\w+?)"/.exec(cproject)?.[1] ?? "";
+      // STM32F429IGTx → stm32f4x；STM32H743 → stm32h7x；STM32L476 → stm32l4x
+      const family = /^stm32([fhlguw])(\d)/i.exec(mcu);
+      if (family) {
+        const letter = family[1]!.toLowerCase();
+        const digit = family[2]!;
+        target = letter === "h" ? "stm32h7x" : `stm32${letter}${digit}x`;
+      }
+    } catch {
+      return null;
+    }
+  }
+  if (!target) return null;
+  // espidf 那份 openocd（带全量 scripts）：
+  const toolsPath = process.env.IDF_TOOLS_PATH ?? join(homedir(), ".espressif");
+  const openocdBase = join(toolsPath, "tools", "openocd-esp32");
+  try {
+    const versions = readdirSync(openocdBase, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory()).map((entry) => entry.name).sort().reverse();
+    if (versions.length === 0) return null;
+    const openocd = join(openocdBase, versions[0]!, "openocd-esp32", "bin", "openocd.exe");
+    const scripts = join(openocdBase, versions[0]!, "openocd-esp32", "share", "openocd", "scripts");
+    if (!existsSync(openocd) || !existsSync(join(scripts, "target", `${target}.cfg`))) return null;
+    return { openocd, scripts, target };
+  } catch {
+    return null;
+  }
 }
 
 export interface OpenResult {
@@ -69,8 +114,15 @@ function findElf(projectDir: string | undefined, explicit: string | undefined): 
 export async function openSession(options: OpenOptions): Promise<OpenResult> {
   const log: string[] = [];
   try {
-    const server = await reuseOrStartGdbServer({ tools: options.tools, port: options.port });
-    log.push(`gdbserver on port ${server.port}`);
+    // ST gdbserver 被固件挡（S7 克隆限制）时的 OpenOCD 回退：芯片族 → target cfg。
+    // CubeIDE 自带 openocd 不带 scripts，用 espidf 后端那份（带全量 cfg）。
+    const fallback = findOpenOcdFallback(options.projectDir, options.targetCfg);
+    const server = await reuseOrStartGdbServer({
+      tools: options.tools,
+      port: options.port,
+      ...(fallback ? { openocdFallback: fallback } : {}),
+    });
+    log.push(`gdbserver on port ${server.port}${fallback ? " (openocd fallback)" : ""}`);
     const gdb = new GdbMi({ gdbPath: options.tools.gdb });
     await gdb.command("-gdb-set pagination off");
     await gdb.command("-gdb-set confirm off");

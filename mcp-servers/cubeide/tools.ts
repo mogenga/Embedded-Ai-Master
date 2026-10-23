@@ -11,6 +11,7 @@ import {
 } from "./actions.js";
 import { declarationFor } from "./declarations.js";
 import { findCubeIdeTools, type CubeIdeTools } from "./cubeideInstall.js";
+import { findCubeMx, mxGenerate, mxRunScript } from "./cubeMx.js";
 import { findEclipseProjects, readEclipseName } from "./eclipseProject.js";
 import { headlessBuild } from "./cubeideBuild.js";
 import { chipErase, flashImage, probeTarget, summarizeProbeList } from "./cubeideFlash.js";
@@ -379,6 +380,33 @@ const cubeideBuildTool: ProbeToolSpec = {
         }
         case "version":
           return ok([`CubeIDE root: ${tools.root}`, `gdb: ${tools.gdb}`, `gdbserver: ${tools.stlinkGdbServer}`, `programmer: ${tools.programmerCli}`]);
+        case "generate": {
+          const mx = findCubeMx();
+          if (!mx) return fail("cubemx_not_installed", "STM32CubeMX is not found: set CUBEMX_HOME to the install root (the directory holding STM32CubeMX.exe and db/). CubeMX generates the project; CubeIDE builds it; CubeProgrammer flashes it — all three are expected.");
+          const mcu = input.mcu ? String(input.mcu) : "";
+          const name = input.name ? String(input.name) : "";
+          const path = input.path ? String(input.path) : "";
+          if (!mcu || !name || !path) return fail("missing_argument", "generate needs `mcu` (part number, e.g. STM32F429IGTx), `name` (project name) and `path` (output directory)");
+          const result = await mxGenerate(mx, { mcu, name, path, ...(input.toolchain ? { toolchain: input.toolchain as never } : {}) });
+          if (!result.ok) return fail("generate_failed", `${result.reason}`);
+          return ok([
+            `generated ${name} (${mcu}) in ${path}`,
+            `ioc: ${result.iocPath}`,
+            `cubeide project: ${result.projectDir} — pass THIS directory to build`,
+            `took ${(result.durationMs / 1000).toFixed(1)}s`,
+          ], { tool: "cubeide_build", action, ioc: result.iocPath, projectDir: result.projectDir });
+        }
+        case "ioc_generate": {
+          const mx = findCubeMx();
+          if (!mx) return fail("cubemx_not_installed", "STM32CubeMX is not found: set CUBEMX_HOME.");
+          const ioc = input.project ? String(input.project) : "";
+          if (!ioc || !ioc.endsWith(".ioc") || !existsSync(ioc)) return fail("bad_ioc", "ioc_generate needs `project` = the .ioc file path");
+          const { dirname, basename } = await import("node:path");
+          const script = ["config load", ioc, "project generate", "exit"].join("\n");
+          const result = await mxRunScript(mx, script);
+          if (!result.ok) return fail("generate_failed", result.reason ?? "CubeMX generation failed");
+          return ok([`regenerated from ${basename(ioc)}`, ...(result.log ? [] : [])], { tool: "cubeide_build", action });
+        }
         case "capabilities":
           return ok([
             "build/rebuild/clean: available (Eclipse headlessbuild)",
@@ -417,7 +445,13 @@ const cubeideBuildTool: ProbeToolSpec = {
             `exit ${result.exitCode} in ${(result.durationMs / 1000).toFixed(1)}s`,
             ...(result.errors ?? []),
           ];
-          if (!result.ok) lines.push(`log tail: ${result.log.split(/\r?\n/).filter(Boolean).slice(-12).join(" | ")}`);
+          if (!result.ok) {
+            lines.push(`log tail: ${result.log.split(/\r?\n/).filter(Boolean).slice(-12).join(" | ")}`);
+            // Eclipse 的完整诊断在 workspace 的 .metadata/.log 里，stdout 不带。
+            if ("workspace" in result && typeof result.workspace === "string") {
+              lines.push(`eclipse workspace log: ${result.workspace}\\.metadata\\.log`);
+            }
+          }
           return ok(lines, { tool: "cubeide_build", action, exitCode: result.exitCode, durationMs: result.durationMs }, result.ok ? {} : { isError: true });
         }
         case "flash": {

@@ -52,11 +52,14 @@ export async function probeTarget(tools: CubeIdeTools): Promise<ProgrammerResult
 /**
  * 整片擦除。这是 keil 后端（UVSOCK PRJ_FLASH_ERASE 无响应，D-201）做不到、
  * 这里做得到的动作。声明由 declarations.ts 的 chip_erase 提供。
+ *
+ * 实测：连接语法是 `-c port=SWD`（`-c SWD` 报 "missing the port name
+ * value"，v2.23.0 真机验证）。
  */
 export async function chipErase(tools: CubeIdeTools): Promise<ProgrammerResult> {
-  const connect = await programmerCli(tools, ["-c", "SWD"], 30_000);
+  const connect = await programmerCli(tools, ["-c", "port=SWD"], 30_000);
   if (!connect.ok) return connect;
-  return programmerCli(tools, ["-c", "SWD", "-e", "all"], 5 * 60_000);
+  return programmerCli(tools, ["-c", "port=SWD", "-e", "all"], 5 * 60_000);
 }
 
 /**
@@ -68,7 +71,7 @@ export async function flashImage(
   image: string,
   options: { address?: number; verify?: boolean } = {},
 ): Promise<ProgrammerResult> {
-  const args = ["-c", "SWD"];
+  const args = ["-c", "port=SWD"];
   if (options.address !== undefined) args.push(...["-w", image, `0x${options.address.toString(16)}`]);
   else args.push(...["-w", image]);
   if (options.verify !== false) args.push("-v");
