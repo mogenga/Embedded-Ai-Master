@@ -1277,7 +1277,12 @@ function buildConnectionPage() {
      *  than a paragraph: a successful test draws a structured block, while a
      *  failure stays one line of text in the same place. `aria-live` because
      *  the answer arrives after the click, and a result only a sighted user
-     *  can perceive is a click that reported nothing (R3). */
+     *  can perceive is a click that reported nothing (R3).
+     *
+     *  It is the first thing in the body (see `body.append` below), directly
+     *  under the header that holds the Test button. At the foot of the form it
+     *  answered a click from a full set of fields away — the user had to find
+     *  the result rather than simply see it. */
     const testResult = el("div", "setting-note", "");
     testResult.hidden = true;
     testResult.setAttribute("aria-live", "polite");
@@ -1292,7 +1297,13 @@ function buildConnectionPage() {
     // None of the warnings below stops a save: the value is written as typed,
     // and a wrong guess about a real naming scheme must not cost the user their
     // configuration (R3 — warn, do not pretend to know).
+    //
+    // `testResult` leads the body: the Test button is in the header just above
+    // it, so the answer lands where the click happened instead of below every
+    // field in the form. `problem`, the body's other note, stays at the foot —
+    // it belongs to Save, which is at the foot too.
     body.append(
+      testResult,
       protocolLine,
       sRow({ label: s.name, desc: s.connNameDesc, control: nameInput }),
       sRow({ label: s.baseUrl, desc: s.baseUrlDesc, control: baseUrlInput }),
@@ -1307,7 +1318,6 @@ function buildConnectionPage() {
         control: fieldCell(apiKeyEnvInput, null, envWarning),
       }),
       modelsGroup,
-      testResult,
       problem,
     );
     node.append(head, body);
@@ -2556,7 +2566,11 @@ function buildKbPage() {
     if (!isDir) {
       const row = el("div", "kb-row");
       row.style.paddingLeft = `${depth * 16}px`;
-      row.append(iconEl("file"), el("span", "kb-file", node.name));
+      row.append(
+        el("span", "kb-chevron-slot"),
+        iconEl("file"),
+        el("span", "kb-file", node.name),
+      );
       wrap.appendChild(row);
       return wrap;
     }
@@ -2762,6 +2776,15 @@ function buildKbPage() {
       // The badge carries the state; the label above it does not repeat the same
       // sentence. `kbUpdateState` is the neutral "Update status" heading the
       // badge answers.
+      //
+      // Deliberately **not** `wide`. A wide row gives `.setting-control`
+      // `flex: 1`, so it splits the row with the copy column and the badge
+      // lands mid-row; every other row on this page (version, index, the facts
+      // below) keeps the control at its natural width and therefore at the same
+      // right edge. A badge is a few characters — it needs no room of its own,
+      // and matching the edge is what makes the column readable. The reason
+      // text, which *does* need the full width, is drawn as its own paragraph
+      // below rather than inside this control.
       group.appendChild(
         sRow({
           label: s.kbUpdateState,
@@ -2771,7 +2794,6 @@ function buildKbPage() {
             view.badge === "" ? "setting-badge" : `setting-badge ${view.badge}`,
             view.title,
           ),
-          wide: view.desc !== "" || view.reason !== undefined,
         }),
       );
       for (const [label, value] of view.facts) group.appendChild(row(label, value));
@@ -2884,7 +2906,7 @@ function buildKbPage() {
       // is drawn anyway — it reads a different location (`$HARNESS_HOME/kb`)
       // through a different command, and its own "still reading" line is the
       // honest thing to show while the tree has not arrived.
-      body.appendChild(el("p", "setting-note", s.kbLoading));
+      body.appendChild(el("p", "setting-note kb-loading", s.kbLoading));
       body.appendChild(updateGroup());
       return;
     }

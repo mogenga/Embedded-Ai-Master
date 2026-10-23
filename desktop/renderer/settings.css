@@ -1117,15 +1117,19 @@
 
 /* The head sits above the first group, and `.kb-body` is a zero-gap flex
    column: without a margin of its own the group title lands flush against the
-   note and reads as a third line of it rather than as a heading. Measured at
-   0px before this; the groups below already get their separation from
-   `.setting-group`'s own `margin-bottom`. */
+   note and reads as a third line of it rather than as a heading. The 26px is
+   `.setting-group`'s own `margin-bottom` — every block on this page is
+   separated by that value, and the 14px this carried made the standing note
+   look attached to the "Status" title under it.
+   The 2px inset is `.setting-row`'s horizontal padding: without it the note
+   started 2px left of every label and group title below it. */
 .kb-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 26px;
+  padding: 0 2px;
 }
 
 /* The standing note sits above the status rows, so its own top margin would
@@ -1135,46 +1139,84 @@
   max-width: 56ch;
 }
 
+/* A body-level line, inset to the rows' 2px. Only the horizontal inset and the
+   bottom gap are set here: `.kb-error` also carries `.pack-problem`, whose
+   `margin-top` is declared later in this file and is the one that applies. */
 .kb-error {
-  margin: 0 0 12px;
+  margin-right: 2px;
+  margin-bottom: 12px;
+  margin-left: 2px;
 }
 
 .kb-note {
   margin: 6px 0 0;
 }
 
+/* The truncation warning sits between the update group and the tree group, so
+   it takes `.setting-group`'s 26px above it (`.kb-body` is a flex column, so
+   margins do not collapse) and the tree title's own 6px below. */
 .kb-truncated {
-  margin: 8px 0 0;
+  margin: 0 2px 6px;
   color: var(--warn);
+}
+
+/* Shown while the tree is being read. `.setting-note` carries `margin: 10px 0
+   0`, and `.kb-body` does not collapse margins, so with no bottom margin this
+   line sat flush against the "Corpus updates" title that follows it and the
+   two read as one paragraph. */
+.kb-loading {
+  margin: 0 2px 26px;
+}
+
+/* The "no corpus here" card is followed by the update group. The card's own 8px
+   bottom padding is a list item's rhythm, not a block's; 18px brings the
+   distance to that group's title to the same 26px the groups use. */
+.kb-body > .settings-empty-card {
+  margin-bottom: 18px;
 }
 
 /* Corpus updates. The reason a check or a verify failed is the most important
    sentence on the page when it appears, so it gets its own line at full width
-   rather than being squeezed into `.setting-control`'s 56% column. */
+   rather than being squeezed into `.setting-control`'s 56% column.
+   Each of the rules below repeats the 2px inset: these lines are appended
+   straight to the group, which has no padding of its own, so at the group's
+   edge they started 2px left of every label, title and row above them. */
 .kb-update-reason {
-  margin: 2px 0 8px;
+  margin: 2px 2px 8px;
   line-height: 1.55;
   word-break: break-word;
 }
 
+/* `.kb-update-reason` also carries `.pack-problem`, which sets `margin-top:
+   4px` later in this file; state it here so the value that applies is the one
+   written beside the rule. */
+.kb-update-reason.pack-problem {
+  margin-top: 2px;
+}
+
 .kb-update-path {
   display: inline-block;
-  margin: 2px 0 8px;
+  margin: 2px 2px 8px;
   word-break: break-all;
 }
 
+/* The buttons are the only row in the group that is not a `.setting-row`, so
+   they carry that row's 11px bottom padding: every other group ends with a row
+   whose padding keeps the last line off the group's bottom edge. The 8px above
+   separates them from the result line directly over them — that result is the
+   feedback for this click, so it stays next to the buttons. */
 .kb-update-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 8px 2px 0;
+  padding: 8px 2px 11px;
 }
 
 .kb-update-progress,
 .kb-update-done,
 .kb-update-failed,
 .kb-update-unchanged {
-  margin: 4px 0 0;
+  margin: 4px 2px 0;
 }
 
 /* A finished update is a fact worth noticing, and the one line on this page
@@ -1199,6 +1241,18 @@
   border-radius: var(--radius-sm);
   font-size: var(--text-sm);
   color: var(--text-secondary);
+}
+
+/* A file row has no chevron to draw, but it needs the slot. A folder row puts
+   its icon behind `.kb-toggle`'s 6px padding, the 16px chevron and two 7px
+   gaps — 29px in from the row's own left edge. A file row drew its icon at
+   that edge, so every file name started 29px left of the folder name beside it
+   at the same depth. Slot + margin + gap reproduce the folder's offsets
+   exactly, so the two columns line up. */
+.kb-chevron-slot {
+  width: 16px;
+  flex: 0 0 auto;
+  margin-left: 6px;
 }
 
 .kb-row .icon {
