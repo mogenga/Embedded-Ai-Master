@@ -207,3 +207,34 @@
 - 没有渲染器侧自动化测试：`tests/desktop/` 里只有协议层与宿主测试，没有 DOM 测试框架，按要求**不为这一页新造一个**。渲染器改动靠人工核对（本任务未在 Electron 里实际打开过页面，见「需主代理决策」）。
 - 没有真实联调 OBS：按禁令全程不触网，真实桶的 200 / 403 行为由主代理验证。
 - 没改 `docs/corpus-ota.md`（契约源，只读）、没碰 `package.json` / lock / `node_modules`、没做任何 git 写操作。
+
+## 2026-10-23 T5 首次种子化与 KB 接线
+
+**用户关键原话**
+- 「派T5，刚测试完，可以拉取」
+- （前序）「那其他人拿到打包的安装包，获取的知识库是存放在哪里」
+- （前序）「一直显示正在读取知识库…，正在检查也响应太慢」
+- （前序）「问题1：知识库页面没做视觉对齐；问题2：模型配置测试，测试按键与测试结果相距太远，不合理」
+
+**关键产出**
+- 新增 `src/corpus/seed.ts`：`seedCorpus` + `seedKbMcpEntry`，复用 `snapshot.ts` 的 `getKbLayout` / `ensureSnapshotDir` / `setCurrent` / `readCurrentVersion`，不自写 symlink。
+- `desktop/host/host.js`：`seedFirstRun()` 在 `init` 末尾以 `void` 启动（不阻塞握手）；`handleCorpusStatus` / `handleCorpusCheck` / `handleCorpusApply` / `getKb` 各自先 `await seedFirstRunPromise`，消除「页面在种子化中途打开」的竞态。
+- 新增 `tests/corpus-seed.test.ts`（26 例）+ `tests/desktop/host-seed.test.js`（4 例）。
+
+**主代理实测（真实环境，非 mock）**
+- 宿主启动后 `C:\Users\mogen\.harness\mcp.json` 被正确写入：
+  `command: D:\nvm4w\nodejs\node.exe`、`args: [.../dist-mcp/kb/server.js]`、`env: { KB_ROOT: ...\kb\current, KB_INBOX_PATH: ...\kb\inbox\_inbox.md, ELECTRON_RUN_AS_NODE: "1" }`。
+- `getKb` 从此前的 `source: "default"`（仓库目录，108 文件）变为 `source: "mcp.json"`、根 `C:\Users\mogen\.harness\kb\current`、**fileCount 107**。
+- 107 不是 108：清单 108 = 107 个 `.md` + 1 个 `.yaml`（`index.yaml`），而 `getKb` 的 `fileCount` 只数 `.md`。两处口径不同，非缺陷。
+
+**被拒绝或纠偏的内容**
+- 首版 `appendProposalTo` 自动 `mkdirSync` 被撤销（见 T4 段）——本次种子化正是那个「目录归部署层负责」的实现者。
+- 子代理在我的 brief 之外自行加了两个跳过条件：`kb_root_env_override`（`process.env.KB_ROOT` 非空则不写，否则 env 与 `mcp.json` 会指向不同根）、`kb_server_missing`（`dist-mcp/kb/server.js` 不存在则不写，否则每次会话多一条必然失败的 `connect_failed`）。**主代理确认保留**——两个都指向「写进去只会产生两种互相矛盾的说法」。
+- `writeMcpServers` 会丢掉其它 server 条目上的未知字段（只序列化白名单）。子代理选择复用它而不是自写第二套读写，理由与设置页 `saveMcpServer` 的既有行为一致。**接受**。
+
+**翻车与返工**
+- 首次验证 `mcp.json` 未生成，误判为种子化失败。实际原因是我用 `printf | node` 管道跑宿主，stdin 立刻关闭触发 `rl.on("close")` 流程，`void` 启动的种子化没跑完就退出了。改为保持 stdin 打开 4 秒后，`mcp.json` 正常写出。**这是验证方法的问题，不是代码的问题**——但它暴露了一个真实风险：宿主在 stdin 关闭时会立即退出，可能中断正在进行的种子化。若将来种子化变慢（语料变大），需要考虑退出前等待。
+
+**遗留（未做）**
+- 打包配置（T10）仍暂缓：`seedCorpus` 在开发形态返回 `no_bundled_corpus`，其「物化内置语料」路径只在 `tests/desktop/host-seed.test.js` 里用合成语料验证过，**未在真实打包产物上跑过**。
+- 渲染器无自动化测试，知识库页视觉对齐与模型测试按钮位置两处改动只能人工验收。
