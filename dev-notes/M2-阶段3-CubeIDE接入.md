@@ -19,3 +19,12 @@
 - 关键产出：`mcp-servers/espidf/` 8 文件；路由表加 espidf；`docs/espidf-headless.md`；D-204/D-205。
 - 实测驱动：idf.py 需要的最小 env 三件套是踩错跑出来的（缺 ESP_IDF_VERSION 直接 TypeError；MSYSTEM 从 git-bash 派生会让它走警告分支）；烧录参数不自己算，flasher_args.json 是 IDF 自己写的事实源；board cfg 同理来自 project_description.json。
 - 真实构建验证：ESP32S3 LVGL 工程首建 122s、增量 1.9s，exit 0。无板接入，flash/debug 未真机验证（probe 实测 COM3 不存在，报错路径符合预期）。
+
+## 2026-10-23（续2）— Arduino 后端
+
+- 用户原话：「开始做arduino路线」。
+- 范围定案：编译+烧录+板卡/库查询，无调试（AVR 无调试硬件，debug check 实测报不支持；不做假面）。
+- 实测驱动：arduino-cli 由 IDE 自带（Program Files 深路径）；三处 CLI JSON 形状与假设不符（core list 是 {platforms:[{releases:{...}}]} 嵌套、board fqbn 小写、lib 是 installed_libraries 包装）；lib list 过滤词精确匹配 → 本地子串过滤。upload 用 --input-dir 拒绝隐式编译，产物永不过期。
+- 真机冒烟：Blink 编译 924 bytes 与 CLI 直跑一致；无板 upload 报错原文带出。
+- 翻车与返工：测试里 resolveSketchShape 少传了对象包装（root vs {project: root}），报错文案断言也改了一次。
+- 测试：9 个离线单测全过；MCP 全量 410 过 + kb-review 存量失败（与本轮无关）。

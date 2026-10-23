@@ -22,13 +22,15 @@ import type { LegacyTool } from "../keil/tools.js";
  * findEclipseProjects 同样遵守。
  */
 
-export type ProjectKind = "keil" | "cubeide" | "espidf" | "mixed" | "none";
+export type ProjectKind = "keil" | "cubeide" | "espidf" | "arduino" | "mixed" | "none";
 
 export interface RouteResult {
   kind: ProjectKind;
   /** 各类型的工程文件（mixed / none 时全量列出）。 */
   keilFile?: string;
   eclipseProjects?: string[];
+  /** arduino：sketch 目录（含与目录同名 .ino）。 */
+  sketchDirs?: string[];
   /** none 时的目录线索。 */
   hints?: string[];
 }
@@ -42,22 +44,46 @@ function isIdfProjectDir(dir: string): boolean {
   }
 }
 
+/** Arduino sketch 签名：目录里有与目录同名的 .ino（Arduino 的硬规则）。 */
+function sketchDirsAt(dir: string): string[] {
+  const out: string[] = [];
+  const name = dir.split(/[\\/]/).filter(Boolean).pop() ?? "";
+  if (existsSync(join(dir, `${name}.ino`))) out.push(dir);
+  try {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isDirectory() || /^\./.test(entry.name)) continue;
+      if (existsSync(join(dir, entry.name, `${entry.name}.ino`))) out.push(join(dir, entry.name));
+    }
+  } catch {
+    /* unreadable */
+  }
+  return out;
+}
+
 export function routeProject(root: string): RouteResult {
   const keilFile = findUvprojx(root) ?? undefined;
   const eclipse = findEclipseProjects(root);
   // IDF 工程的 CMakeLists 在工程根；不往下钻（IDF 组件目录里有同名文件，会误判）。
   const idf = isIdfProjectDir(root);
+  const sketches = sketchDirsAt(root);
   const kinds: ProjectKind[] = [];
   if (keilFile) kinds.push("keil");
   if (eclipse.length > 0) kinds.push("cubeide");
   if (idf) kinds.push("espidf");
+  if (sketches.length > 0) kinds.push("arduino");
   if (kinds.length === 1) {
     if (kinds[0] === "keil") return { kind: "keil", keilFile };
     if (kinds[0] === "cubeide") return { kind: "cubeide", eclipseProjects: eclipse.map((entry) => entry.dir) };
+    if (kinds[0] === "arduino") return { kind: "arduino", sketchDirs: sketches };
     return { kind: "espidf" };
   }
   if (kinds.length > 1) {
-    return { kind: "mixed", ...(keilFile ? { keilFile } : {}), ...(eclipse.length > 0 ? { eclipseProjects: eclipse.map((entry) => entry.dir) } : {}) };
+    return {
+      kind: "mixed",
+      ...(keilFile ? { keilFile } : {}),
+      ...(eclipse.length > 0 ? { eclipseProjects: eclipse.map((entry) => entry.dir) } : {}),
+      ...(sketches.length > 0 ? { sketchDirs: sketches } : {}),
+    };
   }
   const hints: string[] = [];
   try {
@@ -82,8 +108,8 @@ export const embedProjectSchema = z.object({
 
 export const EMBED_PROJECT_DESCRIPTION =
   "Work on the embedded project in the working directory — the router picks the right backend for you. " +
-  "A Keil MDK project (.uvprojx) is routed to the Keil uVision backend; an STM32CubeIDE / Eclipse CDT project (.project + .cproject) is routed to the CubeIDE backend (headless build, STM32_Programmer_CLI flash, and full-chip erase — which the Keil backend cannot do); an ESP32 ESP-IDF project (CMakeLists.txt including tools/cmake/project.cmake) is routed to the ESP-IDF backend (idf.py build, esptool flash/erase, openocd+gdb debug). " +
-  "Pass action `identify` to only ask what kind of project this is and what files were found. Other actions are forwarded verbatim to the backend tool that owns them (keil_debug / keil_project / cubeide_debug / cubeide_build / esp_debug / esp_build); unknown or unsupported actions are reported honestly, never guessed. " +
+  "A Keil MDK project (.uvprojx) is routed to the Keil uVision backend; an STM32CubeIDE / Eclipse CDT project (.project + .cproject) is routed to the CubeIDE backend (headless build, STM32_Programmer_CLI flash, and full-chip erase — which the Keil backend cannot do); an ESP32 ESP-IDF project (CMakeLists.txt including tools/cmake/project.cmake) is routed to the ESP-IDF backend (idf.py build, esptool flash/erase, openocd+gdb debug); an Arduino sketch (a directory whose name matches its .ino) is routed to the Arduino backend (arduino-cli compile/upload — build and flash only, no debug). " +
+  "Pass action `identify` to only ask what kind of project this is and what files were found. Other actions are forwarded verbatim to the backend tool that owns them (keil_debug / keil_project / cubeide_debug / cubeide_build / esp_debug / esp_build / arduino_build); unknown or unsupported actions are reported honestly, never guessed. " +
   "When the directory holds more than one kind, the router refuses and asks for an explicit `project` argument.";
 
 /** 路由 + 转发。keil 侧的 LegacyTool 由 createKeilTools 的输入提供。 */
@@ -106,10 +132,12 @@ export function createEmbedProjectTool(keilLegacy: LegacyTool[]): ProbeToolSpec 
         const lines: string[] = [];
         if (route.kind === "keil") lines.push(`kind: keil`, `project: ${route.keilFile}`);
         else if (route.kind === "cubeide") lines.push(`kind: cubeide`, `projects: ${(route.eclipseProjects ?? []).join(", ")}`);
+        else if (route.kind === "espidf") lines.push(`kind: espidf (ESP32)`, `project: ${root}`);
+        else if (route.kind === "arduino") lines.push(`kind: arduino sketch`, `sketches: ${(route.sketchDirs ?? []).join(", ")}`);
         else if (route.kind === "mixed") {
-          lines.push(`kind: mixed — both a Keil and a CubeIDE project are present; pass \`project\` to choose one`, `keil: ${route.keilFile}`, `cubeide: ${(route.eclipseProjects ?? []).join(", ")}`);
+          lines.push(`kind: mixed — more than one project kind is present; pass \`project\` to choose one`, `keil: ${route.keilFile ?? "(none)"}`, `cubeide: ${(route.eclipseProjects ?? []).join(", ") || "(none)"}`, `espidf: ${route.kind === "mixed" ? "(check CMakeLists)" : ""}`, `arduino: ${(route.sketchDirs ?? []).join(", ") || "(none)"}`);
         } else {
-          lines.push(`kind: none — no .uvprojx and no .project/.cproject pair in ${root}`);
+          lines.push(`kind: none — no recognised project in ${root}`);
           if (route.hints?.length) lines.push(`build-system clues found: ${route.hints.join(", ")}`);
         }
         return { content: [{ type: "text", text: lines.join("\n") }], structuredContent: { tool: "embed_project", action, ...route } };
@@ -119,7 +147,7 @@ export function createEmbedProjectTool(keilLegacy: LegacyTool[]): ProbeToolSpec 
         return {
           content: [{
             type: "text",
-            text: `no recognised project in ${root} (no .uvprojx, no .project/.cproject).${route.hints?.length ? ` Build-system clues: ${route.hints.join(", ")} — that build system has no backend here.` : ""}`,
+            text: `no recognised project in ${root} (no .uvprojx, no .project/.cproject, no IDF CMakeLists, no sketch).${route.hints?.length ? ` Build-system clues: ${route.hints.join(", ")} — that build system has no backend here.` : ""}`,
           }],
           structuredContent: { tool: "embed_project", action, ...route },
           isError: true,
@@ -129,7 +157,7 @@ export function createEmbedProjectTool(keilLegacy: LegacyTool[]): ProbeToolSpec 
         return {
           content: [{
             type: "text",
-            text: `both a Keil project (${route.keilFile}) and CubeIDE projects (${(route.eclipseProjects ?? []).join(", ")}) are present; pass \`project\` with the one you mean.`,
+            text: `more than one project kind is present here (keil: ${route.keilFile ?? "no"}; cubeide: ${(route.eclipseProjects ?? []).join(", ") || "no"}; arduino sketches: ${(route.sketchDirs ?? []).join(", ") || "no"}); pass \`project\` with the one you mean.`,
           }],
           structuredContent: { tool: "embed_project", action, ...route },
           isError: true,
@@ -143,10 +171,11 @@ export function createEmbedProjectTool(keilLegacy: LegacyTool[]): ProbeToolSpec 
         const isKeil = /\.uvprojx?$/i.test(explicit) && existsSync(explicit);
         const isEclipse = existsSync(join(explicit, ".project")) || explicit.endsWith(".project");
         const isIdf = isIdfProjectDir(explicit);
-        const matched = [isKeil, isEclipse, isIdf].filter(Boolean).length;
-        if (matched === 1) kind = isKeil ? "keil" : isEclipse ? "cubeide" : "espidf";
+        const isSketch = existsSync(join(explicit, `${explicit.split(/[\\/]/).filter(Boolean).pop() ?? ""}.ino`));
+        const matched = [isKeil, isEclipse, isIdf, isSketch].filter(Boolean).length;
+        if (matched === 1) kind = isKeil ? "keil" : isEclipse ? "cubeide" : isIdf ? "espidf" : "arduino";
         else if (matched === 0) {
-          return { content: [{ type: "text", text: `${explicit} is not a recognisable project (.uvprojx / .project+.cproject / IDF CMakeLists); nothing was routed.` }], isError: true };
+          return { content: [{ type: "text", text: `${explicit} is not a recognisable project (.uvprojx / .project+.cproject / IDF CMakeLists / sketch directory); nothing was routed.` }], isError: true };
         } else {
           return { content: [{ type: "text", text: `${explicit} matches more than one project kind; pass the project directory itself.` }], isError: true };
         }
@@ -168,6 +197,10 @@ export function createEmbedProjectTool(keilLegacy: LegacyTool[]): ProbeToolSpec 
         // espidf 后端经动态 import，避免 keil/cubeide 侧硬依赖。
         const { handleEspIdfAction } = await import("../espidf/route-esp.js");
         return handleEspIdfAction(input);
+      }
+      if (kind === "arduino") {
+        const { handleArduinoAction } = await import("../arduino/route-arduino.js");
+        return handleArduinoAction(input);
       }
       // cubeide 动作直接在本文件里可用——通过动态 import 避免硬依赖
       // keil 与 cubeide 互相引用（keil 不 import 本文件）。
