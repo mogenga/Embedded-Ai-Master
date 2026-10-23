@@ -1889,10 +1889,29 @@
 - **修复建议**: 非 ST 芯片走各厂商 CLI（如 nRF 的 `nrfjprog --eraseall`、NXP 的 `blhost`），或在能力报告里明确「整片擦除仅 STM32」；会话恢复做成「擦除前记录断点列表，完成后重放」。
 - **状态**: 未解决。
 
+### D-202 · CubeIDE 后端的工程编辑动作未实现
+
+- **发现**: 2026-10-23，CubeIDE 接入（用户决策方案 A：统一门面按工程类型路由）。
+- **现象**: `cubeide_build` 只有 `info` 读工程概要；keil 侧的 `add_group` / `add_file` / `set_option` 一类编辑动作没有对应实现。`.cproject` 是带构建插件配置的嵌套 XML，直接改写需要理解 CDT managed build 的 option 结构，不能照 keil 的经-uVision-落盘模式做。
+- **影响**: CubeIDE 工程的编译选项、文件组织只能用 CubeIDE IDE 本体改；门面对此类请求只能报 `info` 可用、编辑不可用。
+- **触发升级条件**: 用户在 CubeIDE 工程上要求改编译选项/文件组织且不能手开 IDE。
+- **修复建议**: 按需实现最小编辑面（defines / include paths 两项最有价值），直接编辑 `.cproject` 并保留自动备份；或评估 Eclipse headlessbuild 是否有等价的 setOption 入口。
+- **状态**: 未解决。
+
+### D-203 · CubeIDE 的 J-Link 与 OpenOCD gdbserver 路线未接入
+
+- **发现**: 2026-10-23，CubeIDE 接入。
+- **现象**: 插件里已定位 `openocd.win32_*` 与 `jlink.win32_*` 二进制，但 `gdbserver.ts` 只实现 ST-LINK_gdbserver 启动；J-Link/OpenOCD 探针的用户需要先用 probe MCP 的 openocd 后端。
+- **影响**: 非 ST-Link 探针在 cubeide 后端上不可用（keil 侧按 `.uvoptx` 配置走，反而没有这个限制）。
+- **触发升级条件**: 用户用 J-Link 调 CubeIDE 工程。
+- **修复建议**: `gdbserver.ts` 增加 backend 参数（stlink | jlink | openocd），openocd 需要板级配置文件参数（没有默认值，fail-closed）。
+- **状态**: 未解决。
+
 ## 变更记录
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-23 | CubeIDE 接入 + 统一路由门面（用户「我想做的就是遇到什么工程调用哪个mcp」，方案 A 定案）：新增 `mcp-servers/cubeide/`（安装发现 CUBEIDE_HOME→默认路径、Eclipse 工程识别、headlessbuild 构建、内置 STM32_Programmer_CLI 烧录/整片擦除、GDB/MI 协议层 gdbMi、ST-LINK gdbserver、单会话 gdbSession、cubeide_debug/cubeide_build 两工具 35 动作）；`embed_project` 门面挂进 keil 与 cubeide 两个 server，识别 `.uvprojx` vs `.project+.cproject` 后转发，mixed 拒绝要求显式 project，none 报构建系统线索。实测修复两处：newestPlugin glob 必须排除 `.jar` 只取目录（字符串排序会把 jar 排在 win32 目录后）；GDB/MI result-class 边界是空格或逗号。`CUBEIDE_HOME` 是自选安装位（本机 G:\software）的指定通道。20 个离线单测全过；npm test 3 处失败（skills-store ×2、kb-review ×1）在干净树上同样失败，与本轮无关。录入 D-202（工程编辑未实现）与 D-203（J-Link/OpenOCD 未接）。文档 `docs/cubeide-headless.md`；规格 `docs/cubeide-porting-spec.md`。 |
 | 2026-10-22 | 第十七轮（用户「增加功能：思考强度设置；设置里面的worktree隔离也需要删掉；新增功能：长耗时终端后台运行，运行完毕后反馈」，并发 3 个子代理）：①**思考强度真正上线**——`providers.json` 的模型项新增 `supportsReasoning` / `reasoningEffort`，请求体只在解析出等级时才写 `reasoning_effort`（**缺席 ≠ 显式 `none`**，`auto` 在 runner 层转成「无覆盖」，绝不作为字面量上线）；操作者的选择按 `provider/model` 存 `run.json` 的 `reasoningEffortByModel`（缺席即 auto）。`setEffort` 从「永远回 warn」改为真正生效并回 `state`；`supportsReasoning` 不再写死 false；模型未声明能力时不提供等级、`Ctrl+E` 静默。顺带修两处谎：设置页保存 provider 会抹掉这两个字段（`carried` 漏项），渲染器在等级为空时伪造 `low/medium/high` 并把控件永久 `hidden`。**D-169 的 setEffort 结论作废**，D-188 的 `Ctrl+E` 一项已解决。②**删除 worktree 隔离设置**——行为页的 `isolateByDefault` 与会话页的 `branchPrefix` / `worktreeLocation` 三行、六个 i18n 键、`pageSessionsDesc` 里「隔离工作区」的说法一并删除；`app.js` 的 `ui_preference` 映射里最后一处残留也清掉。这三个控件本来就都是假的：`isolateByDefault` 只写 localStorage 无人读，`branchPrefix` 连 localStorage 都没写、每次重建就丢，内核也没有 worktree 能力。③**长耗时终端后台运行**——新增 `terminal_bg` / `terminal_bg_check`（`src/tools/background.ts`）：立即返回、`detached` + `unref` 启动、`timeoutMs` 到点终止整棵进程树（复用 `shell.ts` 的 `terminateTree`，危险命令同一套谓词拦截、有「先断言谓词再断言未 spawn」的两层测试）、输出取 64 KiB 尾巴并**同时报总字节与保留字节**。完成时经新事件 `background_result` 写进会话日志（不是临时提示：作业按定义比它所属的回合长，重开窗口还得看得见）；该事件在 `types.ts` / `persistence.ts` 的 `EVENT_TYPES` / `build.ts` 的投影 switch / `protocol.js` 的 `KNOWN_TYPES` **四处**登记，并用变异探针逐一验证过少任何一处都会整份日志读不出来或整屏「未识别事件」。宿主新增 1s 的完成泵与退出时的 `killAllBackgroundJobs`（只发信号、不谎称已停止）。**登记 D-199**（完成队列在进程内存、作业表不淘汰、孤儿进程风险）。 |
 | 2026-10-17 | 建档,录入 D-001 ~ D-008 |
 | 2026-10-17 | 录入 D-009(cached token 之外的 usage 明细延后) |

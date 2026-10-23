@@ -6,7 +6,8 @@ import type {
   StandardSchemaWithJSON,
 } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
-import { createKeilTools } from "./tools.js";
+import { createKeilTools, keilTools } from "./tools.js";
+import { createEmbedProjectTool } from "../cubeide/route.js";
 
 /**
  * Keil / UVSOCK MCP server。
@@ -15,13 +16,19 @@ import { createKeilTools } from "./tools.js";
  * 接线方式与 probe/kb 同构：
  *
  *   { "mcpServers": { "keil": { "command": "node", "args": ["dist-mcp/keil/server.js"] } } }
+ *
+ * 除 keil_debug / keil_project 外，本 server 还挂载统一路由门面
+ * `embed_project`（cubeide/route.ts）：模型调它，门面识别工程类型后分发。
+ * cubeide 后端在自己的 server（dist-mcp/cubeide/server.js）里同样挂载，
+ * 两边都暴露 embed_project，哪个 server 被接线都能路由。
  */
 
 export const KEIL_SERVER_NAME = "embedded-ai-keil";
 
 export function createKeilServer(): McpServer {
   const server = new McpServer({ name: KEIL_SERVER_NAME, version: "0.1.0" });
-  for (const tool of createKeilTools()) {
+  const tools = [...createKeilTools(), createEmbedProjectTool(keilTools)];
+  for (const tool of tools) {
     const inputSchema = (tool.inputSchema ?? {}) as unknown as StandardSchemaWithJSON;
     server.registerTool(
       tool.name,

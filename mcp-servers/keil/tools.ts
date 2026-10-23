@@ -125,7 +125,7 @@ interface ToolContext {
   selection?: KeilSelection;
 }
 
-interface LegacyTool {
+export interface LegacyTool {
   name: string;
   description: string;
   readonly: boolean;
