@@ -27,12 +27,24 @@ import {
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { kernelMissingMessage, RESOURCES_PATH_ENV, resolveRoots } from "./roots.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const repoRoot = path.resolve(here, "..", "..");
-// Dynamic import takes a URL, not a Windows path: `E:\...` would be parsed as
-// a protocol named "e".
-const dist = (name) => pathToFileURL(path.join(repoRoot, "dist", name)).href;
+// `distParent` is the directory that holds `dist/` — the checkout root in
+// development, `resources/` once packaged. It is resolved rather than assumed
+// because the two layouts differ; see `./roots.js` for the precedence and for
+// why `process.resourcesPath` is not read here.
+//
+// The main process passes its `process.resourcesPath` down in an environment
+// variable: the host runs with `ELECTRON_RUN_AS_NODE=1` and has no Electron
+// API, and the property it *can* see in that mode belongs to the Electron
+// installation, not to this app.
+const roots = resolveRoots({
+  here,
+  resourcesPath: process.env[RESOURCES_PATH_ENV],
+  env: process.env,
+});
+const dist = (name) => pathToFileURL(path.join(roots.distDir, name)).href;
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -40,6 +52,32 @@ function send(message) {
 
 function fatal(message) {
   send({ type: "fatal", message });
+}
+
+/**
+ * `process.exit` does not wait for a pipe write, and a truncated `fatal` reads
+ * as no message at all: the parent sees a process that died for no stated
+ * reason. Drain stdout, then leave.
+ *
+ * The returned promise never resolves, and callers must `await` it: the exit
+ * runs from a write callback, which is a later turn of the loop, so returning
+ * normally would let the module go on importing from a `dist/` just declared
+ * absent. Top-level `await` is what stops the rest of the file.
+ */
+function exitAfterFlush(code) {
+  return new Promise(() => {
+    process.stdout.write("", () => process.exit(code));
+    // A pipe nobody is reading would otherwise hold the process open.
+    setTimeout(() => process.exit(code), 1000).unref();
+  });
+}
+
+// A missing build used to surface as the first dynamic import's module error,
+// which names a file the operator never chose and says nothing about the cure.
+// Check the entry up front and say what went wrong in the layout they have.
+if (!existsSync(roots.entry)) {
+  fatal(kernelMissingMessage(roots.form, roots.entry));
+  await exitAfterFlush(1);
 }
 
 function messageOf(error) {
@@ -141,7 +179,8 @@ try {
   fatal(
     `内核未构建：${error instanceof Error ? error.message : String(error)}。请先在仓库根目录运行 npm run build。`,
   );
-  process.exit(1);
+  // Same reason as the entry check above: the message must reach the parent.
+  await exitAfterFlush(1);
 }
 
 // `hello` is emitted before stdin is read: the renderer uses it to move its
@@ -182,9 +221,130 @@ function kbModule() {
   return kbModulePromise;
 }
 
+/**
+ * The kernel's corpus OTA client, its config reader and its manifest rules,
+ * loaded lazily.
+ *
+ * Same reasoning as `kbModule`, one module further: `dist/corpus/update.js`
+ * and `dist/config/corpus-config.js` are newer than most `dist/` trees in the
+ * wild, and a kernel built before them must still boot — the knowledge-base
+ * page is where the operator reads about the corpus, so it cannot live in a
+ * process that died during startup. Each handler answers "run npm run build"
+ * instead of taking the window down.
+ *
+ * All three come from one promise because every corpus answer needs at least
+ * two of them: the status reader plus the config loader, and the apply path
+ * also parses the manifest it hands back to the kernel.
+ */
+let corpusModulePromise;
+function corpusModule() {
+  corpusModulePromise ??= Promise.all([
+    import(dist("corpus/update.js")),
+    import(dist("config/corpus-config.js")),
+    import(dist("corpus/manifest.js")),
+  ])
+    .then(([update, config, manifest]) => ({ update, config, manifest }))
+    .catch(() => undefined);
+  return corpusModulePromise;
+}
+
+/**
+ * The first-run seeding module (`dist/corpus/seed.js`), loaded lazily by the
+ * boot sequence.
+ *
+ * Same stale-`dist/` reasoning as `kbModule`, and here it matters more: seeding
+ * runs before the operator has done anything, so an import that threw at boot
+ * would take the window down over a feature nobody has asked for yet. A kernel
+ * built before seeding landed simply skips it — the knowledge base then behaves
+ * exactly as it did before, and `getKb` still answers from whatever `mcp.json`
+ * and the checkout hold.
+ *
+ * `snapshot.js` rides along because the host needs `getKbLayout` to name the
+ * two paths `seedKbMcpEntry` writes (`kb/current`, `kb/inbox/_inbox.md`); those
+ * must come from the kernel's own layout function rather than being spelled out
+ * here, or the OTA writer and the MCP config would disagree about §3's layout.
+ */
+let seedModulePromise;
+function seedModule() {
+  seedModulePromise ??= Promise.all([
+    import(dist("corpus/seed.js")),
+    import(dist("corpus/snapshot.js")),
+  ])
+    .then(([seed, snapshot]) => ({ seed, snapshot }))
+    .catch(() => undefined);
+  return seedModulePromise;
+}
+
+/**
+ * Where `<resources>/corpus.json` would live, or `undefined` when this install
+ * has no such level.
+ *
+ * Packaged, `roots.distParent` is the app's `resources/` directory, which is
+ * exactly where the build injects `corpus.json` (contract §2). In a checkout
+ * it is the repository root — a directory that holds `config/corpus.local.json`
+ * rather than `corpus.json`, so pointing the loader at it would only ever
+ * produce "not found" for a file that was never meant to be there.
+ *
+ * **Testing and development** therefore use the level that outranks it anyway:
+ * `$HARNESS_HOME/corpus.json` (contract §2, highest precedence). Point
+ * `HARNESS_HOME` at a temporary directory, drop a `corpus.json` in it, and the
+ * whole check/apply path runs against that file — no extra environment
+ * variable and no second validation path in this host. A `HARNESS_CORPUS_CONFIG`
+ * override was considered and rejected for that reason: it would have to
+ * re-implement `loadCorpusConfig`'s validation here, and two validators for one
+ * file will eventually disagree about what "configured" means.
+ */
+const corpusResourcesRoot = roots.form === "packaged" ? roots.distParent : undefined;
+
+/**
+ * Wording for "there is no `corpus.json` at any level".
+ *
+ * Mirrors `normalizeConfig` in `src/corpus/update.ts`, which produces this
+ * sentence when it is handed `config: null`. Kept as a copy rather than
+ * obtained by calling the kernel with a null config: that call happens to
+ * return before any request today, but a reordering there would turn "opening
+ * Settings" into a network call, and the page opening must never reach out.
+ */
+const CORPUS_CONFIG_MISSING = "没有语料更新配置（corpus.json 缺失），无法检查更新";
+
+/**
+ * The manifest the last check verified, so "Update now" does not fetch
+ * `latest.json` a second time.
+ *
+ * Keyed on the config it was verified under (`publicKeyPem` + `updateBaseUrl`):
+ * editing either one makes the cached manifest a statement about a different
+ * source, and installing it would mean trusting bytes the current config never
+ * vouched for.
+ */
+let corpusManifestCache = null;
+/**
+ * Corpus commands run one at a time, in arrival order.
+ *
+ * A queue rather than a "busy" refusal, for two reasons. The commands share
+ * `state.json` and the manifest cache, so overlapping them would let one write
+ * over the other's result. And the natural sequence a user produces — click
+ * Check, then click Update now before the first answer lands — is not an error:
+ * the update simply waits for the check that is already fetching the manifest it
+ * needs. Refusing it would be a refusal with nothing wrong. A rejected link is
+ * swallowed so one failed command cannot poison the queue for every later one.
+ */
+let corpusQueue = Promise.resolve();
+
+function enqueueCorpus(task) {
+  const run = corpusQueue.then(task, task);
+  corpusQueue = run.catch(() => undefined);
+  return run;
+}
+
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
+
+// `getKb` still wants a checkout root: the default corpus it falls back to is
+// `<repoRoot>/mcp-servers/kb/kb`. This is that same directory only in
+// development — packaged, it is `resources/`, which holds no corpus, and the
+// locator reports the candidates it tried rather than pretending otherwise.
+const repoRoot = roots.distParent;
 
 const harnessHome = kernel.resolveHarnessHome();
 const sessionsRoot = path.join(harnessHome, "sessions");
@@ -696,6 +856,16 @@ async function registerRoot(target) {
  * handshake wait on the filesystem.
  */
 let pendingRoot = Promise.resolve(false);
+
+/**
+ * The first-run seed, started once by `init`.
+ *
+ * `undefined` until `init` runs. Kept as a promise (rather than fired and
+ * forgotten) so a second `init` — the renderer reloading does not send one, but
+ * a re-handshake would — cannot start a second copy, and so `getKb` can await
+ * it before reporting a root that is about to change.
+ */
+let seedFirstRunPromise;
 
 async function settleRoot() {
   try {
@@ -1973,6 +2143,520 @@ async function handleTestProvider(payload) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Corpus OTA (Settings → Knowledge base)
+// ---------------------------------------------------------------------------
+//
+// Three commands, and the split between them is the contract (`docs/corpus-ota.md`
+// §6): reading the status never touches the network, checking does, and applying
+// only happens because the operator clicked. `getCorpusStatus` is therefore the
+// only one the page calls on open — the startup check is the kernel's own job,
+// and a settings page that re-checked would turn "opening Settings" into a
+// network request the user never asked for.
+//
+// The `CorpusUpdateState` union is the kernel's (`src/corpus/update.ts`), sent
+// through unchanged. This host never re-derives a state: a copied switch here
+// would eventually disagree with the one that writes `state.json`, and the page
+// would then describe a corpus that is not the one on disk (R3).
+
+const CORPUS_CONFIG_FILE = "corpus.json";
+const CORPUS_MANIFEST_FILE = "latest.json";
+
+/**
+ * Load `corpus.json` the way the kernel does, or say why there is none.
+ *
+ * `loadCorpusConfig` answers with a discriminated union on purpose: "no file at
+ * any level" (`none`), "a file that does not parse" (`invalid`, with the path
+ * and the field) and "loaded" are three different situations with three
+ * different cures. Collapsing them into one `null` would make a broken file read
+ * as "never configured" and send the user looking for a file that is already
+ * there (R3).
+ *
+ * `path` travels with every answer: it is what makes `config_invalid`
+ * actionable. When no file exists at any level it names the one the user can
+ * create, which is the only level this host can see on every install.
+ */
+async function readCorpusConfig(modules) {
+  const homePath = path.join(harnessHome, CORPUS_CONFIG_FILE);
+  let loaded;
+  try {
+    loaded = await modules.config.loadCorpusConfig({
+      harnessHome,
+      // Absent in development on purpose: a checkout holds
+      // `config/corpus.local.json`, not `corpus.json`, and the build (not this
+      // host) is what copies one to the other. See `corpusResourcesRoot`.
+      ...(corpusResourcesRoot === undefined ? {} : { resourcesRoot: corpusResourcesRoot }),
+    });
+  } catch (error) {
+    // The loader reports read failures as `invalid` rather than throwing; this
+    // is for a shape it did not anticipate, and it still has to become a corpus
+    // state rather than a dead host.
+    return { config: null, reason: `读取语料配置失败：${messageOf(error)}`, path: homePath };
+  }
+  if (loaded.kind === "ok") {
+    const source = loaded.source;
+    return {
+      config: loaded.config,
+      source,
+      // The file that actually won. Showing the home path when the packaged
+      // file is the one in use would send the operator to edit a file the
+      // loader never read.
+      path: source === "resources" && corpusResourcesRoot !== undefined
+        ? path.join(corpusResourcesRoot, CORPUS_CONFIG_FILE)
+        : homePath,
+    };
+  }
+  if (loaded.kind === "invalid") {
+    // `reason` already names the offending file and field; the path is for the
+    // page's "where to configure this" line, which has to survive a rebuild.
+    return { config: null, reason: loaded.reason, path: homePath };
+  }
+  return { config: null, reason: CORPUS_CONFIG_MISSING, path: homePath };
+}
+
+/**
+ * First-run seeding: materialise the bundled corpus and wire up the `kb` MCP
+ * server.
+ *
+ * Two facts this closes, both of them "nothing happened on a fresh install":
+ * with no `$HARNESS_HOME/mcp.json` the KB server is never started, so the model
+ * has no `kb_*` tools; and with no `kb/current` the settings page can only say
+ * `unavailable`. Seeding is what makes a fresh install usable without the
+ * operator hand-copying a corpus.
+ *
+ * **Development and packaged differ in exactly one input.** A checkout holds no
+ * `resources/corpus/`, so `resourcesRoot` stays `undefined` and the kernel
+ * answers `no_bundled_corpus` — the same shape `corpusResourcesRoot` already
+ * uses for `corpus.json`. That is deliberate: a developer's `~/.harness/kb`
+ * must not be filled with a shipped corpus that then looks like an OTA result.
+ *
+ * **Nothing here blocks or fails the boot.** Every outcome is reported at most
+ * as a warn notice, and only when something actually went wrong: a successful
+ * seed and a deliberate skip are both silent, because neither is the
+ * operator's problem. `ready` has already been sent by the time this runs, so a
+ * slow disk cannot delay the handshake either.
+ *
+ * Not queued with `enqueueCorpus` on purpose. That queue orders commands the
+ * page issued; seeding happens once before anyone can click, and putting it
+ * behind the queue would let a status read answer `unavailable` for a corpus
+ * that is about to exist.
+ */
+async function seedFirstRun() {
+  const modules = await seedModule();
+  if (modules === undefined) return;
+
+  const { seed, snapshot } = modules;
+  if (typeof seed.seedCorpus !== "function" || typeof seed.seedKbMcpEntry !== "function") {
+    return;
+  }
+
+  // The layout is the kernel's (§3): deriving these paths here would be a
+  // second copy of a contract that already has one owner.
+  let layout;
+  try {
+    layout = snapshot.getKbLayout(harnessHome);
+  } catch (error) {
+    send({
+      type: "notice",
+      level: "warn",
+      text: `知识库初始化跳过：${messageOf(error)}`,
+    });
+    return;
+  }
+
+  // 1. The corpus itself. Packaged, `roots.distParent` is `resources/`, where
+  //    the build puts `corpus/` — the same value `readCorpusConfig` already
+  //    uses for `corpus.json`.
+  try {
+    await seed.seedCorpus({
+      harnessHome,
+      ...(roots.form === "packaged" ? { resourcesRoot: roots.distParent } : {}),
+    });
+  } catch (error) {
+    // A broken install (unreadable corpus, malformed `latest.json`) has to be
+    // visible: the alternative is a knowledge base that quietly is not there.
+    send({
+      type: "notice",
+      level: "warn",
+      text: `内置知识库初始化失败：${messageOf(error)}`,
+    });
+  }
+
+  // 2. The MCP entry, so the model gets the `kb_*` tools and `getKb`/OTA point
+  //    at the same root.
+  //
+  //    Runs in development too, and the kernel skips it when `kb/current` does
+  //    not exist. That skip is the whole point of this ordering: writing
+  //    `mcp.json` on a machine with no corpus would make `getKb` report a
+  //    missing directory instead of falling back to the checkout's
+  //    `mcp-servers/kb/kb`, which is strictly worse — and the MCP server it
+  //    would launch would answer from an empty root.
+  try {
+    // The answer is deliberately not branched on. `kb_entry_exists`,
+    // `no_current_snapshot`, `kb_server_missing` and `kb_root_env_override` are
+    // all legitimate states, not failures: the user configured their own
+    // server, this machine has no corpus yet, the kernel's MCP server is not
+    // built, or the operator pinned `KB_ROOT`. Announcing any of them at every
+    // launch would be noise about a situation the operator created.
+    await seed.seedKbMcpEntry({
+      harnessHome,
+      kernelRoot: roots.distParent,
+      currentKbRoot: layout.currentLink,
+      inboxPath: path.join(layout.inboxDir, "_inbox.md"),
+      mcpModules: { readAppConfig: kernel.readAppConfig, writeMcpServers: kernel.writeMcpServers },
+    });
+  } catch (error) {
+    // This one is a failure: `readAppConfig` refused to read a file it cannot
+    // parse, or the write did not land. Either way the operator has to know
+    // why the `kb` tools are missing.
+    send({
+      type: "notice",
+      level: "warn",
+      text: `知识库 MCP 配置写入失败：${messageOf(error)}`,
+    });
+  }
+}
+
+/**
+ * `latest.json`'s address, joined the way `src/corpus/update.ts` joins it.
+ *
+ * This is the one piece of the kernel's URL handling copied here, and it is
+ * copied because the capturing fetch below has to recognise the manifest
+ * response by URL. Validation guarantees the trailing `/` (`corpus-config.ts`),
+ * so the two spellings cannot differ today; should that ever change, the
+ * capture simply misses and `apply` falls back to re-checking — a slower path,
+ * not a wrong one.
+ */
+function corpusManifestUrl(updateBaseUrl) {
+  const base = updateBaseUrl.endsWith("/") ? updateBaseUrl : `${updateBaseUrl}/`;
+  return new URL(CORPUS_MANIFEST_FILE, base).toString();
+}
+
+function corpusConfigFingerprint(config) {
+  // Both fields decide what a manifest means: the address says where it came
+  // from, the key says who signed it. A cache that survived either changing
+  // would be a manifest the current config never vouched for.
+  return `${config.updateBaseUrl}\n${config.publicKeyPem}`;
+}
+
+/**
+ * Drop a leading UTF-8 BOM.
+ *
+ * Tested by code point, not by a literal: a U+FEFF pasted into source is
+ * invisible in review and dies the moment the file is re-encoded. Same rule and
+ * same reason as `stripBom` in `src/corpus/update.ts` and
+ * `src/config/corpus-config.ts`.
+ */
+function stripBom(text) {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+/**
+ * Where the manifest text came from, so the caller can say which it used.
+ * Kept as a value rather than a boolean: the log line and the tests both read it.
+ */
+const CORPUS_MANIFEST_FROM_CACHE = "cache";
+const CORPUS_MANIFEST_FROM_CHECK = "check";
+
+/**
+ * Run `checkForUpdate` while keeping a copy of the manifest it fetched.
+ *
+ * The kernel's check returns a state, not the manifest, and `applyUpdate` needs
+ * the parsed manifest. Re-fetching it here would mean this host implementing
+ * the HTTP-status rules of contract §6.1 — including the one that says a 403
+ * from OBS means "not published / no GetObject", never "up to date". That is
+ * exactly the rule that must not exist twice. Instead the fetch is wrapped:
+ * `checkForUpdate` does all of the talking, and its response body is cloned on
+ * the way past.
+ *
+ * Cloning is what makes this safe: `checkForUpdate` still reads the body from
+ * the response it was given, and the copy is only used if the check itself
+ * concluded `update_available` — i.e. only after the kernel parsed and verified
+ * those bytes. Nothing that failed verification can reach `applyUpdate` through
+ * here.
+ */
+async function checkCorpusWithManifest(modules, config) {
+  const manifestUrl = corpusManifestUrl(config.updateBaseUrl);
+  let captured = null;
+  const recordingFetch = async (url, init) => {
+    const response = await globalThis.fetch(url, init);
+    if (url === manifestUrl && response.status === 200) {
+      try {
+        captured = await response.clone().text();
+      } catch {
+        // The clone is an optimisation. A body that cannot be duplicated leaves
+        // `captured` null and the caller re-checks instead.
+        captured = null;
+      }
+    }
+    return response;
+  };
+
+  const status = await modules.update.checkForUpdate({
+    harnessHome,
+    config,
+    fetchImpl: recordingFetch,
+  });
+  return { status, manifestText: status.kind === "update_available" ? captured : null };
+}
+
+/** A sentence for a state that carries one; the union has no other shape. */
+function corpusStatusReason(status) {
+  if (status.kind === "up_to_date") {
+    return `已安装的语料版本就是 v${status.corpusVersion}，无需更新`;
+  }
+  if ("reason" in status && typeof status.reason === "string") return status.reason;
+  // `bundled` and `unavailable` carry no explanation of their own; reaching
+  // here means a check answered with a state only a status read produces.
+  return `更新源没有可用的新版清单（当前状态：${status.kind}）`;
+}
+
+function sendCorpusKernelMissing() {
+  send({
+    type: "notice",
+    level: "warn",
+    text: "语料更新不可用：内核未编译，请先在仓库根目录运行 npm run build",
+  });
+  // The page needs an answer or it waits forever; `error` is not one of the
+  // seven states, and inventing one would be a claim about a corpus this host
+  // could not read.
+  send({ type: "corpus_status", error: "内核未编译，无法读取语料更新状态（请先 npm run build）" });
+}
+
+async function handleCorpusStatus() {
+  // Same reason as `getKb`: a seed still copying the bundled corpus would have
+  // this answer `unavailable` for a corpus that is about to exist, and nothing
+  // would refresh the page afterwards. The seed never throws.
+  if (seedFirstRunPromise !== undefined) await seedFirstRunPromise;
+
+  const modules = await corpusModule();
+  if (modules === undefined) {
+    sendCorpusKernelMissing();
+    return;
+  }
+
+  const { config, reason, source, path: configPath } = await readCorpusConfig(modules);
+
+  let status = null;
+  let readError = "";
+  try {
+    status = await modules.update.readCorpusStatus({ harnessHome });
+  } catch (error) {
+    readError = messageOf(error);
+  }
+
+  /**
+   * Which of the seven states this is.
+   *
+   * `unavailable` outranks the config verdict: with no `kb/current` there is no
+   * corpus to update at all, and pointing the user at `corpus.json` would send
+   * them to fix the second thing first. A status read that threw outranks both
+   * — it is the one fact here that is not a supported state.
+   *
+   * `config_invalid` otherwise replaces the stored state rather than sitting
+   * beside it, because the update feature genuinely cannot run: contract §2
+   * says the knowledge base keeps working while updates report
+   * `corpus_config_invalid`.
+   */
+  let reported;
+  if (status === null) {
+    reported = { kind: "check_failed", reason: `读取语料状态失败：${readError}`, checkedAt: "" };
+  } else if (status.kind === "unavailable") {
+    reported = status;
+  } else if (config === null) {
+    reported = { kind: "config_invalid", reason };
+  } else {
+    reported = status;
+  }
+
+  send({
+    type: "corpus_status",
+    status: reported,
+    ...(source === undefined ? {} : { configSource: source }),
+    configPath,
+  });
+}
+
+async function handleCorpusCheck() {
+  // A check started before the seed finished would compare the remote version
+  // against a local version that is still being materialised, and could even
+  // race `setCurrent`. The seed is a one-off filesystem copy and never throws,
+  // so waiting costs at most that copy on the very first launch.
+  if (seedFirstRunPromise !== undefined) await seedFirstRunPromise;
+
+  const modules = await corpusModule();
+  if (modules === undefined) {
+    sendCorpusKernelMissing();
+    return;
+  }
+
+  const { config, reason, source, path: configPath } = await readCorpusConfig(modules);
+  if (config === null) {
+    // No request to make: say so in the same shape a failed check uses, so the
+    // page has one state machine instead of a special case.
+    send({
+      type: "corpus_status",
+      status: { kind: "config_invalid", reason },
+      ...(source === undefined ? {} : { configSource: source }),
+      configPath,
+    });
+    return;
+  }
+
+  try {
+    const { status, manifestText } = await checkCorpusWithManifest(modules, config);
+    if (status.kind === "update_available" && manifestText !== null) {
+      corpusManifestCache = {
+        fingerprint: corpusConfigFingerprint(config),
+        text: manifestText,
+        corpusVersion: status.corpusVersion,
+      };
+    } else if (status.kind !== "update_available") {
+      // A check that concludes anything else makes the previous manifest a
+      // statement about a source that has since changed (or about a version
+      // that is already installed).
+      corpusManifestCache = null;
+    }
+    send({
+      type: "corpus_status",
+      status,
+      ...(source === undefined ? {} : { configSource: source }),
+      configPath,
+    });
+  } catch (error) {
+    // `checkForUpdate` is documented as never throwing; this is the belt for a
+    // host whose kernel is older or newer than the contract.
+    send({
+      type: "corpus_status",
+      status: {
+        kind: "check_failed",
+        reason: `检查更新失败：${messageOf(error)}`,
+        checkedAt: new Date().toISOString(),
+      },
+      ...(source === undefined ? {} : { configSource: source }),
+      configPath,
+    });
+  }
+}
+
+/**
+ * The manifest to install, and where it came from.
+ *
+ * Two sources, in this order:
+ *
+ * 1. The text the last successful check fetched and verified, when the config
+ *    it was verified under is still the current one. That is what makes "update
+ *    to what I was shown" true rather than approximate, and it costs no request.
+ * 2. A fresh check, run through the same capturing wrapper — used when there is
+ *    no cache or the cache belongs to another config. The kernel decides whether
+ *    there is anything to install, so a failed or pointless re-check answers
+ *    with its own state instead of a second paraphrase from this host.
+ *
+ * Either way the text goes through `applyUpdate`, which parses and verifies the
+ * signature again before touching disk. Nothing this host fetched is trusted on
+ * its own say-so.
+ */
+async function resolveCorpusManifest(modules, config) {
+  const fingerprint = corpusConfigFingerprint(config);
+  if (corpusManifestCache !== null && corpusManifestCache.fingerprint === fingerprint) {
+    return { ok: true, text: corpusManifestCache.text, from: CORPUS_MANIFEST_FROM_CACHE };
+  }
+
+  const { status, manifestText } = await checkCorpusWithManifest(modules, config);
+  if (status.kind !== "update_available" || manifestText === null) {
+    return { ok: false, status };
+  }
+  corpusManifestCache = {
+    fingerprint,
+    text: manifestText,
+    corpusVersion: status.corpusVersion,
+  };
+  return { ok: true, text: manifestText, from: CORPUS_MANIFEST_FROM_CHECK };
+}
+
+async function handleCorpusApply() {
+  // Same reason as the check: an apply racing the seed would have two writers
+  // switching `current` over one `snapshots/` tree.
+  if (seedFirstRunPromise !== undefined) await seedFirstRunPromise;
+
+  const modules = await corpusModule();
+  if (modules === undefined) {
+    sendCorpusKernelMissing();
+    return;
+  }
+
+  const { config, reason } = await readCorpusConfig(modules);
+  if (config === null) {
+    send({ type: "corpus_update_result", ok: false, reason });
+    return;
+  }
+
+  const resolved = await resolveCorpusManifest(modules, config);
+  if (!resolved.ok) {
+    send({ type: "corpus_update_result", ok: false, reason: corpusStatusReason(resolved.status) });
+    // The state may have moved (a re-check can write `check_failed`), so the
+    // seven-state display is refreshed rather than left describing a moment
+    // before this click.
+    await handleCorpusStatus();
+    return;
+  }
+
+  let manifest;
+  try {
+    manifest = JSON.parse(stripBom(resolved.text));
+  } catch (error) {
+    // Unreachable through the cache (the kernel parsed these bytes) but this
+    // is the boundary where they become an object again.
+    send({
+      type: "corpus_update_result",
+      ok: false,
+      reason: `更新源返回的 latest.json 不是合法 JSON（${messageOf(error)}）`,
+    });
+    return;
+  }
+
+  let result;
+  try {
+    result = await modules.update.applyUpdate({
+      harnessHome,
+      config,
+      manifest,
+      onProgress: (progress) => {
+        // The kernel's own counts, forwarded as they happen. No timer, no
+        // estimated percentage: a progress line that moves on its own is the
+        // fake progress bar this page must not have.
+        send({
+          type: "corpus_update_progress",
+          completed: progress.completed,
+          total: progress.total,
+          path: progress.path,
+          action: progress.action === "reused" ? "reused" : "downloaded",
+        });
+      },
+    });
+  } catch (error) {
+    result = { ok: false, reason: `更新失败：${messageOf(error)}`, corpusVersionUnchanged: null };
+  }
+
+  if (result.ok === true) {
+    // The installed version is now on disk; a stale cache would offer to
+    // install it again.
+    corpusManifestCache = null;
+    send({ type: "corpus_update_result", ok: true, corpusVersion: result.corpusVersion });
+    // The tree on this page describes the corpus that was just replaced.
+    // Re-reading it is the only way it can keep describing what is there.
+    void handlers.getKb();
+  } else {
+    send({
+      type: "corpus_update_result",
+      ok: false,
+      reason: result.reason,
+      corpusVersionUnchanged: result.corpusVersionUnchanged ?? null,
+    });
+  }
+  await handleCorpusStatus();
+}
+
 /**
  * Commands this host implements. Everything else answers with a warning:
  * the renderer hides those controls, but a stale client or a keyboard
@@ -2068,6 +2752,15 @@ const handlers = {
         level: "dim",
         text: `模型服务配置有误：${providersError}。可在设置 → 模型服务中修改`,
       });
+    }
+
+    // First-run seeding runs *after* the handshake, not inside it: a fresh
+    // install may have a corpus to copy and a disk to wait on, and `init` must
+    // not make `ready` wait on the filesystem. Parked like `pendingRoot` above,
+    // and swallowed for the same reason — `seedFirstRun` reports its own
+    // failures as notices, so a rejected promise here would only duplicate them.
+    if (seedFirstRunPromise === undefined) {
+      seedFirstRunPromise = seedFirstRun().catch(() => undefined);
     }
   },
 
@@ -2374,6 +3067,11 @@ const handlers = {
       });
       return;
     }
+    // Settle the first-run seed first: it may be writing `mcp.json` right now,
+    // and a root resolved a moment earlier would describe a corpus that is
+    // already superseded. The seed never throws, so this cannot turn a page
+    // opening into a failure.
+    if (seedFirstRunPromise !== undefined) await seedFirstRunPromise;
     const location = located.resolveKbRoot({ harnessHome, repoRoot });
     try {
       const scan = await located.scanKbRoot(location.root);
@@ -2401,6 +3099,45 @@ const handlers = {
         },
       });
     }
+  },
+
+  /**
+   * What the corpus updater knows, without asking anyone.
+   *
+   * The knowledge-base page calls this when it opens. It must not reach the
+   * network: opening Settings is not a request to check for updates, and the
+   * startup check (contract §6) has already written whatever `state.json` is
+   * going to say. `readCorpusStatus` is the kernel's own reader of that file,
+   * so the seven states here are the same seven the update path produces.
+   */
+  getCorpusStatus() {
+    // Queued as well, not answered from beside the queue: a status read that
+    // overtook a running apply would describe the corpus as it was before the
+    // install, and the page would show the old version until the next visit.
+    void enqueueCorpus(handleCorpusStatus);
+  },
+
+  /**
+   * Ask the update source. **This touches the network**, so it only ever runs
+   * from the operator's click.
+   *
+   * Not returned to the NDJSON command queue for the same reason
+   * `testProvider` is not: a check waits on a request with the kernel's own
+   * timeout (30 s), and the rest of the window must keep answering while it
+   * does. Corpus commands are ordered among themselves by `enqueueCorpus`, so
+   * "check, then update" from one page cannot interleave.
+   */
+  checkCorpusUpdate() {
+    void enqueueCorpus(handleCorpusCheck);
+  },
+
+  /**
+   * Install the version the last check reported. Also a network operation —
+   * every changed file is downloaded — and it is the operator's click that
+   * starts it, never the page opening (contract §6: no automatic apply).
+   */
+  applyCorpusUpdate() {
+    void enqueueCorpus(handleCorpusApply);
   },
 
   /**

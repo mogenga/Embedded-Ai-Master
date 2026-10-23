@@ -67,6 +67,15 @@ export interface KbGrepResult {
 export interface KbServiceOptions {
   // 仅供测试注入更小的遍历预算；生产一律用 MAX_WALK_FILES。
   maxWalkFiles?: number
+  /**
+   * `kb_propose` 写入的 inbox 文件（绝对路径或相对进程 cwd 的路径）。
+   *
+   * 不传时保持历史行为：写 `<root>/_inbox.md`。传了就把 inbox 挪到语料根之外
+   * （OTA 部署形态是 `$HARNESS_HOME/kb/inbox/_inbox.md`，见 `docs/corpus-ota.md` §3）：
+   * 快照会被整份替换，用户沉淀不能跟着被冲掉。`kb_status` 与 `kb_propose`
+   * 都按这个位置读/写，不存在「写外部、读老位置」的分叉。
+   */
+  inboxPath?: string
 }
 
 export interface KbReadOptions {
@@ -93,6 +102,11 @@ export interface KbStatus {
   indexPresent: boolean
   inboxPending: number
   inboxError?: string
+  // inbox 的实际位置。默认形态是 `<root>/_inbox.md`；外部 inbox 时是绝对路径。
+  // 报位置是 R3 要求：写在哪就必须能查到在哪，不能让人以为语料根里有一份。
+  inboxPath: string
+  // inbox 是否位于语料根之外（OTA 形态为 true）。外部 inbox 不经 kb_read 暴露。
+  inboxExternal: boolean
   // 遍历预算被用完时出现；此时 fileCount 是「至少 N」（R3：不静默）。
   scanTruncated?: boolean
 }
@@ -458,6 +472,8 @@ export class KbService {
   private readonly root: string
   private readonly rootExists: boolean
   private readonly maxWalkFiles: number
+  private readonly inboxFile: string
+  private readonly inboxExternal: boolean
 
   constructor(root: string, options: KbServiceOptions = {}) {
     const resolved = path.resolve(root)
@@ -470,10 +486,39 @@ export class KbService {
     this.root = real
     this.rootExists = this.isDirectory(real)
     this.maxWalkFiles = Math.max(0, Math.trunc(options.maxWalkFiles ?? MAX_WALK_FILES))
+
+    // 先 `path.resolve` 再判断归属：外部 inbox 的父目录可能还不存在（首次启动前），
+    // 不能用 realpathSync——那会对不存在的路径抛 ENOENT。归属比较本身要能同时
+    // 处理 Windows 大小写不敏感与前缀混淆（`/kb` vs `/kbevil`），所以用 isWithin。
+    const configuredInbox = options.inboxPath?.trim()
+    if (configuredInbox === undefined || configuredInbox === '') {
+      this.inboxFile = path.join(real, '_inbox.md')
+      this.inboxExternal = false
+    } else {
+      const inbox = path.resolve(configuredInbox)
+      this.inboxFile = inbox
+      // 显式指定但在语料根内：按「根内」处理，于是仍可经 kb_read 读到并且
+      // kb_status 报相对路径——位置语义跟着实际所在，不跟着参数是否传了。
+      this.inboxExternal = !isWithin(real, inbox)
+    }
   }
 
   get rootPath(): string {
     return this.root
+  }
+
+  /**
+   * inbox 的绝对路径。`kb_propose` 写它，`kb_status` 读它，审核脚本读它——
+   * 三处必须是同一个值，否则就是「写外部、读老位置」的静默不一致。
+   */
+  get inboxPath(): string {
+    return this.inboxFile
+  }
+
+  /** inbox 对外的标识：根内用相对语料根的 POSIX 路径，根外用绝对路径。 */
+  inboxLabel(): string {
+    if (!this.inboxExternal) return toPosix(path.relative(this.root, this.inboxFile))
+    return this.inboxFile
   }
 
   lookup(query: string, limit = DEFAULT_LOOKUP_LIMIT): KbLookupResult {
@@ -720,8 +765,17 @@ export class KbService {
   }
 
   status(): KbStatus {
+    const inboxPath = this.inboxLabel()
     if (!this.rootExists) {
-      return { root: this.root, fileCount: 0, indexEntries: 0, indexPresent: false, inboxPending: 0 }
+      return {
+        root: this.root,
+        fileCount: 0,
+        indexEntries: 0,
+        indexPresent: false,
+        inboxPending: 0,
+        inboxPath,
+        inboxExternal: this.inboxExternal,
+      }
     }
 
     const indexPath = path.join(this.root, INDEX_FILE)
@@ -737,10 +791,11 @@ export class KbService {
 
     let inboxPending = 0
     let inboxError: string | undefined
-    const inboxFile = path.join(this.root, '_inbox.md')
-    if (this.isRegularFile(inboxFile)) {
+    // 读的位置就是写的位置（this.inboxFile）。文件不存在时保持既有 `inboxPending: 0`
+    // 语义——「没有待审提案」不是错误；只有文件存在却读不动/解析不了才报 inboxError。
+    if (this.isRegularFile(this.inboxFile)) {
       try {
-        inboxPending = parseInbox(readFileSync(inboxFile, 'utf8')).length
+        inboxPending = parseInbox(readFileSync(this.inboxFile, 'utf8')).length
       } catch (error) {
         inboxError = error instanceof Error ? error.message : String(error)
       }
@@ -754,6 +809,8 @@ export class KbService {
       indexEntries,
       indexPresent,
       inboxPending,
+      inboxPath,
+      inboxExternal: this.inboxExternal,
       ...(inboxError === undefined ? {} : { inboxError }),
       ...(walk.scanTruncated ? { scanTruncated: true } : {}),
     }
@@ -800,6 +857,11 @@ export class KbService {
       throw new KbServiceError('path_denied', `KB 路径无法解析: ${relativePath}`)
     }
 
+    // 刻意**不放宽**这里去迁就外部 inbox（OTA 形态下 `inboxPath` 在语料根之外）：
+    // 外部 inbox 经 `kb_read` 读不到，是接受的取舍——它本来就是待审区，
+    // `kb_read` 的返回值会原样进模型上下文并标 `reviewStatus: reviewed`，
+    // 让一条「根外任意路径可读」的口子换来读自家 inbox，代价与收益不成比例。
+    // 审核脚本不经这条路径，它直接按 `KbService.inboxPath` 读文件，所以人工流程不受影响。
     if (!isWithin(this.root, real)) {
       throw new KbServiceError('path_denied', `KB 路径越出知识库根目录: ${relativePath}`)
     }

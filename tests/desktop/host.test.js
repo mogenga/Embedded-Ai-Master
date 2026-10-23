@@ -5,6 +5,11 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import {
+  ensureSnapshotDir,
+  getKbLayout,
+  setCurrent,
+} from "../../src/corpus/snapshot.js";
 
 const HOST = path.join(import.meta.dirname, "..", "..", "desktop", "host", "host.js");
 const REPO_ROOT = path.join(import.meta.dirname, "..", "..");
@@ -78,6 +83,17 @@ const COMPACT_FORCES = DIST_BUILT
  */
 const BREAKDOWN_BUILT = DIST_BUILT
   && existsSync(path.join(REPO_ROOT, "dist", "context", "breakdown.js"));
+/**
+ * Whether the first-run seeding module has been compiled.
+ *
+ * The host imports `dist/corpus/seed.js` lazily and silently skips it when the
+ * import fails: a `dist/` from before seeding landed must still boot, and the
+ * knowledge base then behaves exactly as it did before. That makes "not built"
+ * a supported state rather than a failure, so the two seeding cases skip and
+ * say so — a green result here would otherwise claim a behaviour nobody ran.
+ */
+const SEED_BUILT = existsSync(path.join(REPO_ROOT, "dist", "corpus", "seed.js"))
+  && existsSync(path.join(REPO_ROOT, "dist", "corpus", "snapshot.js"));
 // 每个用例都要起一个 Node 宿主进程；满负载下会超过 vitest 的 5s 默认超时。
 const HOST_TIMEOUT_MS = 30_000;
 const tempDirs = [];
@@ -1866,6 +1882,86 @@ describe("desktop host", () => {
     const event = events.find((entry) => entry.type === "kb");
     expect(event.kb).toMatchObject({ root: "", source: "none", tree: [] });
     expect(events.some((entry) => entry.type === "ready")).toBe(true);
+  }, HOST_TIMEOUT_MS);
+
+  /**
+   * First-run seeding, end to end through the real host process.
+   *
+   * A checkout has no `resources/corpus/`, so the corpus half answers
+   * `no_bundled_corpus` and leaves `~/.harness/kb` absent — asserted first,
+   * because "seeded a corpus into the developer's home" is the failure mode
+   * that would be invisible until an OTA check started reporting odd versions.
+   *
+   * The MCP half is the one that must run in development: given a `current`
+   * that OTA (or a previous install) put there, the host writes the `kb` server
+   * entry, and `getKb` then reports the same root the OTA client writes to
+   * instead of falling back to the checkout's corpus. Without this the settings
+   * page shows an empty knowledge base next to an `unavailable` update state.
+   */
+  it.runIf(KB_MODULE_BUILT && SEED_BUILT)("首启：开发形态不塞内置语料，但把 kb 条目接到 OTA 的根", async () => {
+    const home = await tempHome();
+    const layout = getKbLayout(home);
+    await ensureSnapshotDir(layout, 1);
+    await setCurrent(layout, 1);
+    await writeFile(path.join(layout.snapshotsDir, "v1", "index.yaml"), "version: 1\n");
+    await writeFile(path.join(layout.snapshotsDir, "v1", "top.md"), "# top\n");
+
+    const events = await runHost(home, [{ cmd: "init", cwd: home }, { cmd: "getKb" }], {
+      // `KB_ROOT` pinned empty: an operator with that variable exported in
+      // their shell would otherwise have the seeding step skip by design, and
+      // this case would fail for a reason that is not the code under test.
+      env: { KB_ROOT: "" },
+      until: (all) => all.some((event) => event.type === "kb"),
+    });
+
+    // Development form: no bundled corpus was materialised, and nothing was
+    // said about it (a skip is not the operator's problem).
+    expect(existsSync(path.join(layout.snapshotsDir, "v2"))).toBe(false);
+    expect(
+      events.some((entry) => entry.type === "notice" && entry.text.includes("内置知识库")),
+    ).toBe(false);
+    expect(events.some((entry) => entry.type === "ready")).toBe(true);
+
+    // The `kb` entry landed, pointing at the snapshot OTA maintains.
+    const onDisk = JSON.parse(readFileSync(path.join(home, "mcp.json"), "utf8"));
+    expect(Object.keys(onDisk.mcpServers)).toStrictEqual(["kb"]);
+    expect(onDisk.mcpServers.kb.env.KB_ROOT).toBe(layout.currentLink);
+    expect(onDisk.mcpServers.kb.env.KB_INBOX_PATH).toBe(path.join(layout.inboxDir, "_inbox.md"));
+    expect(onDisk.mcpServers.kb.env.ELECTRON_RUN_AS_NODE).toBe("1");
+    expect(onDisk.mcpServers.kb.command).toBe(process.execPath);
+    expect(path.isAbsolute(onDisk.mcpServers.kb.args[0])).toBe(true);
+
+    // And `getKb` reads it back: same root as the corpus, not the checkout's.
+    const event = events.find((entry) => entry.type === "kb");
+    expect(event.kb.source).toBe("mcp.json");
+    expect(event.kb.root).toBe(layout.currentLink);
+    expect(event.kb.fileCount).toBe(1);
+  }, HOST_TIMEOUT_MS);
+
+  /**
+   * A home with no corpus at all must not get an `mcp.json` entry.
+   *
+   * Writing one would point `getKb` at a directory that does not exist, which
+   * reads as "your knowledge base is missing" — worse than falling back to the
+   * checkout's corpus, which at least holds something.
+   */
+  it.runIf(KB_MODULE_BUILT && SEED_BUILT)("首启：没有 current 时不写 mcp.json，getKb 照旧回落", async () => {
+    const home = await tempHome();
+    const events = await runHost(home, [{ cmd: "init", cwd: home }, { cmd: "getKb" }], {
+      // Same pin as the case above: `KB_ROOT` would otherwise resolve `getKb`
+      // to the operator's own corpus and change the expected `source`.
+      env: { KB_ROOT: "" },
+      until: (all) => all.some((event) => event.type === "kb"),
+    });
+
+    expect(existsSync(path.join(home, "mcp.json"))).toBe(false);
+    expect(existsSync(path.join(home, "kb"))).toBe(false);
+    const event = events.find((entry) => entry.type === "kb");
+    expect(event.kb.source).toBe("default");
+    // No warning: "you have no corpus yet" is a state, not a fault.
+    expect(
+      events.some((entry) => entry.type === "notice" && entry.text.includes("知识库")),
+    ).toBe(false);
   }, HOST_TIMEOUT_MS);
 
   it("无法解析的指令被拒绝而不是让宿主崩溃", async () => {

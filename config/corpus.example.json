@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "updateBaseUrl": "https://example.invalid/",
+  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n"
+}

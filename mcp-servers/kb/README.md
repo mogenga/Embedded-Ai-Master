@@ -99,8 +99,8 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 | `kb_grep(pattern, glob?)` | 逐行正则检索，大小写不敏感，可选 glob 限定 | `found` / `hits[{path,line,text}]` / `count` / `truncated` / `fileCount` / `files[{path,hits}]` / `scanTruncated` |
 | `kb_read(path, offset?, limit?)` | 读文件，分页窗口 | `content` / `offset` / `lines` / `totalLines` / `truncated` / `frontmatter` / `reviewStatus` |
 | `kb_search(tokens, limit?)` | 字面多 token 行检索（不支持正则） | `found` / `hits[{path,line,text,token}]` |
-| `kb_status()` | 根路径、文件数、索引条目、待审数 | `root` / `fileCount` / `indexEntries` / `indexPresent` / `inboxPending` |
-| `kb_propose(...)` | 写待审 inbox | `proposalId` / `status: "pending_review"` |
+| `kb_status()` | 根路径、文件数、索引条目、待审数、inbox 位置 | `root` / `fileCount` / `indexEntries` / `indexPresent` / `inboxPending` / `inboxPath` / `inboxExternal` |
+| `kb_propose(...)` | 写待审 inbox | `proposalId` / `inboxPath` / `status: "pending_review"` |
 
 除 `kb_propose` 外全部 `readOnlyHint: true`，`kb_read` 另带 `meta.evidence: true`。
 
@@ -124,10 +124,13 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 2026-10-22 这一轮按 D-179 的**建议 ① 与 ②** 做了一半：工具描述里写死「命中只是候选，断言前必须 `kb_read` 原文确认」，`kb_grep` 增加了命中文件级分布（`fileCount` / `files`）。**建议 ③（补 B 的负样本跑批、按同一评测协议拿真实拒答率）没有做**，所以 D-179 的状态仍是「未解决」——本轮只是把不可见的歧义变成可见的数字，拒答率依然未知，也**没有**因此设置任何阈值。
 
 - `kb_lookup` / `kb_glob` / `kb_grep` / `kb_read` / `kb_search` / `kb_status` 为只读工具。
-- `kb_propose` 把新知识写入 `<KB 根>/_inbox.md`，返回 `proposalId` 与 `status: "pending_review"`。它**只写待审区**：`kb_search` / `kb_grep` / `kb_glob` 均排除 `_inbox.md`，`kb_lookup` 只读 `index.yaml`，因此未审内容不会进入检索。
-- 同一 `kind + domain + content` 重复提交不会重复写入，返回已有 `proposalId` 与 `duplicate: true`。
-- 审核是人工步骤：先把内容合并进正式条目，再运行 `npm run kb:review -- --accept <id> --target <正式条目路径>`；回归指标低于基线时脚本拒绝接受、inbox 不变。拒绝用 `npm run kb:review -- --reject <id> --reason "..."`。
-- `kb_status.inboxPending` 报告待审条数；inbox 读取失败时返回 `inboxError`，不把错误吞成 0。
+- `kb_propose` 把新知识写入待审 inbox，返回 `proposalId`、`inboxPath` 与 `status: "pending_review"`。它**只写待审区**：`kb_search` / `kb_grep` / `kb_glob` 均排除 `_inbox.md`，`kb_lookup` 只读 `index.yaml`，因此未审内容不会进入检索。
+- **inbox 位置可配置**：默认仍是 `<KB 根>/_inbox.md`（不传 `inboxPath` 时行为不变）。OTA 部署形态下语料快照会被整份替换，用户沉淀必须放在根外——`KbServiceOptions.inboxPath` / 环境变量 `KB_INBOX_PATH` 指向 `$HARNESS_HOME/kb/inbox/_inbox.md`（见 `docs/corpus-ota.md` §3）。`kb_status` 用 `inboxPath` 与 `inboxExternal` 如实回报实际位置，`kb_propose` 回报的 `inboxPath` 与之一致：写在哪就报在哪，绝不会写外部文件却回报 `_inbox.md`。
+- 外部 inbox 不经 `kb_read` 暴露：`kb_read` 的路径校验仍限制在语料根内（不放宽成任意路径可读）。审核脚本不走这条路径，它直接按同一位置读文件。
+- `MANAGED_CORPUS_EXCLUDES`（`inbox.ts`）列出受管语料必须排除的文件名，第一项是 `_inbox.md`，另含 `_reviewed.md`：OTA 整份替换快照，用户沉淀与审核记录不能算进清单。
+- 同一 `kind + domain + content` 重复提交不会重复写入，返回已有 `proposalId` 与 `duplicate: true`（外部 inbox 下同样生效）。
+- 审核是人工步骤：先把内容合并进正式条目，再运行 `npm run kb:review -- --accept <id> --target <正式条目路径>`；回归指标低于基线时脚本拒绝接受、inbox 不变。拒绝用 `npm run kb:review -- --reject <id> --reason "..."`。inbox 不在默认位置时加 `--inbox <路径>`，或设环境变量 `KB_INBOX_PATH`（`--inbox` 优先）。
+- `kb_status.inboxPending` 报告待审条数；inbox 读取失败时返回 `inboxError`，不把错误吞成 0。文件不存在时按 `inboxPending: 0` 处理（「没有提案」不是错误）。
 - 旧 inbox 块没有 `id`，列表/审核时按出现顺序生成 `legacy-<n>`；删除前置块后编号会漂移。新提案始终写入稳定 id，审核时优先使用新 id。
 
 ## 测试
@@ -137,3 +140,5 @@ npx vitest run mcp-servers/kb
 ```
 
 测试使用内联夹具，不依赖本地语料；另有一条真实语料测试，仅当 `mcp-servers/kb/kb/index.yaml` 存在时运行并断言解析出 90 条，语料缺失时自动 skip（不伪造数据）。`tests/regression.test.ts` 的双轨回归同理，缺本地语料时 `describe.skip`。
+
+`tests/kb-inbox-location.test.ts` 覆盖外部 inbox：写入不再触碰 `<KB 根>/_inbox.md`、默认形态逐字不变、跨位置去重、`kb_status` 位置回报、读取失败仍保留 `inboxError`。读失败的注入用 `vi.mock("node:fs")` 只让指定路径的 `readFileSync` 抛 EACCES（Windows 上真实 chmod 不生效，没有跨平台做法）。`tests/kb-review-script.test.ts` 覆盖 `--inbox` / `KB_INBOX_PATH` 与默认位置的向后兼容。

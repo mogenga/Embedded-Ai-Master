@@ -27,6 +27,22 @@ function kbRoot() {
   return path.resolve(ROOT, configured === undefined || configured === "" ? DEFAULT_KB_ROOT : configured);
 }
 
+/**
+ * inbox 位置。优先级：`--inbox <路径>` > 环境变量 `KB_INBOX_PATH` > `<KB 根>/_inbox.md`。
+ *
+ * 与 MCP server 同一套口径（`mcp-servers/kb/server.ts:resolveKbInboxPath`）：OTA 部署把
+ * inbox 挪到语料根之外，审核脚本必须跟过去，否则会出现「kb_propose 写外部文件、
+ * 审核脚本读老位置」——用户看到的 inbox 永远是空的，提案却真实存在。
+ *
+ * 相对路径按 ROOT 解析，与 KB_ROOT 一致。
+ */
+function inboxFile(root, explicit) {
+  if (typeof explicit === "string" && explicit.trim() !== "") return path.resolve(ROOT, explicit);
+  const configured = process.env.KB_INBOX_PATH?.trim();
+  if (configured !== undefined && configured !== "") return path.resolve(ROOT, configured);
+  return path.join(root, INBOX_FILE);
+}
+
 function statSignature(file) {
   const info = statSync(file);
   return `${info.mtimeMs}:${info.size}`;
@@ -65,7 +81,7 @@ function parseArgs(argv) {
       index += 1;
       continue;
     }
-    if (arg === "--target" || arg === "--note" || arg === "--reason") {
+    if (arg === "--target" || arg === "--note" || arg === "--reason" || arg === "--inbox") {
       const key = arg.slice(2);
       options[key] = argv[index + 1];
       index += 1;
@@ -75,7 +91,10 @@ function parseArgs(argv) {
     return undefined;
   }
   if (mode === undefined) {
-    fail("用法: --list | --accept <id> --target <path> [--note ...] | --reject <id> --reason ...", 2);
+    fail(
+      "用法: --list | --accept <id> --target <path> [--note ...] | --reject <id> --reason ...（均可加 --inbox <路径>）",
+      2,
+    );
     return undefined;
   }
   return { mode, ...options };
@@ -154,18 +173,18 @@ async function main() {
   const gateModule = await import(pathToFileURL(GATE_MODULE).href);
   const yamlModule = await import(pathToFileURL(YAML_MODULE).href);
   const root = kbRoot();
-  const inboxFile = path.join(root, INBOX_FILE);
+  const inbox = inboxFile(root, parsed.inbox);
 
   if (!existsSync(root)) {
     fail(`KB 根不存在: ${root}`, 2);
     return;
   }
-  if (!existsSync(inboxFile)) {
-    fail(`inbox 不存在: ${inboxFile}`, 2);
+  if (!existsSync(inbox)) {
+    fail(`inbox 不存在: ${inbox}`, 2);
     return;
   }
 
-  const proposals = readProposals(inboxModule, inboxFile);
+  const proposals = readProposals(inboxModule, inbox);
 
   if (parsed.mode === "list") {
     if (proposals.length === 0) {
@@ -202,26 +221,26 @@ async function main() {
       fail("--reject 需要 --reason", 2);
       return;
     }
-    const before = statSignature(inboxFile);
-    const removed = inboxModule.removeProposal(root, parsed.id);
+    const before = statSignature(inbox);
+    const removed = inboxModule.removeProposalFrom(inbox, parsed.id);
     if (removed === undefined) {
       fail(`移除提案失败: ${parsed.id}`, 1);
       return;
     }
-    if (statSignature(inboxFile) === before) {
-      // removeProposal 已重写文件；此分支只用于提示实现异常，不改变退出码。
+    if (statSignature(inbox) === before) {
+      // removeProposalFrom 已重写文件；此分支只用于提示实现异常，不改变退出码。
       console.error("kb review: inbox 未发生预期变化");
     }
     const reviewedPath = (() => {
       try {
-        return inboxModule.appendReviewed(root, {
+        return inboxModule.appendReviewedTo(inbox, {
           id: parsed.id,
           status: "rejected",
           reviewedAt: new Date().toISOString(),
           reason: parsed.reason.trim(),
         });
       } catch (error) {
-        inboxModule.appendProposal(root, removed);
+        inboxModule.appendProposalTo(inbox, removed);
         fail(`写入审核记录失败，已回滚 inbox: ${errorMessage(error)}`, 2);
         return undefined;
       }
@@ -239,7 +258,7 @@ async function main() {
   const target = validateTarget(root, parsed.target);
   if (target === undefined) return;
 
-  const before = statSignature(inboxFile);
+  const before = statSignature(inbox);
   const report = runRegression(root);
   if (report === undefined) return;
   const baseline = JSON.parse(readFileSync(BASELINE_PATH, "utf8"));
@@ -254,19 +273,19 @@ async function main() {
     process.exitCode = 1;
     return;
   }
-  if (statSignature(inboxFile) !== before) {
+  if (statSignature(inbox) !== before) {
     fail("inbox 在审核期间发生变化，请重试", 1);
     return;
   }
 
-  const removed = inboxModule.removeProposal(root, parsed.id);
+  const removed = inboxModule.removeProposalFrom(inbox, parsed.id);
   if (removed === undefined) {
     fail(`移除提案失败: ${parsed.id}`, 1);
     return;
   }
   const reviewedPath = (() => {
     try {
-      return inboxModule.appendReviewed(root, {
+      return inboxModule.appendReviewedTo(inbox, {
         id: parsed.id,
         status: "accepted",
         reviewedAt: new Date().toISOString(),
@@ -276,7 +295,7 @@ async function main() {
           : {}),
       });
     } catch (error) {
-      inboxModule.appendProposal(root, removed);
+      inboxModule.appendProposalTo(inbox, removed);
       fail(`写入审核记录失败，已回滚 inbox: ${errorMessage(error)}`, 2);
       return undefined;
     }

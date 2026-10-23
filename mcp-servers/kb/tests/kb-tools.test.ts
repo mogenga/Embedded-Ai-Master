@@ -4,7 +4,7 @@ import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { KbService } from '../service.js'
-import { createKbService, resolveKbRoot } from '../server.js'
+import { createKbService, resolveKbInboxPath, resolveKbRoot } from '../server.js'
 import { kbTools } from '../tools.js'
 import type { KbToolSpec } from '../tools.js'
 
@@ -444,5 +444,40 @@ describe('KB_ROOT', () => {
     const service = createKbService({ KB_ROOT: 'no-such-kb-fixture-dir' }, process.cwd())
 
     expect(service.status().root).toBe(path.resolve(process.cwd(), 'no-such-kb-fixture-dir'))
+  })
+})
+
+describe('KB_INBOX_PATH', () => {
+  it('未设置时返回 undefined，service 沿用 <KB 根>/_inbox.md', () => {
+    expect(resolveKbInboxPath({}, 'C:/work/project')).toBeUndefined()
+    expect(resolveKbInboxPath({ KB_INBOX_PATH: '   ' }, 'C:/work/project')).toBeUndefined()
+
+    const service = createKbService({ KB_ROOT: 'kb-fixture' }, 'C:/work/project')
+    expect(service.status()).toMatchObject({
+      inboxPath: '_inbox.md',
+      inboxExternal: false,
+    })
+  })
+
+  it('相对路径按 cwd 解析，绝对路径保持不变', () => {
+    expect(resolveKbInboxPath({ KB_INBOX_PATH: 'state/inbox/_inbox.md' }, 'C:/work/project')).toBe(
+      path.resolve('C:/work/project', 'state/inbox/_inbox.md'),
+    )
+    expect(resolveKbInboxPath({ KB_INBOX_PATH: '  C:/inbox/_inbox.md  ' }, 'C:/work/project')).toBe(
+      path.resolve('C:/inbox/_inbox.md'),
+    )
+  })
+
+  it('createKbService 把 KB_INBOX_PATH 接到 KbService.inboxPath', () => {
+    const service = createKbService(
+      { KB_ROOT: 'kb-fixture', KB_INBOX_PATH: 'C:/harness/kb/inbox/_inbox.md' },
+      'C:/work/project',
+    )
+
+    expect(service.inboxPath).toBe(path.resolve('C:/harness/kb/inbox/_inbox.md'))
+    expect(service.status()).toMatchObject({
+      inboxPath: path.resolve('C:/harness/kb/inbox/_inbox.md'),
+      inboxExternal: true,
+    })
   })
 })
