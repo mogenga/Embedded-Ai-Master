@@ -25,6 +25,16 @@ export interface ReviewedEntry {
 
 const INBOX_FILE = '_inbox.md'
 const REVIEWED_FILE = '_reviewed.md'
+
+/**
+ * 受管语料集合必须排除的文件名（按 basename 匹配），供 manifest 生成与 OTA 发布脚本使用。
+ *
+ * `_inbox.md` 排第一：它是用户本地沉淀，而 OTA 会**整份替换**语料快照
+ * （`docs/corpus-ota.md` §3/§4）。把它算进清单只有两种结局——更新时冲掉用户的
+ * 提案，或者新快照校验失败。`_reviewed.md` 同理：审核记录也是用户数据，不是语料正文。
+ */
+export const MANAGED_CORPUS_EXCLUDES: readonly string[] = [INBOX_FILE, REVIEWED_FILE]
+
 const INBOX_HEADER = [
   '# 知识库收件箱 (KB Inbox)',
   '',
@@ -153,12 +163,20 @@ function toProposal(parsed: ParsedBlock, id: string): KbProposal {
   }
 }
 
-function inboxPath(root: string): string {
+/**
+ * `_inbox.md` 的默认位置：语料根内。
+ *
+ * OTA 会整份替换语料快照，部署形态把 inbox 放在根外（契约 `docs/corpus-ota.md` §3
+ * 的 `$HARNESS_HOME/kb/inbox/_inbox.md`），因此下面所有读写都提供「按文件路径」的
+ * 变体；`root` 版本只是默认位置的薄封装，行为与改动前逐字一致。
+ */
+export function defaultInboxFile(root: string): string {
   return path.join(root, INBOX_FILE)
 }
 
-function reviewedPath(root: string): string {
-  return path.join(root, REVIEWED_FILE)
+/** 审核记录与 inbox 同目录：inbox 搬到哪里，记录就跟到哪里。 */
+function reviewedFileFor(inboxFile: string): string {
+  return path.join(path.dirname(inboxFile), REVIEWED_FILE)
 }
 
 export function parseInbox(text: string): KbProposal[] {
@@ -199,30 +217,45 @@ export function newProposalId(now = new Date()): string {
   return `${stamp}-${randomBytes(3).toString('hex')}`
 }
 
-export function appendProposal(
-  root: string,
+/**
+ * 把提案追加到 `file`；返回的 `path` 是**调用方看到的** inbox 标识。
+ *
+ * `label` 由调用方传：默认形态下是 `_inbox.md`（相对语料根，历史契约），
+ * 外部 inbox 形态下是绝对路径——写在哪里就如实回报哪里，不能一边写外部文件
+ * 一边回 `_inbox.md` 让人以为语料根里有一份（R3）。
+ */
+export function appendProposalTo(
+  file: string,
   proposal: KbProposal,
+  label: string = INBOX_FILE,
 ): { path: string; duplicateOf?: string } {
-  const file = inboxPath(root)
   if (!existsSync(file)) {
+    // 刻意不补建父目录：inbox 目录由部署层（快照种子化）负责，这里悄悄建目录会把
+    // 「路径配错」伪装成写入成功。父目录缺失时 ENOENT 由调用方如实报为写入失败。
     writeFileSync(file, `${INBOX_HEADER}\n\n${formatProposal(proposal)}`, 'utf8')
-    return { path: INBOX_FILE }
+    return { path: label }
   }
   const existingText = readFileSync(file, 'utf8')
   const existing = parseInbox(existingText)
   const digest = proposalDigest(proposal)
   const duplicate = existing.find((item) => proposalDigest(item) === digest)
   if (duplicate !== undefined) {
-    return { path: INBOX_FILE, duplicateOf: duplicate.id }
+    return { path: label, duplicateOf: duplicate.id }
   }
 
   const separator = existingText.endsWith('\n') ? '' : '\n'
   appendFileSync(file, `${separator}${formatProposal(proposal)}`, 'utf8')
-  return { path: INBOX_FILE }
+  return { path: label }
 }
 
-export function removeProposal(root: string, id: string): KbProposal | undefined {
-  const file = inboxPath(root)
+export function appendProposal(
+  root: string,
+  proposal: KbProposal,
+): { path: string; duplicateOf?: string } {
+  return appendProposalTo(defaultInboxFile(root), proposal)
+}
+
+export function removeProposalFrom(file: string, id: string): KbProposal | undefined {
   if (!existsSync(file)) return undefined
   const text = readFileSync(file, 'utf8')
   const { header, blocks } = splitBlocks(text)
@@ -252,8 +285,13 @@ export function removeProposal(root: string, id: string): KbProposal | undefined
   return removed
 }
 
-export function appendReviewed(root: string, entry: ReviewedEntry): string {
-  const file = reviewedPath(root)
+export function removeProposal(root: string, id: string): KbProposal | undefined {
+  return removeProposalFrom(defaultInboxFile(root), id)
+}
+
+/** 审核记录写到 inbox 同目录；返回相对该目录的文件名（`_reviewed.md`）。 */
+export function appendReviewedTo(inboxFile: string, entry: ReviewedEntry): string {
+  const file = reviewedFileFor(inboxFile)
   if (!existsSync(file)) writeFileSync(file, `${REVIEWED_HEADER}\n`, 'utf8')
   const lines = [
     '---',
@@ -267,4 +305,8 @@ export function appendReviewed(root: string, entry: ReviewedEntry): string {
   const text = readFileSync(file, 'utf8')
   appendFileSync(file, `${text.endsWith('\n') ? '' : '\n'}${lines.join('\n')}`, 'utf8')
   return REVIEWED_FILE
+}
+
+export function appendReviewed(root: string, entry: ReviewedEntry): string {
+  return appendReviewedTo(defaultInboxFile(root), entry)
 }

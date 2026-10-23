@@ -818,6 +818,9 @@ describe('KbService', () => {
         indexEntries: 4,
         indexPresent: true,
         inboxPending: 0,
+        // 未配 inboxPath 时仍是老位置，且如实报出来。
+        inboxPath: '_inbox.md',
+        inboxExternal: false,
       })
     })
 
@@ -842,6 +845,8 @@ describe('KbService', () => {
         indexEntries: 0,
         indexPresent: false,
         inboxPending: 0,
+        inboxPath: '_inbox.md',
+        inboxExternal: false,
       })
       expect(ghost.status().scanTruncated).toBeUndefined()
       expect(ghost.lookup('串口')).toEqual({

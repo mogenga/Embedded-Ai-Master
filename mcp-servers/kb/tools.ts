@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { appendProposal, newProposalId } from './inbox.js'
+import { appendProposalTo, newProposalId } from './inbox.js'
 import { KbServiceError } from './service.js'
 import type { KbService } from './service.js'
 
@@ -198,7 +198,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const status: KbToolSpec = {
     name: 'kb_status',
     description:
-      '查看知识库根路径、markdown 文件数、索引条目数、待审提案数与索引是否存在。索引缺失时返回 indexPresent=false；索引损坏时返回 index_invalid；inbox 读取失败时返回 inboxError。scanTruncated: true 表示文件遍历被预算截停，此时 fileCount 只是下界。',
+      '查看知识库根路径、markdown 文件数、索引条目数、待审提案数与索引是否存在。inboxPath 是待审 inbox 的实际位置（inboxExternal: true 表示它在知识库根之外、不经 kb_read 暴露）；inbox 为空或不存在时 inboxPending=0，读取失败时返回 inboxError，不得把读取失败说成「没有待审提案」。索引缺失时返回 indexPresent=false；索引损坏时返回 index_invalid。scanTruncated: true 表示文件遍历被预算截停，此时 fileCount 只是下界。',
     annotations: { readOnlyHint: true },
     handler: async () => {
       try {
@@ -214,7 +214,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const propose: KbToolSpec = {
     name: 'kb_propose',
     description:
-      '把诊断中发现的新知识或修正写入待审 inbox（_inbox.md）。只写入待审区，不参与 kb_lookup/kb_search，也不会自动合并；必须由人工审核后合并到正式条目。返回 proposalId 与 pending_review 状态。',
+      '把诊断中发现的新知识或修正写入待审 inbox。只写入待审区，不参与 kb_lookup/kb_search，也不会自动合并；必须由人工审核后合并到正式条目。返回 proposalId、inboxPath（inbox 实际位置，可能是知识库根之外的绝对路径）与 pending_review 状态。',
     inputSchema: proposeSchema,
     annotations: { readOnlyHint: false, destructiveHint: true },
     handler: withSchema(proposeSchema, async (args) => {
@@ -229,7 +229,8 @@ export function kbTools(service: KbService): KbToolSpec[] {
         ...(args.title === undefined ? {} : { title: args.title }),
       }
       try {
-        const result = appendProposal(service.rootPath, proposal)
+        // 写 service 报出来的那个位置，不在这里另算一遍：位置只有一个来源。
+        const result = appendProposalTo(service.inboxPath, proposal, service.inboxLabel())
         return ok({
           proposalId: result.duplicateOf ?? proposal.id,
           inboxPath: result.path,

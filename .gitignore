@@ -26,6 +26,9 @@ mcp-servers/kb/data/
 .env.*
 !.env.example
 
+# 语料 OTA 真实配置（模板见 config/corpus.example.json）：真实桶地址与公钥由构建时注入，不进仓库
+config/corpus.local.json
+
 # 密钥与证书（语料 OTA 的签名私钥、TLS 证书、SSH 私钥）
 # 语料会进模型上下文，被篡改的语料就是一次提示注入；签名私钥泄露等同可向
 # 全部用户推恶意语料，因此这一组按最坏情况预置，不靠「记得别提交」。

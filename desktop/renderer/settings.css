@@ -1148,6 +1148,41 @@
   color: var(--warn);
 }
 
+/* Corpus updates. The reason a check or a verify failed is the most important
+   sentence on the page when it appears, so it gets its own line at full width
+   rather than being squeezed into `.setting-control`'s 56% column. */
+.kb-update-reason {
+  margin: 2px 0 8px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.kb-update-path {
+  display: inline-block;
+  margin: 2px 0 8px;
+  word-break: break-all;
+}
+
+.kb-update-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 2px 0;
+}
+
+.kb-update-progress,
+.kb-update-done,
+.kb-update-failed,
+.kb-update-unchanged {
+  margin: 4px 0 0;
+}
+
+/* A finished update is a fact worth noticing, and the one line on this page
+   that should not read as another warning. */
+.kb-update-done {
+  color: var(--success);
+}
+
 .kb-tree {
   display: flex;
   flex-direction: column;

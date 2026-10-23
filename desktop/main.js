@@ -86,7 +86,18 @@ function startWindow(options = {}) {
       cwd: hostCwd,
       // Node, not a second Electron app: the host imports the compiled kernel
       // and has no Electron API in scope.
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      //
+      // Only a packaged app names its `resources/` here. The property is not
+      // passed unconditionally because a development host sees a
+      // `resourcesPath` too — Electron's own `dist/resources`, which holds no
+      // kernel — and the host could not tell the two apart. Omitting it in
+      // development is what makes the host fall back to the checkout layout
+      // and report "run npm run build" instead of "reinstall".
+      env: {
+        ...process.env,
+        ELECTRON_RUN_AS_NODE: "1",
+        ...(app.isPackaged ? { HARNESS_RESOURCES_PATH: process.resourcesPath } : {}),
+      },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     });

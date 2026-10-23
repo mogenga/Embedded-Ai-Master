@@ -217,6 +217,38 @@ const kbExpanded = new Set();
 let kbNodeSeq = 0;
 
 /**
+ * The last `corpus_status` answer, or null before the page has asked.
+ *
+ * Null is not `bundled`: the page has to be able to say it has not heard back
+ * yet. `unavailable` arrives as a real state with `kind: "unavailable"`, so a
+ * missing answer and "there is no corpus" stay different facts (R3).
+ */
+state.corpusStatus = null;
+/** Why the host could not read the update state at all — kernel not built, or
+ *  a status read that threw. Not one of the seven states: it is the absence of
+ *  an answer, and the page says so rather than picking a state to show. */
+state.corpusError = "";
+/** Which corpus command is in flight — `""`, `"check"` or `"apply"`.
+ *
+ *  Tracked by name rather than as a boolean so each button says what *it* is
+ *  doing: showing "Updating…" on a check that is only fetching a manifest would
+ *  be a label for work that is not happening. Both buttons are disabled while
+ *  either runs, because a second click would queue behind the first and then
+ *  answer twice — two results for one visible action. */
+state.corpusBusy = "";
+/** `{completed, total, path, action}` from the kernel's `onProgress`, forwarded
+ *  by the host. Null until the first file. No timer: a line that advances on
+ *  its own would be a progress bar that reports work nobody is doing. */
+state.corpusProgress = null;
+/** The last apply's outcome: `{ok, corpusVersion?, reason?}`. Stays on the page
+ *  until the next action, because a failure the user blinked past is a failure
+ *  they will repeat. */
+state.corpusResult = null;
+/** `corpus.json`'s path as the host resolved it, so `config_invalid` can name
+ *  the file to edit rather than describing one in the abstract. */
+state.corpusConfigPath = "";
+
+/**
  * Drop every test still waiting on an answer, and cancel their timers.
  *
  * Called when the pane that started them goes away — a rebuild, or a switch to
@@ -2569,6 +2601,275 @@ function buildKbPage() {
     return wrap;
   };
 
+  /**
+   * A timestamp from the host, in the reader's own time zone.
+   *
+   * The kernel stores ISO-8601 UTC (`checkedAt`), which is the right thing to
+   * persist and the wrong thing to read. Anything unparseable comes back as the
+   * raw string: inventing "just now" for a value the host could not have meant
+   * would put a time on the page that nobody measured.
+   */
+  const checkedAtText = (iso) => {
+    const text = typeof iso === "string" ? iso : "";
+    if (text === "") return "";
+    const at = new Date(text);
+    if (Number.isNaN(at.getTime())) return text;
+    return at.toLocaleString(state.locale === "zh" ? "zh-CN" : "en-US", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  };
+
+  /**
+   * The corpus update group.
+   *
+   * Contract §7 lists seven states and this draws all seven, each with its own
+   * words. Two rules shape the layout:
+   *
+   * - The reason a state carries is shown **verbatim**, never as "failed".
+   *   "403 from the update source, possibly not published or the bucket policy
+   *   has not granted GetObject" tells the operator what to do; "check failed"
+   *   tells them to try again, which will fail again.
+   * - "Update now" exists only in `update_available`. A button whose only
+   *   possible outcome is a refusal is the fake control R3 forbids, and the
+   *   other six states have nothing to install.
+   *
+   * "Check for updates" is the exception: it is offered in every state,
+   * `unavailable` included, because "is the update source even reachable from
+   * this machine" is a question the operator may need answered before anything
+   * else is fixed.
+   */
+  const updateGroup = () => {
+    const group = el("section", "setting-group kb-update");
+    group.appendChild(el("h3", "setting-group-title", s.kbGroupUpdate));
+
+    const status = state.corpusStatus;
+    const busy = state.corpusBusy;
+    /** A plain label/value row: the state's name on the left, its facts on the
+     *  right. No badge here — the badge is the state itself, drawn once below. */
+    const row = (label, value) =>
+      sRow({ label, control: el("span", "", value) });
+
+    if (state.corpusError !== "") {
+      // The host could not read the state at all — a different fact from any
+      // of the seven, and the one that must not be dressed up as one of them.
+      group.appendChild(
+        el("p", "setting-note pack-problem kb-update-error", s.kbUpdateError.replace("{error}", state.corpusError)),
+      );
+    } else if (status === null) {
+      // `kbLoading` is the file tree's line; reusing it here claimed the wrong
+      // thing was loading and gave no hint that the update state was the
+      // missing half. The distinction between "not asked yet" and "asked, no
+      // answer yet" is not tracked, so this line covers both and says only what
+      // is true of both: the page has no update state to show.
+      group.appendChild(el("p", "setting-note", s.kbUpdateLoading));
+    } else {
+      /**
+       * One descriptor per state: the badge variant, the badge text, the
+       * sentence under it, and whichever facts that state actually has.
+       *
+       * A table rather than a switch with a `appendChild` in every branch: the
+       * seven states differ only in what they say, and writing the layout once
+       * is what keeps them from drifting into seven slightly different rows.
+       * `undefined` for a field means the state does not carry it — which is
+       * not the same as carrying zero, so nothing is filled in.
+       */
+      const view = (() => {
+        switch (status.kind) {
+          case "bundled":
+            return {
+              badge: "muted",
+              title: s.kbStateBundled,
+              desc: s.kbStateBundledDesc,
+              facts: [],
+            };
+          case "up_to_date":
+            return {
+              badge: "ok",
+              title: s.kbStateUpToDate,
+              desc: s.kbStateUpToDateDesc,
+              facts: [
+                [s.kbUpdateVersion, s.kbUpdateVersionValue.replace("{n}", String(status.corpusVersion))],
+                [s.kbUpdateCheckedAt, checkedAtText(status.checkedAt) || s.kbUpdateCheckedUnknown],
+              ],
+            };
+          case "update_available":
+            return {
+              badge: "",
+              title: s.kbStateUpdateAvailable,
+              desc: s.kbStateUpdateAvailableDesc,
+              facts: [
+                [s.kbUpdateVersion, s.kbUpdateVersionValue.replace("{n}", String(status.corpusVersion))],
+                [s.kbUpdateFiles, s.kbUpdateFilesValue.replace("{n}", String(status.fileCount))],
+                [s.kbUpdateCheckedAt, checkedAtText(status.checkedAt) || s.kbUpdateCheckedUnknown],
+              ],
+            };
+          case "check_failed":
+            return {
+              badge: "warn",
+              title: s.kbStateCheckFailed,
+              desc: "",
+              // The reason, as the update client wrote it: it names the status
+              // code and the URL, which is what makes it actionable.
+              reason: status.reason,
+              facts: typeof status.checkedAt === "string" && status.checkedAt !== ""
+                ? [[s.kbUpdateCheckedAt, checkedAtText(status.checkedAt)]]
+                : [],
+            };
+          case "verify_failed":
+            return {
+              badge: "warn",
+              title: s.kbStateVerifyFailed,
+              desc: s.kbStateVerifyFailedDesc,
+              reason: status.reason,
+              facts: [],
+            };
+          case "config_invalid":
+            return {
+              badge: "warn",
+              title: s.kbStateConfigInvalid,
+              desc: s.kbStateConfigInvalidDesc,
+              reason: status.reason,
+              // The file to edit, when the host named one. A "not configured"
+              // with no location is a dead end.
+              path: state.corpusConfigPath,
+              facts: [],
+            };
+          case "unavailable":
+            return {
+              badge: "muted",
+              title: s.kbStateUnavailable,
+              desc: s.kbStateUnavailableDesc,
+              facts: [],
+            };
+          default:
+            // A state this build does not know. Saying "check failed" and
+            // quoting the discriminant is honest; guessing which of the seven
+            // it was would put a sentence on the page nobody authored.
+            return {
+              badge: "warn",
+              title: s.kbStateCheckFailed,
+              desc: "",
+              reason: `无法识别的更新状态：${String(status.kind)}`,
+              facts: [],
+            };
+        }
+      })();
+
+      // The badge carries the state; the label above it does not repeat the same
+      // sentence. `kbUpdateState` is the neutral "Update status" heading the
+      // badge answers.
+      group.appendChild(
+        sRow({
+          label: s.kbUpdateState,
+          desc: view.desc === "" ? undefined : view.desc,
+          control: el(
+            "span",
+            view.badge === "" ? "setting-badge" : `setting-badge ${view.badge}`,
+            view.title,
+          ),
+          wide: view.desc !== "" || view.reason !== undefined,
+        }),
+      );
+      for (const [label, value] of view.facts) group.appendChild(row(label, value));
+      if (view.reason !== undefined) {
+        group.appendChild(el("p", "setting-note pack-problem kb-update-reason", view.reason));
+      }
+      if (view.path !== undefined && view.path !== "") {
+        group.appendChild(el("code", "setting-code kb-update-path", view.path));
+      }
+    }
+
+    // Progress, from the kernel's own counts. Only while an apply is running:
+    // a line left behind after the run would describe work that has stopped.
+    if (busy && state.corpusProgress !== null) {
+      const progress = state.corpusProgress;
+      const text =
+        progress.action === "reused"
+          ? s.kbUpdateProgressReused
+              .replace("{done}", String(progress.completed))
+              .replace("{total}", String(progress.total))
+          : s.kbUpdateProgress
+              .replace("{done}", String(progress.completed))
+              .replace("{total}", String(progress.total))
+              .replace("{path}", String(progress.path));
+      group.appendChild(el("p", "setting-note kb-update-progress", text));
+    }
+
+    // The last apply's outcome. Both halves are sentences the user acts on, and
+    // both stay until the next click: a success that vanished is indistinguishable
+    // from a click that did nothing, and a failure is exactly what they need to
+    // read twice.
+    if (state.corpusResult !== null) {
+      const result = state.corpusResult;
+      if (result.ok === true) {
+        group.appendChild(
+          el(
+            "p",
+            "setting-note kb-update-done",
+            s.kbUpdateDone.replace("{n}", String(result.corpusVersion ?? "")),
+          ),
+        );
+      } else {
+        // Two lines, not one: the reason is the kernel's own sentence (or the
+        // host's), and gluing a translated label onto it would need a
+        // punctuation mark that is wrong in one of the two languages.
+        group.appendChild(el("p", "setting-note pack-problem kb-update-failed", s.kbUpdateFailed));
+        group.appendChild(el("p", "setting-note pack-problem kb-update-reason", result.reason));
+        if (typeof result.corpusVersionUnchanged === "number") {
+          group.appendChild(
+            el(
+              "p",
+              "setting-note kb-update-unchanged",
+              s.kbUpdateFailedUnchanged.replace("{n}", String(result.corpusVersionUnchanged)),
+            ),
+          );
+        }
+      }
+    }
+
+    // The buttons. Both are disabled while either runs: the host queues corpus
+    // commands, so a second click would answer a second time for one visible
+    // action. Each label describes its own command, never the other's.
+    const actions = el("div", "kb-update-actions");
+    const checkLabel = busy === "check" ? s.kbUpdateChecking : s.kbUpdateCheck;
+    const checkButton = sButton(checkLabel, () => {
+      state.corpusBusy = "check";
+      state.corpusProgress = null;
+      state.corpusResult = null;
+      render();
+      api.send({ cmd: "checkCorpusUpdate" });
+    });
+    checkButton.disabled = busy !== "";
+    actions.appendChild(checkButton);
+
+    // Only `update_available` has something to install. A button in any other
+    // state could only be refused, and a control that can only be refused must
+    // not look pressable (R3).
+    if (status !== null && status.kind === "update_available") {
+      const applyLabel = busy === "apply" ? s.kbUpdateApplying : s.kbUpdateApply;
+      const applyButton = sButton(
+        applyLabel,
+        () => {
+          state.corpusBusy = "apply";
+          state.corpusProgress = null;
+          state.corpusResult = null;
+          render();
+          api.send({ cmd: "applyCorpusUpdate" });
+        },
+        { primary: true },
+      );
+      applyButton.disabled = busy !== "";
+      actions.appendChild(applyButton);
+    }
+    group.appendChild(actions);
+
+    return group;
+  };
+
   const render = () => {
     body.innerHTML = "";
     const kb = state.kb;
@@ -2579,8 +2880,12 @@ function buildKbPage() {
     body.appendChild(head);
 
     if (kb === null) {
-      // Not an empty corpus: the host has not answered yet.
+      // Not an empty corpus: the host has not answered yet. The update group
+      // is drawn anyway — it reads a different location (`$HARNESS_HOME/kb`)
+      // through a different command, and its own "still reading" line is the
+      // honest thing to show while the tree has not arrived.
       body.appendChild(el("p", "setting-note", s.kbLoading));
+      body.appendChild(updateGroup());
       return;
     }
 
@@ -2613,6 +2918,12 @@ function buildKbPage() {
       }
       empty.appendChild(el("p", "kb-note", s.kbHowToGet));
       body.appendChild(empty);
+      // The update group is drawn here too, and for the same reason it is drawn
+      // at all: the corpus updater's seven states are about `$HARNESS_HOME/kb`,
+      // which is a different location from the folder the tools read. "No
+      // folder here" does not answer "can this machine reach the update
+      // source", and the check button is the only way to ask that.
+      body.appendChild(updateGroup());
       return;
     }
 
@@ -2631,6 +2942,8 @@ function buildKbPage() {
         }),
       ]),
     );
+
+    body.appendChild(updateGroup());
 
     if (truncated) {
       // The count and the tree are both partial. Saying "108 files" beside a
@@ -2674,6 +2987,15 @@ function buildKbPage() {
   // a cached tree from the last visit would be a claim about a corpus nobody
   // re-read.
   api.send({ cmd: "getKb" });
+  // The update state is asked for too, but this is **not** a check: the command
+  // reads `state.json` and never opens a connection. The startup check has
+  // already decided what that file says (contract §6), and re-checking here
+  // would turn "open Settings" into a network request the user did not make.
+  // Asked once per visit, like the tree above: the stored state can have moved
+  // since the last time this page was on screen (a startup check may have run
+  // in between), and a figure nobody re-read would be a claim about a version
+  // that may no longer be installed.
+  api.send({ cmd: "getCorpusStatus" });
   render();
   return pane;
 }
@@ -3800,6 +4122,62 @@ function basename(path) {
         state.kb = message.kb ?? null;
         // The page may not be open (the command is only sent from it), but a
         // stale answer must not land on whatever is on screen now.
+        if (state.settingsTab === "kb" && !settingsDialog.hidden) state.renderKbPage?.();
+        break;
+      case "corpus_status":
+        // Two shapes arrive here, and they mean different things. A `status`
+        // object is one of the kernel's seven states; an `error` is the host
+        // saying it could not read any of them. Keeping them apart is what
+        // stops a missing kernel from being drawn as "bundled" — a state that
+        // claims there is a corpus.
+        if (typeof message.error === "string" && message.error !== "") {
+          state.corpusError = message.error;
+          state.corpusStatus = null;
+        } else if (message.status && typeof message.status.kind === "string") {
+          state.corpusError = "";
+          state.corpusStatus = message.status;
+        } else {
+          // Neither half present: an answer with nothing in it is not evidence
+          // of any state, and saying so beats leaving a stale one on screen.
+          state.corpusError = S().kbUpdateEmptyAnswer;
+          state.corpusStatus = null;
+        }
+        if (typeof message.configPath === "string" && message.configPath !== "") {
+          state.corpusConfigPath = message.configPath;
+        }
+        // A status answer also ends whatever was in flight: the host only sends
+        // one after the work it was doing. Progress lines are dropped with it,
+        // because a counter left frozen at 3/12 after the run finished reads as
+        // a download that stalled.
+        state.corpusBusy = "";
+        state.corpusProgress = null;
+        if (state.settingsTab === "kb" && !settingsDialog.hidden) state.renderKbPage?.();
+        break;
+      case "corpus_update_progress":
+        state.corpusProgress = {
+          completed: typeof message.completed === "number" ? message.completed : 0,
+          total: typeof message.total === "number" ? message.total : 0,
+          path: typeof message.path === "string" ? message.path : "",
+          action: message.action === "reused" ? "reused" : "downloaded",
+        };
+        if (state.settingsTab === "kb" && !settingsDialog.hidden) state.renderKbPage?.();
+        break;
+      case "corpus_update_result":
+        // The outcome stays on the page until the next click; the status answer
+        // that follows clears the busy flag.
+        state.corpusResult = message.ok === true
+          ? { ok: true, corpusVersion: message.corpusVersion }
+          : {
+              ok: false,
+              reason: typeof message.reason === "string" ? message.reason : S().kbUpdateNoReason,
+              corpusVersionUnchanged:
+                typeof message.corpusVersionUnchanged === "number" ? message.corpusVersionUnchanged : null,
+            };
+        state.corpusProgress = null;
+        // A result ends the work, whether or not a status answer follows. A
+        // refusal the host answers with this event alone must not leave both
+        // buttons disabled — that would be the only trace of a click.
+        state.corpusBusy = "";
         if (state.settingsTab === "kb" && !settingsDialog.hidden) state.renderKbPage?.();
         break;
       case "instructions":

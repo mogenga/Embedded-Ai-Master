@@ -228,8 +228,8 @@ OpenOCD 后端本轮只做“连接已运行的 OpenOCD telnet”，`attach` 不
 | `kb_grep` | agentic | 逐行正则（大小写不敏感），可用 `glob` 限定文件，最多 100 条、命中行截断到 300 字符；`fileCount` + `files`（命中最多的前 10 个文件）显示命中是集中还是散落——**是线索，不是置信度** |
 | `kb_read` | agentic | 读文件，`offset`（0-based）/`limit`（默认且上限 2000 行）分页；`truncated: true` 表示需续读 |
 | `kb_search` | 字面检索 | 多 token 字面行检索，不支持正则 |
-| `kb_status` | 只读 | 根路径、文件数、索引条目、待审数 |
-| `kb_propose` | 写入 | 只追加 `_inbox.md`，未审内容不参与检索，必须人工审核后合并 |
+| `kb_status` | 只读 | 根路径、文件数、索引条目、待审数、inbox 实际位置（`inboxPath` / `inboxExternal`） |
+| `kb_propose` | 写入 | 只追加待审 inbox，未审内容不参与检索，必须人工审核后合并；inbox 位置可经 `KB_INBOX_PATH` 配到语料根之外（OTA 形态），不配时仍是 `<KB 根>/_inbox.md` |
 
 除 `kb_propose` 外全部只读，`kb_read` 标记为 evidence。`kb_glob` / `kb_grep` 与 `kb_search` 一样排除 `_inbox.md`、`_about.md` 与 `index.yaml`，并拒绝绝对路径与 `..` 越界；遍历另跳过 `.git`、`node_modules`、`__pycache__`、`.mypy_cache`、`.pytest_cache`、`.venv`、`venv`、`.next`、`.cache`、`dist`、`build`、`out`、`target`（KB_ROOT 被误指向大目录时不至于无限遍历），单次遍历上限 20000 个文件，触顶时 `scanTruncated: true` 且 `count` / `found` 只代表已扫描部分。
 
@@ -252,6 +252,8 @@ npm run build:mcp
 ```
 
 `KB_ROOT` 缺省为相对 `process.cwd()` 的 `mcp-servers/kb/kb`；目录不存在时 server 仍可启动，`kb_status` 显式返回 `indexPresent: false`。
+
+`KB_INBOX_PATH` 可选，指定待审 inbox 的写入位置（`kb_propose` 写、`kb_status` 读、`kb-review` 读同一个文件）。不设时沿用 `<KB 根>/_inbox.md`。OTA 部署把语料快照整份替换，用户沉淀必须放在根外，此时指向 `$HARNESS_HOME/kb/inbox/_inbox.md`；`kb-review` 用 `--inbox <路径>` 或同一环境变量跟过去。
 
 ### 本地语料与回归基线
 

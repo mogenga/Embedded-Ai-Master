@@ -16,8 +16,27 @@ export function resolveKbRoot(env: NodeJS.ProcessEnv = process.env, cwd = proces
   return path.resolve(cwd, configured ? configured : DEFAULT_KB_ROOT)
 }
 
+/**
+ * `KB_INBOX_PATH`：待审 inbox 的位置。不设时沿用历史行为（写 `<KB 根>/_inbox.md`）。
+ *
+ * 为什么需要它：OTA 会整份替换语料快照（`docs/corpus-ota.md` §3），部署形态把沉淀
+ * 放在 `$HARNESS_HOME/kb/inbox/` 下。没有这个入口，`KbServiceOptions.inboxPath`
+ * 就只能被测试用上，真实 server 进程永远写不出去。
+ */
+export function resolveKbInboxPath(
+  env: NodeJS.ProcessEnv = process.env,
+  cwd = process.cwd(),
+): string | undefined {
+  const configured = env.KB_INBOX_PATH?.trim()
+  return configured ? path.resolve(cwd, configured) : undefined
+}
+
 export function createKbService(env: NodeJS.ProcessEnv = process.env, cwd = process.cwd()): KbService {
-  return new KbService(resolveKbRoot(env, cwd))
+  const inboxPath = resolveKbInboxPath(env, cwd)
+  return new KbService(
+    resolveKbRoot(env, cwd),
+    inboxPath === undefined ? {} : { inboxPath },
+  )
 }
 
 export function createKbTools(service: KbService = createKbService()): KbToolSpec[] {

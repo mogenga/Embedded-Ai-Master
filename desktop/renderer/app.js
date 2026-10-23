@@ -2942,6 +2942,17 @@ function handleEvent(message) {
     }
 
     case "kb":
+    case "corpus_status":
+    case "corpus_update_progress":
+    case "corpus_update_result":
+      // The KB page owns both the file tree (`kb`) and the corpus update group
+      // drawn under it (`corpus_*`). Nothing in the transcript reads any of
+      // them, so forwarding is the whole job. They need their own labels all
+      // the same: an event no branch names falls to `default`, and the update
+      // group would then keep its "still waiting for the state" line forever,
+      // with no way to tell that from a host that is merely slow. The Check
+      // button would never come back either — `corpus_update_result` is what
+      // clears the busy flag.
       settings.handleEvent(message);
       break;
 
