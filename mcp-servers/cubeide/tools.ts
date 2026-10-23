@@ -176,7 +176,31 @@ const cubeideDebugTool: ProbeToolSpec = {
         }
         case "halt": {
           const session = await sessionFor();
-          
+
+          // 顺序（pyOCD 实测驱动）：
+          // 1. 目标可能已经停着（open 的 settle、断点命中）——先读 PC，读到了就完成；
+          // 2. 跑着：pyOCD 的 all-stop 忽略 Ctrl-C，`monitor halt` 是唯一停法；
+          //    ST gdbserver/OpenOCD 反而吃 -exec-interrupt。monitor 失败再 interrupt。
+          try {
+            const pcNow = await session.gdb.command("-data-evaluate-expression $pc", 4000);
+            const already = unquote(pcNow.values["value"] ?? "");
+            if (already.startsWith("0x")) {
+              return ok([`halted at ${already} (already stopped)`], { tool: "cubeide_debug", action, addr: already });
+            }
+          } catch {
+            /* 在跑——继续 */
+          }
+          try {
+            await session.gdb.command("-interpreter-exec console \"monitor halt\"", 5000);
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            const pc = await session.gdb.command("-data-evaluate-expression $pc", 5000);
+            const value = unquote(pc.values["value"] ?? "");
+            if (value.startsWith("0x")) {
+              return ok([`halted at ${value}`], { tool: "cubeide_debug", action, addr: value });
+            }
+          } catch {
+            /* monitor 路线不通——走 interrupt */
+          }
           await session.gdb.command("-exec-interrupt");
           const stop = await session.gdb.waitForStop(input.timeout_ms ? Number(input.timeout_ms) : 5000);
           const frame = frameFields(String(stop.values["frame"] ?? ""));
@@ -184,11 +208,18 @@ const cubeideDebugTool: ProbeToolSpec = {
         }
         case "reset": {
           const session = await sessionFor();
-          
-          // monitor reset 走 console 通道：gdbserver 支持 `monitor reset`。
-          await session.gdb.command("-interpreter-exec console \"monitor reset halt\"");
-          const stop = await session.gdb.waitForStop(input.timeout_ms ? Number(input.timeout_ms) : 5000);
-          return ok([`reset, halted at ${hex(Number(frameFields(String(stop.values["frame"] ?? "")).addr ?? 0))}`]);
+
+          // monitor reset 走 console 通道。OpenOCD 的 `reset halt` 自己把核停住
+          // 但**不发 *stopped 异步帧**（实测）——reset 后直接读当前帧，等不到
+          // stop 就超时（第一版实测 "no stop within 5000ms"）。
+          await session.gdb.command("-interpreter-exec console \"monitor reset halt\"", 10_000);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          try {
+            const frame = await currentFrame(session);
+            return ok([`reset, halted at ${frame["func"] ?? "??"} (${frame["addr"] ?? "?"})`], { frame });
+          } catch {
+            return ok(["reset issued (target state unreadable — halt/status to inspect)"]);
+          }
         }
         case "run_to": {
           if (!input.location) return fail("missing_location", "run_to needs a `location` (function or file:line)");

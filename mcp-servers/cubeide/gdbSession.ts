@@ -2,7 +2,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { GdbMi, GdbMiError, frameFields, unquote } from "./gdbMi.js";
-import { reuseOrStartGdbServer, stopGdbServer, type GdbServerHandle } from "./gdbserver.js";
+import { reuseOrStartGdbServer, stopGdbServer, shutdownOpenOcdGracefully, findPyOcd, activeGdbServer, type GdbServerHandle } from "./gdbserver.js";
 import type { CubeIdeTools } from "./cubeideInstall.js";
 
 /**
@@ -101,11 +101,29 @@ export interface OpenResult {
 function findElf(projectDir: string | undefined, explicit: string | undefined): string | undefined {
   if (explicit) return existsSync(explicit) ? explicit : undefined;
   if (!projectDir) return undefined;
-  // CubeIDE 生成的工程把产物放在 Debug/ 或 Release/ 下，与配置同名。
+  // CubeIDE 的产物名 = .project 的 <name>（实测：工程 test → Debug/test.elf；
+  // 第一版只猜 Debug.elf 等固定名，真实工程全都匹配不上 → 符号没加载）。
+  let projectName = "";
+  try {
+    projectName = /<name>([^<]+)<\/name>/.exec(readFileSync(join(projectDir, ".project"), "utf8"))?.[1] ?? "";
+  } catch {
+    /* no .project */
+  }
   for (const config of ["Debug", "Release"]) {
-    for (const entry of [`${config}.elf`, "firmware.elf", "application.elf"]) {
-      const candidate = join(projectDir, config, entry);
+    const candidates = [
+      ...(projectName ? [join(projectDir, config, `${projectName}.elf`)] : []),
+      join(projectDir, config, "firmware.elf"),
+      join(projectDir, config, "application.elf"),
+    ];
+    for (const candidate of candidates) {
       if (existsSync(candidate)) return candidate;
+    }
+    // 兜底：目录里唯一的 .elf
+    try {
+      const elves = readdirSync(join(projectDir, config)).filter((name) => name.endsWith(".elf"));
+      if (elves.length === 1) return join(projectDir, config, elves[0]!);
+    } catch {
+      /* no such dir */
     }
   }
   return undefined;
@@ -114,15 +132,18 @@ function findElf(projectDir: string | undefined, explicit: string | undefined): 
 export async function openSession(options: OpenOptions): Promise<OpenResult> {
   const log: string[] = [];
   try {
-    // ST gdbserver 被固件挡（S7 克隆限制）时的 OpenOCD 回退：芯片族 → target cfg。
-    // CubeIDE 自带 openocd 不带 scripts，用 espidf 后端那份（带全量 cfg）。
-    const fallback = findOpenOcdFallback(options.projectDir, options.targetCfg);
+    // server 优先级：pyOCD（S7 克隆唯一稳定）→ ST gdbserver（官方探针）→
+    // OpenOCD 兜底。pyOCD 的 target 用 cortex_m 通用型（全功能）。
+    const pyocd = findPyOcd();
+    const openocd = findOpenOcdFallback(options.projectDir, options.targetCfg);
     const server = await reuseOrStartGdbServer({
       tools: options.tools,
       port: options.port,
-      ...(fallback ? { openocdFallback: fallback } : {}),
+      ...(pyocd ? { pyocdFallback: { pyocd, target: "cortex_m" } } : {}),
+      ...(openocd ? { openocdFallback: openocd } : {}),
     });
-    log.push(`gdbserver on port ${server.port}${fallback ? " (openocd fallback)" : ""}`);
+    const serverKind = pyocd ? "pyocd" : openocd ? "openocd fallback" : "st gdbserver";
+    log.push(`gdbserver on port ${server.port} (${serverKind})`);
     const gdb = new GdbMi({ gdbPath: options.tools.gdb });
     await gdb.command("-gdb-set pagination off");
     await gdb.command("-gdb-set confirm off");
@@ -147,6 +168,17 @@ export async function openSession(options: OpenOptions): Promise<OpenResult> {
       openedAt: Date.now(),
     };
     sessions.set(key, session);
+    // esp-gdb 17.1 的死锁窗口（实测，OpenOCD/pyOCD server 都中）：attach 后的
+    // 第一次停如果是**断点命中**，gdb 会卡死到后续任何命令（连 -break-list 这种
+    // 纯本地命令都不回）。attach 后立刻做一次 -exec-interrupt 确定性停再继续，
+    // 之后断点停就正常了。目标本来就停时 interrupt 无副作用。
+    try {
+      await gdb.command("-exec-interrupt", 5000);
+      await gdb.waitForStop(4000);
+    } catch {
+      /* 目标本来就停着：没有 stop 帧可等 */
+    }
+    log.push("settled (interrupt-first, esp-gdb deadlock workaround)");
     return { ok: true, key, log };
   } catch (error) {
     const reason = error instanceof GdbMiError || error instanceof Error ? error.message : String(error);
@@ -161,6 +193,28 @@ export async function closeSession(key?: string): Promise<{ closed: number; reas
   let reason: string | undefined;
   for (const [id, session] of targets) {
     try {
+      // 关闭顺序（实测教训，按因果排）：
+      // 1. **先删全部断点**——硬件断点（FPB）残留在目标里，detach 后程序一旦
+      //    跑到断点地址，目标进调试故障、SWD 整个死掉（实测反复断电才恢复）；
+      // 2. 若目标停着，continue 让它离开停态（detach-resume 语义）；
+      // 3. gdb-exit（内部 detach）；pyocd/openocd 进程随后由 stopGdbServer 收。
+      try {
+        // -break-delete 必须带断点号（MI 语法），裸命令会被 gdb 拒绝——断点
+        // 没删掉、continue 立刻又命中同一个断点，detach 后 FPB 残留把目标拉死。
+        // 先 -break-list 取全部编号再逐个删。
+        const list = await session.gdb.command("-break-list", 3000);
+        const body = String(list.values["body"] ?? "");
+        for (const match of body.matchAll(/number="(\d+)"/g)) {
+          await session.gdb.command(`-break-delete ${match[1]}`, 3000).catch(() => {});
+        }
+      } catch {
+        /* 没有断点 */
+      }
+      try {
+        await session.gdb.command("-exec-continue", 2000);
+      } catch {
+        /* 已经在跑或已停连——继续关 */
+      }
       session.gdb.kill();
       sessions.delete(id);
       closed++;
@@ -168,7 +222,20 @@ export async function closeSession(key?: string): Promise<{ closed: number; reas
       reason = error instanceof Error ? error.message : String(error);
     }
   }
-  if (sessions.size === 0 && stopGdbServer()) closed += 0; // gdbserver stop is reported via return below
+  if (sessions.size === 0) {
+    // pyOCD 是长驻 server（--persist）：不杀进程，留给下次 open 复用。实测
+    // （Windows）kill 掉 pyocd 进程后探针 USB 层残留坏状态，SWD 随之失联——
+    // 进程退出本身是死亡事件的强相关项。close 只收 gdb，server 常驻空闲。
+    const handle = activeGdbServer();
+    if (handle && !handle.process) {
+      // 外部起的 server（我们没 spawn）——什么都不做。
+    } else if (handle?.process && /pyocd/i.test(handle.process.spawnfile ?? "")) {
+      // pyocd 常驻：跳过 kill。
+    } else {
+      await shutdownOpenOcdGracefully().catch(() => false);
+      stopGdbServer();
+    }
+  }
   return { closed, ...(reason ? { reason } : {}) };
 }
 

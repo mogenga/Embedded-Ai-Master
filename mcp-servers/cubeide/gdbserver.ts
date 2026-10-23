@@ -1,6 +1,9 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import net from "node:net";
+import { createRequire } from "node:module";
 import type { CubeIdeTools } from "./cubeideInstall.js";
+
+const require_ = createRequire(import.meta.url);
 
 /**
  * gdbserver 启动与探针独占。
@@ -65,6 +68,8 @@ export interface StartGdbServerOptions {
     scripts: string;
     target: string;
   };
+  /** pyOCD gdbserver（S7 克隆上唯一稳定的 server，优先于 ST gdbserver）。 */
+  pyocdFallback?: PyOcdFallbackOptions;
 }
 
 export async function startStlinkGdbServer(options: StartGdbServerOptions): Promise<GdbServerHandle> {
@@ -167,7 +172,69 @@ export async function reuseOrStartGdbServer(options: StartGdbServerOptions): Pro
   if (await probePort("127.0.0.1", port, 500)) {
     return { port, process: null as unknown as ChildProcess, log: [] };
   }
+  // server 优先级（真机实测定）：
+  // 1. **pyOCD**：自带 ST-Link 驱动、无 ST 的 S7 克隆检查；S7 克隆上唯一
+  //    稳定的 gdbserver（裸 RSP 实测读内存/断点全通）。
+  // 2. ST gdbserver：官方探针用。S7 克隆会报 "No device found"。
+  // 3. OpenOCD 回退：这颗克隆上 disconnect 会把目标 SWD 拉死（实测反复），
+  //    只在 pyOCD 也没有时兜底。
+  if (options.pyocdFallback) {
+    try {
+      return await startPyOcdGdbServer({ pyocd: options.pyocdFallback.pyocd, target: options.pyocdFallback.target, port });
+    } catch {
+      /* fall through to ST server */
+    }
+  }
   return startStlinkGdbServer(options);
+}
+
+export interface PyOcdFallbackOptions {
+  /** pyOCD 可执行文件路径。 */
+  pyocd: string;
+  /** target 名（cortex_m 通用型即可全功能调试）。 */
+  target: string;
+}
+
+export interface StartPyOcdOptions extends PyOcdFallbackOptions {  port?: number;
+  timeoutMs?: number;
+}
+
+let pyocdPath: string | null = null;
+
+/** 找 pyOCD：PATH 里 pyocd.exe（`where pyocd`）。每进程缓存一次。 */
+export function findPyOcd(): string | null {
+  if (pyocdPath !== null) return pyocdPath;
+  try {
+    const found = require_("node:child_process").execFileSync("where", ["pyocd"], { encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"] });
+    pyocdPath = found.split(/\r?\n/).filter(Boolean)[0] ?? null;
+  } catch {
+    pyocdPath = null;
+  }
+  return pyocdPath;
+}
+
+export async function startPyOcdGdbServer(options: StartPyOcdOptions): Promise<GdbServerHandle> {
+  if (active) return active;
+  const port = options.port ?? 3333;
+  const args = ["gdbserver", "--target", options.target, "--persist", "--port", String(port)];
+  const child = spawn(options.pyocd, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+  const handle: GdbServerHandle = { port, process: child, log: [] };
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => handle.log.push(chunk));
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => handle.log.push(chunk));
+  const deadline = Date.now() + (options.timeoutMs ?? 20_000);
+  const ready = await waitForPort(port, deadline);
+  if (!ready) {
+    const tail = handle.log.join("").split(/\r?\n/).filter(Boolean).slice(-6).join(" | ");
+    try { child.kill(); } catch { /* gone */ }
+    throw new Error(`pyocd gdbserver did not open port ${port}${tail ? `; last lines: ${tail}` : ""}`);
+  }
+  active = handle;
+  child.once("exit", () => {
+    if (active === handle) active = null;
+  });
+  return handle;
 }
 
 export function stopGdbServer(): boolean {
@@ -180,4 +247,29 @@ export function stopGdbServer(): boolean {
   }
   active = null;
   return true;
+}
+
+/**
+ * OpenOCD 的优雅关闭：tcl 端口（gdb_port+6666-3333 的默认布局里是 6666）
+ * 发 shutdown，让它走正常 detach 序列把 SWD 释放干净。gdb_port 非默认时
+ * tcl 端口仍按 6666 起（openocd 默认），除非显式改过。
+ */
+export async function shutdownOpenOcdGracefully(tclPort = 6666, timeoutMs = 2000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: "127.0.0.1", port: tclPort });
+    let done = false;
+    const finish = (ok: boolean) => {
+      if (done) return;
+      done = true;
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once("connect", () => {
+      socket.write("shutdown\r\n");
+      setTimeout(() => finish(true), 300);
+    });
+    socket.once("timeout", () => finish(false));
+    socket.once("error", () => finish(false));
+  });
 }

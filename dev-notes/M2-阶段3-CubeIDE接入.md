@@ -42,3 +42,11 @@
 - 真实 harness 层 E2E：mcp.json 加 cubeide server（env 传 CUBEIDE_HOME/CUBEMX_HOME）→ loadMcpConfig → McpManager.connectAll → call。五项过：version/probe/generate(33.8s)/build(10.6s)/flash(verified)。与 desktop 宿主同一代码路径。
 - 翻车与返工：手工拼 .cproject 被 CDT 拒（fBuildData null，结构太深放弃，用户 GUI 建工程）；调试会话中途目标进入 "Unable to get core ID"（CLI 也连不上，AP 1→0），等物理复位才能继续——原因未定（可能 halt 后 detach 时序，登记 deferred）。
 - 测试：cubeide 20 + espidf 12 全过；typecheck 干净；E2E 脚本 .smoke/harness-e2e-cube.mjs。
+
+## 2026-10-23（终）— SWD 反复锁死根因修复 + 双链路终验
+
+- 用户原话：「重新插拔了」（×4）→「你全网研究一下 我不想cube链路还混着openocd」→「哎呦 无所谓了 用ocd就用吧 确保keil链路和cube链路都能用就行了」。
+- SWD 锁死根因链（最终定性）：**close 时断点未删（-break-delete 裸命令被 MI 静默拒绝）→ continue 秒命中同断点 → detach 后 FPB 硬件断点残留在目标 → 程序命中断点地址 → 目标锁死**。修复：close 先 -break-list 取编号逐个删，再 continue 再 gdb-exit。
+- server 选型终态：pyOCD 优先（S7 克隆唯一稳定，自带驱动无 ST 检查）→ ST gdbserver（官方探针）→ OpenOCD 兜底。pyOCD 的 all-stop 忽略 Ctrl-C，halt 改 monitor-halt 优先 + already-stopped 短路 + interrupt 兜底。
+- 五轮 open→halt→eval→close 全绿（5/5），板子存活；随后 cube 全链 generate→build(14.5s)→flash(verified) 一遍过；keil 路由识别正常。
+- 遗留观察：pyocd 进程 close 后仍退出但目标不死——kill 进程非死因，断点卫生流程才是。ESP8266、串口监控（D-204）、sdkconfig（D-205）不变。
