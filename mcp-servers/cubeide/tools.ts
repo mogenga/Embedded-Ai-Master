@@ -29,7 +29,7 @@ import {
   openSession,
 } from "./gdbSession.js";
 import { GdbMiError, frameFields, unquote } from "./gdbMi.js";
-import { captureSerialPort, captureThenWrite, listSerialPorts, readRingMirror, ringMirrorPath } from "./serial.js";
+import { askHostSerial, captureSerialPort, captureThenWrite, listSerialPorts, readRingMirror, ringMirrorPath } from "./serial.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -585,10 +585,32 @@ const embedSerialTool: ProbeToolSpec = {
           const durationMs = Number(input.duration_ms ?? 2000);
           const ownership = mirrorHasPort(port);
           if (ownership) {
-            return fail(
-              "port_busy",
-              `面板正在使用 ${port}。串口是独占的，打不开第二个句柄——读面板已经收到的数据就用 read 不带 port 参数（面板缓冲副本），或者先让用户停掉面板的串口。`,
-            );
+            // The panel owns the port. Its ring mirror IS this port's data, so
+            // read from there rather than refusing: the user asked for what
+            // the device said, not for which process owns the handle.
+            const mirror = readRingMirror();
+            const entry = mirror?.ports.find((candidate) => candidate.port === port);
+            if (entry === undefined) {
+              return fail("no_monitor", `面板持有 ${port}，但镜像里没有它的会话（可能刚关闭）`);
+            }
+            const maxLines = Number(input.max_lines ?? 200);
+            const since = Number(input.since ?? 0);
+            const start = since > 0 ? Math.min(since, entry.lines.length) : Math.max(0, entry.lines.length - maxLines);
+            const lines = entry.lines.slice(start, start + maxLines);
+            const text = [
+              `${port} @ ${entry.baud} (panel-owned; ring ${entry.lines.length} lines, ${entry.dropped} dropped early)`,
+              ...lines.map((line) => line.text),
+              since > 0 ? `(cursor ${start + lines.length}/${entry.lines.length})` : `(ring index ${entry.lines.length})`,
+            ];
+            return ok(text, {
+              tool: "embed_serial",
+              action,
+              port,
+              baud: entry.baud,
+              via: "panel",
+              ringIndex: entry.lines.length,
+              lineCount: lines.length,
+            });
           }
           const capture = await captureSerialPort(port, baud, durationMs);
           if (!capture.ok && capture.lines.length === 0) {
@@ -609,16 +631,35 @@ const embedSerialTool: ProbeToolSpec = {
             return fail("missing_argument", "write needs `port`（经面板打开的口写：传面板正在用的那个口；本工具没有常驻句柄，写入走一次性泵）");
           }
           const baud = Number(input.baud ?? 115200);
+          // The panel owns the handle when it has the port open: a second
+          // `open` cannot succeed, so the write goes through the host, which
+          // already holds it. Same port, same session, no competing handles.
+          if (mirrorHasPort(port)) {
+            const reply = await askHostSerial({
+              op: "write",
+              port,
+              data,
+              hex: input.hex === true,
+              source: "agent",
+            });
+            if (reply.ok !== true) {
+              return fail("port_busy", String(reply.error ?? `面板拒绝了写入 ${port}`));
+            }
+            // Give the panel's echo a moment, then read what it received.
+            await new Promise((resolve) => setTimeout(resolve, Number(input.duration_ms ?? 1500)));
+            const mirror = readRingMirror();
+            const entry = mirror?.ports.find((candidate) => candidate.port === port);
+            const tail = (entry?.lines ?? []).slice(-Number(input.max_lines ?? 100));
+            const text = [
+              `wrote ${JSON.stringify(data.length > 60 ? `${data.slice(0, 60)}…` : data)} to ${port} @ ${baud} (through the panel's session)`,
+              `panel ring: ${entry?.lines.length ?? 0} line(s)`,
+              ...tail.map((line) => line.text),
+            ];
+            return ok(text, { tool: "embed_serial", action, port, baud, via: "panel", lineCount: tail.length });
+          }
           // A write through a transient pump: open, write, brief settle for
           // the echo/reply, capture, exit. duration_ms applies to the reply
           // window, not the write.
-          const ownership = mirrorHasPort(port);
-          if (ownership) {
-            return fail(
-              "port_busy",
-              `面板正在使用 ${port}，无法开第二个句柄写。让用户在面板里发，或者先停掉面板串口再试。`,
-            );
-          }
           const capture = await captureThenWrite(port, baud, data, Number(input.duration_ms ?? 1500));
           const text = [
             `wrote ${JSON.stringify(data.length > 60 ? `${data.slice(0, 60)}…` : data)} to ${port} @ ${baud}`,

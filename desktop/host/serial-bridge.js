@@ -17,7 +17,7 @@
  */
 
 import { SerialPort } from "serialport";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -35,6 +35,18 @@ const FLUSH_DEBOUNCE_MS = 150;
  */
 export function serialRingPath(home = process.env.HARNESS_HOME?.trim() || path.join(os.homedir(), ".harness")) {
   return path.join(home, "serial", "ring.json");
+}
+
+/**
+ * Where the agent's MCP server drops write requests for the panel's session.
+ *
+ * The panel owns the COM handle, so `embed_serial write` cannot open a second
+ * one — Windows refuses. The MCP tool therefore writes a request file and the
+ * host, which already owns the port, executes it and writes the reply. One
+ * consumer per file: the host drains the requests directory every tick.
+ */
+export function serialMailboxDir(home = process.env.HARNESS_HOME?.trim() || path.join(os.homedir(), ".harness")) {
+  return path.join(home, "serial", "requests");
 }
 /** Max characters buffered for one line. */
 const LINE_MAX_CHARS = 8192;
@@ -109,10 +121,104 @@ export class SerialBridge {
   #send;
   /** Port constructor; injectable for tests (SerialPortMock). */
   #PortCtor;
+  /** Mailbox poll timer; started lazily by `startMailbox`. */
+  #mailboxTimer = null;
 
   constructor(send, portCtor = SerialPort) {
     this.#send = send ?? (() => {});
     this.#PortCtor = portCtor;
+  }
+
+  /**
+   * Start serving the agent's write requests.
+   *
+   * The MCP server cannot open the panel's port, so `embed_serial write`
+   * leaves a request file here; this loop — running in the process that does
+   * own the handle — executes it and writes the answer beside it. Started by
+   * the host at boot and never stopped: an idle tick costs one readdir.
+   */
+  startMailbox(intervalMs = 120) {
+    if (this.#mailboxTimer !== null) return;
+    this.#mailboxTimer = setInterval(() => this.#drainMailbox(), intervalMs);
+    this.#mailboxTimer.unref?.();
+  }
+
+  stopMailbox() {
+    if (this.#mailboxTimer === null) return;
+    clearInterval(this.#mailboxTimer);
+    this.#mailboxTimer = null;
+  }
+
+  /** Handle every pending request; each one is deleted after its reply lands. */
+  #drainMailbox() {
+    const dir = serialMailboxDir();
+    let entries;
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return; // No directory yet: nobody has asked for a write.
+    }
+    for (const name of entries) {
+      if (!name.endsWith(".req.json")) continue;
+      const requestPath = path.join(dir, name);
+      const replyPath = path.join(dir, name.replace(/\.req\.json$/, ".res.json"));
+      let request;
+      try {
+        request = JSON.parse(readFileSync(requestPath, "utf8"));
+      } catch {
+        // A half-written request (the writer renames atomically, but an old
+        // file from a crashed writer is possible) is dropped, not retried
+        // forever.
+        try { renameSync(requestPath, `${requestPath}.bad`); } catch { /* ignore */ }
+        continue;
+      }
+      const answer = this.#serveMailboxRequest(request);
+      try {
+        const tmp = `${replyPath}.tmp`;
+        writeFileSync(tmp, JSON.stringify(answer), "utf8");
+        renameSync(tmp, replyPath);
+        unlinkSync(requestPath);
+      } catch {
+        // If the reply cannot land, leave the request for the next tick
+        // rather than losing the write silently.
+      }
+    }
+  }
+
+  /** Execute one request against the panel's live session (R3: never fake it). */
+  #serveMailboxRequest(request) {
+    const port = String(request.port ?? "");
+    const session = this.#sessions.get(port);
+    if (session === undefined || !session.ready || session.dead) {
+      return { ok: false, error: `面板未打开 ${port}（或已断开）；先在面板里开始串口` };
+    }
+    const before = session.rxBytes;
+    if (request.op === "write") {
+      const data = String(request.data ?? "");
+      // The pane replays the agent's write as a real user action — typing into
+      // the input, then pressing Send — so the operator can see who sent what
+      // instead of characters appearing from nowhere. The event goes out
+      // BEFORE the bytes so the animation starts as the port transmits.
+      this.#send({
+        type: "serial_agent_write",
+        port,
+        data,
+        hex: request.hex === true,
+        source: String(request.source ?? "agent"),
+      });
+      const ok = this.write(port, data, { hex: request.hex === true });
+      if (!ok) return { ok: false, error: "写入失败：面板拒绝（会话已断或数据为空）" };
+      return { ok: true, port, wrote: data.length, rxBefore: before };
+    }
+    if (request.op === "setLine") {
+      const ok = this.setLine(port, String(request.line ?? ""), request.value === true);
+      return ok ? { ok: true, port } : { ok: false, error: "设置 DTR/RTS 失败" };
+    }
+    if (request.op === "setEncoding") {
+      const ok = this.setEncoding(port, String(request.encoding ?? ""));
+      return ok ? { ok: true, port, encoding: session.encoding } : { ok: false, error: "切换编码失败" };
+    }
+    return { ok: false, error: `未知请求 op=${String(request.op)}` };
   }
 
   /** Ports this bridge currently holds. */

@@ -2783,6 +2783,10 @@ const handlers = {
     // must not wait on the filesystem — so the promise is parked and `getTree`
     // awaits it before listing.
     pendingRoot = cwd === "" ? Promise.resolve(false) : registerRoot(cwd).catch(() => false);
+    // The panel owns the COM handle, so the agent's `embed_serial write`
+    // leaves a request file for this process to execute — the only process
+    // that can. Idle cost is one readdir per tick.
+    serialBridge.startMailbox();
     // Same reason as `providers` above: a config file the app cannot parse is
     // an error the settings page shows, not a reason to refuse to boot.
     if (config?.providersError !== undefined) providersError = config.providersError;
@@ -3942,6 +3946,7 @@ const handlers = {
   shutdown() {
     stopFollow();
     stopBackgroundPump();
+    serialBridge.stopMailbox();
     void serialBridge.closeAll();
     // Detached builds must not survive the window that started them: they are
     // `unref`-ed on purpose (so a finished one cannot hold the process open),

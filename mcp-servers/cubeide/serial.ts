@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 
@@ -96,6 +97,56 @@ export interface RingMirror {
 
 export function ringMirrorPath(home = process.env.HARNESS_HOME?.trim() || path.join(os.homedir(), ".harness")) {
   return path.join(home, "serial", "ring.json");
+}
+
+/** Where write requests for the panel's session are dropped. Mirrors the host. */
+export function serialMailboxDir(home = process.env.HARNESS_HOME?.trim() || path.join(os.homedir(), ".harness")) {
+  return path.join(home, "serial", "requests");
+}
+
+/**
+ * Run an operation against the panel's live port through the host.
+ *
+ * The panel owns the only COM handle — a second `open` gets EACCES. The host
+ * polls this directory and executes each request with the handle it already
+ * has, which is also the only way the agent's write can share the panel's
+ * view of the port instead of competing with it. Nothing is faked: a timeout
+ * or a refused op comes back as `ok: false` with the host's own reason.
+ */
+export async function askHostSerial(
+  request: Record<string, unknown>,
+  timeoutMs = 3000,
+): Promise<{ ok: boolean; error?: string; [key: string]: unknown }> {
+  const dir = serialMailboxDir();
+  const id = `${Date.now()}-${process.pid}-${randomUUID().slice(0, 8)}`;
+  const requestPath = path.join(dir, `${id}.req.json`);
+  const replyPath = path.join(dir, `${id}.res.json`);
+  try {
+    mkdirSync(dir, { recursive: true });
+    const tmp = `${requestPath}.tmp`;
+    writeFileSync(tmp, JSON.stringify(request), "utf8");
+    renameSync(tmp, requestPath);
+  } catch (error) {
+    return { ok: false, error: `无法写入串口请求：${error instanceof Error ? error.message : String(error)}` };
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (existsSync(replyPath)) {
+      try {
+        const answer = JSON.parse(readFileSync(replyPath, "utf8"));
+        try { unlinkSync(replyPath); } catch { /* another reader won the race */ }
+        return answer;
+      } catch {
+        return { ok: false, error: "面板回了无法解析的响应" };
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  }
+  try { unlinkSync(requestPath); } catch { /* the host may have taken it */ }
+  return {
+    ok: false,
+    error: `面板未在 ${timeoutMs}ms 内响应（宿主可能没运行，或串口面板没开）`,
+  };
 }
 
 export function readRingMirror(): RingMirror | null {

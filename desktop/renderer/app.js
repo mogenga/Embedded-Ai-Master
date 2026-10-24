@@ -2690,6 +2690,10 @@ function handleEvent(message) {
       }
       break;
 
+    case "serial_agent_write":
+      replayAgentWrite(message);
+      break;
+
     case "serial_cleared":
       state.serial.lines = [];
       state.serial.filtered = 0;
@@ -4817,6 +4821,58 @@ function sendSerialLine() {
 /** Recall: at the end of history the draft slot (empty) comes back. */
 function serialHistoryRecall() {
   $("serial-send-input").value = serialHistoryIndex < serialSendHistory.length ? serialSendHistory[serialHistoryIndex] : "";
+}
+
+/**
+ * Replay an agent-authored write as the action it is: type the text into the
+ * input, press Send, clear. Without this the characters just appear on the
+ * wire and the operator cannot tell their own sends from the agent's.
+ *
+ * The bytes are already out (the host wrote them before announcing the
+ * event); this is purely the visible echo of who did it. `typing` is a
+ * module-level token so a second agent write cancels the first animation
+ * instead of interleaving two typewriters.
+ */
+let agentTypingToken = 0;
+
+function replayAgentWrite(write) {
+  const input = $("serial-send-input");
+  const button = $("serial-send");
+  if (!input || !button) return;
+  const token = ++agentTypingToken;
+  const text = String(write.data ?? "");
+  // A hex write is shown as the byte string the agent actually sent; the
+  // panel would otherwise look like it typed a different payload.
+  const shown = write.hex === true ? text.replace(/(..)/gi, "$1 ").trim() : text.replace(/\r\n$/, "");
+  const chunk = Math.max(1, Math.ceil(shown.length / 24));
+  input.classList.add("agent-typing");
+  input.value = "";
+  let index = 0;
+  const typeNext = () => {
+    if (token !== agentTypingToken) return;
+    index = Math.min(shown.length, index + chunk);
+    input.value = shown.slice(0, index);
+    if (index < shown.length) {
+      setTimeout(typeNext, 18);
+      return;
+    }
+    // The press: a real click's visual, plus the same highlight the button
+    // gets from a pointer.
+    setTimeout(() => {
+      if (token !== agentTypingToken) return;
+      button.classList.add("agent-pressing");
+      button.setAttribute("aria-busy", "true");
+      setTimeout(() => {
+        if (token !== agentTypingToken) return;
+        button.classList.remove("agent-pressing");
+        button.removeAttribute("aria-busy");
+        input.value = "";
+        input.classList.remove("agent-typing");
+      }, 180);
+    }, 140);
+  };
+  // One frame first so the caret and empty field are painted before typing.
+  setTimeout(typeNext, 40);
 }
 
 $("serial-send").addEventListener("click", sendSerialLine);
@@ -7039,6 +7095,99 @@ function endSidebarDrag() {
       const width = applySidebarWidth(SIDEBAR_DEFAULT, { persist: true });
       resizer.setAttribute("aria-valuenow", String(Math.round(width)));
     }
+  });
+}
+
+/* ---------- inspector (right pane) width ---------- */
+
+/**
+ * The inspector is resizable by dragging its left edge, the mirror of the
+ * sidebar handle. Its width is remembered unscaled, like the sidebar's, so
+ * it keeps its meaning when the UI scale changes.
+ *
+ * The bounds are wider than the old fixed 420 px: the panel holds a serial
+ * monitor and a hex view, which want room, while the conversation below
+ * ~3000 px of inspector would have nothing left. The clamp drops the ceiling
+ * on a narrow window so a drag can never crowd the transcript out.
+ */
+const WORKBENCH_DEFAULT = 420;
+const WORKBENCH_MIN = 320;
+const WORKBENCH_MAX = 900;
+let workbenchDrag = null;
+
+function clampWorkbenchWidth(width) {
+  const requested = Number.isFinite(width) ? width : WORKBENCH_DEFAULT;
+  const ceiling = Math.max(WORKBENCH_MIN, Math.min(WORKBENCH_MAX, window.innerWidth - 520));
+  return Math.round(Math.min(ceiling, Math.max(WORKBENCH_MIN, requested)));
+}
+
+function applyWorkbenchWidth(width, options = {}) {
+  const clamped = clampWorkbenchWidth(width);
+  document.documentElement.style.setProperty("--workbench-width", `${Math.round(clamped)}px`);
+  if (options.persist) localStorage.setItem("prometheus.workbenchWidth", String(Math.round(clamped)));
+  return clamped;
+}
+
+function beginWorkbenchDrag(event) {
+  const workbench = $("workbench");
+  if (!workbench) return;
+  event.preventDefault();
+  workbenchDrag = {
+    startX: event.clientX,
+    startWidth: workbench.getBoundingClientRect().width,
+    resizer: $("workbench-resizer"),
+  };
+  workbenchDrag.resizer.classList.add("resizing");
+  document.body.classList.add("resizing-workbench");
+  window.addEventListener("pointermove", onWorkbenchDrag);
+  window.addEventListener("pointerup", endWorkbenchDrag, { once: true });
+  workbenchDrag.resizer.setPointerCapture?.(event.pointerId);
+}
+
+function onWorkbenchDrag(event) {
+  if (!workbenchDrag) return;
+  // Dragging the pane's left edge leftwards makes it wider: the delta is
+  // inverted against the sidebar's handle, which sits on the right edge.
+  const width = workbenchDrag.startWidth - (event.clientX - workbenchDrag.startX);
+  applyWorkbenchWidth(width);
+}
+
+function endWorkbenchDrag() {
+  if (!workbenchDrag) return;
+  window.removeEventListener("pointermove", onWorkbenchDrag);
+  const workbench = $("workbench");
+  const width = workbench?.getBoundingClientRect().width ?? WORKBENCH_DEFAULT;
+  workbenchDrag.resizer.classList.remove("resizing");
+  document.body.classList.remove("resizing-workbench");
+  workbenchDrag = null;
+  applyWorkbenchWidth(width, { persist: true });
+}
+
+{
+  const stored = Number(localStorage.getItem("prometheus.workbenchWidth"));
+  if (stored) applyWorkbenchWidth(stored);
+  const resizer = $("workbench-resizer");
+  resizer?.addEventListener("pointerdown", beginWorkbenchDrag);
+  resizer?.addEventListener("dblclick", () => {
+    applyWorkbenchWidth(WORKBENCH_DEFAULT, { persist: true });
+  });
+  resizer?.addEventListener("keydown", (event) => {
+    const step = event.shiftKey ? 32 : 8;
+    const current = Number(localStorage.getItem("prometheus.workbenchWidth")) || WORKBENCH_DEFAULT;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      applyWorkbenchWidth(current + step, { persist: true });
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      applyWorkbenchWidth(current - step, { persist: true });
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      applyWorkbenchWidth(WORKBENCH_DEFAULT, { persist: true });
+    }
+  });
+  window.addEventListener("resize", () => {
+    const width = Number(localStorage.getItem("prometheus.workbenchWidth"));
+    if (width) applyWorkbenchWidth(width);
   });
 }
 
