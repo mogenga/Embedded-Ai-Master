@@ -6,9 +6,11 @@ import { dirname, join } from "node:path";
 /**
  * 子进程的环境构造（精简版）。
  *
- * 从 Prometheus/src/embedded/toolEnv.ts 抽出，去掉 packs 与 sandbox 模块依赖：
- * - `packBinDirs()` 在 packs 迁移前恒为空（TODO: Phase 3 接回）；
- * - `sandboxEnv` 的键名白名单原样内联（A 的 sandbox.ts:386 起）。
+ * 从 Prometheus/src/embedded/toolEnv.ts 抽出。原版 import packs/registry 与
+ * sandbox 两个模块；B 的分层下 keil server（rootDir=mcp-servers）不能静态
+ * import 内核 `src/packs/`，所以 `packBinDirs` 改为**注入**：server.ts 启动
+ * 时从编译产物 `dist/packs/registry.js` 动态加载并注入（见 server.ts 的
+ * `wirePackBinDirs`）。`sandboxEnv` 的键名白名单原样内联（A 的 sandbox.ts:386 起）。
  *
  * 硬规则保持不变：**绝不修改 process.env**，只给某一次 spawn 用的副本。
  * Windows 键名大小写不敏感（系统给 `Path`，再写 `PATH` 会出现两个键），
@@ -86,19 +88,55 @@ export function prependPath(env: NodeJS.ProcessEnv, dirs: string[]): NodeJS.Proc
   return { ...env, [key]: [...ordered, ...rest].join(sep) };
 }
 
-/** 所有 pack 提供的 bin 目录。packs 未迁移前为空（TODO: Phase 3）。 */
+/**
+ * pack 目录提供器，由 server.ts 启动时注入（来自 `dist/packs/registry.js`
+ * 的 `packBinDirs`）。null 表示 packs 未接回（未注入或 dist 未构建）——
+ * pack 贡献为空，系统 PATH 与注册表发现照常工作。
+ */
+type PackBinDirsFn = () => Map<string, { dir: string; packId: string }[]>;
+let packBinDirsFn: PackBinDirsFn | null = null;
+
+/** 注入/撤销 pack 目录提供器。返回前一个值，方便测试还原。 */
+export function setPackBinDirsProvider(fn: PackBinDirsFn | null): PackBinDirsFn | null {
+  const previous = packBinDirsFn;
+  packBinDirsFn = fn;
+  return previous;
+}
+
+/** 所有 pack 提供的 bin 目录，按 pack 的声明顺序（与 A 的 allPackBinDirs 等价）。 */
 export function allPackBinDirs(): string[] {
-  return [];
+  if (!packBinDirsFn) return [];
+  const dirs: string[] = [];
+  for (const entries of packBinDirsFn().values()) {
+    for (const entry of entries) if (!dirs.includes(entry.dir)) dirs.push(entry.dir);
+  }
+  return dirs;
 }
 
 /**
  * 给嵌入式工具用的环境。
  *
+ * `kinds` 为空表示带上所有 pack；指定时只带这些类型，避免一个 Rust pack
+ * 的 `cargo` 意外盖住用户自己装的 cargo（A 的语义，当前调用方都不传 kinds）。
+ *
  * 基础环境是白名单那份，不是 `process.env`：编译器和烧录器同样是 agent 让它
  * 跑的命令，没有理由比 `bash` 多拿一份 API key。
  */
-export function toolEnv(_kinds?: string[], base: NodeJS.ProcessEnv = sandboxEnv()): NodeJS.ProcessEnv {
-  return prependPath({ ...base }, allPackBinDirs());
+export function toolEnv(kinds?: string[], base: NodeJS.ProcessEnv = sandboxEnv()): NodeJS.ProcessEnv {
+  const dirs =
+    kinds && kinds.length > 0
+      ? (() => {
+          if (!packBinDirsFn) return [];
+          const map = packBinDirsFn();
+          const out: string[] = [];
+          for (const kind of kinds) {
+            for (const entry of map.get(kind) ?? []) if (!out.includes(entry.dir)) out.push(entry.dir);
+          }
+          return out;
+        })()
+      : allPackBinDirs();
+
+  return prependPath({ ...base }, dirs);
 }
 /**
  * `cbuild` 找到编译器的方式：`<name>_TOOLCHAIN_<major>_<minor>_<patch>` 里写

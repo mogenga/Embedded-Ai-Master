@@ -342,6 +342,92 @@ function seedModule() {
 }
 
 /**
+ * The kernel's toolchain-pack stack (`dist/packs/*`), loaded lazily by the
+ * Tools settings page.
+ *
+ * Same stale-`dist/` rule as `kbModule`: `dist/packs/` is newer than most
+ * `dist/` trees in the wild, and an import that threw at boot would take the
+ * window down over a page nobody had opened. The handlers answer "run
+ * `npm run build`" instead.
+ */
+let packsModulePromise;
+function packsModule() {
+  packsModulePromise ??= Promise.all([
+    import(dist("packs/registry.js")),
+    import(dist("packs/install.js")),
+    import(dist("packs/catalog.js")),
+  ])
+    .then(([registry, install, catalog]) => ({ registry, install, catalog }))
+    .catch(() => undefined);
+  return packsModulePromise;
+}
+
+/**
+ * The keil MCP server's compiled modules that the Tools page borrows:
+ * `TOOLCHAIN_INFO` (the kind → label/purpose table the renderer cannot read
+ * from TypeScript) and `findUv4` (Keil's registry/TOOLS.INI install discovery —
+ * Keil is never on PATH and never a pack).
+ *
+ * These live under `dist-mcp/`, not `dist/`: they are domain modules with
+ * their own build, so the host resolves them off `roots.distParent`. In a
+ * checkout that directory exists whenever `npm run build:mcp` has run; a
+ * missing table only blanks the Tools page's detection section, it does not
+ * take the host down.
+ */
+const distMcp = (name) => pathToFileURL(path.join(roots.distParent, "dist-mcp", name)).href;
+let keilToolchainModulePromise;
+function keilToolchainModule() {
+  keilToolchainModulePromise ??= Promise.all([
+    import(distMcp("keil/toolchain.js")),
+    import(distMcp("keil/keilInstall.js")).catch(() => undefined),
+  ])
+    .then(([toolchain, keilInstall]) => ({ toolchain, keilInstall }))
+    .catch(() => undefined);
+  return keilToolchainModulePromise;
+}
+
+/**
+ * Toolchain detection, cached per host process and reset whenever a pack
+ * changes (install/remove) — a cache that survived an install would keep
+ * reporting the freshly installed compiler as missing.
+ */
+let toolchainDetectionCache = null;
+function resetToolchainDetection() {
+  toolchainDetectionCache = null;
+}
+
+async function detectToolchainsForPacks(registry) {
+  if (toolchainDetectionCache) return toolchainDetectionCache;
+  const keil = await keilToolchainModule();
+  const packDirs = [];
+  try {
+    for (const entries of registry.packBinDirs().values()) {
+      for (const entry of entries) if (!packDirs.includes(entry.dir)) packDirs.push(entry.dir);
+    }
+  } catch {
+    /* pack 目录列不出来时照样探测 PATH——那是更可信的一半也不能丢 */
+  }
+  const { detectToolchains } = await import("./toolchains.js");
+  toolchainDetectionCache = await detectToolchains({
+    packDirs,
+    findUv4: typeof keil?.keilInstall?.findUv4 === "function" ? keil.keilInstall.findUv4 : null,
+  });
+  return toolchainDetectionCache;
+}
+
+/**
+ * Toolchain-pack install state.
+ *
+ * Two guards, by design: `packInstallRunning` is this host's own refusal (the
+ * command loop must never queue two transactions from one window), and the
+ * registry-level `.lock` file is the second one, covering the CLI and a second
+ * window — processes this host cannot see. `packAbort` cancels the in-flight
+ * install when a new one is requested, same as A's host.
+ */
+let packAbort = null;
+let packInstallRunning = false;
+
+/**
  * Where `<resources>/corpus.json` would live, or `undefined` when this install
  * has no such level.
  *
@@ -4147,6 +4233,237 @@ const handlers = {
     // Re-answer with the merged state so the pane never shows a value the
     // tools would not use.
     void handlers.getBoardState();
+  },
+
+  // ---- 工具链包 -------------------------------------------------------------
+  // 消息形状以 settings.js 已消费的 case 分支为准（A 的 host.js 协议已漂移，
+  // 不作反推依据）。安装是分钟级操作：进度边跑边发，handler 不把 promise
+  // 交还命令队列，否则下载期间整个宿主不再响应任何命令。
+
+  /**
+   * 已装 pack + 磁盘占用 + 本机探测 + 工具链元数据表，合成一条 `packs`
+   * 消息——渲染器打开这一页要问的三个问题（有什么、装了什么、还能装
+   * 什么）在同一次回答里到齐，语言切换时也只重放这一个来源。
+   */
+  async getPacks() {
+    const packs = await packsModule();
+    if (!packs) {
+      send({ type: "notice", level: "warn", text: "工具链包不可用：内核未编译，请先 npm run build" });
+      send({ type: "packs", root: "", freeBytes: null, totalBytes: 0, detected: null, toolchains: [], packs: [] });
+      return;
+    }
+    try {
+      const summary = packs.registry.packsSummary();
+      // 探测是尽力而为：注册表读不了或 dist-mcp 缺失时 pack 列表照样
+      // 发——那一半的答案不依赖探测成功。
+      let detected = null;
+      try {
+        detected = await detectToolchainsForPacks(packs.registry);
+      } catch {
+        /* detection is optional; the pack list is still worth showing */
+      }
+      // 元数据表随消息一起发：渲染器读不了 TS 模块，而 label/purpose 本来
+      // 就是答案的一部分，不是装饰。
+      let toolchains = [];
+      try {
+        const keil = await keilToolchainModule();
+        if (keil?.toolchain?.TOOLCHAIN_INFO) {
+          toolchains = Object.entries(keil.toolchain.TOOLCHAIN_INFO).map(([kind, info]) => ({ kind, ...info }));
+        }
+      } catch {
+        /* 表拿不到时探测区留空，页面其余部分照常 */
+      }
+      send({
+        type: "packs",
+        root: summary.root,
+        freeBytes: summary.freeBytes,
+        totalBytes: summary.totalBytes,
+        detected,
+        toolchains,
+        packs: summary.packs.map((pack) => ({
+          manifest: {
+            id: pack.manifest.id,
+            name: pack.manifest.name,
+            version: pack.manifest.version,
+            provides: pack.manifest.provides,
+            license: pack.manifest.license,
+          },
+          bytes: pack.bytes,
+          status: pack.status,
+          problem: pack.problem,
+        })),
+      });
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `toolchain packs: ${messageOf(error)}` });
+    }
+  },
+
+  async getPackCatalog() {
+    const packs = await packsModule();
+    if (!packs) {
+      send({ type: "notice", level: "warn", text: "工具链目录不可用：内核未编译，请先 npm run build" });
+      return;
+    }
+    try {
+      // includeUnverified：目录里没填哈希的条目也列出来，但标成不可安装 ——
+      // 静默隐藏会让用户以为"没有这个工具链"，而不是"还没准备好"。
+      send({
+        type: "pack_catalog",
+        entries: packs.catalog.catalogFor(undefined, undefined, { includeUnverified: true }).map((entry) => ({
+          id: entry.id,
+          name: entry.name,
+          version: entry.version,
+          downloadBytes: entry.downloadBytes,
+          provides: entry.provides,
+          installable: packs.catalog.isInstallable(entry),
+        })),
+      });
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `toolchain catalog: ${messageOf(error)}` });
+    }
+  },
+
+  /**
+   * 安装目录里的一个 pack。handler 立即返回：进度走 `pack_progress` 事件，
+   * 结束走 `pack_installed` / `pack_error`，命令循环全程可响应。
+   */
+  async installPack(payload = {}) {
+    const packs = await packsModule();
+    if (!packs) {
+      send({ type: "pack_error", id: payload.id ?? null, message: "工具链包不可用：内核未编译，请先 npm run build" });
+      return;
+    }
+    const entry = packs.catalog
+      .catalogFor(undefined, undefined, { includeUnverified: true })
+      .find((item) => item.id === payload.id);
+    if (!entry) {
+      send({ type: "pack_error", id: payload.id ?? null, message: "no such pack in the catalog" });
+      return;
+    }
+    if (!packs.catalog.isInstallable(entry)) {
+      send({ type: "pack_error", id: entry.id, message: "this pack has not been checksummed yet and cannot be installed" });
+      return;
+    }
+    if (packInstallRunning) {
+      // 本窗口的自守卫；跨窗口/CLI 由根目录的 .lock 文件把守。
+      send({ type: "pack_error", id: entry.id, message: "另一个包安装正在进行中，请等它结束再试" });
+      return;
+    }
+    packAbort?.abort();
+    packAbort = new AbortController();
+    const controller = packAbort;
+    packInstallRunning = true;
+    packs.install
+      .installPack(packs.catalog.toInstallEntry(entry), {
+        signal: controller.signal,
+        onProgress: (progress) => send({ type: "pack_progress", ...progress }),
+      })
+      .then(() => {
+        resetToolchainDetection();
+        send({ type: "pack_installed", id: entry.id });
+        // 装完之后列表与探测都变了：重发整份而不是就地补一条。
+        void handlers.getPacks();
+      })
+      .catch((error) => {
+        send({ type: "pack_error", id: entry.id, message: messageOf(error) });
+      })
+      .finally(() => {
+        packInstallRunning = false;
+        if (packAbort === controller) packAbort = null;
+      });
+  },
+
+  /**
+   * 离线安装：用户手上是别人拷过来的 pack.json + 压缩包，机器连不上下载
+   * 站。同一个事务、同一套成员检查、同一个校验——只是字节从本地来。
+   */
+  async installFromManifest(payload = {}) {
+    const packs = await packsModule();
+    if (!packs) {
+      send({ type: "pack_error", id: null, message: "工具链包不可用：内核未编译，请先 npm run build" });
+      return;
+    }
+    if (typeof payload.path !== "string" || payload.path === "") {
+      send({ type: "pack_error", id: null, message: "离线安装需要 pack.json 的路径" });
+      return;
+    }
+    if (packInstallRunning) {
+      send({ type: "pack_error", id: null, message: "另一个包安装正在进行中，请等它结束再试" });
+      return;
+    }
+    packAbort?.abort();
+    packAbort = new AbortController();
+    const controller = packAbort;
+    packInstallRunning = true;
+    packs.install
+      .installFromManifest(payload.path, {
+        signal: controller.signal,
+        localFiles: Array.isArray(payload.files) && payload.files.length > 0 ? payload.files : undefined,
+        onProgress: (progress) => send({ type: "pack_progress", ...progress }),
+      })
+      .then((manifest) => {
+        resetToolchainDetection();
+        send({ type: "pack_installed", id: manifest.id });
+        void handlers.getPacks();
+      })
+      .catch((error) => {
+        send({ type: "pack_error", id: null, message: messageOf(error) });
+      })
+      .finally(() => {
+        packInstallRunning = false;
+        if (packAbort === controller) packAbort = null;
+      });
+  },
+
+  /**
+   * 卸载。armed 两段式确认在渲染器（settings.js），到达这里的已是确认
+   * 过的请求；pack 先改名出 `packs/` 再删除，失败也只是不可见而非半卸载。
+   */
+  async removePack(payload = {}) {
+    const packs = await packsModule();
+    if (!packs) {
+      send({ type: "pack_error", id: payload.id ?? null, message: "工具链包不可用：内核未编译，请先 npm run build" });
+      return;
+    }
+    try {
+      await packs.registry.removePack(payload.id);
+      resetToolchainDetection();
+      // `packs` 事件本身就是刷新信号：渲染器收到即整页重渲染。
+      void handlers.getPacks();
+    } catch (error) {
+      send({ type: "pack_error", id: payload.id ?? null, message: messageOf(error) });
+    }
+  },
+
+  /** 校验一个已装的 pack（浅检查 + 可执行文件应答）。 */
+  async verifyPack(payload = {}) {
+    const packs = await packsModule();
+    if (!packs) {
+      send({ type: "pack_error", id: payload.id ?? null, message: "工具链包不可用：内核未编译，请先 npm run build" });
+      return;
+    }
+    packs.registry
+      .verifyPack(payload.id, { onProgress: (progress) => send({ type: "pack_progress", ...progress }) })
+      .then((result) => {
+        send({ type: "pack_verified", id: payload.id, ok: result.ok, problems: result.problems });
+      })
+      .catch((error) => send({ type: "pack_error", id: payload.id ?? null, message: messageOf(error) }));
+  },
+
+  /** 清理中断遗留的事务目录与 trash（只删本应用创建且已过期的）。 */
+  async prunePacks() {
+    const packs = await packsModule();
+    if (!packs) {
+      send({ type: "notice", level: "warn", text: "工具链包不可用：内核未编译，请先 npm run build" });
+      return;
+    }
+    try {
+      const result = await packs.registry.pruneTmp();
+      send({ type: "pack_pruned", removed: result.removed.length, bytes: result.bytes });
+      void handlers.getPacks();
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `prunePacks 失败：${messageOf(error)}` });
+    }
   },
 };
 
