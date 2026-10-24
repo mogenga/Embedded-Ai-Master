@@ -2937,16 +2937,30 @@ const handlers = {
   setMode(payload) {
     const presets = ["read-only", "workspace-write", "diagnose", "danger-full-access"];
     if (!presets.includes(payload.mode)) return;
-    if (ctx.running) {
-      // Changing the preset mid-run would change what the operator approved.
-      send({ type: "notice", level: "warn", text: "运行中不能切换权限模式" });
-      return;
-    }
+    const previous = mode;
+    if (previous === payload.mode) return;
     mode = payload.mode;
-    // Rebuild so the next run starts under the new preset.
-    void runner?.close();
-    runner = createRunner();
+    // The preset is read when a run *starts*, so a switch made mid-turn cannot
+    // change what the operator already approved — and blocking it was worse
+    // than allowing it: `ctx.running` is cleared only by a kernel `done` /
+    // `interrupted` event, so one turn that ended without either left the
+    // switch dead for the rest of the session, silently. Storing the choice
+    // now and letting the next run pick it up is both safe and what the label
+    // promises.
+    // Rebuild only when no turn is open: closing a runner out from under a
+    // live run would drop its session registry entry.
+    if (!ctx.running) {
+      void runner?.close();
+      runner = createRunner();
+    }
     send(stateEvent());
+    send({
+      type: "notice",
+      level: "dim",
+      text: ctx.running
+        ? `权限模式：${previous} → ${mode}（本轮结束后生效）`
+        : `权限模式：${previous} → ${mode}`,
+    });
   },
 
   /**
