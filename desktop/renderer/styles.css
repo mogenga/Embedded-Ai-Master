@@ -2328,6 +2328,34 @@ mark.find-hit.current {
   margin: 16px 0;
 }
 
+/* Display math keeps the LaTeX source verbatim — there is no typesetter in a
+   zero-dependency renderer — so the block reads as a formula through voice
+   alone: centred, serif, a touch larger, with source line breaks preserved. */
+.markdown .math {
+  margin: 0 0 14px;
+  padding: 10px 16px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: var(--text-md);
+  line-height: 1.6;
+  text-align: center;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+/* Display math keeps the LaTeX source verbatim — there is no typesetter in a
+   zero-dependency renderer — so the block reads as a formula through voice
+   alone: centred, serif, a touch larger, with source line breaks preserved. */
+.markdown .math {
+  margin: 0 0 14px;
+  padding: 10px 16px;
+  font-family: Georgia, "Times New Roman", serif;
+  font-size: var(--text-md);
+  line-height: 1.6;
+  text-align: center;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
 .markdown table {
   border-collapse: collapse;
   margin: 0 0 14px;

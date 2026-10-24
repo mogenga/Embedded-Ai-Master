@@ -77,7 +77,7 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 - **渲染层语言是 JavaScript，不是 TypeScript**：TypeScript 只用于内核 `src/` 与 MCP server。`desktop/renderer/*.js` 是 `.js` 文件，靠 `protocol.d.ts` 提供协议层的类型提示。**这条与 v1.4 相反**。
 - **无 UI 框架、无组件系统**：`app.js`（5853 行）是命令式 DOM 操作（`addUserTurn` / `addAssistantTurn` / `addToolRow` / `attachToolOutput` …），状态在一个 `state` 对象里，没有 `TranscriptView` 那样的纯函数归约层。
 - **样式**：手写 CSS 变量体系，两张表（`styles.css` 5473 行 + `settings.css` 1243 行），无 CSS 预处理器。
-- **Markdown**：零依赖手写渲染器（`markdown.js`），带 `IncrementalRenderer` 增量 diff。支持的块级语法是围栏代码块、`#`~`######`（降到 h3）、无序/有序列表、`>` 引用、**GFM 最小集表格**（表头 + `:?-{3,}:?` 分隔行；切列走状态机，`\|` 与 code-span 内的 `\|` 不拆列；对齐三态用 `style="text-align"`；短行补空单元、长行截断，保证每行同列数）、**分割线**（`---` / `***` / `___` / `- - -`，仅在段落为空时产出 `<hr>`，所以 `上面一行\n---` 仍是正文——本渲染器没有 setext 标题）。不支持嵌套表格、多行单元格、单元格内的块级语法、setext 标题。表格与 `hr` 的样式在 `styles.css` 的 `.markdown table` / `.markdown hr`。
+- **Markdown**：零依赖手写渲染器（`markdown.js`），带 `IncrementalRenderer` 增量 diff。支持的块级语法是围栏代码块、`#`~`######`（降到 h3）、无序/有序列表、`>` 引用、**GFM 最小集表格**（表头 + `:?-{3,}:?` 分隔行；切列走状态机，`\|` 与 code-span 内的 `\|` 不拆列；对齐三态用 `style="text-align"`；短行补空单元、长行截断，保证每行同列数）、**分割线**（`---` / `***` / `___` / `- - -`，仅在段落为空时产出 `<hr>`，所以 `上面一行\n---` 仍是正文——本渲染器没有 setext 标题）、**显示数学块**（`$$` 围栏：单行 `$$E=mc^2$$` 或多行 `$$`…`$$`；LaTeX 源原样转义显示、不做 TeX 排版、不做行内语法处理；未闭合宽容渲染到块尾；开/闭 `$$` 同行的内容并入公式体）。不支持嵌套表格、多行单元格、单元格内的块级语法、setext 标题、**行内 `$...$`**（调试输出里 `$sp`、`$1 = 0x2000` 高频，配对单 `$` 误伤面太大）。表格、`hr` 与数学块的样式在 `styles.css` 的 `.markdown table` / `.markdown hr` / `.markdown .math`（居中、衬线、`pre-wrap` 保留源换行）。
 - **图标**：内联 SVG sprite（`icons.js`），单一 24×24 网格、`stroke-width: 1.75`。**零 emoji**。
 - **i18n**：`i18n.js`（en 437 键 / zh 438 键）+ `settings-i18n.js`（604 行），中英双语，默认跟随系统语言。
 

@@ -125,6 +125,38 @@ export function renderMarkdown(source, copyLabel = "copy") {
       continue;
     }
 
+    // Display math: a `$$` fence, either one line (`$$E=mc^2$$`) or a run
+    // closed by a trailing `$$` line. The LaTeX source is shown as-is — no
+    // typesetting — and gets no inline markdown treatment. An unterminated
+    // block renders what arrived so far, the way an open code fence does.
+    // Inline `$...$` is deliberately unsupported: `$` is all over debugger
+    // output (`$sp`, `$1 = 0x2000`), so pairing lone dollars breaks prose.
+    if (/^\s{0,3}\$\$/.test(line)) {
+      flushParagraph();
+      const single = line.match(/^\s{0,3}\$\$(.+?)\$\$\s*$/);
+      if (single) {
+        out.push(`<div class="math">${escapeHtml(single[1].trim())}</div>`);
+        i++;
+        continue;
+      }
+      const body = [];
+      const rest = line.slice(line.indexOf("$$") + 2).trim();
+      if (rest) body.push(rest);
+      i++;
+      while (i < lines.length) {
+        const close = lines[i].match(/^(?:(.*?)\s*)?\$\$\s*$/);
+        if (close) {
+          if (close[1]) body.push(close[1]);
+          i++;
+          break;
+        }
+        body.push(lines[i]);
+        i++;
+      }
+      out.push(`<div class="math">${escapeHtml(body.join("\n"))}</div>`);
+      continue;
+    }
+
     const heading = line.match(/^(#{1,6})\s+(.*)$/);
     if (heading) {
       flushParagraph();
@@ -237,15 +269,22 @@ export class IncrementalRenderer {
     this.cachedHtml = "";
   }
 
-  /** Split on blank lines, but never inside an unclosed fence. */
+  /** Split on blank lines, but never inside an unclosed fence or math block. */
   static split(source) {
     const lines = source.replace(/\r?\n/g, "\n").split("\n");
     const blocks = [];
     let current = [];
     let fenced = false;
+    let mathed = false;
     for (const line of lines) {
-      if (/^\s*```/.test(line)) fenced = !fenced;
-      if (!fenced && line.trim() === "") {
+      if (!mathed && /^\s*```/.test(line)) fenced = !fenced;
+      // A one-line `$$x$$` toggles twice and stays closed; a bare `$$` flips
+      // the state, so a blank line inside display math never splits the block.
+      if (!fenced) {
+        const marks = line.match(/\$\$/g);
+        if (marks && marks.length % 2 === 1) mathed = !mathed;
+      }
+      if (!fenced && !mathed && line.trim() === "") {
         if (current.length > 0) blocks.push(current.join("\n"));
         current = [];
         continue;
