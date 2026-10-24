@@ -129,7 +129,16 @@ export function evaluatePolicy(input: {
       matches.push({ entry, index });
     }
 
+    // `danger-full-access` is the one preset that promises "no prompts": the
+    // operator picked a throwaway target and said so. A per-tool `ask` rule
+    // left over from a tighter preset would otherwise keep interrupting under
+    // it — the label said 完全访问 and the dialog appeared anyway, which reads
+    // as the switch doing nothing. `deny` still wins: an explicit prohibition
+    // is a safety line, not a prompt, and this mode was never sold as
+    // "ignore the denylist".
+    const skipAsk = preset === "danger-full-access";
     for (const action of ["deny", "ask", "allow"] as const) {
+      if (skipAsk && action === "ask") continue;
       const match = matches.find((candidate) => candidate.entry.rule.action === action);
       if (match === undefined) continue;
       return {

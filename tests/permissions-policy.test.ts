@@ -278,11 +278,21 @@ describe("evaluatePolicy user rules", () => {
     expect(result.ruleIndex).toBe(0);
   });
 
-  it("lets a user ask rule override a preset allow", () => {
+  it("does not let an ask rule override danger-full-access", () => {
+    // The operator picked the one preset that promises no prompts. An `ask`
+    // rule left over from a tighter preset overriding it made the switch look
+    // broken: the label said 完全访问 and the dialog kept appearing.
     const result = evaluate("danger-full-access", [rule("project", "grep", "ask")], readTool);
-    expect(result.action).toBe("ask");
-    expect(result.source).toBe("project");
-    expect(result.ruleIndex).toBe(0);
+    expect(result.action).toBe("allow");
+  });
+
+  it("lets a user ask rule override a preset allow under other presets", () => {
+    for (const preset of ["diagnose", "workspace-write"] as const) {
+      const result = evaluate(preset, [rule("project", "grep", "ask")], readTool);
+      expect(result.action).toBe("ask");
+      expect(result.source).toBe("project");
+      expect(result.ruleIndex).toBe(0);
+    }
   });
 
   it("deny wins over allow regardless of order", () => {
@@ -469,5 +479,47 @@ describe("evaluatePolicy errors", () => {
     );
     expect(result.action).toBe("deny");
     expect(result.reason).toBe("permission_error:plain failure");
+  });
+});
+
+describe("danger-full-access and per-tool ask rules", () => {
+  // The preset's own description is "no prompts and no restriction". A rule
+  // left over from a tighter preset that still says `ask` used to override it,
+  // so the operator picked 完全访问 and the approval dialog appeared anyway —
+  // indistinguishable from the switch being broken.
+  it("ignores ask rules under danger-full-access", () => {
+    const result = evaluate(
+      "danger-full-access",
+      [rule("user", "shell", "ask")],
+      shell,
+    );
+    expect(result.action).toBe("allow");
+  });
+
+  it("still honours ask rules under every other preset", () => {
+    for (const preset of ["diagnose", "workspace-write", "read-only"] as const) {
+      expect(evaluate(preset, [rule("user", "shell", "ask")], shell).action).toBe("ask");
+    }
+  });
+
+  it("still honours deny rules under danger-full-access", () => {
+    // An explicit prohibition is a safety line, not a prompt: the mode was
+    // never sold as "ignore the denylist".
+    const result = evaluate(
+      "danger-full-access",
+      [rule("user", "shell", "deny")],
+      shell,
+    );
+    expect(result.action).toBe("deny");
+  });
+
+  it("still honours allow rules under danger-full-access", () => {
+    const result = evaluate(
+      "danger-full-access",
+      [rule("user", "shell", "allow")],
+      shell,
+    );
+    expect(result.action).toBe("allow");
+    expect(result.source).toBe("user");
   });
 });

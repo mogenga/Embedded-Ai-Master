@@ -189,6 +189,40 @@ export class SerialBridge {
   #serveMailboxRequest(request) {
     const port = String(request.port ?? "");
     const session = this.#sessions.get(port);
+    if (request.op === "open") {
+      // The agent opened the port through the panel: the panel becomes the
+      // owner, so the user sees the same data and can type into it. A second
+      // open of a port this bridge already holds is answered, not attempted.
+      if (session !== undefined) {
+        return { ok: true, port, already: true, baud: session.baud };
+      }
+      const baud = Number(request.baud ?? 115200);
+      // Detached: the mailbox drain is synchronous and the open resolves on
+      // its own `open` event. The reply says it started; the caller polls
+      // `status`. The pane is told through the same events a click produces,
+      // so the toolbar and the counters follow along without a second path.
+      void this.open(port, baud, { encoding: request.encoding }).then((result) => {
+        if (result.ok) {
+          this.#send({ type: "serial_snapshot", ...result.snapshot });
+        } else {
+          this.#send({ type: "serial_state", open: false, port, baud, error: result.error });
+        }
+      }).catch(() => undefined);
+      return { ok: true, port, opening: true, baud };
+    }
+    if (request.op === "close") {
+      if (session === undefined) return { ok: true, port, already: true };
+      void this.close(port).catch(() => undefined);
+      return { ok: true, port, closing: true };
+    }
+    if (request.op === "status") {
+      // What the caller needs is "is it open yet", not the ring (the ring has
+      // its own mirror file). Absent session reads as not-ready, never as an
+      // error — the open is racing this poll by design.
+      return session === undefined
+        ? { ok: true, port, open: false, ready: false }
+        : { ok: true, port, open: session.ready && !session.dead, ready: session.ready && !session.dead, baud: session.baud };
+    }
     if (session === undefined || !session.ready || session.dead) {
       return { ok: false, error: `面板未打开 ${port}（或已断开）；先在面板里开始串口` };
     }

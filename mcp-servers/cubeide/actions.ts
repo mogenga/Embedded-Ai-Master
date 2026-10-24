@@ -120,11 +120,11 @@ export const BUILD_DESCRIPTION =
 
 // ---- embed_serial -----------------------------------------------------------
 
-export const SERIAL_ACTIONS = ["read", "write", "ports", "status"] as const;
+export const SERIAL_ACTIONS = ["read", "write", "ports", "status", "open", "close"] as const;
 export type SerialAction = (typeof SERIAL_ACTIONS)[number];
 
 export const SERIAL_EVIDENCE_ACTIONS: ReadonlySet<string> = new Set(["read", "ports", "status"]);
-export const SERIAL_DESTRUCTIVE_ACTIONS: ReadonlySet<string> = new Set(["write"]);
+export const SERIAL_DESTRUCTIVE_ACTIONS: ReadonlySet<string> = new Set(["write", "open", "close"]);
 
 export const serialInputSchema = z
   .object({
@@ -137,6 +137,8 @@ export const serialInputSchema = z
     since: z.number().int().min(0).optional(),
     duration_ms: z.number().int().min(50).max(30_000).optional(),
     data: z.string().max(4096).optional(),
+    // RX text codec for `open`: Keil and most Chinese MCU tutorials print GBK.
+    encoding: z.enum(["utf-8", "gbk"]).optional(),
   })
   .strict();
 

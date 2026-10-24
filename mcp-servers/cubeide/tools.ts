@@ -612,6 +612,47 @@ const embedSerialTool: ProbeToolSpec = {
               lineCount: lines.length,
             });
           }
+          // The host owns the handle whenever the desktop app is running — it
+          // is the only process that can show the data to the operator. Asking
+          // it to open the port (rather than grabbing the port here) means the
+          // panel lights up with the same session instead of failing to open
+          // a port the agent already holds, which is what the user saw.
+          const opened = await askHostSerial({ op: "open", port, baud });
+          if (opened.ok === true) {
+            // The open is detached on the host side; give it the ready timeout.
+            const deadline = Date.now() + 8000;
+            while (Date.now() < deadline) {
+              const status = await askHostSerial({ op: "status", port }, 800);
+              if (status.ok === true && status.ready === true) break;
+              await new Promise((resolve) => setTimeout(resolve, 150));
+            }
+            // Wait out the capture window, then read the ring the panel filled.
+            await new Promise((resolve) => setTimeout(resolve, durationMs));
+            const mirror = readRingMirror();
+            const entry = mirror?.ports.find((candidate) => candidate.port === port);
+            if (entry !== undefined) {
+              const maxLines = Number(input.max_lines ?? 200);
+              const since = Number(input.since ?? 0);
+              const start = since > 0 ? Math.min(since, entry.lines.length) : Math.max(0, entry.lines.length - maxLines);
+              const lines = entry.lines.slice(start, start + maxLines);
+              const text = [
+                `${port} @ ${entry.baud} (panel-owned; ring ${entry.lines.length} lines, ${entry.dropped} dropped early)`,
+                ...lines.map((line) => line.text),
+                since > 0 ? `(cursor ${start + lines.length}/${entry.lines.length})` : `(ring index ${entry.lines.length})`,
+              ];
+              return ok(text, {
+                tool: "embed_serial",
+                action,
+                port,
+                baud: entry.baud,
+                via: "panel",
+                ringIndex: entry.lines.length,
+                lineCount: lines.length,
+              });
+            }
+          }
+          // No desktop host answered (headless use): fall back to a transient
+          // capture with our own handle, which is what this tool did before.
           const capture = await captureSerialPort(port, baud, durationMs);
           if (!capture.ok && capture.lines.length === 0) {
             return fail("capture_failed", capture.error ?? `${port} 捕获失败`);
@@ -631,10 +672,18 @@ const embedSerialTool: ProbeToolSpec = {
             return fail("missing_argument", "write needs `port`（经面板打开的口写：传面板正在用的那个口；本工具没有常驻句柄，写入走一次性泵）");
           }
           const baud = Number(input.baud ?? 115200);
-          // The panel owns the handle when it has the port open: a second
-          // `open` cannot succeed, so the write goes through the host, which
-          // already holds it. Same port, same session, no competing handles.
-          if (mirrorHasPort(port)) {
+          // Route every write through the host, which owns the handle: if the
+          // panel already has the port it lands in that session, and if it
+          // does not, the host opens it so the operator watches the exchange
+          // instead of hunting for the process that took the port.
+          const opened = await askHostSerial({ op: "open", port, baud });
+          if (opened.ok === true) {
+            const deadline = Date.now() + 8000;
+            while (Date.now() < deadline) {
+              const status = await askHostSerial({ op: "status", port }, 800);
+              if (status.ok === true && status.ready === true) break;
+              await new Promise((resolve) => setTimeout(resolve, 150));
+            }
             const reply = await askHostSerial({
               op: "write",
               port,
@@ -667,6 +716,28 @@ const embedSerialTool: ProbeToolSpec = {
             ...capture.lines.slice(-Number(input.max_lines ?? 100)).map((line: { text: string }) => line.text),
           ];
           return ok(text, { tool: "embed_serial", action, port, baud, lineCount: capture.lines.length });
+        }
+        case "open": {
+          const port = input.port ? String(input.port) : undefined;
+          if (port === undefined) return fail("missing_argument", "open needs `port`");
+          const baud = Number(input.baud ?? 115200);
+          const reply = await askHostSerial({ op: "open", port, baud, encoding: input.encoding });
+          if (reply.ok !== true) {
+            return fail("open_failed", String(reply.error ?? `无法打开 ${port}`));
+          }
+          return ok(
+            [`opened ${port} @ ${baud} in the panel`, "(the desktop app now owns the port; this tool writes and reads through it)"],
+            { tool: "embed_serial", action, port, baud, via: "panel" },
+          );
+        }
+        case "close": {
+          const port = input.port ? String(input.port) : undefined;
+          if (port === undefined) return fail("missing_argument", "close needs `port`");
+          const reply = await askHostSerial({ op: "close", port });
+          if (reply.ok !== true) {
+            return fail("close_failed", String(reply.error ?? `无法关闭 ${port}`));
+          }
+          return ok([`closed ${port}`], { tool: "embed_serial", action, port });
         }
         case "ports": {
           const ports = await listSerialPorts();
