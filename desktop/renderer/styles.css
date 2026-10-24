@@ -5735,3 +5735,115 @@ mark.find-hit.current {
   white-space: nowrap;
   cursor: pointer;
 }
+
+/* ---------- board pane: serial tail preview ---------- */
+
+.board-serial-tail {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  overflow: hidden;
+}
+
+.board-serial-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.board-serial-line .serial-time {
+  color: var(--text-dim);
+  margin-right: 8px;
+}
+
+.board-serial-line.warn { color: var(--warn); }
+.board-serial-line.error { color: var(--danger); }
+
+.board-serial-open {
+  margin-top: 4px;
+}
+
+/* ---------- serial counters / hex / dtr-rts ---------- */
+
+.serial-counters {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* The send area follows the SSCOM/XCOM split: a compact options row
+   (line toggles left, hex/crlf right) above the input row. Small controls
+   never sit between the input and its button. */
+.serial-send-area {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.serial-send-options {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 0;
+}
+
+.serial-send-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 8px;
+  background: transparent;
+  border-top: none;
+}
+
+.serial-line-btn {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 0 8px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.serial-line-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.serial-line-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.serial-send-crlf {
+  flex: 0 0 auto;
+}
+
+.serial-send-crlf input {
+  margin: 0 3px 0 0;
+  vertical-align: middle;
+}
+
+.serial-send-input.invalid {
+  border-color: var(--danger);
+  background: rgba(220, 80, 80, 0.08);
+}
+
+.serial-text {
+  white-space: pre-wrap;
+}

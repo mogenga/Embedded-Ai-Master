@@ -479,6 +479,10 @@
                     <button role="radio" data-filter="warn" data-i18n="serialFilterWarn">Warnings</button>
                     <button role="radio" data-filter="error" data-i18n="serialFilterError">Errors</button>
                   </div>
+                  <div class="serial-filter" id="serial-view" role="radiogroup" aria-label="View">
+                    <button role="radio" data-view="text" class="active" data-i18n="serialViewText">Text</button>
+                    <button role="radio" data-view="hex" data-i18n="serialViewHex">HEX</button>
+                  </div>
                   <span class="serial-spacer"></span>
                   <button class="icon-button small" id="serial-pause" data-i18n-title="serialPause">
                     <svg class="icon" aria-hidden="true"><use href="#i-pause"></use></svg>
@@ -496,22 +500,35 @@
                 </div>
                 <div class="serial-status-row">
                   <span class="serial-status" id="serial-status"></span>
+                  <span class="serial-spacer"></span>
+                  <span class="serial-counters" id="serial-counters"></span>
                 </div>
                 <div class="serial-output" id="serial-output" tabindex="0"></div>
-                <div class="serial-send-row">
-                  <input
-                    class="serial-send-input"
-                    id="serial-send-input"
-                    spellcheck="false"
-                    autocomplete="off"
-                    data-i18n-placeholder="serialSendPlaceholder"
-                    placeholder="Send to the port…"
-                  />
-                  <button class="btn btn-primary small" id="serial-send" data-i18n="serialSend">Send</button>
-                  <label class="serial-send-crlf" data-i18n-title="serialSendCrlf">
-                    <input type="checkbox" id="serial-send-crlf" checked />
-                    <span data-i18n="serialSendCrlf">CRLF</span>
-                  </label>
+                <div class="serial-send-area">
+                  <div class="serial-send-options">
+                    <button type="button" class="serial-line-btn" id="serial-dtr" data-i18n-title="serialDtr" aria-pressed="false">DTR</button>
+                    <button type="button" class="serial-line-btn" id="serial-rts" data-i18n-title="serialRts" aria-pressed="false">RTS</button>
+                    <span class="serial-spacer"></span>
+                    <label class="serial-send-crlf" data-i18n-title="serialSendHex">
+                      <input type="checkbox" id="serial-send-hex" />
+                      <span data-i18n="serialSendHex">HEX 发送</span>
+                    </label>
+                    <label class="serial-send-crlf" data-i18n-title="serialSendCrlf">
+                      <input type="checkbox" id="serial-send-crlf" checked />
+                      <span data-i18n="serialSendCrlf">CRLF</span>
+                    </label>
+                  </div>
+                  <div class="serial-send-row">
+                    <input
+                      class="serial-send-input"
+                      id="serial-send-input"
+                      spellcheck="false"
+                      autocomplete="off"
+                      data-i18n-placeholder="serialSendPlaceholder"
+                      placeholder="Send to the port…"
+                    />
+                    <button class="btn btn-primary small" id="serial-send" data-i18n="serialSend">Send</button>
+                  </div>
                 </div>
               </div>
               <div class="artifact-root" id="artifact-root" hidden></div>

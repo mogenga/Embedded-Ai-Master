@@ -28,7 +28,7 @@ import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { kernelMissingMessage, RESOURCES_PATH_ENV, resolveRoots } from "./roots.js";
-import { SerialBridge, listSerialPorts } from "./serial-bridge.js";
+import { SerialBridge, listSerialPorts, serialRingPath } from "./serial-bridge.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // `distParent` is the directory that holds `dist/` — the checkout root in
@@ -53,6 +53,56 @@ function send(message) {
 
 /** One bridge per host process; its events leave through the same `send`. */
 const serialBridge = new SerialBridge(send);
+
+/**
+ * Board pane state the host owns directly. The target part number is NOT
+ * here — that answer comes from the agent's probe tools via `device_status`
+ * events, and a host-side guess would be a fabricated one (R3). This is the
+ * selection the tools should use, persisted per host process.
+ */
+let boardSelection = {};
+
+/**
+ * The device half of the board pane: call each configured embedded backend's
+ * read-only status tool through a short-lived MCP manager. Undefined when the
+ * kernel's MCP modules are missing (stale dist) — the pane keeps its serial
+ * half either way.
+ */
+async function probeBoardDevices() {
+  const config = mcpBoardModule?.config;
+  const managerCtor = mcpBoardModule?.manager?.McpManager;
+  if (typeof config?.loadMcpConfig !== "function" || typeof managerCtor !== "function") {
+    return [];
+  }
+  try {
+    const { probeBoardState } = await import("./board-probe.js");
+    return await probeBoardState({
+      loadMcpConfig: config.loadMcpConfig,
+      McpManager: managerCtor,
+      harnessHome,
+      workdir: cwd,
+    });
+  } catch {
+    // An unreachable backend is a normal finding, not a host failure; the
+    // per-tool errors travel in the results when they do.
+    return [];
+  }
+}
+
+/** Project identity from the cwd, at the shape the pane's `project` expects. */
+function state_boardProject() {  const dir = cwd ?? "";
+  if (dir === "") return { kind: "unknown", evidence: [] };
+  // The same signals the route facade uses; cheap extension checks only —
+  // this is a display hint, not a routing decision.
+  if (existsSync(path.join(dir, ".uvprojx"))) return { kind: "keil", root: dir, evidence: [] };
+  for (const marker of [[".project", ".cproject"], ["CMakeLists.txt", "project.cmake"], ["platformio.ini"], ["sdkconfig"], ["Makefile"]]) {
+    if (marker.every((name) => existsSync(path.join(dir, name)))) {
+      const kind = marker[0] === ".project" ? "cubeide" : marker[0] === "CMakeLists.txt" ? "espidf" : marker[0] === "platformio.ini" ? "platformio" : marker[0] === "sdkconfig" ? "zephyr" : "make";
+      return { kind, root: dir, evidence: [] };
+    }
+  }
+  return { kind: "unknown", evidence: [] };
+}
 
 function fatal(message) {
   send({ type: "fatal", message });
@@ -210,6 +260,18 @@ send({ type: "hello" });
  * only visible on the namespace.
  */
 const probeModule = await import(dist("model/probe.js")).catch(() => undefined);
+
+/**
+ * The kernel's MCP stack, for the board pane's device probe.
+ *
+ * Same lazy/namespace rule as `probeModule`: a `dist/` without these modules
+ * (or without `loadMcpConfig` on config.js) must not stop the host from
+ * booting — the board pane reports the gap instead.
+ */
+const mcpBoardModule = await Promise.all([
+  import(dist("mcp/config.js")),
+  import(dist("mcp/manager.js")),
+]).then(([config, manager]) => ({ config, manager })).catch(() => undefined);
 
 /**
  * The kernel's knowledge-base locator, loaded lazily by `getKb`.
@@ -3942,14 +4004,38 @@ const handlers = {
     send({ type: "serial_cleared" });
   },
 
-  serialWrite({ data }) {
+  serialWrite({ data, hex }) {
     const port = serialBridge.openPorts[0];
     if (port === undefined || typeof data !== "string" || data === "") {
       send({ type: "notice", level: "warn", text: "serialWrite：无已打开的串口或数据为空" });
       return;
     }
-    if (!serialBridge.write(port, data)) {
+    if (!serialBridge.write(port, data, { hex: hex === true })) {
       send({ type: "notice", level: "warn", text: `serialWrite：${port} 写入失败` });
+    }
+  },
+
+  /** Manual modem-line control (DTR/RTS): the board-reset gesture. */
+  serialLine({ line, value }) {
+    const port = serialBridge.openPorts[0];
+    if (port === undefined) {
+      send({ type: "notice", level: "warn", text: "serialLine：无已打开的串口" });
+      return;
+    }
+    if (!serialBridge.setLine(port, line, value === true)) {
+      send({ type: "notice", level: "warn", text: `serialLine：${port} ${line} 设置失败` });
+    }
+  },
+
+  /** Runtime baud change without dropping the line. */
+  serialBaud({ baud }) {
+    const port = serialBridge.openPorts[0];
+    if (port === undefined) {
+      send({ type: "notice", level: "warn", text: "serialBaud：无已打开的串口" });
+      return;
+    }
+    if (!serialBridge.setBaud(port, baud)) {
+      send({ type: "notice", level: "warn", text: "serialBaud：波特率无效（300–4000000）" });
     }
   },
 
@@ -3958,6 +4044,63 @@ const handlers = {
     // The pane's port dropdown also feeds from board_state.ports; serial
     // enumeration is the authoritative one for the monitor, so it ships here.
     send({ type: "serial_ports", ports });
+  },
+
+  /**
+   * Board pane refresh. The kernel has no machine scanner, so what the host
+   * can answer truthfully is the serial side (ports from WMI, the mirror
+   * state the panel itself owns) plus the session selection; the target/
+   * flash answers only the agent's probe tools can give. The renderer knows
+   * this shape and prompts the agent for the tool half when the user asks
+   * for a refresh — this handler never pretends to know a part number.
+   */
+  async getBoardState() {
+    const ports = await listSerialPorts();
+    // The device half comes from the MCP backends directly: a short-lived
+    // manager connects to the configured embedded servers and calls their
+    // read-only status tools. No model, no agent turn, no approval — read-only
+    // by whitelist in board-probe.js. Slow path (connect ~seconds), so it
+    // races the serial half and the answer lands in a second event.
+    const devicePromise = probeBoardDevices();
+    devicePromise.then((devices) => {
+      if (devices.length > 0) send({ type: "board_devices", devices });
+    });
+    const mirrorPath = serialRingPath();
+    let serial = { open: false };
+    let serialTail = [];
+    try {
+      if (existsSync(mirrorPath)) {
+        const mirror = JSON.parse(readFileSync(mirrorPath, "utf8"));
+        const entry = mirror.ports?.[0];
+        if (entry) {
+          serial = { open: true, port: entry.port, baud: entry.baud, lines: entry.lines?.length ?? 0, dropped: entry.dropped ?? 0 };
+          // A short tail for the board pane's preview: five lines is enough to
+          // see the device is alive without duplicating the serial pane.
+          serialTail = (entry.lines ?? []).slice(-5).map((line) => ({ text: String(line.text ?? "").slice(0, 120), at: line.at, level: line.level }));
+        }
+      }
+    } catch {
+      // A torn mirror reads as closed; the serial pane is the authority anyway.
+    }
+    send({
+      type: "board_state",
+      state: {
+        scannedAt: Date.now(),
+        project: state_boardProject(),
+        ports,
+        serial,
+        serialTail,
+        selection: boardSelection,
+        effective: { port: boardSelection?.port, baud: boardSelection?.baud },
+      },
+    });
+  },
+
+  setBoardSelection({ selection }) {
+    boardSelection = typeof selection === "object" && selection !== null ? { ...selection } : {};
+    // Re-answer with the merged state so the pane never shows a value the
+    // tools would not use.
+    void handlers.getBoardState();
   },
 };
 

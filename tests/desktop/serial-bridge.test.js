@@ -1,257 +1,316 @@
 /**
- * Tests for desktop/host/serial-bridge.js — the pump protocol, the ring and
- * the lifecycle, all against an injected fake pump. The real PowerShell path
- * is exercised separately against real hardware; here nothing opens a port.
+ * Tests for desktop/host/serial-bridge.js — the in-process serialport
+ * implementation. A lightweight FakePort (same surface as `serialport`'s
+ * SerialPort: EventEmitter + open/write/update/setDTR/setRTS/drain/close)
+ * is injected through the bridge's constructor, so no real COM port is
+ * touched and nothing spawns.
  */
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { EventEmitter } from "node:events";
 import { createRequire } from "node:module";
 
 const require_ = createRequire(import.meta.url);
+const path = require_("node:path");
+const os = require_("node:os");
 // The bridge lives in desktop/host, outside vitest's tsconfig root; load the
 // JS file directly. Its exports are plain ESM.
-const { SerialBridge, listSerialPorts, RING_MAX_LINES } = await import(
+const { SerialBridge, listSerialPorts, RING_MAX_LINES, serialRingPath } = await import(
   "../../../../desktop/host/serial-bridge.js"
 );
 
+/** Existing paths the fake driver pretends to have. */
+const fakePaths = new Set();
+/** Bytes written through any fake port, in order. */
+const fakeWrites = [];
+/** DTR/RTS calls captured as {method, value}. */
+const fakeLines = [];
+/** One constructed port per path, so tests can drive device-side events. */
+const fakePorts = new Map();
+
 /**
- * A fake pump that speaks the pump protocol: `spawn` is stubbed so `open`
- * gets a process we control, and the tests drive it through `pump.hostSend`.
+ * The double: constructor signature `{path, baudRate, autoOpen}` and the
+ * methods the bridge calls. `open(callback)` succeeds for paths in
+ * `fakePaths`, errors otherwise — asynchronously, like the real driver.
  */
-class FakePump {
-  constructor() {
-    this.stdout = { on: vi.fn(), removeAllListeners: vi.fn() };
-    this.stderr = { on: vi.fn() };
-    this.stdin = { write: vi.fn(), end: vi.fn() };
-    this.listeners = {};
-    this.killed = false;
+class FakePort extends EventEmitter {
+  constructor(options) {
+    super();
+    this.path = options.path;
+    this.baudRate = options.baudRate;
+    this.isOpen = false;
+    fakePorts.set(options.path, this);
   }
-  on(event, cb) {
-    (this.listeners[event] ??= []).push(cb);
-  }
-  once(event, cb) {
-    this.on(event, (...args) => {
-      cb(...args);
-      this.listeners[event] = this.listeners[event].filter((entry) => entry !== undefined);
+  open(callback) {
+    setImmediate(() => {
+      if (fakePaths.has(this.path)) {
+        this.isOpen = true;
+        callback?.(null);
+        this.emit("open");
+      } else {
+        callback?.(new Error("Port does not exist"));
+        this.emit("error", new Error("Port does not exist"));
+      }
     });
   }
-  emit(event, ...args) {
-    for (const cb of this.listeners[event] ?? []) cb(...args);
+  write(chunk, _encoding, callback) {
+    fakeWrites.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    if (typeof callback === "function") setImmediate(() => callback(null));
+    return true;
   }
-  /** The host -> pump direction: what the bridge wrote to our stdin. */
-  wroteOps() {
-    return this.stdin.write.mock.calls.map(([line]) => JSON.parse(line));
+  update(options, callback) {
+    this.baudRate = options.baudRate;
+    if (typeof callback === "function") setImmediate(() => callback(null));
+    return true;
   }
-  /** pump -> host direction. */
-  hostSend(obj) {
-    for (const call of this.stdout.on.mock.calls) {
-      if (call[0] !== "data") continue;
-      call[1](Buffer.from(`${JSON.stringify(obj)}\n`, "utf8"));
+  setDTR(value, callback) {
+    fakeLines.push({ method: "setDTR", value: Boolean(value) });
+    if (typeof callback === "function") setImmediate(() => callback(null));
+    return true;
+  }
+  setRTS(value, callback) {
+    fakeLines.push({ method: "setRTS", value: Boolean(value) });
+    if (typeof callback === "function") setImmediate(() => callback(null));
+    return true;
+  }
+  drain(callback) {
+    if (typeof callback === "function") setImmediate(() => callback(null));
+    return true;
+  }
+  close(callback) {
+    if (this.isOpen) {
+      this.isOpen = false;
+      setImmediate(() => {
+        this.emit("close");
+        callback?.(null);
+      });
+    } else if (typeof callback === "function") {
+      setImmediate(() => callback(null));
     }
-  }
-  kill() {
-    this.killed = true;
+    return true;
   }
 }
 
-/** Install the spawn stub and return the handle to the next pump. */
-function stubSpawn(nextPump) {
-  const childProcess = require_("node:child_process");
-  return vi.spyOn(childProcess, "spawn").mockImplementation(() => nextPump);
+function makeBridge() {
+  const events = [];
+  const bridge = new SerialBridge((m) => events.push(m), FakePort);
+  return { bridge, events };
 }
 
-describe("SerialBridge", () => {
-  beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-  });
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.restoreAllMocks();
-  });
+/** Send raw bytes out of the "device" under test. */
+function deviceSend(path, text) {
+  fakePorts.get(path).emit("data", Buffer.from(text, "utf8"));
+}
 
-  it("open settles on ready and answers a snapshot", async () => {
-    const pump = new FakePump();
-    stubSpawn(pump);
-    const bridge = new SerialBridge(() => {});
-    const pending = bridge.open("COM7", 9600);
-    // The config line goes out before ready; `parent_pid` is the orphan
-    // guard the pump polls (host death must release the port).
-    await vi.waitFor(() => {
-      expect(pump.wroteOps()[0]).toMatchObject({ port: "COM7", baud: 9600, parent_pid: expect.any(Number) });
-    });
-    pump.hostSend({ ev: "ready" });
-    const result = await pending;
+beforeEach(() => {
+  fakePaths.clear();
+  fakeWrites.length = 0;
+  fakeLines.length = 0;
+  fakePorts.clear();
+  fakePaths.add("/dev/TEST0");
+  fakePaths.add("/dev/TEST1");
+});
+
+afterEach(() => {
+  for (const port of fakePorts.values()) {
+    port.removeAllListeners();
+    if (port.isOpen) port.close();
+  }
+  fakePorts.clear();
+});
+
+describe("SerialBridge (FakePort)", () => {
+  it("opens a port and reports the snapshot", async () => {
+    const { bridge } = makeBridge();
+    const result = await bridge.open("/dev/TEST0", 115200);
     expect(result.ok).toBe(true);
-    expect(result.snapshot).toEqual({ open: true, port: "COM7", baud: 9600, lines: [], dropped: 0 });
-    expect(bridge.openPorts).toEqual(["COM7"]);
+    expect(result.snapshot).toMatchObject({ open: true, port: "/dev/TEST0", baud: 115200 });
+    expect(bridge.openPorts).toEqual(["/dev/TEST0"]);
+    await bridge.closeAll();
   });
 
-  it("open fails when the pump reports an error (port busy case)", async () => {
-    const pump = new FakePump();
-    stubSpawn(pump);
-    const bridge = new SerialBridge(() => {});
-    const pending = bridge.open("COM7", 9600);
-    pump.hostSend({ ev: "error", message: "open failed: access denied" });
-    const result = await pending;
+  it("fails honestly when the port does not exist", async () => {
+    const { bridge } = makeBridge();
+    const result = await bridge.open("/dev/NOPE", 115200);
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("access denied");
-    expect(bridge.openPorts).toEqual([]);
+    expect(String(result.error)).toContain("打开串口失败");
   });
 
-  it("open times out when the pump never reports ready", async () => {
-    const pump = new FakePump();
-    stubSpawn(pump);
-    const bridge = new SerialBridge(() => {});
-    const pending = bridge.open("COM7", 9600);
-    // Real timeout is 8s; elapse the fake clock instead of waiting it out.
-    await vi.advanceTimersByTimeAsync(8100);
-    const result = await pending;
+  it("rejects an invalid baud rate", async () => {
+    const { bridge } = makeBridge();
+    const result = await bridge.open("/dev/TEST0", 0);
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("超时");
-    expect(pump.killed).toBe(true);
-  }, 15_000);
-
-  it("lines land in the ring, the ring caps, and drops are counted", async () => {
-    const pump = new FakePump();
-    stubSpawn(pump);
-    const events = [];
-    const bridge = new SerialBridge((m) => events.push(m));
-    const pending = bridge.open("COM1", 115200);
-    pump.hostSend({ ev: "ready" });
-    await pending;
-    for (let i = 0; i < RING_MAX_LINES + 10; i++) {
-      pump.hostSend({ ev: "line", text: `t${i}`, at: 1000 + i });
-    }
-    const tail = bridge.ringTail("COM1", RING_MAX_LINES);
-    // `total` counts what arrived since open; the ring holds the tail.
-    expect(tail.total).toBe(RING_MAX_LINES);
-    expect(tail.lines.length).toBe(RING_MAX_LINES);
-    expect(tail.lines[0].text).toBe("t10");
-    expect(tail.dropped).toBe(10);
-    // Lines flush to the renderer as they come.
-    // Lines flush to the renderer as they come; the debounce empties the
-    // last partial batch, so advance past it before asserting.
-    await vi.advanceTimersByTimeAsync(200);
-    const lineEvents = events.filter((e) => e.type === "serial_lines");
-    expect(lineEvents.length).toBeGreaterThan(0);
-    const allFlushed = lineEvents.flatMap((e) => e.lines.map((l) => l.text));
-    expect(allFlushed.at(-1)).toBe(`t${RING_MAX_LINES + 9}`);
-    expect(lineEvents.at(-1).lines.length).toBeLessThanOrEqual(200);
+    expect(String(result.error)).toContain("波特率无效");
   });
 
-  it("level classification drives the renderer's colours", async () => {
-    const pump = new FakePump();
-    stubSpawn(pump);
-    const bridge = new SerialBridge(() => {});
-    const pending = bridge.open("COM1", 115200);
-    pump.hostSend({ ev: "ready" });
-    await pending;
-    pump.hostSend({ ev: "line", text: "hardfault in handler", at: 1 });
-    pump.hostSend({ ev: "line", text: "low battery warning", at: 2 });
-    pump.hostSend({ ev: "line", text: "all good", at: 3 });
-    const tail = bridge.ringTail("COM1", 10);
-    expect(tail.lines.map((l) => l.level)).toEqual(["error", "warn", undefined]);
-  });
-
-  it("ringTail honours since as a ring cursor", async () => {
-    const pump = new FakePump();
-    stubSpawn(pump);
-    const bridge = new SerialBridge(() => {});
-    const pending = bridge.open("COM1", 115200);
-    pump.hostSend({ ev: "ready" });
-    await pending;
-    for (let i = 0; i < 5; i++) pump.hostSend({ ev: "line", text: `t${i}`, at: i });
-    expect(bridge.ringTail("COM1", 100, 3).lines.map((l) => l.text)).toEqual(["t3", "t4"]);
-    // since past the end reads nothing, not everything.
-    expect(bridge.ringTail("COM1", 100, 99).lines).toEqual([]);
-    // Unknown port is null, not an empty tail that looks like a quiet port.
-    expect(bridge.ringTail("COMX", 10)).toBeNull();
-  });
-
-  it("write goes to the pump and is refused when the port is not ours", async () => {
-    const pump = new FakePump();
-    stubSpawn(pump);
-    const bridge = new SerialBridge(() => {});
-    const pending = bridge.open("COM1", 115200);
-    pump.hostSend({ ev: "ready" });
-    await pending;
-    expect(bridge.write("COM1", "hello")).toBe(true);
-    expect(pump.wroteOps().at(-1)).toEqual({ op: "write", data: "hello" });
-    expect(bridge.write("COM9", "x")).toBe(false);
-  });
-
-  it("close removes the session and the reopen path is free", async () => {
-    const pump = new FakePump();
-    stubSpawn(pump);
-    const bridge = new SerialBridge(() => {});
-    const pending = bridge.open("COM1", 115200);
-    pump.hostSend({ ev: "ready" });
-    await pending;
-    pump.hostSend({ ev: "line", text: "tail", at: 1 });
-    const closing = bridge.close("COM1");
-    const ops = pump.wroteOps();
-    expect(ops.at(-1)).toEqual({ op: "close" });
-    expect(pump.stdin.end).toHaveBeenCalled();
-    pump.emit("exit", 0);
-    expect(await closing).toBe(true);
-    expect(bridge.openPorts).toEqual([]);
-    // The pending tail was flushed so the renderer keeps the last lines.
-    expect(bridge.ringTail("COM1", 10)).toBeNull();
-  });
-
-  it("an unexpected pump exit after ready sends serial_state with the error", async () => {
-    const pump = new FakePump();
-    stubSpawn(pump);
-    const events = [];
-    const bridge = new SerialBridge((m) => events.push(m));
-    const pending = bridge.open("COM1", 115200);
-    pump.hostSend({ ev: "ready" });
-    await pending;
-    pump.emit("exit", 1);
-    await vi.waitFor(() => {
-      const state = events.filter((e) => e.type === "serial_state").at(-1);
-      expect(state).toMatchObject({ open: false, port: "COM1", error: expect.stringContaining("code=1") });
-    });
-    expect(bridge.openPorts).toEqual([]);
-  });
-
-  it("a duplicate open on the same port is refused with a clear error", async () => {
-    const pump = new FakePump();
-    stubSpawn(pump);
-    const bridge = new SerialBridge(() => {});
-    const pending = bridge.open("COM1", 115200);
-    pump.hostSend({ ev: "ready" });
-    await pending;
-    const second = await bridge.open("COM1", 115200);
+  it("refuses a second open of the same port", async () => {
+    const { bridge } = makeBridge();
+    const first = await bridge.open("/dev/TEST0", 115200);
+    expect(first.ok).toBe(true);
+    const second = await bridge.open("/dev/TEST0", 9600);
     expect(second.ok).toBe(false);
-    expect(second.error).toContain("COM1");
+    expect(String(second.error)).toContain("端口已被本宿主打开");
+    await bridge.closeAll();
+  });
+
+  it("emits serial_lines with debounced batches and UTF-8 intact", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    deviceSend("/dev/TEST0", "hello world\r\n中文测试\r\n");
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_lines")) throw new Error("no lines yet");
+    });
+    const lineEvent = events.find((e) => e.type === "serial_lines");
+    expect(lineEvent.port).toBe("/dev/TEST0");
+    expect(lineEvent.lines.map((l) => l.text)).toEqual(["hello world", "中文测试"]);
+    expect(lineEvent.lines.every((l) => l.level === "info")).toBe(true);
+    await bridge.closeAll();
+  });
+
+  it("classifies error/warn levels for the log gutter", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    deviceSend("/dev/TEST0", "[E][servo] motor error\r\n[W] disk almost full\r\nplain\r\n");
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_lines")) throw new Error("none");
+    });
+    const lineEvent = events.find((e) => e.type === "serial_lines");
+    expect(lineEvent.lines.map((l) => l.level)).toEqual(["error", "warn", "info"]);
+    await bridge.closeAll();
+  });
+
+  it("counts RX/TX bytes on the wire and reports serial_stats", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    deviceSend("/dev/TEST0", "12345\r\n");
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_stats" && e.rx === 7)) throw new Error("no rx stats");
+    });
+    expect(bridge.write("/dev/TEST0", "abc")).toBe(true);
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_stats" && e.tx === 3)) throw new Error("no tx stats");
+    });
+    await bridge.closeAll();
+  });
+
+  it("writes hex payloads as raw bytes and refuses malformed hex", async () => {
+    const { bridge } = makeBridge();
+    // Closed port: honest refusal.
+    expect(bridge.write("/dev/TEST0", "DEADBEEF", { hex: true })).toBe(false);
+    await bridge.open("/dev/TEST0", 115200);
+    expect(bridge.write("/dev/TEST0", "DE AD BE EF", { hex: true })).toBe(true);
+    expect(bridge.write("/dev/TEST0", "XYZ", { hex: true })).toBe(false);
+    expect(bridge.write("/dev/TEST0", "ABC", { hex: true })).toBe(false); // odd length
+    expect(fakeWrites.at(-1)).toEqual(Buffer.from([0xde, 0xad, 0xbe, 0xef]));
+    await bridge.closeAll();
+  });
+
+  it("holds an unterminated partial until more bytes arrive", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    deviceSend("/dev/TEST0", "partial-no-newline");
+    await new Promise((r) => setTimeout(r, 250));
+    expect(events.some((e) => e.type === "serial_lines")).toBe(false);
+    deviceSend("/dev/TEST0", "-tail\r\n");
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_lines")) throw new Error("none");
+    });
+    const lineEvent = events.find((e) => e.type === "serial_lines");
+    expect(lineEvent.lines[0].text).toBe("partial-no-newline-tail");
+    await bridge.closeAll();
+  });
+
+  it("reconstructs multi-byte UTF-8 split across two chunks", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    const full = Buffer.from("测试中文\r\n", "utf8");
+    fakePorts.get("/dev/TEST0").emit("data", full.subarray(0, 4));
+    fakePorts.get("/dev/TEST0").emit("data", full.subarray(4));
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_lines")) throw new Error("none");
+    });
+    const lineEvent = events.find((e) => e.type === "serial_lines");
+    expect(lineEvent.lines[0].text).toBe("测试中文");
+    await bridge.closeAll();
+  });
+
+  it("caps the ring at RING_MAX_LINES and counts dropped", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    let burst = "";
+    for (let i = 0; i < RING_MAX_LINES + 50; i += 1) burst += `L${i}\r\n`;
+    deviceSend("/dev/TEST0", burst);
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_lines" && e.lines.length > 100)) throw new Error("not flushed");
+    });
+    const tail = bridge.ringTail("/dev/TEST0", 10);
+    expect(tail.total).toBe(RING_MAX_LINES);
+    expect(tail.dropped).toBe(50);
+    expect(tail.lines[tail.lines.length - 1].text).toBe(`L${RING_MAX_LINES + 49}`);
+    await bridge.closeAll();
+  });
+
+  it("toggles DTR/RTS and records the calls", async () => {
+    const { bridge } = makeBridge();
+    expect(bridge.setLine("/dev/TEST0", "dtr", true)).toBe(false); // not open
+    await bridge.open("/dev/TEST0", 115200);
+    expect(bridge.setLine("/dev/TEST0", "dtr", true)).toBe(true);
+    expect(bridge.setLine("/dev/TEST0", "rts", false)).toBe(true);
+    expect(bridge.setLine("/dev/TEST0", "bogus", true)).toBe(false);
+    expect(fakeLines).toEqual([
+      { method: "setDTR", value: true },
+      { method: "setRTS", value: false },
+    ]);
+    await bridge.closeAll();
+  });
+
+  it("changes baud without dropping the line", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    expect(bridge.setBaud("/dev/TEST0", 9600)).toBe(true);
+    expect(bridge.setBaud("/dev/TEST0", 1)).toBe(false);
+    expect(events.some((e) => e.type === "serial_state" && e.open === true && e.baud === 9600)).toBe(true);
+    await bridge.closeAll();
+  });
+
+  it("closes and removes the session; ringTail answers null after", async () => {
+    const { bridge } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    expect(bridge.openPorts).toEqual(["/dev/TEST0"]);
+    await bridge.close("/dev/TEST0");
+    expect(bridge.openPorts).toEqual([]);
+    expect(bridge.ringTail("/dev/TEST0", 5)).toBeNull();
+  });
+
+  it("reports a runtime port error as serial_state with the message", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    fakePorts.get("/dev/TEST0").emit("error", new Error("driver exploded"));
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_state" && e.open === false && e.error)) throw new Error("none");
+    });
+    const state = events.find((e) => e.type === "serial_state" && e.open === false);
+    expect(state.error).toContain("driver exploded");
+    expect(bridge.openPorts).toEqual([]);
   });
 });
 
 describe("listSerialPorts", () => {
-  it("parses single-object and array WMI output, and tolerates junk", async () => {
-    const childProcess = require_("node:child_process");
-    const one = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, on: vi.fn(), kill: vi.fn() };
-    vi.spyOn(childProcess, "spawn").mockImplementation(() => one);
-    const pending = listSerialPorts();
-    const dataCall = one.stdout.on.mock.calls.find((call) => call[0] === "data");
-    dataCall[1](Buffer.from('{"path":"COM7","description":"CH340"}'));
-    one.on.mock.calls.find((call) => call[0] === "exit")[1]();
-    expect(await pending).toEqual([{ path: "COM7", description: "CH340" }]);
+  it("answers with an array or an honest error object", async () => {
+    const result = await listSerialPorts();
+    if (result.error !== undefined) {
+      expect(typeof result.error).toBe("string");
+    } else {
+      expect(Array.isArray(result)).toBe(true);
+      for (const entry of result) {
+        expect(typeof entry.path).toBe("string");
+      }
+    }
+  });
+});
 
-    const many = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, on: vi.fn(), kill: vi.fn() };
-    vi.spyOn(childProcess, "spawn").mockImplementation(() => many);
-    const pending2 = listSerialPorts();
-    const dataCall2 = many.stdout.on.mock.calls.find((call) => call[0] === "data");
-    dataCall2[1](Buffer.from('[{"path":"COM3","description":"a"},{"path":"bogus","description":"x"}]'));
-    many.on.mock.calls.find((call) => call[0] === "exit")[1]();
-    expect(await pending2).toEqual([{ path: "COM3", description: "a" }]);
-
-    const bad = { stdout: { on: vi.fn() }, stderr: { on: vi.fn() }, on: vi.fn(), kill: vi.fn() };
-    vi.spyOn(childProcess, "spawn").mockImplementation(() => bad);
-    const pending3 = listSerialPorts();
-    const dataCall3 = bad.stdout.on.mock.calls.find((call) => call[0] === "data");
-    dataCall3[1](Buffer.from("not json"));
-    bad.on.mock.calls.find((call) => call[0] === "exit")[1]();
-    expect(await pending3).toEqual([]);
+describe("serialRingPath", () => {
+  it("honors HARNESS_HOME and defaults to ~/.harness/serial/ring.json", () => {
+    expect(serialRingPath("/tmp/h1")).toBe(path.join("/tmp/h1", "serial", "ring.json"));
+    expect(serialRingPath()).toBe(path.join(os.homedir(), ".harness", "serial", "ring.json"));
   });
 });

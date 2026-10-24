@@ -10,5 +10,8 @@
   },
   "devDependencies": {
     "electron": "^44.9.0"
+  },
+  "dependencies": {
+    "serialport": "^13.0.0"
   }
 }
