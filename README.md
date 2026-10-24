@@ -46,6 +46,7 @@ src/
 ├── loop/         事件类型、熔断、query 主循环
 ├── mcp/          MCP stdio 客户端：配置合并、连接生命周期、工具适配
 ├── model/        模型协议、OpenAI 兼容适配器、重试、token 估算
+├── packs/        工具链包管理器：九阶段安装事务、目录、注册表（见 docs/toolchain-packs.md）
 ├── session/      append-only JSONL 会话
 ├── server/       宿主调用的库层：会话运行器、审批桥、会话管理、文件与知识库扫描
 ├── skills/       技能（提示词模板）的存储与解析：两作用域读取、frontmatter、原子写
@@ -55,8 +56,9 @@ desktop/
 ├── main.js       Electron 主进程（窗口、IPC、宿主生命周期）
 ├── preload.cjs   contextBridge 桥
 ├── host/host.js  桌面宿主：NDJSON 分发器，复用 dist/ 下的内核模块
+├── host/toolchains.js  Tools 设置页的本机工具链探测（pack 目录 → PATH → Keil 注册表）
 └── renderer/     纯 ES 模块前端（app.js / protocol.js / 样式与 i18n）
-scripts/          端到端脚本（probe、diagnosis、kb 回归与审核）
+scripts/          端到端脚本（probe、diagnosis、kb 回归与审核、packs）
 tests/            Vitest 测试（tests/desktop 为桌面宿主与协议层）
 docs/             设计、计划与已知问题
 ```
@@ -216,6 +218,16 @@ npm run probe:e2e
 成功时输出 `{"backend":"renode","attach":true,...,"writeVerified":true,...}`；`dist-mcp/` 缺失时退出码 2 并提示 `npm run build:mcp`，其余失败退出码 1。写内存、复位与串口写入是破坏性操作，在 `diagnose` 预设下为 `ask`；headless（无审批器）时降级为拒绝且不执行工具。`serial_open` 不是只读工具，未显式授权时在 `diagnose` 下被拒绝；可复制 `mcp-servers/probe/permissions.example.json` 到 `.harness/permissions.json` 配置 SRAM 写窗口与串口白名单。写操作返回 `declaration` 声明；`mem_read` 全 0 只返回警告，不推断“无故障”。`serial_read` 响应 MCP 取消信号：abort 后返回 `aborted`，不再继续等待或消费缓冲。
 
 OpenOCD 后端本轮只做“连接已运行的 OpenOCD telnet”，`attach` 不 spawn 进程；使用前请自行启动 `openocd -f <config>`（telnet 默认 `127.0.0.1:4444`）。`OPENOCD_PATH` 仅用于可用性检测；`openocdConfig` 参数已移除。真机验证登记 D-157。
+
+## 工具链包管理器
+
+`src/packs/`（平台层，多 MCP server 共用的基础设施）实现按需下载的编译工具链包：Arm GNU / OpenOCD / CMake / Ninja 等 9 个 Windows x64 条目，URL 与 SHA-256 全部钉死。安装是九阶段事务（preflight → lock → download → verify → list → extract → inspect → validate → commit），半装状态不可见、断电可恢复、根目录级 `.lock` 防 CLI 与桌面双入口竞争。桌面设置页 Tools 已接通装/卸/进度/磁盘统计；keil MCP server 经注入读取已装 pack 的 bin 目录（无系统 PATH 也能找到工具链）。结构、不变量与权限语义见 `docs/toolchain-packs.md`。
+
+```bash
+npm run packs:e2e   # 装（默认 Ninja，~300 KB 真实下载）→ 验证可执行 → 卸 → 无残留
+```
+
+根目录由 `HARNESS_TOOLCHAIN_HOME` 覆盖（默认 `%LOCALAPPDATA%\Embedded-Ai-Master\toolchains`）；`dist/` 缺失时退出码 2 并提示 `npm run build`。默认测试不触网，该脚本是验收动作。
 
 ## 领域 MCP：知识库（BR-3）
 
