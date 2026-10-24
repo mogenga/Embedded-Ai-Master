@@ -188,6 +188,40 @@ function firstMatchLine(output: string, pattern: RegExp): string {
 }
 
 /**
+ * Turn a flasher's failure line into something the caller can act on.
+ *
+ * The raw text is accurate and useless: "Flash Download failed - Target DLL
+ * has been cancelled" does not say that a second uVision holds the probe, and
+ * an agent reading it spent ten shell calls listing processes to guess. The
+ * mapping below names the cause and the next step; the original line is kept
+ * alongside it so nothing is hidden.
+ */
+export function diagnoseFlashFailure(kind: FlasherKind, output: string): string | undefined {
+  const has = (re: RegExp) => re.test(output);
+  if (kind === "keil") {
+    if (has(/Target DLL has been cancelled/i) || has(/Cannot access target/i)) {
+      return "the probe (ST-Link/ULINK) is held by another program — another uVision debug session, an OpenOCD/gdbserver, or a vendor flash tool. Close it (or run this tool's `close`, which releases the probe) and retry; the same message appears when the board is powered off or USB is disconnected.";
+    }
+    if (has(/No ULINK|No ST-Link|No Debug Unit/i)) {
+      return "no debugger is attached: check the USB cable and that Windows enumerates the probe (ST-Link shows as VID 0483), then retry.";
+    }
+    if (has(/Flash Download failed/i)) {
+      return "the download step failed: confirm the device in the project's Flash Download settings matches the chip, and that the flash algorithm (.FLM) is installed.";
+    }
+  }
+  if (kind === "openocd" && has(/LIBUSB_ERROR_ACCESS|Permission denied/i)) {
+    return "another process holds the USB probe — close other OpenOCD/gdbserver/uVision instances and retry.";
+  }
+  if (kind === "openocd" && has(/no device found|unable to find a matching CMSIS-DAP|Error: open failed/i)) {
+    return "the probe did not answer: check the cable and that the probe is enumerated; a stale OpenOCD may still own it.";
+  }
+  if ((kind === "st-flash" || kind === "pyocd" || kind === "probe-rs") && has(/no .*probe|not found|unable to find/i)) {
+    return "no probe found: check the USB connection and that no other tool is using the debugger.";
+  }
+  return undefined;
+}
+
+/**
  * The JLinkExe Commander script for this request, written beside the firmware.
  *
  * Returning the path (rather than the script text) is what makes the argv
@@ -415,14 +449,18 @@ ${result.err}` : ""}`;
   }
   const output = clip(raw);
   const verdict = classifyOutput(request.kind, output, result.code);
+  const hint = verdict.ok ? undefined : diagnoseFlashFailure(request.kind, output);
 
   return {
     ok: verdict.ok,
     command,
     detail: verdict.ok
       ? `programmed ${request.firmware}`
-      : `flash failed: ${verdict.reason ?? "unknown reason"}`,
+      // The hint is what makes the failure actionable; the raw reason stays
+      // first so a caller that parses it keeps working.
+      : `flash failed: ${verdict.reason ?? "unknown reason"}${hint ? ` — ${hint}` : ""}`,
     ...(verdict.reason ? { reason: verdict.reason } : {}),
+    ...(hint ? { hint } : {}),
     ...(verdict.verified !== undefined ? { verified: verdict.verified } : {}),
     durationMs: Date.now() - started,
     output,

@@ -295,6 +295,7 @@ export async function captureThenWrite(
   baud: number,
   data: string,
   durationMs: number,
+  hex = false,
 ): Promise<{ lines: Array<{ text: string; at: number }> }> {
   // Reuse the capture pump; the write races nothing because the pump only
   // reads. For the write itself we need a pump that takes data — the capture
@@ -330,7 +331,7 @@ export async function captureThenWrite(
       }
     });
     child.on("exit", () => resolve({ lines }));
-    child.stdin.write(`${JSON.stringify({ port, baud, data, duration_ms: durationMs })}\n`);
+    child.stdin.write(`${JSON.stringify({ port, baud, data, hex, duration_ms: durationMs })}\n`);
     // Hard ceiling so a wedged pump cannot hold the tool call.
     setTimeout(() => {
       try { child.kill(); } catch { /* exiting anyway */ }
@@ -381,7 +382,21 @@ function Drain-Port {
     }
   }
 }
-try { $script:serial.Write([string]$config.data) } catch {
+try {
+  # hex mode sends raw bytes: the caller writes "0D0A" meaning CRLF. Without
+  # it the string goes out verbatim and a CRLF-terminated protocol never sees
+  # a line end no matter how the caller spells the escape.
+  if ($config.hex -eq $true) {
+    $count = [int]($config.data.Length / 2)
+    $bytes = [byte[]]::new($count)
+    for ($i = 0; $i -lt $count; $i++) {
+      $bytes[$i] = [Convert]::ToByte($config.data.Substring($i * 2, 2), 16)
+    }
+    $script:serial.Write($bytes, 0, $count)
+  } else {
+    $script:serial.Write([string]$config.data)
+  }
+} catch {
   Emit @{ev='error';message="write failed: $($_.Exception.Message)"}
   try { $script:serial.Close() } catch { }
   exit 1
