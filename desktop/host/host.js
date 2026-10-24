@@ -2950,6 +2950,43 @@ const handlers = {
   },
 
   /**
+   * The settings page's permissions form.
+   *
+   * It writes the file for the *next* host launch, but the operator changed
+   * the switch expecting the switch to move: leaving the live mode untouched
+   * made "完全访问" a setting that appeared to do nothing while every write
+   * still asked. The running mode is now applied here too — through the same
+   * guard as the composer's menu, so a mid-run change is still refused with
+   * the same notice rather than silently deferred to the next launch.
+   */
+  async savePermissions(payload) {
+    const wanted = payload.permissions;
+    if (typeof wanted !== "object" || wanted === null) {
+      send({ type: "notice", level: "warn", text: "缺少 permissions 对象" });
+      return;
+    }
+    const presets = ["read-only", "workspace-write", "diagnose", "danger-full-access"];
+    const wantedPreset = wanted.preset;
+    const switchesMode = typeof wantedPreset === "string" && presets.includes(wantedPreset) && wantedPreset !== mode;
+    if (switchesMode && ctx.running) {
+      send({ type: "notice", level: "warn", text: "运行中不能切换权限模式；新预设已保存，下一轮生效" });
+    }
+    try {
+      await kernel.writePermissionConfig(harnessHome, wanted);
+    } catch (error) {
+      send({ type: "notice", level: "warn", text: `权限配置未保存：${messageOf(error)}` });
+      return;
+    }
+    if (switchesMode && !ctx.running) {
+      mode = wantedPreset;
+      void runner?.close();
+      runner = createRunner();
+    }
+    configEvent();
+    send(stateEvent());
+  },
+
+  /**
    * Pick the model for the next run.
    *
    * Only references that exist in `providers.json` are accepted: the runner
@@ -3262,28 +3299,6 @@ const handlers = {
       return;
     }
     configEvent();
-  },
-
-  async savePermissions(payload) {
-    const wanted = payload.permissions;
-    if (typeof wanted !== "object" || wanted === null) {
-      send({ type: "notice", level: "warn", text: "缺少 permissions 对象" });
-      return;
-    }
-    try {
-      await kernel.writePermissionConfig(harnessHome, wanted);
-    } catch (error) {
-      send({ type: "notice", level: "warn", text: `权限配置未保存：${messageOf(error)}` });
-      return;
-    }
-    // The preset in the file is not the running preset: this host owns the
-    // live mode so the composer's menu stays authoritative.
-    configEvent();
-    send({
-      type: "notice",
-      level: "dim",
-      text: "权限配置已保存；运行中的模式仍以输入框上方选择为准",
-    });
   },
 
   async saveRunLimits(payload) {
