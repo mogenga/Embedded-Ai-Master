@@ -182,6 +182,15 @@ inspect / validate / commit`；下载阶段附带 `received` / `total` 字节数
   B 侧真实路径补充）。
 - `npm run packs:e2e`：装（默认 Ninja，~300 KB 真实下载）→ 验证可执行 →
   卸载 → 无残留。验收动作用脚本，不是 CI 的一部分（默认测试不触网）。
+- **代理环境**：Node 的内置 `fetch` 默认不读 `HTTP_PROXY`/`HTTPS_PROXY`。
+  出网需走代理的机器（如 clash）上跑 e2e 或真实安装，用 Node 24 的环境
+  变量开关（零代码改动）：
+
+  ```bash
+  NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:7897 npm run packs:e2e
+  ```
+
+  端口以本机代理实际监听为准（clash-verge 混合端口见系统代理设置）。
 - 手工破坏性测试契约（与 A 相同）：下载中途断网 → 无半装可见（txn 清理、
   packs/ 不出现）；`.lock` 留死 pid → 下次安装自愈；手动删 pack 目录 →
   枚举不出现孤儿记录（目录列表即索引）。

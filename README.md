@@ -227,7 +227,7 @@ OpenOCD 后端本轮只做“连接已运行的 OpenOCD telnet”，`attach` 不
 npm run packs:e2e   # 装（默认 Ninja，~300 KB 真实下载）→ 验证可执行 → 卸 → 无残留
 ```
 
-根目录由 `HARNESS_TOOLCHAIN_HOME` 覆盖（默认 `%LOCALAPPDATA%\Embedded-Ai-Master\toolchains`）；`dist/` 缺失时退出码 2 并提示 `npm run build`。默认测试不触网，该脚本是验收动作。
+根目录由 `HARNESS_TOOLCHAIN_HOME` 覆盖（默认 `%LOCALAPPDATA%\Embedded-Ai-Master\toolchains`）；`dist/` 缺失时退出码 2 并提示 `npm run build`。默认测试不触网，该脚本是验收动作。出网需代理的机器上加 `NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:7897`（Node 内置 fetch 默认不读代理变量，端口以本机为准，详见 `docs/toolchain-packs.md`）。
 
 ## 领域 MCP：知识库（BR-3）
 
