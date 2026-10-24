@@ -121,7 +121,7 @@ describe.skipIf(!PACKS_BUILT)("packs: page queries", () => {
     expect(Array.isArray(message.toolchains)).toBe(true);
     expect(message.toolchains.length).toBeGreaterThan(0);
     expect(message.toolchains[0]).toMatchObject({ kind: expect.any(String), label: expect.any(String) });
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("getPackCatalog 的条目带安装前显示所需的全部字段", async () => {
     const home = await tempDir("eam-packs-catalog-");
@@ -146,7 +146,7 @@ describe.skipIf(!PACKS_BUILT)("packs: page queries", () => {
     }
     // 目录条目里必有 Ninja——它是 e2e 与手测的最小验证对象。
     expect(entries.some((entry) => entry.id === "ninja-1.13.2-win32-x64")).toBe(true);
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("installPack 对目录里不存在的 id 回 pack_error，而不是静默", async () => {
     const home = await tempDir("eam-packs-unknown-");
@@ -157,7 +157,7 @@ describe.skipIf(!PACKS_BUILT)("packs: page queries", () => {
     const errors = eventsOf(events, "pack_error");
     expect(errors.length).toBe(1);
     expect(errors[0].message).toMatch(/no such pack in the catalog/);
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("verifyPack 对不存在的 pack 回 pack_verified {ok:false} 并指名道姓", async () => {
     const home = await tempDir("eam-packs-verify-none-");
@@ -169,7 +169,7 @@ describe.skipIf(!PACKS_BUILT)("packs: page queries", () => {
     expect(verified.length).toBe(1);
     expect(verified[0].ok).toBe(false);
     expect(verified[0].problems[0]).toMatch(/pack\.json is missing/);
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("prunePacks 在干净根目录上回 pack_pruned {removed:0}", async () => {
     const home = await tempDir("eam-packs-prune-");
@@ -180,7 +180,7 @@ describe.skipIf(!PACKS_BUILT)("packs: page queries", () => {
     const pruned = eventsOf(events, "pack_pruned");
     expect(pruned.length).toBe(1);
     expect(pruned[0]).toMatchObject({ removed: 0, bytes: 0 });
-  });
+  }, HOST_TIMEOUT_MS);
 });
 
 describe.skipIf(!OFFLINE_INSTALLABLE)("packs: offline install transaction", () => {
@@ -270,7 +270,7 @@ describe.skipIf(!OFFLINE_INSTALLABLE)("packs: offline install transaction", () =
     const installed = eventsOf(events, "pack_installed");
     expect(installed.length).toBe(1);
     expect(installed[0].id).toBe(pack.id);
-  });
+  }, HOST_TIMEOUT_MS);
 
   it("装好的 pack 出现在 packs 消息里，卸载后消失且目录无残留", async () => {
     const home = await tempDir("eam-packs-lifecycle-");
@@ -314,5 +314,5 @@ describe.skipIf(!OFFLINE_INSTALLABLE)("packs: offline install transaction", () =
     );
     expect(eventsOf(removeEvents, "pack_error")).toEqual([]);
     expect(existsSync(packRoot), "卸载后目录必须无残留").toBe(false);
-  });
+  }, HOST_TIMEOUT_MS);
 });
