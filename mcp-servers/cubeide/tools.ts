@@ -617,7 +617,7 @@ const embedSerialTool: ProbeToolSpec = {
           // it to open the port (rather than grabbing the port here) means the
           // panel lights up with the same session instead of failing to open
           // a port the agent already holds, which is what the user saw.
-          const opened = await askHostSerial({ op: "open", port, baud });
+          const opened = await askHostSerial({ op: "open", port, baud, encoding: input.encoding });
           if (opened.ok === true) {
             // The open is detached on the host side; give it the ready timeout.
             const deadline = Date.now() + 8000;
@@ -676,7 +676,7 @@ const embedSerialTool: ProbeToolSpec = {
           // panel already has the port it lands in that session, and if it
           // does not, the host opens it so the operator watches the exchange
           // instead of hunting for the process that took the port.
-          const opened = await askHostSerial({ op: "open", port, baud });
+          const opened = await askHostSerial({ op: "open", port, baud, encoding: input.encoding });
           if (opened.ok === true) {
             const deadline = Date.now() + 8000;
             while (Date.now() < deadline) {

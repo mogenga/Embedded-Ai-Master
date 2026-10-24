@@ -50,18 +50,33 @@ export function serialMailboxDir(home = process.env.HARNESS_HOME?.trim() || path
 }
 /** Max characters buffered for one line. */
 const LINE_MAX_CHARS = 8192;
+/**
+ * Bytes to gather before auto-detecting the RX codec. A full line usually
+ * arrives well inside this; the cap stops a device that never sends a newline
+ * from holding data hostage while waiting for one.
+ */
+const AUTO_PROBE_BYTES = 512;
 /** How long the port gets to report open success before the open is declared failed. */
 const READY_TIMEOUT_MS = 8000;
 
+/** Characters U+FFFD left by a failed decode; used to compare two codecs. */
+function countReplacement(text) {
+  let count = 0;
+  for (const ch of text) if (ch === "�") count += 1;
+  return count;
+}
+
 /**
  * Normalize a caller's encoding name to the two the decoder supports.
- * Unknown names fall back to utf-8 rather than failing the open: the port is
- * still usable, and the pane shows what it decoded.
+ * Unknown names (and `auto`) fall back to detection rather than failing the
+ * open: the port is still usable, and the pane shows what it decoded.
  */
 function normalizeEncoding(value) {
   const name = String(value ?? "").trim().toLowerCase().replace(/[_-]/g, "");
   if (name === "gbk" || name === "gb2312" || name === "gb18030") return "gbk";
-  return "utf-8";
+  if (name === "utf8") return "utf-8";
+  // `auto` (and anything unrecognized) means "decide from the bytes".
+  return "auto";
 }
 
 /**
@@ -307,6 +322,8 @@ export class SerialBridge {
       name: port,
       baud: rate,
       encoding,
+      /** Raw bytes gathered while `encoding` is still `auto`. */
+      probe: null,
       ring: [],
       dropped: 0,
       dead: false,
@@ -320,6 +337,8 @@ export class SerialBridge {
       // sequences between chunks, so a character split across reads
       // reassembles. Node ships built-in decoders for utf-8 and gbk.
     };
+    // Under `auto` the decoder is provisional until `#autoDetect` decides; it
+    // is never used to emit lines before then.
     session.decoder = new TextDecoder(encoding === "gbk" ? "gbk" : "utf-8");
     // False positives only: paths in server / kernel error strings stay ASCII.
     /* eslint-disable-next-line no-irregular-whitespace */
@@ -349,7 +368,7 @@ export class SerialBridge {
       sp.on("open", () => {
         session.ready = true;
         this.#sessions.set(port, session);
-        settle({ ok: true, snapshot: { open: true, port, baud: rate, lines: session.ring, dropped: session.dropped } });
+        settle({ ok: true, snapshot: { open: true, port, baud: rate, encoding: session.encoding, lines: session.ring, dropped: session.dropped } });
       });
 
       sp.on("error", (error) => {
@@ -384,8 +403,20 @@ export class SerialBridge {
       // Binary-safe RX: decode per-chunk with a streaming TextDecoder held in
       // the session, so multi-byte UTF-8 sequences split across reads
       // reassemble (the pump's fatal flaw). Invalid bytes become U+FFFD.
+      //
+      // Which codec is not the operator's problem to solve: Keil projects and
+      // most Chinese MCU tutorials print GBK while everything else prints
+      // UTF-8, and picking wrong turns every Chinese line into boxes. Until
+      // the session has enough evidence the chunk is buffered raw and BOTH
+      // decoders run over it; the one that produces fewer replacement
+      // characters wins and is kept for the rest of the session.
       sp.on("data", (chunk) => {
         session.rxBytes += chunk.length;
+        if (session.encoding === "auto") {
+          this.#autoDetect(session, chunk, port);
+          this.#sendStats(session);
+          return;
+        }
         const text = session.decoder.decode(chunk, { stream: true });
         const { lines, rest } = splitLines(text);
         const buffer = session.partial + (lines.length > 0 ? lines.shift() : "");
@@ -468,6 +499,9 @@ export class SerialBridge {
     session.encoding = next;
     session.decoder = new TextDecoder(next === "gbk" ? "gbk" : "utf-8");
     session.partial = "";
+    // Back to `auto`: throw away the evidence from the previous codec and let
+    // the next arrival decide again. Explicit choices keep their buffer.
+    session.probe = next === "auto" ? null : session.probe;
     this.#send({ type: "serial_state", open: true, port, baud: session.baud, encoding: next });
     return true;
   }
@@ -555,6 +589,59 @@ export class SerialBridge {
         this.#flushPending(session);
       }, FLUSH_DEBOUNCE_MS);
       session.flushTimer.unref?.();
+    }
+  }
+
+  /**
+   * Pick a codec from the bytes actually arriving.
+   *
+   * Runs both decoders over the same buffer and compares replacement
+   * characters. GBK is never "invalid" in the way UTF-8 is — any two-byte
+   * pair maps to something — so counting U+FFFD alone would always favour
+   * GBK. The tie-breaker is the other direction: text that decodes as UTF-8
+   * *validly* is almost certainly UTF-8 (GBK Chinese is full of byte pairs
+   * that are invalid UTF-8), so a clean UTF-8 decode wins outright.
+   *
+   * The decision needs one complete line, or the buffer to grow past a
+   * threshold, so a two-byte first chunk cannot decide for the whole session.
+   */
+  #autoDetect(session, chunk, port) {
+    session.probe = Buffer.concat([session.probe ?? Buffer.alloc(0), chunk]);
+    const sample = session.probe;
+    const hasNewline = sample.includes(0x0a);
+    if (!hasNewline && sample.length < AUTO_PROBE_BYTES) return;
+
+    // `fatal` distinguishes "valid UTF-8" from "mostly bytes that happened to
+    // map to something"; a throwing decode is the strongest signal there is.
+    let utf8Clean = true;
+    let utf8Text = "";
+    try {
+      utf8Text = new TextDecoder("utf-8", { fatal: true }).decode(sample);
+    } catch {
+      utf8Clean = false;
+      utf8Text = new TextDecoder("utf-8").decode(sample);
+    }
+    const gbkText = new TextDecoder("gbk").decode(sample);
+
+    const utf8Bad = countReplacement(utf8Text);
+    const gbkBad = countReplacement(gbkText);
+    // Valid UTF-8 (no replacement chars, no throw) is decisive: GBK text that
+    // survives as UTF-8 is vanishingly rare, while ASCII-only output is valid
+    // either way and both decoders agree on it.
+    const choice = utf8Clean && utf8Bad === 0 ? "utf-8" : gbkBad < utf8Bad ? "gbk" : utf8Bad < gbkBad ? "utf-8" : "utf-8";
+
+    session.encoding = choice;
+    session.decoder = new TextDecoder(choice === "gbk" ? "gbk" : "utf-8");
+    session.probe = null;
+    // Tell the pane, so the dropdown stops claiming a codec nobody chose.
+    this.#send({ type: "serial_state", open: true, port, baud: session.baud, encoding: choice, detected: true });
+
+    const text = session.decoder.decode(sample, { stream: true });
+    const { lines, rest } = splitLines(text);
+    const buffer = session.partial + (lines.length > 0 ? lines.shift() : "");
+    session.partial = rest;
+    if (buffer.length > 0 || lines.length > 0) {
+      this.#acceptLine(session, buffer, lines);
     }
   }
 

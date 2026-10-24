@@ -18,6 +18,10 @@ const { SerialBridge, listSerialPorts, RING_MAX_LINES, serialRingPath } = await 
   "../../../../desktop/host/serial-bridge.js"
 );
 
+/** Line terminator used by the fake device; kept as a variable so the
+ *  literals below stay readable. */
+const CRLF = "\r\n";
+
 /** Existing paths the fake driver pretends to have. */
 const fakePaths = new Set();
 /** Bytes written through any fake port, in order. */
@@ -277,14 +281,61 @@ describe("SerialBridge (FakePort)", () => {
     await bridge.closeAll();
   });
 
+  it("auto-detects the codec from the bytes (GBK board)", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200); // no encoding -> auto
+    const gbk = Buffer.concat([
+      Buffer.from("c7ebcae4c8ebcafdbedd2cd2d4bbd8b3b5bcfcbde1caf8", "hex"),
+      Buffer.from("0d0a", "hex"),
+    ]);
+    fakePorts.get("/dev/TEST0").emit("data", gbk);
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_lines")) throw new Error("none");
+    });
+    const line = events.find((e) => e.type === "serial_lines").lines[0].text;
+    expect(line).toBe("请输入数据,以回车键结束");
+    const detected = events.find((e) => e.type === "serial_state" && e.detected === true);
+    expect(detected.encoding).toBe("gbk");
+    await bridge.closeAll();
+  });
+
+  it("auto-detects UTF-8 and leaves ASCII on utf-8", async () => {
+    const cases = [
+      { bytes: Buffer.from("你好世界,这是UTF-8" + CRLF, "utf8"), codec: "utf-8", text: "你好世界,这是UTF-8" },
+      { bytes: Buffer.from("plain ascii line" + CRLF, "ascii"), codec: "utf-8", text: "plain ascii line" },
+    ];
+    for (const { bytes, codec, text } of cases) {
+      const { bridge, events } = makeBridge();
+      await bridge.open("/dev/TEST0", 115200);
+      fakePorts.get("/dev/TEST0").emit("data", bytes);
+      await vi.waitFor(() => {
+        if (!events.some((e) => e.type === "serial_lines")) throw new Error("none");
+      });
+      expect(events.find((e) => e.type === "serial_lines").lines[0].text).toBe(text);
+      expect(events.find((e) => e.type === "serial_state" && e.detected === true).encoding).toBe(codec);
+      await bridge.closeAll();
+    }
+  });
+
+  it("an explicit encoding skips detection entirely", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200, { encoding: "utf-8" });
+    fakePorts.get("/dev/TEST0").emit("data", Buffer.from("hello" + CRLF, "utf8"));
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_lines")) throw new Error("none");
+    });
+    expect(events.some((e) => e.detected === true)).toBe(false);
+    await bridge.closeAll();
+  });
+
   it("switches encoding on a live session without dropping the port", async () => {
     const { bridge } = makeBridge();
     await bridge.open("/dev/TEST0", 115200);
     expect(bridge.setEncoding("/dev/TEST0", "gbk")).toBe(true);
     expect(bridge.sessionOf("/dev/TEST0").encoding).toBe("gbk");
-    // Unknown names fall back to utf-8 rather than refusing.
+    // Unknown names fall back to detection rather than refusing.
     expect(bridge.setEncoding("/dev/TEST0", "latin9")).toBe(true);
-    expect(bridge.sessionOf("/dev/TEST0").encoding).toBe("utf-8");
+    expect(bridge.sessionOf("/dev/TEST0").encoding).toBe("auto");
     expect(bridge.openPorts).toEqual(["/dev/TEST0"]);
     await bridge.closeAll();
   });

@@ -2665,6 +2665,13 @@ function handleEvent(message) {
       state.serial.open = Boolean(message.open);
       state.serial.port = message.port ?? null;
       state.serial.baud = message.baud ?? null;
+      if (message.encoding) {
+        // Same authority rule as `serial_state`: the host opened the port and
+        // chose the codec, so the control reflects that choice.
+        state.serial.encoding = message.encoding;
+        const select = $("serial-encoding");
+        if (select && select.value !== message.encoding) select.value = message.encoding;
+      }
       state.serial.lines = message.lines ?? [];
       fillSerialControls();
       rerenderSerialLines();
@@ -4628,6 +4635,14 @@ function setSerialState(message) {
   if ("open" in message) serial.open = Boolean(message.open);
   if ("port" in message) serial.port = message.port ?? null;
   if ("baud" in message) serial.baud = message.baud ?? null;
+  // The host is the authority on the codec: an agent that opened the port
+  // chose one, and the dropdown has to show that choice or the operator will
+  // read GBK bytes through a control that says UTF-8.
+  if ("encoding" in message && message.encoding) {
+    serial.encoding = message.encoding;
+    const select = $("serial-encoding");
+    if (select && select.value !== message.encoding) select.value = message.encoding;
+  }
   if (message.error) serial.lastError = message.error;
   else if (serial.open) serial.lastError = "";
   if (!serial.open) {
@@ -4657,7 +4672,7 @@ $("serial-toggle").addEventListener("click", () => {
   const port = $("serial-port").value;
   if (!port) return;
   const baud = Number($("serial-baud").value) || 115200;
-  const encoding = $("serial-encoding")?.value || "utf-8";
+  const encoding = $("serial-encoding")?.value || "auto";
   state.serial.port = port;
   state.serial.baud = baud;
   state.serial.encoding = encoding;
