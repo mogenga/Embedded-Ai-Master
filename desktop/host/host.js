@@ -3966,9 +3966,9 @@ const handlers = {
   // and the agent reads the same ring through the embed_serial MCP tool —
   // the port is exclusive, the data is shared.
   // -------------------------------------------------------------------------
-  async serialOpen({ port, baud }) {
+  async serialOpen({ port, baud, encoding }) {
     const baudNum = Number(baud) || 115200;
-    const result = await serialBridge.open(String(port ?? ""), baudNum);
+    const result = await serialBridge.open(String(port ?? ""), baudNum, { encoding });
     if (!result.ok) {
       send({ type: "serial_state", open: false, port: String(port ?? ""), baud: baudNum, error: result.error });
       return;
@@ -4036,6 +4036,18 @@ const handlers = {
     }
     if (!serialBridge.setBaud(port, baud)) {
       send({ type: "notice", level: "warn", text: "serialBaud：波特率无效（300–4000000）" });
+    }
+  },
+
+  /** Runtime text-codec change (utf-8 / gbk) without dropping the line. */
+  serialEncoding({ encoding }) {
+    const port = serialBridge.openPorts[0];
+    if (port === undefined) {
+      send({ type: "notice", level: "warn", text: "serialEncoding：无已打开的串口" });
+      return;
+    }
+    if (!serialBridge.setEncoding(port, encoding)) {
+      send({ type: "notice", level: "warn", text: "serialEncoding：编码切换失败" });
     }
   },
 

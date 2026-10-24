@@ -42,6 +42,17 @@ const LINE_MAX_CHARS = 8192;
 const READY_TIMEOUT_MS = 8000;
 
 /**
+ * Normalize a caller's encoding name to the two the decoder supports.
+ * Unknown names fall back to utf-8 rather than failing the open: the port is
+ * still usable, and the pane shows what it decoded.
+ */
+function normalizeEncoding(value) {
+  const name = String(value ?? "").trim().toLowerCase().replace(/[_-]/g, "");
+  if (name === "gbk" || name === "gb2312" || name === "gb18030") return "gbk";
+  return "utf-8";
+}
+
+/**
  * Level classification for the log gutter. Matches the renderer's filters
  * (全部 / 警告+ / 错误) — the same heuristic the pump used to apply.
  */
@@ -136,8 +147,13 @@ export class SerialBridge {
   /**
    * Open `port` at `baud`. Answers `{ok:true, snapshot}` or `{ok:false, error}`;
    * the snapshot is what the renderer's first `serial_snapshot` carries.
+   *
+   * `options.encoding` picks the RX text codec: `utf-8` (default) or `gbk`.
+   * Keil and most Chinese MCU tutorials print in GBK, and decoding those bytes
+   * as UTF-8 turns every Chinese message into replacement characters — the
+   * board's output is correct, the codec was wrong.
    */
-  async open(port, baud) {
+  async open(port, baud, options = {}) {
     if (this.#sessions.has(port)) {
       return { ok: false, error: `端口已被本宿主打开：${port}` };
     }
@@ -145,10 +161,12 @@ export class SerialBridge {
     if (!Number.isInteger(rate) || rate < 300 || rate > 4_000_000) {
       return { ok: false, error: `波特率无效：${baud}` };
     }
+    const encoding = normalizeEncoding(options.encoding);
     const session = {
       port: null,
       name: port,
       baud: rate,
+      encoding,
       ring: [],
       dropped: 0,
       dead: false,
@@ -159,9 +177,10 @@ export class SerialBridge {
       rxBytes: 0,
       txBytes: 0,
       // Streaming decoder: the TextDecoder carries partial multi-byte
-      // sequences between chunks, so UTF-8 split across reads reassembles.
-      decoder: new TextDecoder("utf-8"),
+      // sequences between chunks, so a character split across reads
+      // reassembles. Node ships built-in decoders for utf-8 and gbk.
     };
+    session.decoder = new TextDecoder(encoding === "gbk" ? "gbk" : "utf-8");
     // False positives only: paths in server / kernel error strings stay ASCII.
     /* eslint-disable-next-line no-irregular-whitespace */
     return new Promise((resolve) => {
@@ -278,17 +297,39 @@ export class SerialBridge {
     }
   }
 
-  /** Toggle a modem line (board reset). Returns false when the port is not ours. */
+  /**
+   * Toggle a modem line (board reset).
+   *
+   * `serialport` v13 removed `setDTR`/`setRTS` from the port: modem lines now
+   * go through `set()`, which forwards the options to the native binding. The
+   * callback form mirrors `update()`; a throw means the driver refused.
+   */
   setLine(port, line, value) {
     const session = this.#sessions.get(port);
     if (session === undefined || !session.ready || session.dead) return false;
     if (line !== "dtr" && line !== "rts") return false;
     try {
-      session.port[line === "dtr" ? "setDTR" : "setRTS"](Boolean(value));
+      session.port.set({ [line]: Boolean(value) }, () => {});
       return true;
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Switch the RX text codec on a live session. The decoder is replaced (not
+   * flushed): a half-received character in the old codec would otherwise
+   * poison the first line after the switch.
+   */
+  setEncoding(port, encoding) {
+    const session = this.#sessions.get(port);
+    if (session === undefined || !session.ready || session.dead) return false;
+    const next = normalizeEncoding(encoding);
+    session.encoding = next;
+    session.decoder = new TextDecoder(next === "gbk" ? "gbk" : "utf-8");
+    session.partial = "";
+    this.#send({ type: "serial_state", open: true, port, baud: session.baud, encoding: next });
+    return true;
   }
 
   /** Change baud rate without dropping the line. */

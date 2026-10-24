@@ -62,6 +62,14 @@ class FakePort extends EventEmitter {
     if (typeof callback === "function") setImmediate(() => callback(null));
     return true;
   }
+  set(options, callback) {
+    // serialport v13 has no setDTR/setRTS: modem lines travel through set(),
+    // which forwards to the native binding. Record them the same way.
+    if ("dtr" in options) fakeLines.push({ method: "setDTR", value: Boolean(options.dtr) });
+    if ("rts" in options) fakeLines.push({ method: "setRTS", value: Boolean(options.rts) });
+    if (typeof callback === "function") setImmediate(() => callback(null));
+    return true;
+  }
   setDTR(value, callback) {
     fakeLines.push({ method: "setDTR", value: Boolean(value) });
     if (typeof callback === "function") setImmediate(() => callback(null));
@@ -246,6 +254,38 @@ describe("SerialBridge (FakePort)", () => {
     expect(tail.total).toBe(RING_MAX_LINES);
     expect(tail.dropped).toBe(50);
     expect(tail.lines[tail.lines.length - 1].text).toBe(`L${RING_MAX_LINES + 49}`);
+    await bridge.closeAll();
+  });
+
+  it("decodes GBK output when the session is opened with encoding: gbk", async () => {
+    // Keil and most Chinese MCU tutorials print GBK. Decoding those bytes as
+    // UTF-8 yields replacement characters, which is what the board's panel
+    // showed before the encoding option existed.
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200, { encoding: "gbk" });
+    const text = "请输入数据,以回车键结束\r\n";
+    // GBK bytes for 请输入数据,以回车键结束 followed by CRLF (verified with
+    // Python's cp936 codec).
+    const gbkBytes = Buffer.from("c7ebcae4c8ebcafdbedd2cd2d4bbd8b3b5bcfcbde1caf80d0a", "hex");
+    fakePorts.get("/dev/TEST0").emit("data", gbkBytes);
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "serial_lines")) throw new Error("none");
+    });
+    const lineEvent = events.find((e) => e.type === "serial_lines");
+    expect(lineEvent.lines[0].text).toBe("请输入数据,以回车键结束");
+    expect(lineEvent.lines[0].text).not.toContain("�");
+    await bridge.closeAll();
+  });
+
+  it("switches encoding on a live session without dropping the port", async () => {
+    const { bridge } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    expect(bridge.setEncoding("/dev/TEST0", "gbk")).toBe(true);
+    expect(bridge.sessionOf("/dev/TEST0").encoding).toBe("gbk");
+    // Unknown names fall back to utf-8 rather than refusing.
+    expect(bridge.setEncoding("/dev/TEST0", "latin9")).toBe(true);
+    expect(bridge.sessionOf("/dev/TEST0").encoding).toBe("utf-8");
+    expect(bridge.openPorts).toEqual(["/dev/TEST0"]);
     await bridge.closeAll();
   });
 

@@ -4653,12 +4653,14 @@ $("serial-toggle").addEventListener("click", () => {
   const port = $("serial-port").value;
   if (!port) return;
   const baud = Number($("serial-baud").value) || 115200;
+  const encoding = $("serial-encoding")?.value || "utf-8";
   state.serial.port = port;
   state.serial.baud = baud;
+  state.serial.encoding = encoding;
   // Opening the monitor also states the port the agent should use; the two are
   // the same decision, and making the user repeat it is how they diverge.
   if ((state.board.selection ?? {}).port !== port) saveBoardSelection({ port, baud });
-  api.send({ cmd: "serialOpen", port, baud });
+  api.send({ cmd: "serialOpen", port, baud, encoding });
 });
 
 $("serial-pause").addEventListener("click", () => {
@@ -4736,6 +4738,12 @@ $("serial-view").addEventListener("click", (event) => {
 
 $("serial-port").addEventListener("change", () => {
   saveBoardSelection({ port: $("serial-port").value, baud: Number($("serial-baud").value) || 115200 });
+});
+
+$("serial-encoding")?.addEventListener("change", (event) => {
+  const encoding = event.target.value;
+  state.serial.encoding = encoding;
+  if (state.serial.open) api.send({ cmd: "serialEncoding", encoding });
 });
 
 /* ---------- serial send ---------- */
