@@ -163,6 +163,7 @@ const state = {
   /** The last assembled board state (project, then inventory). */
   boardState: null,
   /** The probe's own report from the last `device_status` event. */
+  boardDevices: [],
   device: null,
   deviceTool: "",
   /** Whether the target table has been loaded, and the status that follows. */
@@ -178,6 +179,8 @@ const state = {
     paused: false,
     pausedBacklog: 0,
     filter: "all",
+    /** Receive display mode: text | hex (the HTerm-style dual view). */
+    view: "text",
     follow: true,
     lines: [],
     /** Lines the host could not keep up with, since the last clear. */
@@ -2662,6 +2665,13 @@ function handleEvent(message) {
       state.serial.open = Boolean(message.open);
       state.serial.port = message.port ?? null;
       state.serial.baud = message.baud ?? null;
+      if (message.encoding) {
+        // Same authority rule as `serial_state`: the host opened the port and
+        // chose the codec, so the control reflects that choice.
+        state.serial.encoding = message.encoding;
+        const select = $("serial-encoding");
+        if (select && select.value !== message.encoding) select.value = message.encoding;
+      }
       state.serial.lines = message.lines ?? [];
       fillSerialControls();
       rerenderSerialLines();
@@ -2687,6 +2697,10 @@ function handleEvent(message) {
       }
       break;
 
+    case "serial_agent_write":
+      replayAgentWrite(message);
+      break;
+
     case "serial_cleared":
       state.serial.lines = [];
       state.serial.filtered = 0;
@@ -2697,6 +2711,21 @@ function handleEvent(message) {
     case "serial_ports":
       state.serialPorts = message.ports ?? [];
       fillSerialControls();
+      break;
+
+    case "board_devices":
+      state.boardDevices = message.devices ?? [];
+      if (state.pane === "board" && !workbench.hidden) renderBoard();
+      break;
+
+    case "serial_stats":
+      // The pump counts on the wire; a host-side estimate would drift from
+      // what actually left the adapter. Display-only.
+      if (message.port === state.serial.port) {
+        state.serial.rxBytes = message.rx;
+        state.serial.txBytes = message.tx;
+        renderSerialCounters();
+      }
       break;
 
     case "models":
@@ -4101,6 +4130,30 @@ function renderBoard() {
   row(t.boardSerial, portText, effective.port ? "" : "warn", effective.port && !selectionHasBaud(board) ? t.boardBaudDefault : "");
   parts.push(`</div>`);
 
+  // ---- Serial, as the device's live voice --------------------------------
+  // The monitor's own state, mirrored by the host. Open or not is a fact the
+  // user can act on ("my assistant cannot open the port — who holds it?");
+  // the tail says whether anything is talking without opening the other pane.
+  const serialState = board.serial;
+  if (serialState && (serialState.open || (board.ports ?? []).length > 0)) {
+    parts.push(`<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardSerial)}</div>`);
+    if (serialState.open) {
+      row("", `${serialState.port} · ${serialState.baud}`, "ok", t.boardSerialOpenBy(serialState.lines ?? 0, serialState.dropped ?? 0));
+      const tail = board.serialTail ?? [];
+      if (tail.length > 0) {
+        parts.push(`<div class="board-serial-tail">`);
+        for (const line of tail.slice(-5)) {
+          parts.push(`<div class="board-serial-line${line.level ? ` ${line.level}` : ""}"><span class="serial-time">${escapeHtml(new Date(line.at).toTimeString().slice(0, 8))}</span>${escapeHtml(line.text)}</div>`);
+        }
+        parts.push(`</div>`);
+        parts.push(`<button type="button" class="menu-action board-serial-open" data-open-serial>${escapeHtml(t.boardSerialOpen)}</button>`);
+      }
+    } else {
+      row("", t.boardSerialClosed, "muted", (board.ports ?? []).length > 0 ? t.boardSerialClosedHint : "");
+    }
+    parts.push(`</div>`);
+  }
+
   // ---- Alternatives ------------------------------------------------------
   // Only when the chip read leaves a real choice: 1 MiB vs 2 MiB, or two
   // probes. These are overrides on top of the chip's answer, not a second
@@ -4174,12 +4227,49 @@ function renderBoard() {
   }
 
   if (state.device) parts.unshift(deviceSectionHtml());
+
+  // ---- Direct MCP probe results ------------------------------------------
+  // `board_devices` arrives after the refresh click (the probe connects and
+  // calls read-only tools, which takes seconds). Each row is one tool's
+  // answer: probe presence, backend version, session state — whatever the
+  // backend can say without a debug session. Failures are drawn too: "keil
+  // status: no session open" is the honest answer, and hiding it would read
+  // as the backend being absent.
+  if ((state.boardDevices ?? []).length > 0) {
+    parts.push(`<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardDeviceProbe)}</div>`);
+    for (const entry of state.boardDevices) {
+      if (!entry.ok) {
+        row(`${entry.server} · ${entry.tool}`, t.boardProbeFailed, "warn", entry.error ?? "");
+        continue;
+      }
+      // The deviceStatus shape gets the pane's own labels; everything else is
+      // a compact JSON one-liner — a probe list is data, not prose.
+      const state0 = entry.state ?? {};
+      if (typeof state0.backend === "string" || typeof state0.probe === "string") {
+        for (const [key, label] of Object.entries({ backend: t.boardDeviceBackend, probe: t.boardDeviceProbe, cpu: t.boardDeviceCpu, serial: t.boardDeviceSerial })) {
+          if (state0[key] !== undefined) row(`${entry.server} · ${label}`, String(state0[key]), state0[key] === "detached" || state0[key] === "none" ? "warn" : "");
+        }
+      } else if (state0.stlink !== undefined || state0.jlink !== undefined) {
+        const found = [];
+        if (state0.stlink) found.push("ST-Link");
+        if (state0.jlink) found.push("J-Link");
+        row(`${entry.server} · probe`, found.length > 0 ? found.join(", ") : t.boardNoProbeShort, found.length > 0 ? "ok" : "warn");
+      } else {
+        const text = JSON.stringify(state0);
+        row(`${entry.server} · ${entry.tool}`, text.length > 80 ? `${text.slice(0, 80)}…` : text);
+      }
+    }
+    parts.push(`</div>`);
+  }
   body.innerHTML = parts.join("");
   body.querySelectorAll("[data-target]").forEach((button) => {
     button.addEventListener("click", () => saveBoardSelection({ target: button.dataset.target }));
   });
   body.querySelectorAll("[data-port]").forEach((button) => {
     button.addEventListener("click", () => saveBoardSelection({ port: button.dataset.port }));
+  });
+  body.querySelectorAll("[data-open-serial]").forEach((button) => {
+    button.addEventListener("click", () => openWorkbench("serial"));
   });
 }
 
@@ -4353,7 +4443,7 @@ function openBoardMenu() {
   });
   menu.querySelector('[data-action="refresh"]').addEventListener("click", () => {
     closeBoardMenu();
-    api.send({ cmd: "getBoardState", refresh: "all" });
+    $("board-refresh").click();
   });
 }
 
@@ -4368,7 +4458,13 @@ $("board-picker").addEventListener("click", (event) => {
   else closeBoardMenu();
 });
 
-$("board-refresh").addEventListener("click", () => api.send({ cmd: "getBoardState", refresh: "all" }));
+$("board-refresh").addEventListener("click", () => {
+  // The host answers both halves: serial/ports immediately, and the device
+  // probe (short-lived MCP connection to the configured backends, read-only
+  // status tools only) as a following `board_devices` event. No agent turn,
+  // no model call — the refresh must not depend on the model agreeing.
+  api.send({ cmd: "getBoardState" });
+});
 
 /* ---------- serial pane ---------- */
 
@@ -4475,7 +4571,7 @@ function serialLineNode(line) {
 
   const textEl = document.createElement("span");
   textEl.className = "serial-text";
-  textEl.textContent = line.text;
+  textEl.textContent = viewHex() ? hexView(line.text) : line.text;
 
   row.append(timeEl, levelEl, tagEl, textEl);
   if (line.level) row.dataset.level = line.level;
@@ -4539,11 +4635,22 @@ function setSerialState(message) {
   if ("open" in message) serial.open = Boolean(message.open);
   if ("port" in message) serial.port = message.port ?? null;
   if ("baud" in message) serial.baud = message.baud ?? null;
+  // The host is the authority on the codec: an agent that opened the port
+  // chose one, and the dropdown has to show that choice or the operator will
+  // read GBK bytes through a control that says UTF-8.
+  if ("encoding" in message && message.encoding) {
+    serial.encoding = message.encoding;
+    const select = $("serial-encoding");
+    if (select && select.value !== message.encoding) select.value = message.encoding;
+  }
   if (message.error) serial.lastError = message.error;
   else if (serial.open) serial.lastError = "";
   if (!serial.open) {
     serial.paused = false;
     serial.pausedBacklog = 0;
+    serial.rxBytes = 0;
+    serial.txBytes = 0;
+    renderSerialCounters();
   } else {
     // Opening a port starts a fresh ring on the host.
     $("serial-output").innerHTML = "";
@@ -4565,12 +4672,14 @@ $("serial-toggle").addEventListener("click", () => {
   const port = $("serial-port").value;
   if (!port) return;
   const baud = Number($("serial-baud").value) || 115200;
+  const encoding = $("serial-encoding")?.value || "auto";
   state.serial.port = port;
   state.serial.baud = baud;
+  state.serial.encoding = encoding;
   // Opening the monitor also states the port the agent should use; the two are
   // the same decision, and making the user repeat it is how they diverge.
   if ((state.board.selection ?? {}).port !== port) saveBoardSelection({ port, baud });
-  api.send({ cmd: "serialOpen", port, baud });
+  api.send({ cmd: "serialOpen", port, baud, encoding });
 });
 
 $("serial-pause").addEventListener("click", () => {
@@ -4634,11 +4743,66 @@ $("serial-filter").addEventListener("click", (event) => {
   rerenderSerialLines();
 });
 
+$("serial-view").addEventListener("click", (event) => {
+  // Hex view is a re-render of the same ring, not a second capture: nothing
+  // on the wire changes, only how the pane draws it.
+  const button = event.target.closest("[data-view]");
+  if (!button) return;
+  state.serial.view = button.dataset.view;
+  $("serial-view").querySelectorAll("button").forEach((entry) => {
+    entry.classList.toggle("active", entry === button);
+  });
+  rerenderSerialLines();
+});
+
 $("serial-port").addEventListener("change", () => {
   saveBoardSelection({ port: $("serial-port").value, baud: Number($("serial-baud").value) || 115200 });
 });
 
+$("serial-encoding")?.addEventListener("change", (event) => {
+  const encoding = event.target.value;
+  state.serial.encoding = encoding;
+  if (state.serial.open) api.send({ cmd: "serialEncoding", encoding });
+});
+
 /* ---------- serial send ---------- */
+
+/** The receive view mode (text | hex) — a pane-local display toggle. */
+function viewHex() {
+  return state.serial.view === "hex";
+}
+
+/** Hex dump of a received line: bytes spaced, 16 per row kept on one line. */
+function hexView(text) {
+  const bytes = new TextEncoder().encode(text);
+  if (bytes.length === 0) return "(empty)";
+  const out = [];
+  for (let i = 0; i < bytes.length; i += 16) {
+    const row = [...bytes.slice(i, i + 16)].map((b) => b.toString(16).padStart(2, "0").toUpperCase());
+    const ascii = [...bytes.slice(i, 16 + i)].map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "·")).join("");
+    out.push(`${row.join(" ").padEnd(47)}  ${ascii}`);
+    if (i + 16 < bytes.length) out.push("\n");
+  }
+  return out.join("");
+}
+
+/** Send history for the ↑ recall — the terminal's muscle memory. */
+const serialSendHistory = [];
+const SERIAL_HISTORY_MAX = 50;
+let serialHistoryIndex = 0;
+
+/** RX/TX wire counters, counted by the pump, shown in the status row. */
+function renderSerialCounters() {
+  $("serial-counters").textContent = `RX ${state.serial.rxBytes ?? 0} · TX ${state.serial.txBytes ?? 0}`;
+}
+
+/** Validate hex input; the normalised byte string, or null when invalid. */
+function normalizeHexSend(text) {
+  const clean = text.replace(/\s+/g, "").toUpperCase();
+  if (clean === "") return null;
+  if (!/^[0-9A-F]+$/.test(clean) || clean.length % 2 !== 0) return null;
+  return clean;
+}
 
 function sendSerialLine() {
   const input = $("serial-send-input");
@@ -4648,19 +4812,115 @@ function sendSerialLine() {
     renderSerialStatus();
     return;
   }
-  const eol = $("serial-send-crlf").checked ? "\r\n" : "";
-  api.send({ cmd: "serialWrite", data: text + eol });
+  const hex = $("serial-send-hex").checked;
+  if (hex) {
+    const normalized = normalizeHexSend(text);
+    if (normalized === null) {
+      // Refuse visibly rather than send garbage (R3): an odd digit count or a
+      // stray character would go out as something else on the wire.
+      input.classList.add("invalid");
+      setTimeout(() => input.classList.remove("invalid"), 900);
+      return;
+    }
+    api.send({ cmd: "serialWrite", data: normalized, hex: true });
+  } else {
+    api.send({ cmd: "serialWrite", data: text + ($("serial-send-crlf").checked ? "\r\n" : "") });
+  }
+  serialSendHistory.push(text);
+  if (serialSendHistory.length > SERIAL_HISTORY_MAX) serialSendHistory.shift();
+  serialHistoryIndex = serialSendHistory.length;
   input.value = "";
   input.focus();
 }
 
+/** Recall: at the end of history the draft slot (empty) comes back. */
+function serialHistoryRecall() {
+  $("serial-send-input").value = serialHistoryIndex < serialSendHistory.length ? serialSendHistory[serialHistoryIndex] : "";
+}
+
+/**
+ * Replay an agent-authored write as the action it is: type the text into the
+ * input, press Send, clear. Without this the characters just appear on the
+ * wire and the operator cannot tell their own sends from the agent's.
+ *
+ * The bytes are already out (the host wrote them before announcing the
+ * event); this is purely the visible echo of who did it. `typing` is a
+ * module-level token so a second agent write cancels the first animation
+ * instead of interleaving two typewriters.
+ */
+let agentTypingToken = 0;
+
+function replayAgentWrite(write) {
+  const input = $("serial-send-input");
+  const button = $("serial-send");
+  if (!input || !button) return;
+  const token = ++agentTypingToken;
+  const text = String(write.data ?? "");
+  // A hex write is shown as the byte string the agent actually sent; the
+  // panel would otherwise look like it typed a different payload.
+  const shown = write.hex === true ? text.replace(/(..)/gi, "$1 ").trim() : text.replace(/\r\n$/, "");
+  const chunk = Math.max(1, Math.ceil(shown.length / 24));
+  input.classList.add("agent-typing");
+  input.value = "";
+  let index = 0;
+  const typeNext = () => {
+    if (token !== agentTypingToken) return;
+    index = Math.min(shown.length, index + chunk);
+    input.value = shown.slice(0, index);
+    if (index < shown.length) {
+      setTimeout(typeNext, 18);
+      return;
+    }
+    // The press: a real click's visual, plus the same highlight the button
+    // gets from a pointer.
+    setTimeout(() => {
+      if (token !== agentTypingToken) return;
+      button.classList.add("agent-pressing");
+      button.setAttribute("aria-busy", "true");
+      setTimeout(() => {
+        if (token !== agentTypingToken) return;
+        button.classList.remove("agent-pressing");
+        button.removeAttribute("aria-busy");
+        input.value = "";
+        input.classList.remove("agent-typing");
+      }, 180);
+    }, 140);
+  };
+  // One frame first so the caret and empty field are painted before typing.
+  setTimeout(typeNext, 40);
+}
+
 $("serial-send").addEventListener("click", sendSerialLine);
 $("serial-send-input").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && !event.isComposing) {
+  if (event.isComposing) return;
+  if (event.key === "Enter") {
     event.preventDefault();
     sendSerialLine();
+  } else if (event.key === "ArrowUp" && serialHistoryIndex > 0) {
+    event.preventDefault();
+    serialHistoryIndex -= 1;
+    serialHistoryRecall();
+  } else if (event.key === "ArrowDown" && serialHistoryIndex < serialSendHistory.length) {
+    event.preventDefault();
+    serialHistoryIndex += 1;
+    serialHistoryRecall();
   }
 });
+
+/** DTR/RTS toggles — the board-reset gesture. Polarity is the user's call. */
+function serialLineToggle(which) {
+  return () => {
+    if (!state.serial.open) return;
+    const button = $(`serial-${which}`);
+    const next = button.getAttribute("aria-pressed") !== "true";
+    button.setAttribute("aria-pressed", String(next));
+    button.classList.toggle("active", next);
+    api.send({ cmd: "serialLine", line: which, value: next });
+  };
+}
+
+$("serial-dtr").addEventListener("click", serialLineToggle("dtr"));
+$("serial-rts").addEventListener("click", serialLineToggle("rts"));
 
 /* ---------- inline review comments ---------- */
 
@@ -6850,6 +7110,99 @@ function endSidebarDrag() {
       const width = applySidebarWidth(SIDEBAR_DEFAULT, { persist: true });
       resizer.setAttribute("aria-valuenow", String(Math.round(width)));
     }
+  });
+}
+
+/* ---------- inspector (right pane) width ---------- */
+
+/**
+ * The inspector is resizable by dragging its left edge, the mirror of the
+ * sidebar handle. Its width is remembered unscaled, like the sidebar's, so
+ * it keeps its meaning when the UI scale changes.
+ *
+ * The bounds are wider than the old fixed 420 px: the panel holds a serial
+ * monitor and a hex view, which want room, while the conversation below
+ * ~3000 px of inspector would have nothing left. The clamp drops the ceiling
+ * on a narrow window so a drag can never crowd the transcript out.
+ */
+const WORKBENCH_DEFAULT = 420;
+const WORKBENCH_MIN = 320;
+const WORKBENCH_MAX = 900;
+let workbenchDrag = null;
+
+function clampWorkbenchWidth(width) {
+  const requested = Number.isFinite(width) ? width : WORKBENCH_DEFAULT;
+  const ceiling = Math.max(WORKBENCH_MIN, Math.min(WORKBENCH_MAX, window.innerWidth - 520));
+  return Math.round(Math.min(ceiling, Math.max(WORKBENCH_MIN, requested)));
+}
+
+function applyWorkbenchWidth(width, options = {}) {
+  const clamped = clampWorkbenchWidth(width);
+  document.documentElement.style.setProperty("--workbench-width", `${Math.round(clamped)}px`);
+  if (options.persist) localStorage.setItem("prometheus.workbenchWidth", String(Math.round(clamped)));
+  return clamped;
+}
+
+function beginWorkbenchDrag(event) {
+  const workbench = $("workbench");
+  if (!workbench) return;
+  event.preventDefault();
+  workbenchDrag = {
+    startX: event.clientX,
+    startWidth: workbench.getBoundingClientRect().width,
+    resizer: $("workbench-resizer"),
+  };
+  workbenchDrag.resizer.classList.add("resizing");
+  document.body.classList.add("resizing-workbench");
+  window.addEventListener("pointermove", onWorkbenchDrag);
+  window.addEventListener("pointerup", endWorkbenchDrag, { once: true });
+  workbenchDrag.resizer.setPointerCapture?.(event.pointerId);
+}
+
+function onWorkbenchDrag(event) {
+  if (!workbenchDrag) return;
+  // Dragging the pane's left edge leftwards makes it wider: the delta is
+  // inverted against the sidebar's handle, which sits on the right edge.
+  const width = workbenchDrag.startWidth - (event.clientX - workbenchDrag.startX);
+  applyWorkbenchWidth(width);
+}
+
+function endWorkbenchDrag() {
+  if (!workbenchDrag) return;
+  window.removeEventListener("pointermove", onWorkbenchDrag);
+  const workbench = $("workbench");
+  const width = workbench?.getBoundingClientRect().width ?? WORKBENCH_DEFAULT;
+  workbenchDrag.resizer.classList.remove("resizing");
+  document.body.classList.remove("resizing-workbench");
+  workbenchDrag = null;
+  applyWorkbenchWidth(width, { persist: true });
+}
+
+{
+  const stored = Number(localStorage.getItem("prometheus.workbenchWidth"));
+  if (stored) applyWorkbenchWidth(stored);
+  const resizer = $("workbench-resizer");
+  resizer?.addEventListener("pointerdown", beginWorkbenchDrag);
+  resizer?.addEventListener("dblclick", () => {
+    applyWorkbenchWidth(WORKBENCH_DEFAULT, { persist: true });
+  });
+  resizer?.addEventListener("keydown", (event) => {
+    const step = event.shiftKey ? 32 : 8;
+    const current = Number(localStorage.getItem("prometheus.workbenchWidth")) || WORKBENCH_DEFAULT;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      applyWorkbenchWidth(current + step, { persist: true });
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      applyWorkbenchWidth(current - step, { persist: true });
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      applyWorkbenchWidth(WORKBENCH_DEFAULT, { persist: true });
+    }
+  });
+  window.addEventListener("resize", () => {
+    const width = Number(localStorage.getItem("prometheus.workbenchWidth"));
+    if (width) applyWorkbenchWidth(width);
   });
 }
 

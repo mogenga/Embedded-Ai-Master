@@ -1,29 +1,23 @@
 /**
- * Serial bridge for the host.
+ * Serial bridge for the host — in-process, backed by the `serialport` package.
  *
- * Opens a real COM port through a PowerShell child process (the "pump"):
- * .NET's `System.IO.Ports.SerialPort` needs no native module, no Electron ABI
- * match and no npm dependency, and the pump was proven against this machine's
- * adapters during the F429 debugging sessions. Bytes read from the port flow
- * out as NDJSON on the pump's stdout; writes and the close op flow in on
- * stdin.
+ * History: this was a PowerShell child process ("pump") to avoid a native
+ * dependency. It died four times in the field — PS event quirks, orphaned
+ * pumps wedging the CH340 driver, `$script:` scoping crashes, and finally
+ * Kaspersky killing inline `-Command` scripts mid-session plus UTF-8
+ * corruption on multi-byte characters split across read boundaries. The
+ * user's verdict was right: mature serial assistants all use `serialport`,
+ * so the bridge now opens the port directly in the host process. No child,
+ * no AV interaction, native binary-safe reads.
  *
- * Pump protocol (one JSON object per line):
- *   pump -> host: {ev:"ready"} | {ev:"line", text, at} | {ev:"error", message}
- *   host -> pump: {op:"write", data} | {op:"close"}  (EOF closes too)
- *
- * Concurrency: the pump's main thread blocks on stdin (`ReadLine`), while
- * `SerialPort.DataReceived` fires on a threadpool thread and writes lines
- * straight to stdout — `Console.Out` is synchronized, so the two never
- * interleave mid-line. The host is the only one splitting/deciding.
- *
- * Line discipline: a line ends on CR, LF or CRLF. An unterminated partial is
- * held until more bytes arrive or the port closes — a periodic idle flush
- * would duplicate the tail in the ring every 50ms.
+ * The external contract is unchanged:
+ *   open/close/write/setLine/setBaud/ringTail/listSerialPorts
+ *   events: serial_lines (debounced batches) | serial_stats | serial_state | serial_snapshot
+ *   ring mirror: the agent's embed_serial MCP tool reads ring.json
  */
 
-import childProcess from "node:child_process";
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { SerialPort } from "serialport";
+import { mkdirSync, readdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -42,145 +36,238 @@ const FLUSH_DEBOUNCE_MS = 150;
 export function serialRingPath(home = process.env.HARNESS_HOME?.trim() || path.join(os.homedir(), ".harness")) {
   return path.join(home, "serial", "ring.json");
 }
-/** Max characters buffered for one line, both sides of the pump. */
-const LINE_MAX_CHARS = 8192;
-/** How long the pump gets to report `ready` before the open is declared failed. */
-const READY_TIMEOUT_MS = 8000;
-
-// The config line arrives on stdin first; the port must be open before the
-// pump reports ready, so the host never shows a connected state too early.
-const PUMP_SCRIPT = String.raw`
-$ErrorActionPreference = 'Stop'
-# Console.Out under a piped host is the system ANSI codepage (gb2312 here):
-# every non-ASCII line would leave the pump mis-encoded for the UTF-8 reader.
-# Pin both console encodings to UTF-8 before anything is emitted.
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-[Console]::InputEncoding = [System.Text.Encoding]::UTF8
-$config = [Console]::In.ReadLine() | ConvertFrom-Json
-try {
-  $script:serial = [System.IO.Ports.SerialPort]::new($config.port, [int]$config.baud, [System.IO.Ports.Parity]::None, 8, [System.IO.Ports.StopBits]::One)
-  $script:serial.ReadBufferSize = 65536
-  $script:serial.WriteTimeout = 2000
-  # The default encoding is ASCII: every non-ASCII byte the MCU prints
-  # would arrive as '?'. UTF-8 both ways; NDJSON on stdout is UTF-8 too.
-  $script:serial.Encoding = [System.Text.Encoding]::UTF8
-  $script:serial.Open()
-} catch {
-  [Console]::Out.WriteLine((@{ev='error';message="open failed: $($_.Exception.Message)"} | ConvertTo-Json -Compress))
-  exit 1
-}
-$script:out = [Console]::Out
-$script:pending = [System.Text.StringBuilder]::new()
-
-function Emit {
-  param([hashtable]$obj)
-  $script:out.WriteLine(($obj | ConvertTo-Json -Compress))
-}
-
-function FlushLine {
-  if ($script:pending.Length -gt 0) {
-    $text = $script:pending.ToString()
-    [void]$script:pending.Clear()
-    if ($text.Length -gt 8192) { $text = $text.Substring(0, 8192) }
-    Emit @{ev='line'; text=$text; at=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()}
-  }
-}
-
-function Drain-Port {
-  $n = $script:serial.BytesToRead
-  if ($n -le 0) { return }
-  $cbuf = New-Object char[] $n
-  $read = $script:serial.Read($cbuf, 0, $n)
-  for ($i = 0; $i -lt $read; $i++) {
-    $c = $cbuf[$i]
-    if ($c -eq [char]13 -or $c -eq [char]10) { FlushLine }
-    else {
-      [void]$script:pending.Append($c)
-      if ($script:pending.Length -ge 8192) { FlushLine }
-    }
-  }
-}
-
-# Stdin through BeginRead: ReadLine blocks synchronously and DataAvailable on
-# OpenStandardInput() stays false for a pipe from Node (both verified). The
-# async read completes on a threadpool thread; we poll IsCompleted in the
-# same loop that drains the port, so neither side starves the other.
-$script:stdin = [Console]::OpenStandardInput()
-$script:rbuf = New-Object byte[] 4096
-$script:async = $null
-$script:inLine = [System.Text.StringBuilder]::new()
-
-function Pump-Stdin {
-  if ($script:async -eq $null) {
-    $script:async = $script:stdin.BeginRead($script:rbuf, 0, $script:rbuf.Length, $null, $null)
-  }
-  if (-not $script:async.IsCompleted) { return }
-  $got = $script:stdin.EndRead($script:async)
-  $script:async = $null
-  # EOF on the pipe should mean the host is gone. (Does not always fire on
-  # Windows — the parent-liveness poll below is the reliable backstop.)
-  if ($got -le 0) { exit 0 }
-  $text = [System.Text.Encoding]::UTF8.GetString($script:rbuf, 0, $got)
-  foreach ($ch in $text.ToCharArray()) {
-    if ($ch -eq [char]10) {
-      $raw = $script:inLine.ToString().Trim()
-      [void]$script:inLine.Clear()
-      if ($raw -eq '') { continue }
-      try { $op = $raw | ConvertFrom-Json } catch { continue }
-      if ($op.op -eq 'write') {
-        try { $script:serial.Write([string]$op.data) } catch { Emit @{ev='error';message="write failed: $($_.Exception.Message)"} }
-      } elseif ($op.op -eq 'close') {
-        $script:closeRequested = $true
-      }
-    } elseif ($ch -ne [char]13) {
-      [void]$script:inLine.Append($ch)
-    }
-  }
-}
-
-Emit @{ev='ready'}
-
-# Orphan guard: the host polls config through stdin, but stdin EOF does not
-# always fire on Windows when the parent dies (verified live: a killed host
-# left the pump holding the COM port indefinitely). Poll the parent PID —
-# when it is gone, release the port and exit. The host passes its PID in the
-# config line; every 2s is cheap and the worst case is a 2s-orphan.
-$script:parentPid = [int]$config.parent_pid
-$script:lastParentCheck = [DateTime]::UtcNow
-
-$script:closeRequested = $false
-while (-not $script:closeRequested) {
-  Drain-Port
-  Pump-Stdin
-  if (($script:closeRequested -eq $false) -and (([DateTime]::UtcNow - $script:lastParentCheck).TotalMilliseconds -ge 2000)) {
-    $script:lastParentCheck = [DateTime]::UtcNow
-    $parentAlive = Get-Process -Id $script:parentPid -ErrorAction SilentlyContinue
-    if (-not $parentAlive) {
-      FlushLine
-      try { $script:serial.Close() } catch { }
-      exit 0
-    }
-  }
-  Start-Sleep -Milliseconds 10
-}
-FlushLine
-try { $script:serial.Close() } catch { }
-`;
 
 /**
- * One open port per `open`; torn down by `close` or when the pump dies.
+ * Where the agent's MCP server drops write requests for the panel's session.
+ *
+ * The panel owns the COM handle, so `embed_serial write` cannot open a second
+ * one — Windows refuses. The MCP tool therefore writes a request file and the
+ * host, which already owns the port, executes it and writes the reply. One
+ * consumer per file: the host drains the requests directory every tick.
+ */
+export function serialMailboxDir(home = process.env.HARNESS_HOME?.trim() || path.join(os.homedir(), ".harness")) {
+  return path.join(home, "serial", "requests");
+}
+/** Max characters buffered for one line. */
+const LINE_MAX_CHARS = 8192;
+/**
+ * Bytes to gather before auto-detecting the RX codec. A full line usually
+ * arrives well inside this; the cap stops a device that never sends a newline
+ * from holding data hostage while waiting for one.
+ */
+const AUTO_PROBE_BYTES = 512;
+/** How long the port gets to report open success before the open is declared failed. */
+const READY_TIMEOUT_MS = 8000;
+
+/** Characters U+FFFD left by a failed decode; used to compare two codecs. */
+function countReplacement(text) {
+  let count = 0;
+  for (const ch of text) if (ch === "�") count += 1;
+  return count;
+}
+
+/**
+ * Normalize a caller's encoding name to the two the decoder supports.
+ * Unknown names (and `auto`) fall back to detection rather than failing the
+ * open: the port is still usable, and the pane shows what it decoded.
+ */
+function normalizeEncoding(value) {
+  const name = String(value ?? "").trim().toLowerCase().replace(/[_-]/g, "");
+  if (name === "gbk" || name === "gb2312" || name === "gb18030") return "gbk";
+  if (name === "utf8") return "utf-8";
+  // `auto` (and anything unrecognized) means "decide from the bytes".
+  return "auto";
+}
+
+/**
+ * Level classification for the log gutter. Matches the renderer's filters
+ * (全部 / 警告+ / 错误) — the same heuristic the pump used to apply.
+ */
+function levelOf(text) {
+  const t = String(text).toLowerCase();
+  if (t.includes("error") || t.includes("err") || t.includes("fail") || t.includes("assert") || t.includes("panic") || t.includes("hardfault") || t.includes("oops")) return "error";
+  // "[W]" / "W:" prefixes are common MCU log styles alongside the full word.
+  if (t.includes("warn") || t.includes("[w]") || t.startsWith("w:") || t.includes("注意") || t.includes("警告")) return "warn";
+  return "info";
+}
+
+export async function listSerialPorts() {
+  try {
+    const ports = await SerialPort.list();
+    return ports
+      .map((p) => ({ path: p.path, vendorId: p.vendorId ?? "", productId: p.productId ?? "", friendly: p.friendlyName ?? p.path }))
+      .sort((a, b) => a.path.localeCompare(b.path, undefined, { numeric: true }));
+  } catch (error) {
+    // R3: report the failure instead of an empty list that reads as "none".
+    return { error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * Split a text chunk into complete lines. A line ends on CR, LF or CRLF; the
+ * final unterminated fragment is returned as `rest` and held until more bytes
+ * arrive or the port closes. Binary chunks that don't decode as UTF-8 are
+ * passed through with replacement characters rather than dropped.
+ */
+function splitLines(text) {
+  const lines = [];
+  let start = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (ch !== "\r" && ch !== "\n") continue;
+    let end = i;
+    if (ch === "\r" && text[i + 1] === "\n") i += 1;
+    lines.push(text.slice(start, end));
+    start = i + 1;
+  }
+  return { lines, rest: text.slice(start) };
+}
+
+/**
+ * One open port per `open`; torn down by `close` or when the port errors.
  * Events leave through the `send` callback the host provides.
  */
 export class SerialBridge {
-  /** @type {Map<string, {pump: import("node:child_process").ChildProcess, port: string, baud: number, ring: object[], dropped: number, dead: boolean, ready: boolean, pending: object[], stderrTail: string}>} */
+  /** @type {Map<string, {port: object, name: string, baud: number, ring: object[], dropped: number, dead: boolean, ready: boolean, pending: object[], flushTimer: any, partial: string, rxBytes: number, txBytes: number}>} */
   #sessions = new Map();
   /** Ring-mirror write failures since construction; surfaced for honesty. */
   #mirrorFailures = 0;
   /** @type {(message: object) => void} */
   #send;
+  /** Port constructor; injectable for tests (SerialPortMock). */
+  #PortCtor;
+  /** Mailbox poll timer; started lazily by `startMailbox`. */
+  #mailboxTimer = null;
 
-  constructor(send) {
-    this.#send = send;
+  constructor(send, portCtor = SerialPort) {
+    this.#send = send ?? (() => {});
+    this.#PortCtor = portCtor;
+  }
+
+  /**
+   * Start serving the agent's write requests.
+   *
+   * The MCP server cannot open the panel's port, so `embed_serial write`
+   * leaves a request file here; this loop — running in the process that does
+   * own the handle — executes it and writes the answer beside it. Started by
+   * the host at boot and never stopped: an idle tick costs one readdir.
+   */
+  startMailbox(intervalMs = 120) {
+    if (this.#mailboxTimer !== null) return;
+    this.#mailboxTimer = setInterval(() => this.#drainMailbox(), intervalMs);
+    this.#mailboxTimer.unref?.();
+  }
+
+  stopMailbox() {
+    if (this.#mailboxTimer === null) return;
+    clearInterval(this.#mailboxTimer);
+    this.#mailboxTimer = null;
+  }
+
+  /** Handle every pending request; each one is deleted after its reply lands. */
+  #drainMailbox() {
+    const dir = serialMailboxDir();
+    let entries;
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return; // No directory yet: nobody has asked for a write.
+    }
+    for (const name of entries) {
+      if (!name.endsWith(".req.json")) continue;
+      const requestPath = path.join(dir, name);
+      const replyPath = path.join(dir, name.replace(/\.req\.json$/, ".res.json"));
+      let request;
+      try {
+        request = JSON.parse(readFileSync(requestPath, "utf8"));
+      } catch {
+        // A half-written request (the writer renames atomically, but an old
+        // file from a crashed writer is possible) is dropped, not retried
+        // forever.
+        try { renameSync(requestPath, `${requestPath}.bad`); } catch { /* ignore */ }
+        continue;
+      }
+      const answer = this.#serveMailboxRequest(request);
+      try {
+        const tmp = `${replyPath}.tmp`;
+        writeFileSync(tmp, JSON.stringify(answer), "utf8");
+        renameSync(tmp, replyPath);
+        unlinkSync(requestPath);
+      } catch {
+        // If the reply cannot land, leave the request for the next tick
+        // rather than losing the write silently.
+      }
+    }
+  }
+
+  /** Execute one request against the panel's live session (R3: never fake it). */
+  #serveMailboxRequest(request) {
+    const port = String(request.port ?? "");
+    const session = this.#sessions.get(port);
+    if (request.op === "open") {
+      // The agent opened the port through the panel: the panel becomes the
+      // owner, so the user sees the same data and can type into it. A second
+      // open of a port this bridge already holds is answered, not attempted.
+      if (session !== undefined) {
+        return { ok: true, port, already: true, baud: session.baud };
+      }
+      const baud = Number(request.baud ?? 115200);
+      // Detached: the mailbox drain is synchronous and the open resolves on
+      // its own `open` event. The reply says it started; the caller polls
+      // `status`. The pane is told through the same events a click produces,
+      // so the toolbar and the counters follow along without a second path.
+      void this.open(port, baud, { encoding: request.encoding }).then((result) => {
+        if (result.ok) {
+          this.#send({ type: "serial_snapshot", ...result.snapshot });
+        } else {
+          this.#send({ type: "serial_state", open: false, port, baud, error: result.error });
+        }
+      }).catch(() => undefined);
+      return { ok: true, port, opening: true, baud };
+    }
+    if (request.op === "close") {
+      if (session === undefined) return { ok: true, port, already: true };
+      void this.close(port).catch(() => undefined);
+      return { ok: true, port, closing: true };
+    }
+    if (request.op === "status") {
+      // What the caller needs is "is it open yet", not the ring (the ring has
+      // its own mirror file). Absent session reads as not-ready, never as an
+      // error — the open is racing this poll by design.
+      return session === undefined
+        ? { ok: true, port, open: false, ready: false }
+        : { ok: true, port, open: session.ready && !session.dead, ready: session.ready && !session.dead, baud: session.baud };
+    }
+    if (session === undefined || !session.ready || session.dead) {
+      return { ok: false, error: `面板未打开 ${port}（或已断开）；先在面板里开始串口` };
+    }
+    const before = session.rxBytes;
+    if (request.op === "write") {
+      const data = String(request.data ?? "");
+      // The pane replays the agent's write as a real user action — typing into
+      // the input, then pressing Send — so the operator can see who sent what
+      // instead of characters appearing from nowhere. The event goes out
+      // BEFORE the bytes so the animation starts as the port transmits.
+      this.#send({
+        type: "serial_agent_write",
+        port,
+        data,
+        hex: request.hex === true,
+        source: String(request.source ?? "agent"),
+      });
+      const ok = this.write(port, data, { hex: request.hex === true });
+      if (!ok) return { ok: false, error: "写入失败：面板拒绝（会话已断或数据为空）" };
+      return { ok: true, port, wrote: data.length, rxBefore: before };
+    }
+    if (request.op === "setLine") {
+      const ok = this.setLine(port, String(request.line ?? ""), request.value === true);
+      return ok ? { ok: true, port } : { ok: false, error: "设置 DTR/RTS 失败" };
+    }
+    if (request.op === "setEncoding") {
+      const ok = this.setEncoding(port, String(request.encoding ?? ""));
+      return ok ? { ok: true, port, encoding: session.encoding } : { ok: false, error: "切换编码失败" };
+    }
+    return { ok: false, error: `未知请求 op=${String(request.op)}` };
   }
 
   /** Ports this bridge currently holds. */
@@ -215,23 +302,46 @@ export class SerialBridge {
   /**
    * Open `port` at `baud`. Answers `{ok:true, snapshot}` or `{ok:false, error}`;
    * the snapshot is what the renderer's first `serial_snapshot` carries.
+   *
+   * `options.encoding` picks the RX text codec: `utf-8` (default) or `gbk`.
+   * Keil and most Chinese MCU tutorials print in GBK, and decoding those bytes
+   * as UTF-8 turns every Chinese message into replacement characters — the
+   * board's output is correct, the codec was wrong.
    */
-  async open(port, baud) {
+  async open(port, baud, options = {}) {
     if (this.#sessions.has(port)) {
       return { ok: false, error: `端口已被本宿主打开：${port}` };
     }
+    const rate = Number(baud);
+    if (!Number.isInteger(rate) || rate < 300 || rate > 4_000_000) {
+      return { ok: false, error: `波特率无效：${baud}` };
+    }
+    const encoding = normalizeEncoding(options.encoding);
     const session = {
-      pump: null,
-      port,
-      baud,
+      port: null,
+      name: port,
+      baud: rate,
+      encoding,
+      /** Raw bytes gathered while `encoding` is still `auto`. */
+      probe: null,
       ring: [],
       dropped: 0,
       dead: false,
       ready: false,
       pending: [],
       flushTimer: null,
-      stderrTail: "",
+      partial: "",
+      rxBytes: 0,
+      txBytes: 0,
+      // Streaming decoder: the TextDecoder carries partial multi-byte
+      // sequences between chunks, so a character split across reads
+      // reassembles. Node ships built-in decoders for utf-8 and gbk.
     };
+    // Under `auto` the decoder is provisional until `#autoDetect` decides; it
+    // is never used to emit lines before then.
+    session.decoder = new TextDecoder(encoding === "gbk" ? "gbk" : "utf-8");
+    // False positives only: paths in server / kernel error strings stay ASCII.
+    /* eslint-disable-next-line no-irregular-whitespace */
     return new Promise((resolve) => {
       let settled = false;
       const settle = (result) => {
@@ -241,94 +351,171 @@ export class SerialBridge {
         resolve(result);
       };
       const readyTimer = setTimeout(() => {
-        const tail = session.stderrTail.trim().split("\n").pop() ?? "";
         session.dead = true;
-        this.#teardown(session);
-        settle({ ok: false, error: `打开串口超时（${READY_TIMEOUT_MS}ms 内泵未就绪）${tail ? `：${tail}` : ""}` });
+        try { session.port?.close(); } catch { /* already gone */ }
+        settle({ ok: false, error: `打开串口超时（${READY_TIMEOUT_MS}ms）` });
       }, READY_TIMEOUT_MS);
 
-      let pump;
+      let sp;
       try {
-        // `-NoProfile` keeps startup fast and the environment clean; the
-        // script goes over stdin (`-Command -`) because embedding it in the
-        // command line fights quoting for every backtick and quote inside.
-        pump = childProcess.spawn("powershell", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", PUMP_SCRIPT], {
-          windowsHide: true,
-          stdio: ["pipe", "pipe", "pipe"],
-        });
+        sp = new this.#PortCtor({ path: port, baudRate: rate, autoOpen: false });
       } catch (error) {
-        clearTimeout(readyTimer);
-        settle({ ok: false, error: `无法启动 PowerShell 泵：${error instanceof Error ? error.message : String(error)}` });
+        settle({ ok: false, error: `无法创建串口：${error instanceof Error ? error.message : String(error)}` });
         return;
       }
-      session.pump = pump;
+      session.port = sp;
 
-      const failBeforeReady = (message) => {
-        if (settled) {
-          // Ready already answered: this is a runtime failure, not an open one.
-          this.#send({ type: "serial_state", open: false, port: session.port, baud: session.baud, error: message });
-          return;
-        }
-        session.dead = true;
-        this.#teardown(session);
-        clearTimeout(readyTimer);
-        settle({ ok: false, error: message });
-      };
-
-      pump.on("error", (error) => failBeforeReady(`泵进程错误：${error.message}`));
-      pump.stderr.on("data", (chunk) => {
-        // Diagnostics only; the protocol lives on stdout. The last line is
-        // what surfaces when the pump dies without ever reporting ready.
-        session.stderrTail = `${session.stderrTail}${chunk}`.slice(-400);
+      sp.on("open", () => {
+        session.ready = true;
+        this.#sessions.set(port, session);
+        settle({ ok: true, snapshot: { open: true, port, baud: rate, encoding: session.encoding, lines: session.ring, dropped: session.dropped } });
       });
-      pump.stdout.on("data", createLineSplitter((line) => {
-        let event;
-        try {
-          event = JSON.parse(line);
-        } catch {
-          return; // Not protocol; ignore rather than guess.
-        }
-        if (event.ev === "ready") {
-          session.ready = true;
-          this.#sessions.set(port, session);
-          settle({ ok: true, snapshot: { open: true, port, baud, lines: session.ring, dropped: session.dropped } });
-        } else if (event.ev === "line") {
-          this.#acceptLine(session, event);
-        } else if (event.ev === "error") {
-          failBeforeReady(String(event.message ?? "串口泵错误"));
-        }
-      }));
-      pump.on("exit", (code) => {
+
+      sp.on("error", (error) => {
+        const message = error instanceof Error ? error.message : String(error);
         if (!settled) {
-          const tail = session.stderrTail.trim().split("\n").pop() ?? "";
-          failBeforeReady(`泵在就绪前退出（code=${code}）${tail ? `：${tail}` : ""}`);
+          session.dead = true;
+          clearTimeout(readyTimer);
+          settle({ ok: false, error: `打开串口失败：${message}` });
           return;
         }
-        session.dead = true;
-        this.#teardown(session);
-        this.#sessions.delete(session.port);
-        this.#send({
-          type: "serial_state",
-          open: false,
-          port: session.port,
-          baud: session.baud,
-          error: code === 0 ? undefined : `串口泵退出（code=${code}）`,
-        });
+        if (!session.dead) {
+          this.#teardown(session);
+          this.#sessions.delete(port);
+          this.#send({ type: "serial_state", open: false, port, baud: session.baud, error: `串口错误：${message}` });
+        }
       });
 
-      // One config line, then the pump opens the port and reports ready.
-      // `parent_pid` is the orphan guard: when this host dies, the pump
-      // polls the PID and releases the port (stdin EOF alone is unreliable).
-      pump.stdin.write(`${JSON.stringify({ port, baud, parent_pid: process.pid })}\n`);
+      sp.on("close", () => {
+        if (!settled) {
+          session.dead = true;
+          clearTimeout(readyTimer);
+          settle({ ok: false, error: "串口在打开过程中被关闭" });
+          return;
+        }
+        if (!session.dead) {
+          this.#teardown(session);
+          this.#sessions.delete(port);
+          this.#send({ type: "serial_state", open: false, port, baud: session.baud });
+        }
+      });
+
+      // Binary-safe RX: decode per-chunk with a streaming TextDecoder held in
+      // the session, so multi-byte UTF-8 sequences split across reads
+      // reassemble (the pump's fatal flaw). Invalid bytes become U+FFFD.
+      //
+      // Which codec is not the operator's problem to solve: Keil projects and
+      // most Chinese MCU tutorials print GBK while everything else prints
+      // UTF-8, and picking wrong turns every Chinese line into boxes. Until
+      // the session has enough evidence the chunk is buffered raw and BOTH
+      // decoders run over it; the one that produces fewer replacement
+      // characters wins and is kept for the rest of the session.
+      sp.on("data", (chunk) => {
+        session.rxBytes += chunk.length;
+        if (session.encoding === "auto") {
+          this.#autoDetect(session, chunk, port);
+          this.#sendStats(session);
+          return;
+        }
+        const text = session.decoder.decode(chunk, { stream: true });
+        const { lines, rest } = splitLines(text);
+        const buffer = session.partial + (lines.length > 0 ? lines.shift() : "");
+        session.partial = rest;
+        if (buffer.length > 0 || lines.length > 0) {
+          this.#acceptLine(session, buffer, lines);
+        }
+        this.#sendStats(session);
+      });
+
+      sp.open((error) => {
+        if (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          session.dead = true;
+          clearTimeout(readyTimer);
+          settle({ ok: false, error: `打开串口失败：${message}` });
+        }
+        // Success path is the `open` event above.
+      });
     });
   }
 
-  /** Write raw data out the port. False when the port is not open here. */
-  write(port, data) {
+  /**
+   * Write text (UTF-8) or raw bytes (`hex: true`). Returns false when the
+   * port is not ours or the data is empty; the caller surfaces the refusal.
+   */
+  write(port, data, { hex = false } = {}) {
     const session = this.#sessions.get(port);
     if (session === undefined || !session.ready || session.dead) return false;
+    const text = String(data ?? "");
+    if (text.length === 0) return false;
     try {
-      session.pump.stdin.write(`${JSON.stringify({ op: "write", data: String(data) })}\n`);
+      if (hex) {
+        const clean = text.replace(/\s+/g, "");
+        if (!/^[0-9a-fA-F]+$/.test(clean) || clean.length % 2 !== 0) return false;
+        const bytes = Buffer.from(clean, "hex");
+        if (bytes.length === 0) return false;
+        session.port.write(bytes);
+        session.txBytes += bytes.length;
+      } else {
+        const bytes = Buffer.from(text, "utf8");
+        session.port.write(bytes);
+        session.txBytes += bytes.length;
+      }
+      this.#sendStats(session);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Toggle a modem line (board reset).
+   *
+   * `serialport` v13 removed `setDTR`/`setRTS` from the port: modem lines now
+   * go through `set()`, which forwards the options to the native binding. The
+   * callback form mirrors `update()`; a throw means the driver refused.
+   */
+  setLine(port, line, value) {
+    const session = this.#sessions.get(port);
+    if (session === undefined || !session.ready || session.dead) return false;
+    if (line !== "dtr" && line !== "rts") return false;
+    try {
+      session.port.set({ [line]: Boolean(value) }, () => {});
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Switch the RX text codec on a live session. The decoder is replaced (not
+   * flushed): a half-received character in the old codec would otherwise
+   * poison the first line after the switch.
+   */
+  setEncoding(port, encoding) {
+    const session = this.#sessions.get(port);
+    if (session === undefined || !session.ready || session.dead) return false;
+    const next = normalizeEncoding(encoding);
+    session.encoding = next;
+    session.decoder = new TextDecoder(next === "gbk" ? "gbk" : "utf-8");
+    session.partial = "";
+    // Back to `auto`: throw away the evidence from the previous codec and let
+    // the next arrival decide again. Explicit choices keep their buffer.
+    session.probe = next === "auto" ? null : session.probe;
+    this.#send({ type: "serial_state", open: true, port, baud: session.baud, encoding: next });
+    return true;
+  }
+
+  /** Change baud rate without dropping the line. */
+  setBaud(port, baud) {
+    const session = this.#sessions.get(port);
+    if (session === undefined || !session.ready || session.dead) return false;
+    const rate = Number(baud);
+    if (!Number.isInteger(rate) || rate < 300 || rate > 4_000_000) return false;
+    try {
+      session.port.update({ baudRate: rate });
+      session.baud = rate;
+      this.#send({ type: "serial_state", open: true, port, baud: rate });
       return true;
     } catch {
       return false;
@@ -336,29 +523,27 @@ export class SerialBridge {
   }
 
   /** Close one port; resolves once the session is gone. */
-  close(port) {
+  async close(port) {
     const session = this.#sessions.get(port);
-    if (session === undefined) return Promise.resolve(false);
-    return new Promise((resolve) => {
-      const pump = session.pump;
-      const done = () => {
-        // The `exit` handler has already cleaned the ring/state; a second
-        // teardown from here would double-send, so just confirm.
-        resolve(this.#sessions.get(port) === undefined);
-      };
-      pump.once("exit", done);
+    if (session === undefined) return false;
+    if (!session.dead) {
+      this.#teardown(session);
+      this.#sessions.delete(port);
+    }
+    await new Promise((resolve) => {
       try {
-        pump.stdin.write(`${JSON.stringify({ op: "close" })}\n`);
-        pump.stdin.end();
+        session.port.drain(() => {
+          session.port.close(() => resolve());
+        });
       } catch {
-        pump.kill();
+        resolve();
       }
-      // A wedged pump must not hold the close forever; force it.
-      setTimeout(() => {
-        if (this.#sessions.get(port) === session) pump.kill();
-      }, 1000).unref();
-      setTimeout(() => resolve(false), 2500).unref();
+      // A wedged driver must not hold the close forever; force it.
+      setTimeout(resolve, 1500).unref();
     });
+    try { session.port.close(() => {}); } catch { /* second close is a no-op */ }
+    this.#send({ type: "serial_state", open: false, port, baud: session.baud });
+    return true;
   }
 
   /** Shutdown path: every session goes, and the pending tails flush first. */
@@ -367,19 +552,33 @@ export class SerialBridge {
     return Promise.all(ports.map((port) => this.close(port)));
   }
 
-  #acceptLine(session, event) {
-    const line = {
-      text: String(event.text ?? ""),
-      at: Number(event.at) || Date.now(),
-      level: levelOf(event.text),
-    };
-    session.ring.push(line);
-    if (session.ring.length > RING_MAX_LINES) {
-      const excess = session.ring.length - RING_MAX_LINES;
-      session.ring.splice(0, excess);
-      session.dropped += excess;
+  /** Flush pending lines, then mark the session dead so `data` stops flowing. */
+  #teardown(session) {
+    session.dead = true;
+    this.#flushPending(session);
+    if (session.flushTimer !== null) {
+      clearTimeout(session.flushTimer);
+      session.flushTimer = null;
     }
-    session.pending.push(line);
+  }
+
+  /**
+   * Accept one complete line (the carried partial) plus any further complete
+   * lines from the same chunk. The pending batch flushes on count or debounce.
+   */
+  #acceptLine(session, first, rest) {
+    const lines = first.length > 0 ? [first, ...rest] : rest;
+    for (const raw of lines) {
+      const text = raw.length > LINE_MAX_CHARS ? raw.slice(0, LINE_MAX_CHARS) : raw;
+      const line = { text, at: Date.now(), level: levelOf(text) };
+      session.ring.push(line);
+      if (session.ring.length > RING_MAX_LINES) {
+        const excess = session.ring.length - RING_MAX_LINES;
+        session.ring.splice(0, excess);
+        session.dropped += excess;
+      }
+      session.pending.push(line);
+    }
     if (session.pending.length >= FLUSH_MAX_LINES) {
       this.#flushPending(session);
     } else if (session.flushTimer === null) {
@@ -389,41 +588,98 @@ export class SerialBridge {
         session.flushTimer = null;
         this.#flushPending(session);
       }, FLUSH_DEBOUNCE_MS);
+      session.flushTimer.unref?.();
     }
   }
 
+  /**
+   * Pick a codec from the bytes actually arriving.
+   *
+   * Runs both decoders over the same buffer and compares replacement
+   * characters. GBK is never "invalid" in the way UTF-8 is — any two-byte
+   * pair maps to something — so counting U+FFFD alone would always favour
+   * GBK. The tie-breaker is the other direction: text that decodes as UTF-8
+   * *validly* is almost certainly UTF-8 (GBK Chinese is full of byte pairs
+   * that are invalid UTF-8), so a clean UTF-8 decode wins outright.
+   *
+   * The decision needs one complete line, or the buffer to grow past a
+   * threshold, so a two-byte first chunk cannot decide for the whole session.
+   */
+  #autoDetect(session, chunk, port) {
+    session.probe = Buffer.concat([session.probe ?? Buffer.alloc(0), chunk]);
+    const sample = session.probe;
+    const hasNewline = sample.includes(0x0a);
+    if (!hasNewline && sample.length < AUTO_PROBE_BYTES) return;
+
+    // `fatal` distinguishes "valid UTF-8" from "mostly bytes that happened to
+    // map to something"; a throwing decode is the strongest signal there is.
+    let utf8Clean = true;
+    let utf8Text = "";
+    try {
+      utf8Text = new TextDecoder("utf-8", { fatal: true }).decode(sample);
+    } catch {
+      utf8Clean = false;
+      utf8Text = new TextDecoder("utf-8").decode(sample);
+    }
+    const gbkText = new TextDecoder("gbk").decode(sample);
+
+    const utf8Bad = countReplacement(utf8Text);
+    const gbkBad = countReplacement(gbkText);
+    // Valid UTF-8 (no replacement chars, no throw) is decisive: GBK text that
+    // survives as UTF-8 is vanishingly rare, while ASCII-only output is valid
+    // either way and both decoders agree on it.
+    const choice = utf8Clean && utf8Bad === 0 ? "utf-8" : gbkBad < utf8Bad ? "gbk" : utf8Bad < gbkBad ? "utf-8" : "utf-8";
+
+    session.encoding = choice;
+    session.decoder = new TextDecoder(choice === "gbk" ? "gbk" : "utf-8");
+    session.probe = null;
+    // Tell the pane, so the dropdown stops claiming a codec nobody chose.
+    this.#send({ type: "serial_state", open: true, port, baud: session.baud, encoding: choice, detected: true });
+
+    const text = session.decoder.decode(sample, { stream: true });
+    const { lines, rest } = splitLines(text);
+    const buffer = session.partial + (lines.length > 0 ? lines.shift() : "");
+    session.partial = rest;
+    if (buffer.length > 0 || lines.length > 0) {
+      this.#acceptLine(session, buffer, lines);
+    }
+  }
+
+  /** Send the batch out and refresh the agent's ring mirror. */
   #flushPending(session) {
-    if (session.pending.length === 0 && session.flushTimer === null) return;
     if (session.flushTimer !== null) {
       clearTimeout(session.flushTimer);
       session.flushTimer = null;
     }
     if (session.pending.length === 0) return;
-    const lines = session.pending;
-    session.pending = [];
-    this.#send({ type: "serial_lines", port: session.port, lines, dropped: 0 });
-    this.#mirrorRing();
+    const batch = session.pending.splice(0, session.pending.length);
+    this.#send({ type: "serial_lines", port: session.name, lines: batch, dropped: session.dropped });
+    this.#writeMirror();
+  }
+
+  /** RX/TX byte counters for the status bar (XCOM's S:/R: pair). */
+  #sendStats(session) {
+    this.#send({ type: "serial_stats", port: session.name, rx: session.rxBytes, tx: session.txBytes });
   }
 
   /**
-   * Rewrite the ring mirror. The agent reads the ring through the
-   * `embed_serial` MCP tool, which is a different process: the file is the
-   * only channel. Failure is swallowed-with-a-count — serial data must not
-   * die because a mirror write hit a lock; the next flush retries.
+   * Mirror the whole ring to disk for the MCP side. Atomic via tmp+rename;
+   * failures count but never throw — the mirror is a side channel, and the
+   * failure surfaces through `mirrorState` instead of a silent success.
    */
-  #mirrorRing() {
+  #writeMirror() {
+    const file = serialRingPath();
     try {
-      const file = serialRingPath();
       mkdirSync(path.dirname(file), { recursive: true });
-      const ports = [...this.#sessions.entries()].map(([port, session]) => ({
-        port,
+      const ports = [...this.#sessions.values()].map((session) => ({
+        port: session.name,
         baud: session.baud,
         owner: "panel",
-        total: session.ring.length + session.dropped,
+        total: session.ring.length,
         dropped: session.dropped,
-        lines: session.ring,
+        lines: session.ring.slice(-100),
       }));
-      const payload = JSON.stringify({ updatedAt: Date.now(), ports });
+      const payload = JSON.stringify({ updatedAt: Date.now(), ports }, null, 1);
       const tmp = `${file}.tmp`;
       writeFileSync(tmp, payload, "utf8");
       renameSync(tmp, file);
@@ -432,90 +688,8 @@ export class SerialBridge {
     }
   }
 
-  /**
-   * Flush the pending tail so close/exit never loses the last lines. Called
-   * at most once per session from teardown.
-   */
-  #teardown(session) {
-    this.#flushPending(session);
-    try {
-      session.pump?.kill();
-    } catch {
-      // Already gone; nothing to report — the exit event owns the notice.
-    }
+  /** Mirror health for honesty surfaces: 0 means every write succeeded. */
+  get mirrorState() {
+    return { failures: this.#mirrorFailures };
   }
-}
-
-/** Split an NDJSON stream on \n, feeding complete lines to `onLine`. */
-function createLineSplitter(onLine) {
-  let rest = "";
-  return (chunk) => {
-    rest += chunk.toString("utf8");
-    let index;
-    while ((index = rest.indexOf("\n")) >= 0) {
-      const line = rest.slice(0, index).trim();
-      rest = rest.slice(index + 1);
-      if (line !== "") onLine(line);
-    }
-  };
-}
-
-/** A line that looks like a warning or an error gets the renderer's colour. */
-function levelOf(text) {
-  const t = String(text ?? "").toLowerCase();
-  if (/(^|\W)(error|err|assert|failed|fault|hardfault)(\W|$)/.test(t)) return "error";
-  if (/(^|\W)(warn|warning)(\W|$)/.test(t)) return "warn";
-  return undefined;
-}
-
-/**
- * Enumerate COM ports, friendly names included (CH340 vs ST-Link VCP is the
- * difference the user actually needs). WMI in a short-lived PowerShell —
- * the same zero-dependency route as the pump.
- */
-export async function listSerialPorts() {
-  const script =
-    "$ErrorActionPreference='SilentlyContinue'; " +
-    "Get-CimInstance Win32_PnPEntity -Filter \"Name LIKE '%(COM%'\" | " +
-    "ForEach-Object { $m = [regex]::Match($_.Name, '\\((COM\\d+)\\)'); " +
-    "if ($m.Success) { @{path=$m.Groups[1].Value; description=$_.Name} } } | " +
-    "ConvertTo-Json -Compress";
-  return new Promise((resolve) => {
-    let child;
-    try {
-      child = childProcess.spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], {
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "ignore"],
-      });
-    } catch {
-      resolve([]);
-      return;
-    }
-    let out = "";
-    const timer = setTimeout(() => {
-      try { child.kill(); } catch { /* racing an exit is fine */ }
-      resolve([]);
-    }, 5000);
-    child.stdout.on("data", (chunk) => {
-      out += chunk.toString("utf8");
-    });
-    child.on("exit", () => {
-      clearTimeout(timer);
-      const text = out.trim();
-      if (text === "") {
-        resolve([]);
-        return;
-      }
-      try {
-        // One entry comes back as a bare object, several as an array.
-        const parsed = JSON.parse(text);
-        const ports = (Array.isArray(parsed) ? parsed : [parsed])
-          .map((entry) => ({ path: String(entry.path ?? ""), description: String(entry.description ?? "") }))
-          .filter((entry) => /^COM\d+$/.test(entry.path));
-        resolve(ports);
-      } catch {
-        resolve([]);
-      }
-    });
-  });
 }

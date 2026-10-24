@@ -732,8 +732,9 @@ body.resizing-sidebar .sidebar {
      sidebar, so the inspector took a third of what remained and left the
      conversation 548 px — narrow enough that the composer wrapped and the
      prose column collapsed. A fixed 400 px reads better at every size: the
-     inspector is a reference pane, not a second editor. */
-  width: 420px;
+     inspector is a reference pane, not a second editor.
+     `--workbench-width` is written by the drag handle and remembered. */
+  width: var(--workbench-width, 420px);
   min-width: 320px;
   max-width: 560px;
   flex: 0 0 auto;
@@ -742,6 +743,36 @@ body.resizing-sidebar .sidebar {
   min-height: 0;
   border-left: 1px solid var(--border);
   background: var(--bg);
+  position: relative;
+}
+
+/* A 6 px grab strip on the inspector's left edge — the mirror of
+   `.sidebar-resizer`. Invisible until hovered so the pane keeps its single
+   border line. */
+.workbench-resizer {
+  position: absolute;
+  top: 0;
+  left: -3px;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  z-index: 3;
+  background: transparent;
+  -webkit-app-region: no-drag;
+  transition: background var(--fast) var(--ease);
+}
+
+.workbench-resizer:hover,
+.workbench-resizer:focus-visible,
+.workbench-resizer.resizing {
+  background: var(--accent);
+  outline: none;
+}
+
+body.resizing-workbench,
+body.resizing-workbench * {
+  cursor: col-resize !important;
+  user-select: none;
 }
 
 .workbench-head {
@@ -5734,4 +5765,133 @@ mark.find-hit.current {
   color: var(--text-dim);
   white-space: nowrap;
   cursor: pointer;
+}
+
+/* ---------- board pane: serial tail preview ---------- */
+
+.board-serial-tail {
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  overflow: hidden;
+}
+
+.board-serial-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text);
+}
+
+.board-serial-line .serial-time {
+  color: var(--text-dim);
+  margin-right: 8px;
+}
+
+.board-serial-line.warn { color: var(--warn); }
+.board-serial-line.error { color: var(--danger); }
+
+.board-serial-open {
+  margin-top: 4px;
+}
+
+/* ---------- serial counters / hex / dtr-rts ---------- */
+
+.serial-counters {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+/* The send area follows the SSCOM/XCOM split: a compact options row
+   (line toggles left, hex/crlf right) above the input row. Small controls
+   never sit between the input and its button. */
+.serial-send-area {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.serial-send-options {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 0;
+}
+
+.serial-send-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 8px;
+  background: transparent;
+  border-top: none;
+}
+
+.serial-line-btn {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  padding: 0 8px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text-dim);
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+
+.serial-line-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.serial-line-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.serial-send-crlf {
+  flex: 0 0 auto;
+}
+
+.serial-send-crlf input {
+  margin: 0 3px 0 0;
+  vertical-align: middle;
+}
+
+.serial-send-input.invalid {
+  border-color: var(--danger);
+  background: rgba(220, 80, 80, 0.08);
+}
+
+/* The agent's write, replayed as a user action: the field takes on the accent
+   while characters appear, so the operator sees who is driving. The caret
+   flicker is the browser's own; this only makes the field's ownership clear. */
+.serial-send-input.agent-typing {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, var(--bg));
+  caret-color: var(--accent);
+}
+
+/* The press: a short inset + colour shift, the same gesture a real click makes,
+   so the send reads as an action rather than as data arriving on its own. */
+#serial-send.agent-pressing {
+  transform: translateY(1px) scale(0.98);
+  filter: brightness(0.92);
+  transition: transform 90ms ease, filter 90ms ease;
+}
+
+.serial-text {
+  white-space: pre-wrap;
 }
