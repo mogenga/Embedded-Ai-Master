@@ -334,10 +334,12 @@ function settingsPages() {
   // `skills` reaches the host too (`getSkills` / `saveSkill` / `removeSkill`),
   // and the composer's `/` menu draws from the same store — a skill file that
   // cannot be listed here is one the user can only edit by hand.
-  // The rest of the builders (usage, memory, instructions, hooks, packs,
-  // system, sessions) stay in this file so restoring a page is a one-line
-  // change, but listing them would produce forms whose save button cannot
-  // work.
+  // `tools` (toolchain packs) is listed since the host grew its backend: the
+  // seven `*Pack*` handlers answer every control on the page, so hiding the
+  // entry would now hide a working page (D-166 packs item).
+  // The rest of the builders (usage, memory, instructions, hooks, system,
+  // sessions) stay in this file so restoring a page is a one-line change, but
+  // listing them would produce forms whose save button cannot work.
   return [
     { id: "general", group: s.groupSettings, title: s.pageGeneral, build: buildGeneralPage },
     { id: "connection", group: s.groupSettings, title: s.pageConnection, build: buildConnectionPage },
@@ -346,6 +348,7 @@ function settingsPages() {
     { id: "mcp", group: s.groupSettings, title: s.pageMcp, build: buildMcpPage },
     { id: "skills", group: s.groupSettings, title: s.pageSkills, build: buildSkillsPage },
     { id: "kb", group: s.groupComputer, title: s.pageKb, build: buildKbPage },
+    { id: "tools", group: s.groupComputer, title: s.pageTools, build: buildToolsPage },
     { id: "about", group: s.groupComputer, title: s.pageAbout, build: buildAboutPage },
   ];
 }
