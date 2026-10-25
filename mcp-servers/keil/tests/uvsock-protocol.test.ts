@@ -493,13 +493,15 @@ it("a Keil build names its target instead of inheriting the last one", async () 
     const project = detectProject(dir);
     expect(project.kind).toBe("keil");
     const plain = buildCommand(project, { keil: "UV4.exe" }, {});
-    expect(plain).toBeTruthy();
+    expect(plain).not.toBeNull();
+    if (plain === null) throw new Error("buildCommand returned null for a keil project");
     expect(plain.args[0]).toBe("-b");
     // Without `-t` uVision builds whichever target was last current, which is
     // not something a build command should decide on a multi-target project.
     expect(!plain.args.includes("-t")).toBeTruthy();
     const chosen = buildCommand(project, { keil: "UV4.exe" }, { target: "Release" });
-    expect(chosen).toBeTruthy();
+    expect(chosen).not.toBeNull();
+    if (chosen === null) throw new Error("buildCommand returned null for an explicit target");
     const at = chosen.args.indexOf("-t");
     expect(at > 0).toBeTruthy();
     expect(chosen.args[at + 1]).toBe("Release");

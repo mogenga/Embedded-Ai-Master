@@ -184,8 +184,17 @@ it("both fixture files parse as XML right after the BOM", async () => {
   // read project file"), and a stray byte after the BOM once shipped here —
   // the unit tests still passed because none of them fed the fixture to a
   // parser. Guard both files so that cannot come back.
-  const { xmlParser } = await import("node:expat").catch(() => ({ xmlParser: undefined }));
-  void xmlParser;
+  //
+  // **A real XML parser would be better than the assertions below, but this
+  // repository has none and `node:expat` does not exist** (measured on Node
+  // 24.14.1: `ERR_UNKNOWN_BUILTIN_MODULE`). This used to be
+  // `await import("node:expat").catch(...)` followed by `void xmlParser` —
+  // which always took the catch branch, so the import silently never ran and
+  // the test read as if a parser had been involved. That is the shape of a
+  // guard that is not one. What is actually checked here is the byte-level
+  // property uVision cares about, plus `readProjectFacts` (a regex reader)
+  // proving the elements are addressable. If a real parser is ever added,
+  // replace these with it rather than keeping both.
   for (const name of ["TOUCH.uvprojx", "TOUCH.uvoptx"]) {
     const bytes = readFileSync(join(SAMPLE, name));
     const start = bytes.subarray(0, 3).toString("hex") === "efbbbf" ? 3 : 0;
