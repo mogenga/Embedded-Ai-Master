@@ -144,8 +144,10 @@ describe.skipIf(!PACKS_BUILT)("packs: page queries", () => {
       });
       expect(entry.installable).toBe(true);
     }
-    // 目录条目里必有 Ninja——它是 e2e 与手测的最小验证对象。
-    expect(entries.some((entry) => entry.id === "ninja-1.13.2-win32-x64")).toBe(true);
+    // 目录条目里必有 CMake——Keil5 链路收敛后它仍是首个必装的构建工具。
+    // （原断言对象是 Ninja，f03473b 已把它与 openocd/probe-rs/esptool/riscv
+    // 一并剔除。）
+    expect(entries.some((entry) => entry.id === "cmake-4.2.3-win32-x64")).toBe(true);
   }, HOST_TIMEOUT_MS);
 
   it("installPack 对目录里不存在的 id 回 pack_error，而不是静默", async () => {

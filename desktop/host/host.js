@@ -3423,6 +3423,12 @@ const handlers = {
    * settings page shows inline; the page never closes on a failed save.
    */
   async saveMcpServer(payload) {
+    // Same reasoning as `getKb` (line 3350): the first-run seed rewrites
+    // `mcp.json` whole, and a save that reads its snapshot before the seed
+    // finishes would be overwritten by the seed's later write — the user's
+    // entry silently disappears. Settling the seed first makes the read here
+    // observe the post-seed file, so the append below wins.
+    if (seedFirstRunPromise !== undefined) await seedFirstRunPromise;
     const { config } = readConfigSnapshot();
     const existing = config?.mcpServers ?? [];
     const wanted = payload.server;
@@ -3454,6 +3460,8 @@ const handlers = {
   },
 
   async removeMcpServer(payload) {
+    // Same race as `saveMcpServer` above.
+    if (seedFirstRunPromise !== undefined) await seedFirstRunPromise;
     const { config } = readConfigSnapshot();
     const name = String(payload.name ?? "");
     const next = (config?.mcpServers ?? []).filter((entry) => entry.name !== name);

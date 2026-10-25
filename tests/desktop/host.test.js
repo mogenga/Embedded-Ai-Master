@@ -1025,7 +1025,11 @@ describe("desktop host", () => {
       {
         until: (all) => {
           const settings = all.filter((event) => event.type === "settings");
-          return settings.length >= 2 && settings.at(-1).settings.mcpServers?.length === 1;
+          // First-run seeding may have already wired the embedded MCP servers
+          // (serial/keil/datasheet) before this save; the probe entry has to
+          // be present alongside them, not the only row.
+          return settings.length >= 2
+            && settings.at(-1).settings.mcpServers?.some((entry) => entry.name === "probe");
         },
       },
     );
@@ -1037,9 +1041,9 @@ describe("desktop host", () => {
     expect(settings[0].settings.run.maxTurns).toBeNull();
 
     const written = settings.at(-1).settings.mcpServers;
-    expect(written).toStrictEqual([
-      { name: "probe", command: "node", args: ["probe.js", "--stdio"], timeoutMs: 5000, disabled: false },
-    ]);
+    expect(written).toContainEqual({
+      name: "probe", command: "node", args: ["probe.js", "--stdio"], timeoutMs: 5000, disabled: false,
+    });
     // The file is the source of truth, not host memory: a fresh edit of
     // mcp.json reaches the next settings read.
     const onDisk = JSON.parse(await readFile(path.join(home, "mcp.json"), "utf8"));
