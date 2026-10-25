@@ -20,7 +20,7 @@
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
           <div class="brand">
-            <svg class="mark" aria-hidden="true"><use href="#i-mark"></use></svg>
+            <img class="mark" src="assets/mark.png" alt="" aria-hidden="true" draggable="false">
             <span class="wordmark">Embedded AI Master</span>
           </div>
         </div>
@@ -188,23 +188,12 @@
               </div>
               <div class="transcript-scroll" id="transcript-scroll">
                 <section class="empty-state" id="empty-state">
-                  <svg class="empty-mark" aria-hidden="true"><use href="#i-mark"></use></svg>
+                  <img class="empty-mark" src="assets/mark.png" alt="" aria-hidden="true" draggable="false">
                   <h1 data-i18n="emptyTitle">What should we build?</h1>
                   <p data-i18n="emptyBody">The agent reads, edits, and runs your code. It asks before changing files unless you switch the mode.</p>
-                  <div class="suggestions">
-                    <button class="suggestion" id="setup-button" data-i18n="setupTitle" hidden>
-                      Set up a connection
-                    </button>
-                    <button class="suggestion" data-prompt-key="suggestionSummarizePrompt" data-i18n="suggestionSummarize" data-prompt="Summarize this project and list the main entry points.">
-                      Summarize this project
-                    </button>
-                    <button class="suggestion" data-prompt-key="suggestionFailingTestsPrompt" data-i18n="suggestionFailingTests" data-prompt="Find failing tests and fix them. Verify with the project's test command.">
-                      Fix the failing tests
-                    </button>
-                    <button class="suggestion" data-prompt-key="suggestionDocumentPrompt" data-i18n="suggestionDocument" data-prompt="Create an AGENTS.md describing how this project is built, tested, and organized.">
-                      Document the repo
-                    </button>
-                  </div>
+                  <button class="suggestion" id="setup-button" data-i18n="setupTitle" hidden>
+                    Set up a connection
+                  </button>
                 </section>
               </div>
               <button class="scroll-bottom" id="scroll-bottom" hidden data-i18n-title="scrollToLatest">

@@ -9,6 +9,9 @@ dist-mcp/
 # 只忽略这一个子目录，不忽略整个 desktop/build/：那是 electron-builder 存放
 # 图标等构建资源的常规位置，将来可能真的有需要进版本库的文件。
 desktop/build/corpus/
+# 运行时依赖暂存目录（scripts/runtime-deps.mjs 的产物，装成 resources/node_modules）。
+# 23 MB 的第三方包，由 package-lock 推导，不该进版本库。
+desktop/build/node_modules/
 # electron-builder 的输出目录（desktop/package.json 的 build.directories.output）
 desktop/dist-installer/
 
