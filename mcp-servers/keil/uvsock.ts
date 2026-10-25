@@ -31,7 +31,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { toolEnv } from "./toolEnv.js";
 import { decodeGbk, encodeGbk } from "./gbk.js";
 import { createConnection, type Socket } from "node:net";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { killTree } from "./killTree.js";
 
 /* ---------- operation codes ---------- */
@@ -318,13 +318,18 @@ export function messagePayload(message: Buffer): Buffer {
  * on the far end.
  */
 export function fitUtf8(text: string, size: number): Buffer {
-  const bytes = encodeGbk(text);
-  if (bytes.length <= size) return bytes;
-  let cut = size;
-  // A GBK trail byte is 0x40–0xFE; a lead byte is 0x81–0xFE. Walking back one
-  // step is enough, because at most one character straddles the boundary.
-  if (cut > 0 && (bytes[cut]! & 0xc0) === 0x80) cut--;
-  return bytes.subarray(0, cut);
+  // GBK trail bytes (0x40–0xFE) overlap lead bytes (0x81–0xFE), so no byte
+  // inspection can tell a boundary from mid-character — counting high bytes
+  // backward miscounts every second byte. Encode character by character and
+  // stop before the character that would not fit: O(n) over the string, and
+  // the cut is correct by construction.
+  const fitted: number[] = [];
+  for (const character of text) {
+    const encoded = encodeGbk(character);
+    if (fitted.length + encoded.length > size) break;
+    for (const byte of encoded) fitted.push(byte);
+  }
+  return Buffer.from(fitted);
 }
 
 /** `SSTR`: `{ i32 nLen, char szStr[256] }`, `nLen` including the terminator. */
@@ -989,11 +994,48 @@ export class UvSocketClient {
     return this.frames.filter((frame) => frame.type === 0x5020).map(commandWindowText).filter(Boolean);
   }
 
-  async exit(): Promise<void> {
+  /**
+   * Ask uVision to exit, then let it finish before the tree is killed.
+   *
+   * `GEN_EXIT` makes uVision write the project out on its way down — for an
+   * edit session that is the only place the edits reach the .uvprojx. The
+   * old close path killed on a fixed timer (800/2500 ms), and a large or
+   * slow project could still be mid-write when `taskkill /F` landed,
+   * truncating the file. When `settlePath` is given, the kill waits until
+   * that file's mtime has been stable for a second (or `timeoutMs`, then it
+   * kills anyway — a wedged uVision must not hold the session forever).
+   */
+  async exit(options: { settlePath?: string; timeoutMs?: number } = {}): Promise<void> {
     try {
       await this.send(OP.GEN_EXIT, Buffer.alloc(0), 4_000);
     } catch {
       /* the process may already be gone */
+    }
+    const path = options.settlePath;
+    if (!path || !this.process?.pid) {
+      this.close();
+      return;
+    }
+    const timeout = options.timeoutMs ?? 10_000;
+    const deadline = Date.now() + timeout;
+    let lastMtime = -1;
+    let stableSince = 0;
+    while (Date.now() < deadline) {
+      let mtime = lastMtime;
+      try {
+        mtime = statSync(path).mtimeMs;
+      } catch {
+        // The file may not exist yet (nothing to write) — treat as settled
+        // only once the deadline passes; close() then kills as before.
+        mtime = -1;
+      }
+      if (mtime !== lastMtime) {
+        lastMtime = mtime;
+        stableSince = Date.now();
+      } else if (Date.now() - stableSince >= 1_000) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
     this.close();
   }

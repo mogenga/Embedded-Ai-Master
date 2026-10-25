@@ -86,6 +86,21 @@ export function sessionKey(project: string, port: number): string {
   return `${project.toLowerCase()}|${port}`;
 }
 
+/**
+ * Test seam: register a pre-built session as if it had been opened.
+ * Production callers always go through `openKeilSession`; this exists so the
+ * reuse rules (target match, debug-mode requirement) can be exercised
+ * offline without a live uVision on 4823.
+ */
+export function registerSessionForTest(session: KeilSession): void {
+  sessions.set(sessionKey(session.project, 4823), session);
+}
+
+/** Test seam: drop every session without touching any socket. */
+export function resetSessionsForTest(): void {
+  sessions.clear();
+}
+
 
 /**
  * Close the session, and with it the uVision that made the edits.
@@ -104,10 +119,11 @@ export async function closeKeilSession(key: string): Promise<boolean> {
   } catch {
     /* the session may already be gone */
   }
-  await session.client.exit();
-  // `exit()` sends `GEN_EXIT` and closes the socket; uVision needs a moment
-  // to rewrite the project before the file reflects the session's edits.
-  await new Promise((resolve) => setTimeout(resolve, session.debugging ? 800 : 2_500));
+  // GEN_EXIT makes uVision write the project on its way out — for an edit
+  // session that is the only save. Wait for the .uvprojx mtime to settle
+  // before the kill instead of guessing a delay: a big or slow project used
+  // to be mid-write when `taskkill /F` landed.
+  await session.client.exit({ settlePath: session.project, timeoutMs: 10_000 });
   sessions.delete(key);
   return true;
 }
@@ -260,6 +276,20 @@ export async function openKeilSession(options: OpenOptions): Promise<OpenResult>
         reason:
           `the open session for this project is debugging the ${existing.target}, not the ${wanted}. ` +
           `Close it first (keil_debug action \`close\`) and open it again with target \`${wanted}\`.`,
+      };
+    }
+    // A session that exists but never entered debug mode (a leftover plain
+    // session — `closeDebugSessions` only closes `debugging` ones) answers
+    // DBG_MEM_READ with NOT_DEBUGGING. Reusing it for a caller that asked for
+    // a debugging session made flash verify silently report "could not read"
+    // while the download still claimed success. Fail closed instead.
+    if (!options.connectOnly && !existing.debugging) {
+      return {
+        ok: false,
+        log,
+        reason:
+          `the open session for this project on port ${port} is not in debug mode. ` +
+          `Close it first (keil_debug action \`close\`) and open again, or pass connectOnly.`,
       };
     }
     log.push(`reused the open uVision session on port ${port}`);
