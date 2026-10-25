@@ -4,14 +4,55 @@
   "private": true,
   "description": "Desktop shell for Embedded AI Master — Electron window over the kernel",
   "type": "module",
+  "main": "main.js",
   "scripts": {
     "desktop": "electron main.js",
-    "start": "electron main.js"
+    "start": "electron main.js",
+    "dist": "node ../scripts/package-prepare.mjs && electron-builder"
   },
   "devDependencies": {
     "electron": "^44.9.0"
   },
   "dependencies": {
     "serialport": "^13.0.0"
+  },
+  "build": {
+    "appId": "com.embedded-ai-master.app",
+    "productName": "Embedded AI Master",
+    "directories": {
+      "output": "dist-installer"
+    },
+    "files": [
+      "main.js",
+      "preload.cjs",
+      "host/**/*",
+      "renderer/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../dist",
+        "to": "dist"
+      },
+      {
+        "from": "../dist-mcp",
+        "to": "dist-mcp"
+      },
+      {
+        "from": "build/corpus",
+        "to": "corpus"
+      },
+      {
+        "from": "../config/corpus.json",
+        "to": "corpus.json"
+      },
+      {
+        "from": "build/node_modules",
+        "to": "node_modules"
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    }
   }
 }

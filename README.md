@@ -402,9 +402,11 @@ npm run kb:review -- --accept <id> --target <正式条目>   # 指标不降才�
 
 | 位置 | 用途 | 进仓库 |
 |---|---|---|
-| `$HARNESS_HOME/corpus.json` | 运行时覆盖 | 否 |
-| `<安装目录>/resources/corpus.json` | 构建时注入，随包分发 | 否（由 `config/corpus.local.json` 生成） |
-| `config/corpus.example.json` | 只有占位符 | 是 |
+| `$HARNESS_HOME/corpus.json` | 运行时覆盖；改了它换源不必发版 | 否 |
+| `config/corpus.json` | 源码形态读这份 | **是** |
+| `<安装目录>/resources/corpus.json` | 打包形态读这份；由上面那份经 `extraResources` 拷来 | 是（同一个文件） |
+
+默认值进仓库是有意的（2026-10-25 改）：这两个值不可能保密——安装包必须带它们才能连上更新源，而桶是匿名可读的。原先「读 gitignore 的 `config/corpus.local.json` 生成 `resources/corpus.json`」的那个构建脚本从未存在，`corpus.local.json` 也没有任何代码读过，结果是别人 clone 下来只会看到「没有语料更新配置」。真正需要保住的性质是**可换性**，那由 `$HARNESS_HOME` 那一级保证。
 
 ```json
 { "version": 1, "updateBaseUrl": "https://<桶域名>/", "publicKeyPem": "-----BEGIN PUBLIC KEY-----\n<base64>\n-----END PUBLIC KEY-----\n" }
@@ -421,7 +423,26 @@ npm run kb:review -- --accept <id> --target <正式条目>   # 指标不降才�
 
 完整契约（`latest.json` 格式、规范 JSON、状态机、发布侧职责）见 `docs/corpus-ota.md`。
 
-**打包尚未配置**：仓库里只有 `electron-builder` 依赖（`^26.15.3`），没有 `build` 段与 `extraResources`，`dist/`、`dist-mcp/`、`corpus/`、`corpus.json` 如何进安装包还没定。种子化的随包语料路径因此只被合成测试覆盖过，未在真实安装产物上验证（契约 §9 的两项待实测：asar 内 ESM 动态 import、junction 在 `%LOCALAPPDATA%` 下的权限）。
+### 打包
+
+```bash
+npm run build && npm run build:mcp        # 内核 + 领域 MCP 产物
+npm --prefix desktop install              # 让 serialport 落在 desktop/ 里
+npm --prefix desktop run dist             # 前置装配 + electron-builder
+```
+
+`dist` 脚本先跑 `scripts/package-prepare.mjs`，它准备两个 `extraResources` 源：
+
+| 产物 | 装到 | 谁用 |
+|---|---|---|
+| `desktop/build/node_modules` | `resources/node_modules` | 内核的裸说明符 import（`zod` 等）。**缺了包就打不开** |
+| `desktop/build/corpus` | `resources/corpus` | 首次启动物化成快照 |
+| （直接引用）`../dist`、`../dist-mcp` | `resources/dist`、`resources/dist-mcp` | 内核与 MCP server |
+| （直接引用）`../config/corpus.json` | `resources/corpus.json` | 语料更新源地址 |
+
+`node_modules` 那一项不显然但必要：产物保留 `import { z } from "zod"` 这类裸说明符，宿主用绝对 file URL 动态 import 内核，Node 从 `resources/dist/` 向上找 `node_modules`——`resources/` 下没有它，宿主会以 `Cannot find package 'zod'` 退出。闭包由 `scripts/runtime-deps.mjs` 从 `package-lock.json` 算出（14 个包、约 23 MB），不装 electron-builder / typescript / vitest。
+
+**真实安装包尚未产出。** 配置已就位（经 electron-builder 26.15.3 的 `scheme.json` 校验），但 `desktop/node_modules` 里没有 `serialport`（它装在仓库根，靠 hoisting 解析），且打包机上没有 MSVC 工具链。2026-10-25 用模拟布局端到端跑通过：宿主启动到 `ready`、随包语料物化到 `kb/current`（107 个文件）、`corpus_status` 报 `bundled` 且 `configPath` 指向 `resources/corpus.json`。契约 §9 的两项待实测（asar 内 ESM 动态 import、junction 在 `%LOCALAPPDATA%` 的权限）仍记录在案。
 
 ## 验证边界
 

@@ -90,3 +90,28 @@ export function kernelMissingMessage(form, entry) {
   }
   return `找不到内核产物 ${entry}，请在仓库根目录运行 npm run build 后重试`;
 }
+
+/**
+ * The `fatal` text for a kernel that is on disk but failed to load — a missing
+ * or broken dependency, most often.
+ *
+ * Split from `kernelMissingMessage` because the cures differ in the same way:
+ * "the files are not there" and "the files cannot be loaded" look alike in a
+ * log, but telling an installed user to run `npm run build` sends them to a
+ * repository they may not have. The packaged branch names the reinstall, which
+ * is the only thing they can act on.
+ *
+ * @param {"override" | "packaged" | "development"} form
+ * @param {string} detail the loader's own message
+ */
+export function kernelLoadFailedMessage(form, detail) {
+  if (form === "packaged") {
+    // 依赖缺失（`Cannot find package 'zod'`）落在这一支：安装包里的 node_modules
+    // 不完整，用户没有能力补，只能重装。
+    return `安装可能不完整：内核加载失败（${detail}）。请重新安装`;
+  }
+  if (form === "override") {
+    return `内核加载失败（${detail}）。请确认 ${KERNEL_ROOT_ENV} 指向的内核与本机依赖一致，或在仓库根目录重新运行 npm run build`;
+  }
+  return `内核加载失败（${detail}）。请在仓库根目录重新运行 npm run build 后重试`;
+}

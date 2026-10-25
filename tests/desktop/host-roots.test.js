@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   KERNEL_ROOT_ENV,
+  kernelLoadFailedMessage,
   kernelMissingMessage,
   RESOURCES_PATH_ENV,
   resolveRoots,
@@ -79,6 +80,28 @@ describe("resolveRoots", () => {
     for (const form of ["development", "packaged", "override"]) {
       expect(kernelMissingMessage(form, entry)).toContain(entry);
     }
+  });
+
+  /**
+   * 「文件不在」与「文件在但装不起来」是两种病，处置也不同。
+   *
+   * 后者的典型是打包后 `resources/node_modules` 缺包（`Cannot find package
+   * 'zod'`）——用户装完之后看到「请在仓库根目录运行 npm run build」是一句
+   * 他做不到的指示：安装包用户没有源码树。这条断言就是防这句文案回来。
+   */
+  it("内核加载失败的提示同样分形态，且不把装好的用户指向源码树", () => {
+    const detail = "Cannot find package 'zod' imported from resources/dist/config/providers.js";
+
+    const packaged = kernelLoadFailedMessage("packaged", detail);
+    expect(packaged).toContain("重新安装");
+    expect(packaged).not.toContain("npm run build");
+    // 原始错误要原样带上：它是唯一能查的东西。
+    expect(packaged).toContain(detail);
+
+    expect(kernelLoadFailedMessage("development", detail)).toContain("npm run build");
+    expect(kernelLoadFailedMessage("override", detail)).toContain(KERNEL_ROOT_ENV);
+    // override 仍可以 build —— 那棵树是他自己的。
+    expect(kernelLoadFailedMessage("override", detail)).toContain("npm run build");
   });
 });
 

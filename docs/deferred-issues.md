@@ -1936,6 +1936,44 @@
 - **状态**: 未解决(已如实报错,有降级路径——agent 侧 `embed_serial` 的泵同样可能被拦,同报错)。
 - **2026-10-23 补充（桌面实测）**: 用户实机点 Start **成功**——Electron 主进程链不被杀软拦,本条风险降级为「仅影响 node file.mjs 测试链」。同轮发现并修复**孤儿泵**缺陷:宿主死后 PowerShell 泵不自动退(Windows 无 PDEATHSIG),COM 口被攥死;修复为父 PID 看门狗(泵每 2s 查 `Get-Process -Id parent_pid`,宿主不在即关口退出;搜网确认是社区标准模式,Job Object 方案需 native 调用不合零依赖),实测孤儿 ~500ms 自退,已并入 D-206 相关实现记录(dev-notes/M3-串口面板.md)。
 
+### D-210 · `embed-serial.test.ts` 的 `SERIAL_ACTIONS` 断言落后于实现
+
+- **发现**: 2026-10-25,跑全量测试时。
+- **现象**: `mcp-servers/cubeide/tests/embed-serial.test.ts:62` 断言 `SERIAL_ACTIONS` 等于 `["read","write","ports","status"]`，而 `mcp-servers/cubeide/actions.ts:123` 实际是 `["read","write","ports","status","open","close"]`。全量套件里这是**唯一**稳定失败的用例（1 failed / 2902 passed）。
+- **影响**: 无运行时代码问题——实现是对的，测试是旧的。但它让「全量绿」这个信号永久失效，任何人跑 `npm test` 都会看到一个红叉，长期会养成忽略它的习惯（D-156 / D-161 那类抖动被容忍的原因之一）。
+- **触发升级条件**: 已触发（当前就是红的）；任何人再动串口动作时。
+- **修复建议**: 把断言补成六项，并**同时**决定 `open` / `close` 是否属于「证据动作」（目前 `SERIAL_EVIDENCE_ACTIONS` 只有三项，`write` 与新增两项都不在内）与「破坏性动作」。这不是纯改数字：`open` / `close` 会改变串口状态，若它们不进 `destructiveActions` 白名单，`diagnose` 预设下的行为需要重新确认。
+- **状态**: 未解决（本次改动未触碰该文件与其被测源码）。
+
+### D-207 · `corpus.example.json` 的占位值能通过结构校验，把配置错误伪装成网络错误
+
+- **发现**: 2026-10-25,排查「他人 clone 后知识库页显示没有语料更新配置」时。
+- **现象**: `config/corpus.example.json` 的 `updateBaseUrl` 是 `https://example.invalid/`、`publicKeyPem` 是 `-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n`。两者**都能通过** `validateCorpusConfig`：`.invalid` 是合法域名形状、协议是 https、结尾有 `/`，PEM 也含 BEGIN/END 标记。把模板当真实配置用时，设置页不再显示「更新源未配置」，而是显示「检查失败：DNS 解析失败」——症状指向网络，根因是配置。
+- **影响**: 排查方向被引偏；`config_invalid` 与 `check_failed` 两种状态的处置完全不同（前者改文件，后者查网络）。不违反 R3（没有把失败说成成功），但违反「错误必须指向可行动的原因」。
+- **触发升级条件**: 有人真的把模板原样部署；或出现第二个「占位符恰好合法」的字段。
+- **修复建议**: 在 `validateCorpusConfig` 里对保留占位值显式拒绝（`.invalid` 顶级域 + PEM 正文为 `...`），reason 写明「这是模板占位值，请替换」。风险是误伤真用 `.invalid` 做离线测试的配置——但那本来就该走 `$HARNESS_HOME` 而不是打包默认值。
+- **状态**: 未解决。当前只在 `docs/corpus-ota.md` §2 与 README 里用文字警告。
+
+### D-208 · 真实安装包从未产出
+
+- **发现**: 2026-10-25,补齐打包配置（原 T10）时。
+- **现象**: `desktop/package.json` 的 `build` 段已就位（`main`、`appId`、`files`、五项 `extraResources`、`win.target: nsis`，经 electron-builder 26.15.3 的 `scheme.json` + ajv 校验通过），`scripts/package-prepare.mjs` 能从 `package-lock.json` 算出运行时依赖闭包（14 个包 / 23 MB）并按清单装语料。但**从未执行过 `electron-builder`**，因此：
+  - `serialport` 装在仓库根而非 `desktop/node_modules`（靠 Node 向上查找解析）；electron-builder 的 `TraversalNodeModulesCollector` 实测能收到它，但并未在真实打包中验证。
+  - 打包机没有 MSVC 工具链；`@electron/rebuild` 的 prebuildify/prebuild-install 两条分支都不认 `@serialport+bindings-cpp.node` 的命名，会退到 `node-gyp` 从源码编译。`npmRebuild` 保持默认 `true`（未写入配置）——在没验证过打包的前提下显式写 `false` 等于把未假设固化成配置。
+- **影响**: 「安装包能不能起来」目前只有模拟布局的证据（2026-10-25 实测：宿主启动到 `ready`、随包语料物化出 107 个文件、`corpus_status` 报 `bundled` 且 `configPath` 指向 `resources/corpus.json`），没有真实 NSIS 产物的证据。
+- **触发升级条件**: 第一次对外分发前必须关闭。
+- **修复建议**: 装 MSVC Build Tools 或确认 prebuild 可用后跑 `npm --prefix desktop run dist`，在干净机器上安装验证；同时关闭 `docs/corpus-ota.md` §9 的两项待实测。
+- **状态**: 未解决（配置就位，产物未产出）。
+
+### D-209 · 根与 `desktop/` 的 electron 版本不一致（`^45.0.0` vs `^44.9.0`）
+
+- **发现**: 2026-10-25,配置打包时。
+- **现象**: 根 `package.json` 声明 `electron: ^45.0.0`（实际装 45.0.0），`desktop/package.json` 声明 `^44.9.0`（实际装 44.9.1）。`desktop/` 有自己的 `package-lock.json`，两套安装互不感知。打包用的是 `desktop/` 那一份 44.9.1，而 `npm run desktop` 在开发时用哪一份取决于启动方式。
+- **影响**: 开发与打包可能跑在不同 Electron 大版本上，ABI 与 API 差异会表现为「开发能跑、装完不能跑」或反之。当前未观察到实际故障——两个版本都在支持范围内，且串口走 N-API（ABI 稳定）。但这是一个会在升级时咬人的隐患。
+- **触发升级条件**: 任一方的 Electron 需要升级时；或出现「开发/打包行为不一致」。
+- **修复建议**: 统一到一个版本，并让 `desktop/` 用 workspace 或 `file:` 依赖引用根那份，而不是各装一份。
+- **状态**: 未解决。统一需要一次 `npm install`（agent 不代为执行）。
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -2027,3 +2065,4 @@
 | 2026-10-22 | 只保留桌面端（用户「不要浏览器了，只保留桌面端」）：删除 `desktop/renderer/bridge.js`、`src/server` 的 HTTP 层（`api.ts` / `serve.ts` / `http.ts` / `body.ts` / `config-api.ts` / `event-stream.ts`）与 11 个 `tests/server/*` 测试（连同 `tests/desktop/bridge.test.js`、`tests/events-e2e.test.ts`），`package.json` 移除 `serve:ui`；`readSessionHeader` 搬进 `src/session/persistence.ts`；`HttpError` 移入 `src/server/errors.ts`（保留类名，桌面宿主仍靠 `status` / `code` 区分「路径非法」「目录不存在」「会话忙」）。文档侧：README、AGENTS.md、`docs/frontend-design.md` 去掉浏览器形态的说法；本文件给 D-051 / D-060 / D-063 / D-067 / D-112 / D-133 / D-136 / D-137 / D-138 / D-139 / D-146 / D-150 / D-152 / D-153 / D-167 / D-171 / D-174 标注**已作废**并保留原文（D-172 / D-176 / D-182 标在各自的状态行或遗留行上）；D-145 / D-147 / D-148 / D-149 / D-163 / D-193 补注「浏览器形态下线后结论如何变化」。D-124 / D-134 / D-135 等与形态无关的条目未动 |
 | 2026-10-22 | 第十六轮（用户「接入skills功能，发子代理」，并发 4 个子代理）：**技能＝保存下来的提示词模板**，`$ARGUMENTS` 由渲染层替换。①内核新增 `src/skills/`（`store.ts` / `types.ts`）：用户级 `<home>/skills/<name>.md`、项目级 `<workdir>/.harness/skills/<name>.md`，frontmatter 只认 `description` / `argument-hint`（未知键是额外元数据，不是故障），无 frontmatter 时整份文件就是正文；名称须匹配 `/^[a-z][a-z0-9_-]{0,63}$/` 且不得与内置命令 `clear`/`context`/`compact` 同名（同名者永远轮不到执行）；frontmatter 未闭合、文件读失败、名称非法一律进 `problems` 并跳过该文件，**不静默丢弃**（R3）；项目作用域同名覆盖用户作用域；输出按名称排序；写入走「临时文件 + fsync + rename」。②宿主新增 `getSkills` / `saveSkill` / `removeSkill`，`init` 与 `listCommands` 的目录里追加 `source: "skill"` 行，保存成功后重播 `skills` + `commands`，**保存失败什么都不播**并说明原因。③渲染层 `mergeCommands` 认 `source: "skill"`，`expandSkill` 做 `$ARGUMENTS` 替换（正文无占位符时把参数作为追加段落），设置页「技能」页恢复。④**刻意不做**模型可调用的 `Skill` 工具（用户要的是技能，不是模型自选技能）。登记 **D-198**：四条边界（无权限语义 / 无自动调用 / 参数只有字符串替换 / 项目作用域无信任门与同名覆盖缺口）＋两处**已在本轮内修掉**的缺陷（①技能名允许 `_` 而 `parseSlashText` 的 `SLASH` 字符类不含 `_`，`/review_diff` 会被当普通提示词原样发给模型——`SLASH` 补 `_` 并补「合法技能名必须能被斜杠语法还原」的不变量测试；②保存/删除失败只发 `notice`，而渲染器把它写进被设置页遮住的转录、`settings.js` 又没有 `notice` 分支——失败提示加 `domain: "skills"` 转进设置页就地显示，表单不再无条件关闭，草稿留在原处）；**D-166 的 skills 一项标记已解决**，其余能力未动 |
 | 2026-10-22 | Keil 移植步骤 14–15：新增 `mcp-servers/keil/README.md` 与 `docs/keil-headless.md`（安装检查 → 接线 → 典型流程 → 故障排查），根 README 补「领域 MCP：Keil」一节；`mcp.json` 接线与 `KEIL_SELECTION_JSON` 服务级选中项写入文档；`createKeilTools` 的 `_meta` 补 `evidence: true`（内核只认工具级标志，见 `src/mcp/manager.ts:625`）并附 `evidenceActions` / `destructiveActions` 白名单。录入 D-200（构建诊断未迁移）与 D-201（整片擦除依赖 STM32CubeProgrammer 且需先关会话） |
+| 2026-10-25 | 修复「他人 clone 后知识库页报没有语料更新配置」（用户「按方案 A 做，T10打包也做。发子代理，不得提交」）：①**配置加第三级**——`loadCorpusConfig` 的第二级从「目录 `resourcesRoot`」改为「文件路径 `bundledPath`」，`CorpusConfigSource` 由 `home`/`resources` 改为 `home`/`bundled`，`ok` 分支带实际读到的 `path`（宿主不再按 source 反推，那是同一事实的第二份拷贝）；宿主按形态派生：打包 `resources/corpus.json`、源码 `<仓库根>/config/corpus.json`。②**`config/corpus.json` 进仓库**——真实桶地址与公钥。原先契约说「构建脚本读 gitignore 的 `corpus.local.json` 生成 `resources/corpus.json`」，**那个脚本从未存在**、`corpus.local.json` 也没有任何代码读过，所以别人 clone 下来必然缺配置。两值本就不可保密（安装包必须带、桶匿名可读），真正要保的是可换性，由 `$HARNESS_HOME` 那一级保证。③**打包配置就位**——`desktop/package.json` 补 `main`（原先缺它，Electron 会找不存在的 `index.js`）与 `build` 段（五项 `extraResources`，经 electron-builder 26.15.3 的 `scheme.json` 校验）。④**补上一项会让安装包启动不起来的遗漏**——`dist/` 与 `dist-mcp/` 保留裸说明符（`import { z } from "zod"`），宿主用绝对 file URL 动态 import 内核，Node 从 `resources/dist/` 向上找 `node_modules`，`resources/` 下没有就以 `Cannot find package 'zod'` 退出。新增 `scripts/runtime-deps.mjs` 从 `package-lock.json` 算闭包装到 `resources/node_modules`（14 包 / 23 MB，不装构建工具），与 `scripts/corpus-stage.mjs`（按清单逐文件搬语料 + 校验 sha256）一起由 `scripts/package-prepare.mjs` 串起，`npm --prefix desktop run dist` 先跑它。⑤**fatal 文案分形态**——`kernelLoadFailedMessage` 新增，安装形态说「重新安装」而不是让一个没有源码树的用户去跑 `npm run build`。模拟布局端到端实测通过（`hello`→`ready`、随包语料物化出 107 文件、`corpus_status` 报 `bundled`）。录入 **D-207**（模板占位值能通过结构校验）、**D-208**（真实安装包未产出）、**D-209**（根与 desktop 的 electron 版本不一致）。
