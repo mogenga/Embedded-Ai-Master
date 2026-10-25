@@ -770,8 +770,11 @@ it("the capability report is reachable and does not claim a working op is refuse
 /* ---------- project detection must not wander into a sibling ---------- */
 
 // 依赖 A 侧未迁移模块：project.ts (detectProject)（keil-porting-spec.md §15 明确不迁移）。断言原文保留，Phase 3 处理。
-// 15s 而非默认 5s：detectProject 要走目录树，机器慢或并行跑全量时 2s+ 是实测常态。
-it("a directory with no project of its own does not adopt a sibling's", { timeout: 15_000 }, async () => {
+// 无需自定义 timeout：`base` 直接建在 `tmpdir()` 下，向上第三层就是 `%TEMP%`。
+// 原先它在那里对 31,745 个条目逐个 `statSync`，一次调用 2.5 s（实测），并行
+// 跑全量时超过 15 s 超时——那个 15s 是为这个缺陷打的补丁。`detectProject`
+// 现在在边界层之前就停止向上（见 `projectWalk.ts`），本用例实测 35–52 ms。
+it("a directory with no project of its own does not adopt a sibling's", async () => {
   const { detectProject } = await import("../project.js");
   const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
   const { join } = await import("node:path");

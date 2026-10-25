@@ -2121,6 +2121,22 @@
 - **修复建议**: 字段名扩展集中在 `src/model/openai.ts` 的 `reasoningTextOf` 一处，加字段时同步补 `tests/openai.test.ts` 的字段名用例。
 - **状态**: **部分解决**（2026-10-25）：逐段折叠已实现；「部分网关不返回推理」「`reasoning_details` 不认」「未流式不逐字显示」三条仍是已知边界（不修）。
 
+### D-219 · `detectProject` 向上查找没有有意义的上界，在有 3 万条目的临时目录祖先上超时（已解决，2026-10-25）
+
+- **发现**: 2026-10-25，全量并行跑 `npm test` 时 `mcp-servers/keil/tests/uvsock-protocol.test.ts` 的「a directory with no project of its own does not adopt a sibling's」稳定超时（`Test timed out in 15000ms`）；单跑该文件 76/76 通过。
+- **现象**: `mcp-servers/keil/project.ts` 的 `detectProject` 两轮循环都写死「最多向上 5 层」，没有任何依据说明第 5 层为什么不是工程根。测试的临时目录建在 `tmpdir()` 下，向上第三层就是 `%TEMP%`，本机有 **31,736** 个同级条目。
+- **根因（与最初诊断的差异，实测）**: 慢的**不是** `readdirSync`。同一层的 `readdirSync` 只要 13 ms；慢的是第二轮 `findProjectFileAbove` 对 `%TEMP%` 的 **31,745 个条目逐个 `statSync`**，占 2,741 ms（profile 总计 2,768 ms；第一轮 `readdirSyncSafe` 循环合计 16 ms）。一次 `detectProject` 实测 **2,654 ms**，全量并行时放大到 15 s 以上。
+- **第二个缺陷（同一处，顺带修正）**: 第二轮的 `insideRoot` 判定方向反了——它问的是「工程文件所在目录是否在 `start` 之下」，而祖先匹配要的是「工程是否**包含** `start`」。这使祖先循环**永远不会命中**：probe 实测 `base/proj/P.uvprojx`、`start = base/proj/src` 返回 `unknown`，两层的深目录同样 `unknown`。也就是说，这条路径此前既慢又没有产出（纯代价）。修复后同样的 probe 返回 `keil` / `root = base/proj`。
+- **修复方式**:
+  1. 新增 `mcp-servers/keil/projectWalk.ts`（纯函数，可单测）：`isWalkBoundary` / `shouldStopWalkingUp` / `walkLevels` / `branchToward` / `insideRoot` / `isAncestorOrSelf`。边界 = 盘根、用户家目录**及其祖先**、`os.tmpdir()` **及其祖先**、系统目录（`SystemRoot` / `windir` / `ProgramFiles` / `ProgramFiles(x86)` / `ProgramData`，不写死 `C:\`）**及其子树**、单层条目数 > 2000。
+  2. **home / tmp 只算它们自己与祖先，不算子树**。这一点在实现中一度写反：把 `%TEMP%` 的子树也算边界后，`%TEMP%\myproj` 里的工程全部检测不到，本仓库自己 7 条用临时目录的测试立刻失败。临时目录**下**的目录可以是真的工程，只有临时目录这一层及其上方不是。系统目录相反——子树也不长工程。
+  3. `walkLevels` 对**祖先**先判边界再读，边界层不会被 `readdir`；`start` 自己总是读。
+  4. `findProjectFileAbove` 不再列祖先目录再逐个 `stat`，改用 `branchToward` 从路径直接算出通往 `start` 的那一支，候选集合等价而代价是两次 `readdir`。
+  5. `findProjectFile` 的「向下一层」探测也加了同一阈值：本层匹配已查过，超过 2000 条就不再逐个子目录 `stat`。
+  6. 检测语义未变：`start` 可向下看一层，祖先只接受包含 `start` 的工程；返回的 `root` / `evidence` 形状不变（祖先命中仍写 `名称 (目录)`）。
+- **实测**: 修复前该用例单独跑 **2,548 ms**、全量并行 15 s 超时；修复后单独跑 **35–52 ms**（三次，另一次测得 4 ms——该次只跑了本用例，进程冷热不同），全量 113 文件 / 3,248 用例 **0 失败**，`{ timeout: 15_000 }` 已删除、回到默认超时。新增 `mcp-servers/keil/tests/keil-project-walk.test.ts` 19 例。
+- **状态**: 已解决（2026-10-25）。
+
 ## 变更记录
 
 | 日期 | 变更 |
