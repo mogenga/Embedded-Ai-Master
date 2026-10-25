@@ -50,7 +50,7 @@ export function looksLikeEnvName(value) {
 }
 
 export function createSettings(deps) {
-  const { state, $, api, formatTokens, setTheme, setDensity, setMode, applyLocale, openModal, closeModal, getT, applyCodeFont } = deps;
+  const { state, $, api, formatTokens, setTheme, setDensity, setMode, applyLocale, openModal, closeModal, getT, applyCodeFont, confirmAction } = deps;
   // `t` is rebound on every locale change, so every read goes through getT().
   const t = new Proxy({}, { get: (_, key) => getT()[key] });
   const settingsDialog = $("settings-dialog");
@@ -150,6 +150,8 @@ let connectionSavePending = false;
 let connectionShowSaved = false;
 /** Raised by `openSetup`; cleared when the user leaves the page. */
 let connectionSetupHint = false;
+/** openSetup 请求过初始焦点；连接页每次重建时消费一次。 */
+let connectionSetupFocus = false;
 /** A connection test that never hears back would leave its button reading
  *  "Testing…" forever; silence is not an answer (R3). */
 const CONNECTION_TEST_TIMEOUT_MS = 15_000;
@@ -368,7 +370,9 @@ function sRow({ label, desc, control, id, wide = false, mono = false }) {
   row.dataset.search = `${label} ${desc ?? ""}`.toLowerCase();
   const copy = el("div", "setting-copy");
   const labelNode = mono ? el("code", "setting-code", label) : el("label", "setting-label", label);
+  // 显式 id 优先；否则控件自己带了 id（sText 总会生成）就自动关联。
   if (id) labelNode.htmlFor = id;
+  else if (labelNode.tagName === "LABEL" && control?.id) labelNode.htmlFor = control.id;
   copy.appendChild(labelNode);
   if (desc) copy.appendChild(el("p", "setting-desc", desc));
   const controlNode = el("div", "setting-control");
@@ -421,7 +425,9 @@ function sText({ id, value, placeholder, type = "text", mono = false, onChange, 
   const input = document.createElement("input");
   input.className = `setting-input${mono ? " mono" : ""}`;
   input.type = type;
-  if (id) input.id = id;
+  // 没传 id 就生成一个：下面 sRow 依赖控件有 id 才能把 label 关联上
+  // （WCAG 1.3.1 / 4.1.2），传了 id 的调用方自己负责 htmlFor。
+  input.id = id ?? `stext-${Math.random().toString(36).slice(2, 10)}`;
   if (placeholder) input.placeholder = placeholder;
   if (min !== undefined) input.min = String(min);
   if (max !== undefined) input.max = String(max);
@@ -445,12 +451,16 @@ function sTextarea({ id, value, placeholder, rows = 8, onSave, saveLabel }) {
   area.value = value ?? "";
   const foot = el("div", "setting-textarea-foot");
   const status = el("span", "setting-inline-status", "");
+  // 保存状态对读屏可见（aria-live），且持久显示到下一次编辑——定时消失
+  // 的反馈对注意力不在线的用户等于没有。
+  status.setAttribute("aria-live", "polite");
+  const clearSaved = () => (status.textContent = "");
+  area.addEventListener("input", clearSaved);
   const save = el("button", "btn btn-primary small", saveLabel);
   save.type = "button";
   save.addEventListener("click", () => {
     onSave(area.value);
     status.textContent = S().saved;
-    setTimeout(() => (status.textContent = ""), 1600);
   });
   foot.append(status, save);
   wrap.append(area, foot);
@@ -498,7 +508,10 @@ function sHint(text) {
 }
 
 function sButton(label, onClick, { primary = false, quiet = false, danger = false } = {}) {
-  const button = el("button", `btn small${primary ? " btn-primary" : ""}${quiet ? " btn-quiet" : ""}${danger ? " danger" : ""}`, label);
+  // danger 表示破坏性操作，需要在视觉上可辨识（不能被 quiet 弱化成链接
+  // 样式——删除和编辑长得一样，是在邀请误点）。同时给出时 danger 优先。
+  const quietResolved = quiet && !danger;
+  const button = el("button", `btn small${primary ? " btn-primary" : ""}${quietResolved ? " btn-quiet" : ""}${danger ? " danger" : ""}`, label);
   button.type = "button";
   button.addEventListener("click", onClick);
   return button;
@@ -1012,6 +1025,12 @@ function buildConnectionPage() {
   const refreshIds = () => {
     for (const card of cards) card.baseUrlInput.removeAttribute("id");
     cards[0]?.baseUrlInput.setAttribute("id", "setting-base-url");
+    // openSetup 的焦点请求在每次重建时兑现一次：宿主慢回包时重建会把
+    // 焦点打掉，靠这里补回来，而不是靠固定延时。
+    if (connectionSetupFocus && cards[0]?.baseUrlInput) {
+      cards[0].baseUrlInput.focus();
+      connectionSetupFocus = false;
+    }
   };
 
   /** The first free default name; `provider1` unless that one is taken. */
@@ -1942,8 +1961,13 @@ function buildBehaviorPage() {
       // waiting for the host's reply — the removal is in the payload that was
       // just sent, and `fillSettings` redraws from the file when it lands.
       remove.addEventListener("click", () => {
-        savePermissions({ rules: permissions.rules.filter((_, position) => position !== index) });
-        drawRules();
+        // 写盘且不可逆，与其他删除共用 confirmAction；确认后行即刻消失，
+        // `fillSettings` 在宿主回包时按文件重画。
+        void confirmAction(s.removeRuleConfirm, { danger: true }).then((yes) => {
+          if (!yes) return;
+          savePermissions({ rules: permissions.rules.filter((_, position) => position !== index) });
+          drawRules();
+        });
       });
       row.appendChild(remove);
       rulesList.appendChild(row);
@@ -2408,10 +2432,15 @@ function buildMcpPage() {
         },
         { quiet: true },
       ),
-      sButton(s.remove, () => api.send({ cmd: "removeMcpServer", name: server.name }), {
-        quiet: true,
-        danger: true,
-      }),
+      sButton(
+        s.remove,
+        () => {
+          void confirmAction(s.removeMcpConfirm.replace("{name}", server.name), { danger: true }).then((yes) => {
+            if (yes) api.send({ cmd: "removeMcpServer", name: server.name });
+          });
+        },
+        { quiet: true, danger: true },
+      ),
     );
     head.append(toggle, headActions);
 
@@ -3134,10 +3163,15 @@ function buildSkillsPage() {
         const actions = el("div", "mcp-actions");
         actions.appendChild(sButton(s.edit, () => openForm(skill), { quiet: true }));
         actions.appendChild(
-          sButton(s.remove, () => api.send({ cmd: "removeSkill", scope: skill.scope, name: skill.name }), {
-            quiet: true,
-            danger: true,
-          }),
+          sButton(
+            s.remove,
+            () => {
+              void confirmAction(s.removeSkillConfirm.replace("{name}", skill.name), { danger: true }).then((yes) => {
+                if (yes) api.send({ cmd: "removeSkill", scope: skill.scope, name: skill.name });
+              });
+            },
+            { quiet: true, danger: true },
+          ),
         );
         row.append(main, actions);
         list.appendChild(row);
@@ -3256,10 +3290,15 @@ function buildMemoryPage() {
         card.appendChild(el("p", "memory-body-text", entry.body));
         const actions = el("div", "memory-actions");
         actions.appendChild(
-          sButton(s.remove, () => api.send({ cmd: "deleteMemory", scope: section.key, name: entry.name }), {
-            quiet: true,
-            danger: true,
-          }),
+          sButton(
+            s.remove,
+            () => {
+              void confirmAction(s.removeMemoryConfirm.replace("{name}", entry.name), { danger: true }).then((yes) => {
+                if (yes) api.send({ cmd: "deleteMemory", scope: section.key, name: entry.name });
+              });
+            },
+            { quiet: true, danger: true },
+          ),
         );
         card.appendChild(actions);
         group.appendChild(card);
@@ -3318,13 +3357,19 @@ function formatPackBytes(bytes) {
 function buildToolsPage() {
   const s = S();
   const pane = sPage(s.pageTools, s.pageToolsDesc);
-  // 顺序即优先级：本机有什么、装了什么、还能装什么。用户打开这一页问的
-  // 就是这三个问题，按这个顺序回答。
-  const detectedBox = el("section", "setting-group");
-  const summary = el("div", "pack-summary");
-  pane.appendChild(detectedBox);
-  pane.appendChild(summary);
+  // 这页默认只回答"装了什么、还能装什么"：一行占用统计 + 一张统一列表。
+  // 检测详情、搜索路径、清理、离线安装都是排查时才需要的东西，全部折进
+  // 「高级」—— 页面上常年挂着一打按钮和几十行工具表，对只想装个编译器的
+  // 人是噪音。
+  const advanced = el("details", "tc-advanced");
+  const advancedSummary = el("summary", "", s.tcAdvanced);
+  advanced.appendChild(advancedSummary);
+  const advancedBody = el("div", "tc-advanced-body");
+  advanced.appendChild(advancedBody);
+  const detectedBox = el("div");
+  advancedBody.appendChild(detectedBox);
 
+  const summary = el("div", "pack-summary");
   const list = el("div", "pack-list");
   pane.appendChild(list);
 
@@ -3411,6 +3456,7 @@ function buildToolsPage() {
           const entry = availableEntryFor(kind);
           if (entry) {
             const install = sButton(s.packInstall, () => api.send({ cmd: "installPack", id: entry.id }), { quiet: true });
+            install.dataset.packAction = "install";
             install.classList.add("tc-install");
             row.appendChild(install);
           }
@@ -3456,7 +3502,7 @@ function buildToolsPage() {
       list.appendChild(box);
     }
 
-    // 根目录与占用：这是"别把文件系统搞乱"这个问题最直接的回答。
+    // 根目录与占用：一行说清"磁盘被谁占了"。
     summary.innerHTML = "";
     summary.appendChild(el("code", "pack-root", packs.root));
     summary.appendChild(
@@ -3466,21 +3512,11 @@ function buildToolsPage() {
         `${s.packUsed} ${formatBytes(packs.totalBytes)}${packs.freeBytes ? ` · ${s.packFree} ${formatBytes(packs.freeBytes)}` : ""}`,
       ),
     );
+    pane.insertBefore(summary, list);
 
-    if (packs.packs.length === 0) {
-      const empty = el("div", "settings-empty-card");
-      empty.appendChild(el("h3", "", s.packEmptyTitle));
-      empty.appendChild(el("p", "", s.packEmptyBody));
-      list.appendChild(empty);
-    } else {
-      // 清理只删「本应用创建且已经过期」的目录：中断留下的半截下载，
-      // 和删了一半的旧版本。它不会碰任何已安装的包，所以可以放在这里
-      // 让用户随时点，而不必等启动时那一次自动清理。
-      const tools = el("div", "pack-housekeeping");
-      tools.appendChild(sButton(s.packPrune, () => api.send({ cmd: "prunePacks" }), { quiet: true }));
-      list.appendChild(tools);
-    }
-
+    // 统一列表：已安装在前、可安装在后，同一张表同一个节奏。已安装的
+    // 行带它满足的工具链种类（provides），扫一眼就知道"装这个是为了什么"。
+    const installedIds = new Set((packs.packs ?? []).map((pack) => pack.manifest.id));
     for (const pack of packs.packs) {
       const row = el("div", "pack-row");
 
@@ -3505,60 +3541,54 @@ function buildToolsPage() {
       if (pack.problem) main.appendChild(el("p", "setting-note pack-problem", pack.problem));
 
       const actions = el("div", "pack-actions");
-      actions.appendChild(sButton(s.packVerify, () => api.send({ cmd: "verifyPack", id: pack.manifest.id }), { quiet: true }));
+      const verify = sButton(s.packVerify, () => api.send({ cmd: "verifyPack", id: pack.manifest.id }), { quiet: true });
+      verify.dataset.packAction = "verify";
+      actions.appendChild(verify);
 
-      // 删除要两次点击：一个 pack 是一 GB，误删的代价是重新下载十分钟。
-      // 确认状态放在 `state` 上而不是闭包里 —— `render()` 会重建整个列表，
-      // 闭包里的 armed 会跟着旧按钮一起消失，用户第二次点的是新按钮，
-      // 于是永远要求"再点一次"。
+      // 删除一个 pack 是一 GB，误删的代价是重新下载十分钟。与其他删除
+      // 统一走 confirmAction 弹窗——确认状态放在 state 上的 armed 模式
+      // 在 render 重建后会失效，而且同一产品里不该有两种删除确认。
       const remove = sButton(s.packRemove, () => {
-        if (state.packRemoveArmed !== pack.manifest.id) {
-          state.packRemoveArmed = pack.manifest.id;
-          render();
-          setTimeout(() => {
-            if (state.packRemoveArmed === pack.manifest.id) {
-              state.packRemoveArmed = null;
-              render();
-            }
-          }, 4000);
-          return;
-        }
-        state.packRemoveArmed = null;
-        api.send({ cmd: "removePack", id: pack.manifest.id });
+        void confirmAction(s.packRemoveConfirm.replace("{name}", pack.manifest.name), { danger: true }).then((yes) => {
+          if (!yes) return;
+          state.packRemoveArmed = null;
+          api.send({ cmd: "removePack", id: pack.manifest.id });
+        });
       }, { quiet: true, danger: true });
-      if (state.packRemoveArmed === pack.manifest.id) {
-        remove.textContent = s.packRemoveConfirm;
-        remove.classList.add("danger");
-      }
+      remove.dataset.packAction = "remove";
       actions.appendChild(remove);
 
       row.append(main, actions);
       list.appendChild(row);
     }
 
-    // 可安装的条目。已经装过的那个不再列出来 —— 同一份东西出现在
-    // "已安装"和"可安装"两处，用户只会读成"还能再装一次"。
-    const installedIds = new Set((packs.packs ?? []).map((pack) => pack.manifest.id));
-    const available = (state.packCatalog ?? []).filter((entry) => !installedIds.has(entry.id) && entry.installable);
-    if (available.length) {
-      const group = el("section", "setting-group");
-      group.appendChild(el("h3", "setting-group-title", s.packAvailable));
-      for (const entry of available) {
-        const row = el("div", "pack-row pack-available");
-        const main = el("div", "pack-main");
-        const title = el("div", "pack-title");
-        title.appendChild(el("strong", "", entry.name));
-        title.appendChild(el("span", "pack-version", entry.version));
-        main.appendChild(title);
-        main.appendChild(el("div", "pack-meta", `${formatBytes(entry.downloadBytes)} · ${entry.provides.join(", ")}`));
+    if (packs.packs.length === 0) {
+      const empty = el("div", "settings-empty-card");
+      empty.appendChild(el("h3", "", s.packEmptyTitle));
+      empty.appendChild(el("p", "", s.packEmptyBody));
+      list.appendChild(empty);
+    }
 
-        const actions = el("div", "pack-actions");
-        actions.appendChild(sButton(s.packInstall, () => api.send({ cmd: "installPack", id: entry.id }), { primary: true }));
-        row.append(main, actions);
-        group.appendChild(row);
-      }
-      list.appendChild(group);
-    } else {
+    // 可安装的条目接着已安装的排，样式上不再单独分组 —— "还能装什么"
+    // 是这张统一列表的下半部分。已经装过的那个不再列出来。
+    const available = (state.packCatalog ?? []).filter((entry) => !installedIds.has(entry.id) && entry.installable);
+    for (const entry of available) {
+      const row = el("div", "pack-row pack-available");
+      const main = el("div", "pack-main");
+      const title = el("div", "pack-title");
+      title.appendChild(el("strong", "", entry.name));
+      title.appendChild(el("span", "pack-version", entry.version));
+      main.appendChild(title);
+      main.appendChild(el("div", "pack-meta", `${formatBytes(entry.downloadBytes)} · ${entry.provides.join(", ")}`));
+
+      const actions = el("div", "pack-actions");
+      const installPrimary = sButton(s.packInstall, () => api.send({ cmd: "installPack", id: entry.id }), { primary: true });
+      installPrimary.dataset.packAction = "install";
+      actions.appendChild(installPrimary);
+      row.append(main, actions);
+      list.appendChild(row);
+    }
+    if (packs.packs.length && available.length === 0) {
       // 没有可安装项时不安静地留白：用户会以为页面坏了。真实原因有两种,
       // 都要说清楚 —— 已经装完了，或者目录里还没有通过校验的条目。
       const pending = (state.packCatalog ?? []).filter((entry) => !entry.installable && !installedIds.has(entry.id));
@@ -3567,26 +3597,39 @@ function buildToolsPage() {
       list.appendChild(note);
     }
 
-    // 离线安装：内网机器连不上下载站时，用户手上只有别人拷过来的
-    // pack.json 和压缩包。它和在线安装走同一个事务，只是字节来源不同。
-    const offline = el("div", "pack-offline");
-    offline.appendChild(el("p", "setting-note", s.packOfflineHint));
-    offline.appendChild(
-      sButton(s.packOffline, async () => {
-        const manifestPath = await api.pickFile?.({ filters: [{ name: "pack.json", extensions: ["json"] }] });
-        if (!manifestPath) return;
-        // 同一个目录里的 .zip / .tar.xz 就是它的归档；找不到就让安装器
-        // 自己按 manifest 里的 URL 去取。
-        const dir = manifestPath.replace(/[\\/][^\\/]+$/, "");
-        const archive = await api.pickFile?.({
-          defaultPath: dir,
-          filters: [{ name: "Archive", extensions: ["zip", "xz", "gz"] }],
-        });
-        api.send({ cmd: "installFromManifest", path: manifestPath, files: archive ? [archive] : [] });
-      }),
-    );
-    list.appendChild(offline);
+    // 高级区（页面底部，默认折叠）：本机检测详情在 renderDetected 里刷新；
+    // 清理、离线安装是静态内容，在 render 外面只构建一次。
+    if (advanced.parentNode !== pane) pane.appendChild(advanced);
   };
+
+  // 清理只删「本应用创建且已经过期」的目录：中断留下的半截下载，
+  // 和删了一半的旧版本。它不会碰任何已安装的包，所以可以放在这里
+  // 让用户随时点，而不必等启动时那一次自动清理。
+  const housekeeping = el("div", "pack-housekeeping");
+  const prune = sButton(s.packPrune, () => api.send({ cmd: "prunePacks" }), { quiet: true });
+  prune.dataset.packAction = "prune";
+  housekeeping.appendChild(prune);
+  advancedBody.appendChild(housekeeping);
+
+  // 离线安装：内网机器连不上下载站时，用户手上只有别人拷过来的
+  // pack.json 和压缩包。它和在线安装走同一个事务，只是字节来源不同。
+  const offline = el("div", "pack-offline");
+  offline.appendChild(el("p", "setting-note", s.packOfflineHint));
+  offline.appendChild(
+    sButton(s.packOffline, async () => {
+      const manifestPath = await api.pickFile?.({ filters: [{ name: "pack.json", extensions: ["json"] }] });
+      if (!manifestPath) return;
+      // 同一个目录里的 .zip / .tar.xz 就是它的归档；找不到就让安装器
+      // 自己按 manifest 里的 URL 去取。
+      const dir = manifestPath.replace(/[\\/][^\\/]+$/, "");
+      const archive = await api.pickFile?.({
+        defaultPath: dir,
+        filters: [{ name: "Archive", extensions: ["zip", "xz", "gz"] }],
+      });
+      api.send({ cmd: "installFromManifest", path: manifestPath, files: archive ? [archive] : [] });
+    }),
+  );
+  advancedBody.appendChild(offline);
 
   // 进度条独立于列表，安装时它出现在最上面。
   const progressBar = el("div", "pack-progress");
@@ -3600,6 +3643,14 @@ function buildToolsPage() {
 
   state.renderPackPage = render;
   state.renderPackProgress = (progress) => {
+    // An in-flight operation disables every pack button on the page: the host
+    // aborts the running install when a second one arrives, so a second click
+    // did not just error — it killed the first download.
+    const busy = progress !== null;
+    for (const button of pane.querySelectorAll("button")) {
+      if (button.dataset.packAction === undefined) continue;
+      button.disabled = busy;
+    }
     if (!progress) {
       progressBar.hidden = true;
       return;
@@ -4125,15 +4176,12 @@ function openSetup() {
   // host's answer — the pane this call builds is usually replaced by the one
   // `fillSettings` builds a moment later, taking any hint written into it.
   connectionSetupHint = true;
+  // 焦点同样走标志：页面构建时（含宿主回包后的重建）抓取，而不是用固定
+  // 延时去赌一次异步渲染——宿主慢于 80ms 时旧实现会落空。
+  connectionSetupFocus = true;
   openSettings("connection");
-  setTimeout(() => {
-    const hint = $("models-hint");
-    if (hint) {
-      hint.textContent = t.setupHint;
-      hint.hidden = false;
-    }
-    $("setting-base-url")?.focus();
-  }, 80);
+  // 页面本次是同步建好的；直接试一次，若 id 已在就立刻聚焦。
+  $("setting-base-url")?.focus();
 }
 
 $("setup-button").addEventListener("click", openSetup);
@@ -4268,7 +4316,9 @@ function basename(path) {
         // dialog is a modal, so a transcript notice would never be read. Update
         // the line in place — re-rendering would take the open form, and the
         // draft it holds, down with it.
-        const text = message.level === "warn" ? String(message.text ?? "") : "";
+        // warn 和 error 都是失败，都要显示——把 error 丢掉等于把保存失败
+        // 伪装成成功（R3）。只有 info 才是「什么也没发生」。
+        const text = message.level === "info" ? "" : String(message.text ?? "");
         state.skillError = text;
         state.showSkillsError?.(text);
         break;

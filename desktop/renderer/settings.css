@@ -462,7 +462,8 @@
 
 .setting-switch.on .setting-switch-knob {
   transform: translateX(15px);
-  background: #fff;
+  /* on 状态旋钮浮在 accent 底上，语义色是 on-accent（浅色主题下为黑）。 */
+  background: var(--on-accent);
 }
 
 .setting-switch:focus-visible {
@@ -1451,7 +1452,16 @@
 }
 
 .btn.danger {
+  /* 破坏性按钮不能被 btn-quiet 的边框透明弱化：有边框 + danger 色 + hover
+     加深，和普通 secondary 按钮同权重，颜色本身负责语义。 */
   color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 45%, transparent);
+  background: var(--surface);
+}
+
+.btn.danger:hover {
+  background: var(--danger-soft);
+  border-color: var(--danger);
 }
 
 @media (max-width: 860px) {
@@ -1585,6 +1595,38 @@
 .tc-install {
   flex-shrink: 0;
   margin-top: 2px;
+}
+
+/* 高级区：页面底部的折叠块，装包流程之外的一切都住在这里。 */
+.tc-advanced {
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.tc-advanced > summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 4px 0;
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.tc-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.tc-advanced > summary::before {
+  content: "▸ ";
+}
+
+.tc-advanced[open] > summary::before {
+  content: "▾ ";
+}
+
+.tc-advanced-body > * + * {
+  margin-top: 14px;
 }
 
 .pack-none {
