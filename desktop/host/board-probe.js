@@ -24,8 +24,12 @@ const STATUS_TOOLS = new Set([
   // probe MCP (embedded server): reports {backend, probe, cpu, serial}
   "device_status",
   "device_list",
-  // keil: session/toolchain state without opening a debug session
-  "keil_debug:status",
+  // keil: capability/version state without opening a debug session.
+  // `status` is not one of keil_debug's actions — the probe used to call it
+  // anyway and the pane showed a permanent "failed (mcp_tool_error)" row
+  // that had nothing to do with the hardware.
+  "keil_debug:capabilities",
+  "keil_debug:version",
   // cubeide: backend presence + target probe list, no session needed
   "cubeide_build:probe",
   "cubeide_debug:status",
@@ -33,7 +37,7 @@ const STATUS_TOOLS = new Set([
 ]);
 
 /** Actions allowed on action-style tools (name:action whitelist). */
-const STATUS_ACTIONS = new Set(["status", "probe", "version", "info"]);
+const STATUS_ACTIONS = new Set(["status", "probe", "version", "info", "capabilities"]);
 
 /**
  * Read the embedded status from every configured MCP server.

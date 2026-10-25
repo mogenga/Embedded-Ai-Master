@@ -404,6 +404,16 @@ function resetToolchainDetection() {
   toolchainDetectionCache = null;
 }
 
+/**
+ * The packs registry, or null when the kernel is not compiled. getBoardState
+ * needs it for toolchain detection but must not fail the whole state message
+ * over a missing build.
+ */
+async function packsRegistryOrNull() {
+  const packs = await packsModule();
+  return packs?.registry ?? null;
+}
+
 async function detectToolchainsForPacks(registry) {
   if (toolchainDetectionCache) return toolchainDetectionCache;
   const keil = await keilToolchainModule();
@@ -4187,8 +4197,11 @@ const handlers = {
     }
   },
 
-  serialStatus() {
-    const port = serialBridge.openPorts[0];
+  serialStatus(payload = {}) {
+    // The payload may name the port; only fall back to the first open one
+    // when it does not — with two ports (agent opened the second) [0] could
+    // be the wrong target.
+    const port = payload.port ?? serialBridge.openPorts[0];
     if (port === undefined) {
       send({ type: "serial_state", open: false });
       return;
@@ -4208,8 +4221,8 @@ const handlers = {
     });
   },
 
-  serialClear() {
-    const port = serialBridge.openPorts[0];
+  serialClear(payload = {}) {
+    const port = payload.port ?? serialBridge.openPorts[0];
     if (port !== undefined) {
       const session = serialBridge.sessionOf(port);
       session.ring.length = 0;
@@ -4218,8 +4231,9 @@ const handlers = {
     send({ type: "serial_cleared" });
   },
 
-  serialWrite({ data, hex }) {
-    const port = serialBridge.openPorts[0];
+  serialWrite(payload) {
+    const { data, hex } = payload;
+    const port = payload.port ?? serialBridge.openPorts[0];
     if (port === undefined || typeof data !== "string" || data === "") {
       send({ type: "notice", level: "warn", text: "serialWrite：无已打开的串口或数据为空" });
       return;
@@ -4230,8 +4244,9 @@ const handlers = {
   },
 
   /** Manual modem-line control (DTR/RTS): the board-reset gesture. */
-  serialLine({ line, value }) {
-    const port = serialBridge.openPorts[0];
+  serialLine(payload) {
+    const { line, value } = payload;
+    const port = payload.port ?? serialBridge.openPorts[0];
     if (port === undefined) {
       send({ type: "notice", level: "warn", text: "serialLine：无已打开的串口" });
       return;
@@ -4242,8 +4257,9 @@ const handlers = {
   },
 
   /** Runtime baud change without dropping the line. */
-  serialBaud({ baud }) {
-    const port = serialBridge.openPorts[0];
+  serialBaud(payload) {
+    const { baud } = payload;
+    const port = payload.port ?? serialBridge.openPorts[0];
     if (port === undefined) {
       send({ type: "notice", level: "warn", text: "serialBaud：无已打开的串口" });
       return;
@@ -4316,6 +4332,10 @@ const handlers = {
         ports,
         serial,
         serialTail,
+        // What toolchains the machine actually has: the renderer's「本机」line
+        // and the project's requiredMissing check read this. Previously the
+        // field was never sent, so the pane showed "0 tools" forever.
+        tools: await detectToolchainsForPacks(await packsRegistryOrNull()).catch(() => []),
         selection: boardSelection,
         effective: { port: boardSelection?.port, baud: boardSelection?.baud },
       },

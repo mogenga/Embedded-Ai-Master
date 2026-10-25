@@ -333,6 +333,8 @@ export class SerialBridge {
       dead: false,
       ready: false,
       pending: [],
+      /** Raw bytes (latin1, one byte per char) not yet assigned to a line. */
+      rawQueue: [],
       flushTimer: null,
       partial: "",
       rxBytes: 0,
@@ -418,6 +420,10 @@ export class SerialBridge {
       // characters wins and is kept for the rest of the session.
       sp.on("data", (chunk) => {
         session.rxBytes += chunk.length;
+        // The raw bytes ride along so HEX view can show what the wire carried:
+        // re-encoding decoded text with TextEncoder shows UTF-8 bytes even
+        // when the line was GBK, which is not what a logic analyzer saw.
+        session.rawQueue.push(chunk.toString("latin1"));
         if (session.encoding === "auto") {
           this.#autoDetect(session, chunk, port);
           this.#sendStats(session);
@@ -576,6 +582,8 @@ export class SerialBridge {
     if (session.partial.length > 0) {
       const text = session.partial.length > LINE_MAX_CHARS ? session.partial.slice(0, LINE_MAX_CHARS) : session.partial;
       const line = { text, at: Date.now(), level: levelOf(text), tail: true };
+      const consumed = this.#takeRaw(session, text.length);
+      if (consumed.length > 0) line.raw = consumed;
       session.ring.push(line);
       if (session.ring.length > RING_MAX_LINES) {
         const excess = session.ring.length - RING_MAX_LINES;
@@ -595,12 +603,24 @@ export class SerialBridge {
   /**
    * Accept one complete line (the carried partial) plus any further complete
    * lines from the same chunk. The pending batch flushes on count or debounce.
+   *
+   * Each line also takes its raw bytes (latin1, one byte per char) from
+   * `rawQueue`: the decoded text lost the original encoding, and the HEX view
+   * must show what the wire carried. When the queue runs dry (decode
+   * reassembly across chunks) the line simply has no `raw`, and the pane
+   * falls back to its old behaviour.
    */
   #acceptLine(session, first, rest) {
     const lines = first.length > 0 ? [first, ...rest] : rest;
     for (const raw of lines) {
       const text = raw.length > LINE_MAX_CHARS ? raw.slice(0, LINE_MAX_CHARS) : raw;
       const line = { text, at: Date.now(), level: levelOf(text) };
+      if (session.rawQueue.length > 0) {
+        // Bytes belonging to this line: everything up to and including the
+        // line terminator in the raw queue.
+        const consumed = this.#takeRaw(session, text.length + 1);
+        if (consumed.length > 0) line.raw = consumed;
+      }
       session.ring.push(line);
       if (session.ring.length > RING_MAX_LINES) {
         const excess = session.ring.length - RING_MAX_LINES;
@@ -620,6 +640,25 @@ export class SerialBridge {
       }, FLUSH_DEBOUNCE_MS);
       session.flushTimer.unref?.();
     }
+  }
+
+  /**
+   * Take `count` characters (≈ bytes, latin1) off the front of `rawQueue`,
+   * joining chunk fragments as needed. Returns "" when the queue is empty.
+   */
+  #takeRaw(session, count) {
+    let taken = "";
+    while (taken.length < count && session.rawQueue.length > 0) {
+      const head = session.rawQueue[0];
+      const need = count - taken.length;
+      if (head.length <= need) {
+        taken += session.rawQueue.shift();
+      } else {
+        taken += head.slice(0, need);
+        session.rawQueue[0] = head.slice(need);
+      }
+    }
+    return taken;
   }
 
   /**
