@@ -226,7 +226,12 @@ export class SerialBridge {
       return { ok: true, port, opening: true, baud };
     }
     if (request.op === "close") {
-      if (session === undefined) return { ok: true, port, already: true };
+      if (session === undefined) {
+        // Not held in memory — still scrub the mirror so a stale entry from a
+        // previous run stops advertising this port as open.
+        this.#writeClosedMirror(port);
+        return { ok: true, port, already: true };
+      }
       void this.close(port).catch(() => undefined);
       return { ok: true, port, closing: true };
     }
@@ -244,10 +249,11 @@ export class SerialBridge {
     const before = session.rxBytes;
     if (request.op === "write") {
       const data = String(request.data ?? "");
-      // The pane replays the agent's write as a real user action — typing into
-      // the input, then pressing Send — so the operator can see who sent what
-      // instead of characters appearing from nowhere. The event goes out
-      // BEFORE the bytes so the animation starts as the port transmits.
+      // Write FIRST: a refused write must not leave a TX row (or an animation)
+      // for bytes that never went out. The replay event goes out only when the
+      // write was accepted, so the pane animates a real transmission.
+      const ok = this.write(port, data, { hex: request.hex === true });
+      if (!ok) return { ok: false, error: "写入失败：面板拒绝（会话已断、数据为空或 hex 非法）" };
       this.#send({
         type: "serial_agent_write",
         port,
@@ -255,8 +261,6 @@ export class SerialBridge {
         hex: request.hex === true,
         source: String(request.source ?? "agent"),
       });
-      const ok = this.write(port, data, { hex: request.hex === true });
-      if (!ok) return { ok: false, error: "写入失败：面板拒绝（会话已断或数据为空）" };
       return { ok: true, port, wrote: data.length, rxBefore: before };
     }
     if (request.op === "setLine") {
@@ -290,7 +294,7 @@ export class SerialBridge {
     const ring = session.ring;
     const start = since > 0 ? Math.min(since, ring.length) : Math.max(0, ring.length - maxLines);
     return {
-      port: session.port,
+      port: session.name,
       baud: session.baud,
       connected: session.ready && !session.dead,
       lines: ring.slice(start, start + maxLines),
@@ -382,6 +386,7 @@ export class SerialBridge {
         if (!session.dead) {
           this.#teardown(session);
           this.#sessions.delete(port);
+          this.#writeClosedMirror(port);
           this.#send({ type: "serial_state", open: false, port, baud: session.baud, error: `串口错误：${message}` });
         }
       });
@@ -396,6 +401,7 @@ export class SerialBridge {
         if (!session.dead) {
           this.#teardown(session);
           this.#sessions.delete(port);
+          this.#writeClosedMirror(port);
           this.#send({ type: "serial_state", open: false, port, baud: session.baud });
         }
       });
@@ -492,6 +498,11 @@ export class SerialBridge {
    * flushed): a half-received character in the old codec would otherwise
    * poison the first line after the switch.
    */
+  /**
+   * Switch the RX text codec on a live session. The decoder is replaced (not
+   * flushed): a half-received character in the old codec would otherwise
+   * poison the first line after the switch.
+   */
   setEncoding(port, encoding) {
     const session = this.#sessions.get(port);
     if (session === undefined || !session.ready || session.dead) return false;
@@ -502,7 +513,8 @@ export class SerialBridge {
     // Back to `auto`: throw away the evidence from the previous codec and let
     // the next arrival decide again. Explicit choices keep their buffer.
     session.probe = next === "auto" ? null : session.probe;
-    this.#send({ type: "serial_state", open: true, port, baud: session.baud, encoding: next });
+    // A codec switch is NOT a new session: the pane must keep its transcript.
+    this.#send({ type: "serial_state", open: true, port, baud: session.baud, encoding: next, mode: "reconfigured" });
     return true;
   }
 
@@ -515,7 +527,8 @@ export class SerialBridge {
     try {
       session.port.update({ baudRate: rate });
       session.baud = rate;
-      this.#send({ type: "serial_state", open: true, port, baud: rate });
+      // A baud change keeps the session (and its ring) alive — not a new session.
+      this.#send({ type: "serial_state", open: true, port, baud: rate, mode: "reconfigured" });
       return true;
     } catch {
       return false;
@@ -542,6 +555,8 @@ export class SerialBridge {
       setTimeout(resolve, 1500).unref();
     });
     try { session.port.close(() => {}); } catch { /* second close is a no-op */ }
+    // The mirror must not keep advertising a port nobody holds.
+    this.#writeClosedMirror(port);
     this.#send({ type: "serial_state", open: false, port, baud: session.baud });
     return true;
   }
@@ -555,6 +570,21 @@ export class SerialBridge {
   /** Flush pending lines, then mark the session dead so `data` stops flowing. */
   #teardown(session) {
     session.dead = true;
+    // A held-back partial line is real received data: flush it as a line with
+    // a "no newline" marker before the session goes, or the tail disappears
+    // from the ring, the mirror and the pane at once.
+    if (session.partial.length > 0) {
+      const text = session.partial.length > LINE_MAX_CHARS ? session.partial.slice(0, LINE_MAX_CHARS) : session.partial;
+      const line = { text, at: Date.now(), level: levelOf(text), tail: true };
+      session.ring.push(line);
+      if (session.ring.length > RING_MAX_LINES) {
+        const excess = session.ring.length - RING_MAX_LINES;
+        session.ring.splice(0, excess);
+        session.dropped += excess;
+      }
+      session.pending.push(line);
+      session.partial = "";
+    }
     this.#flushPending(session);
     if (session.flushTimer !== null) {
       clearTimeout(session.flushTimer);
@@ -634,7 +664,9 @@ export class SerialBridge {
     session.decoder = new TextDecoder(choice === "gbk" ? "gbk" : "utf-8");
     session.probe = null;
     // Tell the pane, so the dropdown stops claiming a codec nobody chose.
-    this.#send({ type: "serial_state", open: true, port, baud: session.baud, encoding: choice, detected: true });
+    // `mode: "reconfigured"` keeps the pane from treating this as a new
+    // session and wiping the transcript (auto-detect fires mid-session).
+    this.#send({ type: "serial_state", open: true, port, baud: session.baud, encoding: choice, detected: true, mode: "reconfigured" });
 
     const text = session.decoder.decode(sample, { stream: true });
     const { lines, rest } = splitLines(text);
@@ -675,6 +707,7 @@ export class SerialBridge {
         port: session.name,
         baud: session.baud,
         owner: "panel",
+        open: session.ready && !session.dead,
         total: session.ring.length,
         dropped: session.dropped,
         lines: session.ring.slice(-100),
@@ -682,6 +715,30 @@ export class SerialBridge {
       const payload = JSON.stringify({ updatedAt: Date.now(), ports }, null, 1);
       const tmp = `${file}.tmp`;
       writeFileSync(tmp, payload, "utf8");
+      renameSync(tmp, file);
+    } catch {
+      this.#mirrorFailures += 1;
+    }
+  }
+
+  /**
+   * Write a closed-session entry for `port` to the mirror. Called on close
+   * paths so the agent's `status`/`read` stop reporting a dead port as open —
+   * previously the last live frame lingered forever on disk.
+   */
+  #writeClosedMirror(port) {
+    const file = serialRingPath();
+    try {
+      let payload = { updatedAt: Date.now(), ports: [] };
+      try {
+        const previous = JSON.parse(readFileSync(file, "utf8"));
+        if (previous && Array.isArray(previous.ports)) {
+          payload.ports = previous.ports.filter((entry) => entry?.port !== port);
+        }
+      } catch { /* no previous mirror: nothing to merge */ }
+      payload.updatedAt = Date.now();
+      const tmp = `${file}.tmp`;
+      writeFileSync(tmp, JSON.stringify(payload, null, 1), "utf8");
       renameSync(tmp, file);
     } catch {
       this.#mirrorFailures += 1;

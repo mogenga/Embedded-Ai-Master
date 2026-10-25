@@ -4193,7 +4193,19 @@ const handlers = {
       send({ type: "serial_state", open: false });
       return;
     }
-    send({ type: "serial_snapshot", open: true, port, baud: serialBridge.sessionOf(port).baud, lines: [], dropped: 0 });
+    const session = serialBridge.sessionOf(port);
+    // The snapshot must carry the ring tail: an empty `lines` here wiped the
+    // pane's transcript every time the user switched tabs and back.
+    const tail = serialBridge.ringTail(port, 500);
+    send({
+      type: "serial_snapshot",
+      open: true,
+      port,
+      baud: session.baud,
+      encoding: session.encoding,
+      lines: tail?.lines ?? [],
+      dropped: session.dropped,
+    });
   },
 
   serialClear() {

@@ -708,8 +708,12 @@ const embedSerialTool: ProbeToolSpec = {
           }
           // A write through a transient pump: open, write, brief settle for
           // the echo/reply, capture, exit. duration_ms applies to the reply
-          // window, not the write.
+          // window, not the write. A pump write failure is a failed write —
+          // reporting "wrote" here is exactly the fake success R3 forbids.
           const capture = await captureThenWrite(port, baud, data, Number(input.duration_ms ?? 1500), input.hex === true);
+          if (capture.error !== undefined) {
+            return fail("write_failed", `写入失败：${capture.error}`);
+          }
           const text = [
             `wrote ${JSON.stringify(data.length > 60 ? `${data.slice(0, 60)}…` : data)} to ${port} @ ${baud}`,
             `captured ${capture.lines.length} line(s) in reply window (${Number(input.duration_ms ?? 1500)}ms)`,

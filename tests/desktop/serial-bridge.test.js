@@ -12,6 +12,7 @@ import { createRequire } from "node:module";
 const require_ = createRequire(import.meta.url);
 const path = require_("node:path");
 const os = require_("node:os");
+const fs = require_("node:fs");
 // The bridge lives in desktop/host, outside vitest's tsconfig root; load the
 // JS file directly. Its exports are plain ESM.
 const { SerialBridge, listSerialPorts, RING_MAX_LINES, serialRingPath } = await import(
@@ -396,6 +397,152 @@ describe("listSerialPorts", () => {
         expect(typeof entry.path).toBe("string");
       }
     }
+  });
+});
+
+describe("P1 修复的行为锁定", () => {
+  let homeDir;
+  let prevHome;
+
+  beforeEach(() => {
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "eam-bridge-home-"));
+    prevHome = process.env.HARNESS_HOME;
+    process.env.HARNESS_HOME = homeDir;
+  });
+
+  afterEach(() => {
+    if (prevHome === undefined) delete process.env.HARNESS_HOME;
+    else process.env.HARNESS_HOME = prevHome;
+    fs.rmSync(homeDir, { recursive: true, force: true });
+  });
+
+  it("T-012 关闭时把无换行的 partial 作为一行 flush 进 ring 与事件", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200, { encoding: "utf-8" });
+    deviceSend("/dev/TEST0", "no-newline-tail");
+    await bridge.close("/dev/TEST0");
+    const linesEvent = events.find((e) => e.type === "serial_lines" && e.lines?.length > 0);
+    expect(linesEvent).toBeDefined();
+    expect(linesEvent.lines[0].text).toBe("no-newline-tail");
+    expect(linesEvent.lines[0].tail).toBe(true);
+    expect(bridge.ringTail("/dev/TEST0", 5)).toBeNull(); // session gone
+  });
+
+  it("T-013 close 后镜像不再含该端口；open 后无数据镜像为空列表", async () => {
+    const { bridge } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    deviceSend("/dev/TEST0", `hello${CRLF}`);
+    await vi.waitFor(() => {
+      if (!fs.existsSync(serialRingPath())) throw new Error("mirror not written yet");
+    });
+    let mirror = JSON.parse(fs.readFileSync(serialRingPath(), "utf8"));
+    expect(mirror.ports.some((p) => p.port === "/dev/TEST0")).toBe(true);
+    expect(mirror.ports.find((p) => p.port === "/dev/TEST0").open).toBe(true);
+
+    await bridge.close("/dev/TEST0");
+    mirror = JSON.parse(fs.readFileSync(serialRingPath(), "utf8"));
+    expect(mirror.ports.some((p) => p.port === "/dev/TEST0")).toBe(false);
+  });
+
+  it("T-013b mailbox close op 清除陈旧镜像（跨进程残留）", async () => {
+    // Simulate a mirror left behind by a previous run.
+    fs.mkdirSync(path.join(homeDir, "serial"), { recursive: true });
+    fs.writeFileSync(
+      serialRingPath(),
+      JSON.stringify({ updatedAt: 1, ports: [{ port: "/dev/TEST0", open: true, lines: [] }] }),
+      "utf8",
+    );
+    const { bridge } = makeBridge();
+    bridge.startMailbox(20);
+    const reqDir = path.join(homeDir, "serial", "requests");
+    fs.mkdirSync(reqDir, { recursive: true });
+    fs.writeFileSync(path.join(reqDir, "stale.req.json"), JSON.stringify({ id: "stale", op: "close", port: "/dev/TEST0" }), "utf8");
+    await vi.waitFor(() => {
+      if (fs.existsSync(path.join(reqDir, "stale.res.json"))) return;
+      throw new Error("no reply");
+    });
+    const mirror = JSON.parse(fs.readFileSync(serialRingPath(), "utf8"));
+    expect(mirror.ports.some((p) => p.port === "/dev/TEST0")).toBe(false);
+    bridge.stopMailbox();
+  });
+
+  it("T-010 setEncoding/setBaud 发 mode:reconfigured（不是新会话）", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    bridge.setEncoding("/dev/TEST0", "gbk");
+    bridge.setBaud("/dev/TEST0", 9600);
+    const reconfigured = events.filter((e) => e.type === "serial_state" && e.open === true && e.mode === "reconfigured");
+    expect(reconfigured.length).toBe(2);
+    await bridge.closeAll();
+  });
+
+  it("T-010b auto-detect 完成也发 mode:reconfigured", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200, { encoding: "auto" });
+    deviceSend("/dev/TEST0", "中文测试\r\n");
+    await vi.waitFor(() => {
+      if (events.some((e) => e.type === "serial_state" && e.detected === true)) return;
+      throw new Error("no detect");
+    });
+    expect(events.find((e) => e.detected === true).mode).toBe("reconfigured");
+    await bridge.closeAll();
+  });
+
+  it("T-034 agent 写失败时不发 serial_agent_write（先写后发）", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    await bridge.close("/dev/TEST0");
+    const before = events.filter((e) => e.type === "serial_agent_write").length;
+    // Direct mailbox-level path: a refused write must not emit the event.
+    bridge.startMailbox(20);
+    const reqDir = path.join(homeDir, "serial", "requests");
+    fs.mkdirSync(reqDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(reqDir, "w.req.json"),
+      JSON.stringify({ id: "w", op: "write", port: "/dev/TEST0", data: "hi" }),
+      "utf8",
+    );
+    await vi.waitFor(() => {
+      if (fs.existsSync(path.join(reqDir, "w.res.json"))) return;
+      throw new Error("no reply");
+    });
+    const reply = JSON.parse(fs.readFileSync(path.join(reqDir, "w.res.json"), "utf8"));
+    expect(reply.ok).toBe(false);
+    const after = events.filter((e) => e.type === "serial_agent_write").length;
+    expect(after).toBe(before);
+    bridge.stopMailbox();
+  });
+
+  it("T-034b agent 写成功时事件在写入之后仍发出（动画保留）", async () => {
+    const { bridge, events } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    const before = fakeWrites.length;
+    bridge.startMailbox(20);
+    const reqDir = path.join(homeDir, "serial", "requests");
+    fs.mkdirSync(reqDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(reqDir, "w2.req.json"),
+      JSON.stringify({ id: "w2", op: "write", port: "/dev/TEST0", data: "AT\r\n" }),
+      "utf8",
+    );
+    await vi.waitFor(() => {
+      if (fs.existsSync(path.join(reqDir, "w2.res.json"))) return;
+      throw new Error("no reply");
+    });
+    const reply = JSON.parse(fs.readFileSync(path.join(reqDir, "w2.res.json"), "utf8"));
+    expect(reply.ok).toBe(true);
+    expect(fakeWrites.length).toBeGreaterThan(before);
+    expect(events.some((e) => e.type === "serial_agent_write" && e.data === "AT\r\n")).toBe(true);
+    bridge.stopMailbox();
+    await bridge.closeAll();
+  });
+
+  it("ringTail 返回端口名字符串而非 Port 对象", async () => {
+    const { bridge } = makeBridge();
+    await bridge.open("/dev/TEST0", 115200);
+    const tail = bridge.ringTail("/dev/TEST0", 5);
+    expect(tail.port).toBe("/dev/TEST0");
+    await bridge.closeAll();
   });
 });
 

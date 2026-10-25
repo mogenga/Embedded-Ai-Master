@@ -150,7 +150,21 @@ export const serialInputSchema = z
     // RX text codec for `open`: Keil and most Chinese MCU tutorials print GBK.
     encoding: z.enum(["utf-8", "gbk", "auto"]).optional(),
   })
-  .strict();
+  .strict()
+  // With `hex:true` the payload must be even-length hex — both the host
+  // channel and the fallback pump reject odd/non-hex payloads at runtime,
+  // and a schema rejection beats a write that silently loses half a byte.
+  .superRefine((value, ctx) => {
+    if (value.hex !== true) return;
+    const clean = (value.data ?? "").replace(/\s+/g, "");
+    if (clean.length === 0) return;
+    if (!/^[0-9a-fA-F]+$/.test(clean) || clean.length % 2 !== 0) {
+      ctx.addIssue({
+        code: "custom",
+        message: 'hex payload must be even-length hex characters (each byte is two hex chars, e.g. "0D0A")',
+      });
+    }
+  });
 
 export const SERIAL_DESCRIPTION =
   "Serial monitor access for the agent — the same data the desktop panel shows. action `read` without `port` returns the panel's live ring buffer (the desktop host keeps writing it to <home>/.harness/serial/ring.json); action `read` with `port`+`baud`+`duration_ms` opens the COM port directly for that window and returns the lines captured (fails honestly if the panel already owns the port — COM ports are exclusive). action `write` sends data out through the panel's open port or a transient one; pass `hex:true` to send raw bytes (`data:\"0D0A\"` is CRLF), because text is written verbatim with no escape processing. action `ports` lists COM ports with friendly names. action `status` reports which port is open and who owns it.";

@@ -2675,7 +2675,11 @@ function handleEvent(message) {
         const select = $("serial-encoding");
         if (select && select.value !== message.encoding) select.value = message.encoding;
       }
-      state.serial.lines = message.lines ?? [];
+      // A `reconfigured` snapshot accompanies a codec or baud change on a live
+      // session: keep the transcript, only sync the controls.
+      if (message.mode !== "reconfigured") {
+        state.serial.lines = message.lines ?? [];
+      }
       fillSerialControls();
       rerenderSerialLines();
       break;
@@ -2685,7 +2689,9 @@ function handleEvent(message) {
       break;
 
     case "serial_lines":
-      state.serial.dropped = (state.serial.dropped ?? 0) + (message.dropped ?? 0);
+      // The host sends its running total; assign, don't accumulate — adding
+      // made the counter climb by the same figure on every flush forever.
+      state.serial.dropped = message.dropped ?? state.serial.dropped ?? 0;
       if (state.serial.paused) {
         // Data still arrives; the DOM just stops moving. The ring is the host's,
         // so resuming re-reads nothing — the backlog count is what the user sees.
@@ -4704,8 +4710,11 @@ function setSerialState(message) {
     serial.rxBytes = 0;
     serial.txBytes = 0;
     renderSerialCounters();
-  } else {
-    // Opening a port starts a fresh ring on the host.
+  } else if (message.mode !== "reconfigured") {
+    // Opening a port starts a fresh ring on the host. A `reconfigured` state
+    // (codec switch, baud change, auto-detect) keeps the same session —
+    // wiping the transcript there threw away hours of log for a dropdown
+    // change, and auto-detect fired it silently mid-session.
     $("serial-output").innerHTML = "";
     serial.lines = [];
     serial.filtered = 0;

@@ -87,4 +87,16 @@ describe("serial actions/whitelists", () => {
     expect(serialInputSchema.safeParse({ action: "read", baud: 1 }).success).toBe(false);
     expect(serialInputSchema.safeParse({ action: "read", duration_ms: 60_000 }).success).toBe(false);
   });
+
+  it("T-015 schema 拒绝奇数长度 hex（原来会静默截掉最后半字节）", () => {
+    expect(serialInputSchema.safeParse({ action: "write", port: "COM3", data: "0D0A0", hex: true }).success).toBe(false);
+    expect(serialInputSchema.safeParse({ action: "write", port: "COM3", data: "XYZ", hex: true }).success).toBe(false);
+    // 合法形态仍然放行：带空格分组、大写
+    expect(serialInputSchema.safeParse({ action: "write", port: "COM3", data: "0D 0A", hex: true }).success).toBe(true);
+    expect(serialInputSchema.safeParse({ action: "write", port: "COM3", data: "0D0A", hex: true }).success).toBe(true);
+    // hex:true 下非 hex 文本被拒绝（发送文本不该带 hex 标志）
+    expect(serialInputSchema.safeParse({ action: "write", port: "COM3", data: "AT+RST", hex: true }).success).toBe(false);
+    // 不带 hex 标志的文本不受影响
+    expect(serialInputSchema.safeParse({ action: "write", port: "COM3", data: "AT+RST\r\n" }).success).toBe(true);
+  });
 });

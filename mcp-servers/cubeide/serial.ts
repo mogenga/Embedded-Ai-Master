@@ -238,6 +238,15 @@ export function captureSerialPort(
     let error: string | undefined;
     let ready = false;
     let rest = "";
+    let settledByEvent = false;
+    // Spawn failures arrive asynchronously; unhandled, they kill the server.
+    child.on("error", (err) => {
+      if (settledByEvent) return;
+      settledByEvent = true;
+      clearTimeout(timer);
+      resolve({ ok: false, lines, error: `无法启动 PowerShell 泵：${err instanceof Error ? err.message : String(err)}` });
+    });
+    if (child.stdin) child.stdin.on("error", () => { /* reported via exit/error */ });
     const timer = setTimeout(() => {
       if (!ready) resolve({ ok: false, lines, error: error ?? `泵 ${READY_TIMEOUT_MS}ms 内未就绪` });
       try { child.kill(); } catch { /* the deadline loop exits on its own */ }
@@ -273,6 +282,8 @@ export function captureSerialPort(
     child.stderr.on("data", () => { /* diagnostics only */ });
     child.on("exit", () => {
       clearTimeout(timer);
+      if (settledByEvent) return;
+      settledByEvent = true;
       if (!ready && error === undefined) {
         resolve({ ok: false, lines, error: "泵在就绪前退出" });
         return;
@@ -296,7 +307,7 @@ export async function captureThenWrite(
   data: string,
   durationMs: number,
   hex = false,
-): Promise<{ lines: Array<{ text: string; at: number }> }> {
+): Promise<{ lines: Array<{ text: string; at: number }>; error?: string }> {
   // Reuse the capture pump; the write races nothing because the pump only
   // reads. For the write itself we need a pump that takes data — the capture
   // script has no write op, so do the plain thing: capture (device echo is
@@ -309,29 +320,48 @@ export async function captureThenWrite(
         windowsHide: true,
         stdio: ["pipe", "pipe", "pipe"],
       });
-    } catch {
-      resolve({ lines: [] });
+    } catch (error) {
+      resolve({ lines: [], error: `无法启动 PowerShell 泵：${error instanceof Error ? error.message : String(error)}` });
       return;
     }
     const lines: Array<{ text: string; at: number }> = [];
-    let rest = "";
-    child.stdout.on("data", (chunk) => {
-      rest += chunk.toString("utf8");
+    // R3: a write failure must come back as a failure, not an empty success.
+    let pumpError: string | undefined;
+    let exited = false;
+    // The spawn itself rarely throws synchronously — failures (ENOENT, AV
+    // interference) arrive as an async 'error' event, and an unhandled 'error'
+    // kills the whole MCP server process.
+    child.on("error", (err) => {
+      pumpError = `无法启动 PowerShell 泵：${err instanceof Error ? err.message : String(err)}`;
+      if (!exited) resolve({ lines, error: pumpError });
+    });
+    if (child.stdin) {
+      // Same crash surface: writing config into a dead child raises EPIPE.
+      child.stdin.on("error", () => { /* the exit/error path reports it */ });
+    }
+    const rest = { value: "" };
+    child.stdout?.on("data", (chunk) => {
+      rest.value += chunk.toString("utf8");
       let index;
-      while ((index = rest.indexOf("\n")) >= 0) {
-        const line = rest.slice(0, index).trim();
-        rest = rest.slice(index + 1);
+      while ((index = rest.value.indexOf("\n")) >= 0) {
+        const line = rest.value.slice(0, index).trim();
+        rest.value = rest.value.slice(index + 1);
         if (line === "") continue;
         try {
           const event = JSON.parse(line);
           if (event.ev === "line" && lines.length < 2000) {
             lines.push({ text: String(event.text ?? "").slice(0, 8192), at: Number(event.at) || Date.now() });
+          } else if (event.ev === "error") {
+            pumpError = String(event.message ?? "泵错误");
           }
         } catch { /* not protocol */ }
       }
     });
-    child.on("exit", () => resolve({ lines }));
-    child.stdin.write(`${JSON.stringify({ port, baud, data, hex, duration_ms: durationMs })}\n`);
+    child.on("exit", () => {
+      exited = true;
+      resolve({ lines, error: pumpError });
+    });
+    child.stdin?.write(`${JSON.stringify({ port, baud, data, hex, duration_ms: durationMs })}\n`);
     // Hard ceiling so a wedged pump cannot hold the tool call.
     setTimeout(() => {
       try { child.kill(); } catch { /* exiting anyway */ }
@@ -387,10 +417,18 @@ try {
   # it the string goes out verbatim and a CRLF-terminated protocol never sees
   # a line end no matter how the caller spells the escape.
   if ($config.hex -eq $true) {
-    $count = [int]($config.data.Length / 2)
+    $hexData = [string]$config.data -replace '\s+', ''
+    if ($hexData -notmatch '^[0-9a-fA-F]+$' -or ($hexData.Length % 2) -ne 0) {
+      # The host channel rejects this shape outright; the fallback pump must
+      # not silently round a half byte down and send one byte less.
+      Emit @{ev='error';message="invalid hex payload: length $($hexData.Length) is odd or non-hex"}
+      try { $script:serial.Close() } catch { }
+      exit 1
+    }
+    $count = $hexData.Length / 2
     $bytes = [byte[]]::new($count)
     for ($i = 0; $i -lt $count; $i++) {
-      $bytes[$i] = [Convert]::ToByte($config.data.Substring($i * 2, 2), 16)
+      $bytes[$i] = [Convert]::ToByte($hexData.Substring($i * 2, 2), 16)
     }
     $script:serial.Write($bytes, 0, $count)
   } else {
