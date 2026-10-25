@@ -1543,6 +1543,11 @@ body.resizing-workbench * {
  * `opacity: 0` keeps it focusable and in the tab order; `pointer-events: none`
  * is what stops a stray click from landing on something invisible. */
 .session-group-remove {
+  /* 真按钮：清掉 button 默认框，其余沿用原视觉。 */
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
   width: 18px;
   height: 18px;
   border-radius: var(--radius-sm);
@@ -1786,7 +1791,7 @@ body.resizing-workbench * {
 }
 
 .window-close:hover {
-  background: #c42b1c;
+  background: var(--danger);
   color: var(--on-accent);
 }
 
@@ -6258,6 +6263,14 @@ mark.find-hit.current {
 .serial-send-input.invalid {
   border-color: var(--danger);
   background: rgba(220, 80, 80, 0.08);
+}
+
+/* hex 校验错误：持久内联文本，颜色之外必须有文字说明（WCAG 1.4.1），
+   消失时机由 JS 在下一次输入时清除，不是定时器。 */
+.serial-send-error {
+  margin: 4px 2px 0;
+  font-size: var(--text-xs);
+  color: var(--danger);
 }
 
 /* The agent's write, replayed as a user action: the field takes on the accent

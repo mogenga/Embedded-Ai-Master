@@ -548,8 +548,15 @@ function bindCodeCopy(root) {
     button.dataset.bound = "1";
     button.addEventListener("click", async () => {
       const code = button.closest("pre").querySelector("code").textContent;
-      await navigator.clipboard.writeText(code);
-      button.textContent = t.copied;
+      // 复制可能被拒（权限/窗口失焦）：失败也要有回话，静默的「已复制」
+      // 是在撒谎（R3）。按钮状态对读屏可见。
+      button.setAttribute("aria-live", "polite");
+      try {
+        await navigator.clipboard.writeText(code);
+        button.textContent = t.copied;
+      } catch {
+        button.textContent = t.copyFailed;
+      }
       setTimeout(() => (button.textContent = t.copy), 1200);
     });
   });
@@ -3311,7 +3318,8 @@ function handleEvent(message) {
         if (!message.ok) row.classList.add("failed");
         const summaryEl = row.querySelector(".tool-summary");
         if (message.summary) summaryEl.textContent = message.summary;
-        if (!message.ok) summaryEl.style.color = "var(--danger)";
+        // 失败色走类名，与同行的 .failed 同源；内联样式会绕开主题令牌。
+        if (!message.ok) summaryEl.classList.add("failed");
         setIcon(row.querySelector(".tool-glyph svg"), message.ok ? "check" : "x");
         // An edit's result is a diff size: make it read like one, with the
         // file first and the counts after it — "edited types.ts +15 −1" reads
@@ -4647,7 +4655,7 @@ function openSerialPane() {
   // Never open the port automatically: asserting DTR resets most boards, and
   // the agent may be using it. A status read only fetches the ring, and the
   // port list is the monitor's own enumeration (friendly names from WMI).
-  api.send({ cmd: "serialStatus" });
+  api.send({ cmd: "serialStatus", port: state.serial.port ?? undefined });
   api.send({ cmd: "listSerialPorts" });
 }
 
@@ -4719,6 +4727,15 @@ function renderSerialStatus() {
   $("serial-pause").disabled = !serial.open;
   setIcon($("serial-pause").querySelector("svg"), serial.paused ? "play" : "pause");
   $("serial-follow").setAttribute("aria-pressed", String(serial.follow));
+  // 发送按钮在串口未开时明确禁用，禁用原因放在 title 里——静默吞掉
+  // 点击（点了没反应又不解释）违反禁用态要解释原因的规范。
+  const send = $("serial-send");
+  const input = $("serial-send-input");
+  send.disabled = !serial.open;
+  input.disabled = !serial.open;
+  const reason = serial.open ? "" : t.serialSendDisabledHint;
+  send.title = reason;
+  input.title = reason;
 }
 
 /** One row per line; `serial_text` keeps the message, the rest is gutter. */
@@ -4757,7 +4774,10 @@ function serialLineNode(line) {
   // A TX line holds the plain text that was sent, so it is shown as written —
   // in HEX view mode the send box already took hex, and `hexView` would print
   // the digits rather than the bytes they encode.
-  textEl.textContent = viewHex() && dir !== "tx" ? hexView(line.text) : line.text;
+  // HEX view shows the bytes the wire carried: prefer the raw latin1 bytes
+  // the host attached to the line; fall back to re-encoding the decoded text
+  // (UTF-8) only when the line has no raw payload.
+  textEl.textContent = viewHex() && dir !== "tx" ? hexView(line) : line.text;
 
   row.append(timeEl, badgeEl, tagEl, textEl);
   if (line.level) row.dataset.level = line.level;
@@ -4883,11 +4903,16 @@ $("serial-pause").addEventListener("click", () => {
 });
 
 $("serial-clear").addEventListener("click", () => {
-  state.serial.lines = [];
-  state.serial.filtered = 0;
-  $("serial-output").innerHTML = "";
-  api.send({ cmd: "serialClear" });
-  renderSerialStatus();
+  // 串口日志是调试取证数据（R3 语境），误点一次整个 buffer 就没了——与
+  // transcript 清空同一待遇：先确认，文案里提示可先导出。
+  void confirmAction(t.serialClearConfirm, { danger: true }).then((yes) => {
+    if (!yes) return;
+    state.serial.lines = [];
+    state.serial.filtered = 0;
+    $("serial-output").innerHTML = "";
+    api.send({ cmd: "serialClear", port: state.serial.port ?? undefined });
+    renderSerialStatus();
+  });
 });
 
 $("serial-export").addEventListener("click", () => {
@@ -4970,6 +4995,11 @@ function viewHex() {
  * show up as the two bytes 0x34 0x31 instead of 0x41.
  */
 function hexViewOfHex(clean) {
+  // A non-hex payload (schema rejects it, but a stale client could still
+  // relay one) must not render as "NAN NAN" — show it as the text it is.
+  if (!/^[0-9a-fA-F]*$/.test(clean) || clean.length % 2 !== 0) {
+    return `${clean} (invalid hex)`;
+  }
   const bytes = [];
   for (let i = 0; i + 1 < clean.length; i += 2) bytes.push(parseInt(clean.slice(i, i + 2), 16));
   if (bytes.length === 0) return "(empty)";
@@ -4986,13 +5016,18 @@ function hexViewOfHex(clean) {
   return out.join("");
 }
 
-function hexView(text) {
-  const bytes = new TextEncoder().encode(text);
+function hexView(line) {
+  // `raw` is the wire bytes, one byte per latin1 char — the truth HEX view
+  // exists to show. TextEncoder re-encodes decoded text as UTF-8, which for
+  // a GBK line displays different bytes than a logic analyzer captured.
+  const bytes = line.raw
+    ? [...line.raw].map((ch) => ch.charCodeAt(0) & 0xff)
+    : [...new TextEncoder().encode(line.text)];
   if (bytes.length === 0) return "(empty)";
   const out = [];
   for (let i = 0; i < bytes.length; i += 16) {
-    const row = [...bytes.slice(i, i + 16)].map((b) => b.toString(16).padStart(2, "0").toUpperCase());
-    const ascii = [...bytes.slice(i, 16 + i)].map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "·")).join("");
+    const row = bytes.slice(i, i + 16).map((b) => b.toString(16).padStart(2, "0").toUpperCase());
+    const ascii = bytes.slice(i, 16 + i).map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "·")).join("");
     out.push(`${row.join(" ").padEnd(47)}  ${ascii}`);
     if (i + 16 < bytes.length) out.push("\n");
   }
@@ -5021,22 +5056,25 @@ function sendSerialLine() {
   const input = $("serial-send-input");
   const text = input.value;
   if (text === "") return;
-  if (!state.serial.open) {
-    renderSerialStatus();
-    return;
-  }
+  // 串口未开的情况由 renderSerialStatus 把发送控件整体禁用并解释原因，
+  // 这里不再需要静默 return。
   const hex = $("serial-send-hex").checked;
   const crlf = $("serial-send-crlf").checked;
   if (hex) {
     const normalized = normalizeHexSend(text);
     if (normalized === null) {
       // Refuse visibly rather than send garbage (R3): an odd digit count or a
-      // stray character would go out as something else on the wire.
+      // stray character would go out as something else on the wire. 持久内联
+      // 文本 + aria-invalid，颜色只是辅助——纯色闪一下等于没说错在哪。
+      const error = $("serial-send-error");
+      const odd = text.replace(/\s+/g, "").length % 2 !== 0;
+      error.textContent = odd ? t.serialHexOdd : t.serialHexInvalid;
+      error.hidden = false;
       input.classList.add("invalid");
-      setTimeout(() => input.classList.remove("invalid"), 900);
+      input.setAttribute("aria-invalid", "true");
       return;
     }
-    api.send({ cmd: "serialWrite", data: normalized, hex: true });
+    api.send({ cmd: "serialWrite", port: state.serial.port ?? undefined, data: normalized, hex: true });
     // The pane shows what went out as well as what came back: a monitor that
     // only prints RX cannot be read as a conversation, and the operator has no
     // way to tell their own write from the device's answer.
@@ -5044,7 +5082,7 @@ function sendSerialLine() {
       { text: hexViewOfHex(normalized), at: Date.now(), level: "info", dir: "tx", tag: t.serialSenderUser },
     ]);
   } else {
-    api.send({ cmd: "serialWrite", data: text + (crlf ? "\r\n" : "") });
+    api.send({ cmd: "serialWrite", port: state.serial.port ?? undefined, data: text + (crlf ? "\r\n" : "") });
     appendSerialLines([{ text, at: Date.now(), level: "info", dir: "tx", tag: t.serialSenderUser }]);
   }
   serialSendHistory.push(text);
@@ -5112,6 +5150,18 @@ function replayAgentWrite(write) {
 }
 
 $("serial-send").addEventListener("click", sendSerialLine);
+// 修正输入后错误提示立刻消失：清除时机跟输入走，而不是定时器。
+$("serial-send-input").addEventListener("input", () => {
+  const input = $("serial-send-input");
+  const error = $("serial-send-error");
+  input.classList.remove("invalid");
+  input.removeAttribute("aria-invalid");
+  if (error) {
+    error.hidden = true;
+    error.textContent = "";
+  }
+});
+
 $("serial-send-input").addEventListener("keydown", (event) => {
   if (event.isComposing) return;
   if (event.key === "Enter") {
@@ -5136,7 +5186,7 @@ function serialLineToggle(which) {
     const next = button.getAttribute("aria-pressed") !== "true";
     button.setAttribute("aria-pressed", String(next));
     button.classList.toggle("active", next);
-    api.send({ cmd: "serialLine", line: which, value: next });
+    api.send({ cmd: "serialLine", port: state.serial.port ?? undefined, line: which, value: next });
   };
 }
 
@@ -5342,7 +5392,14 @@ $("git-message").addEventListener("keydown", (event) => {
 });
 $("git-branch").addEventListener("click", () => {
   const name = state.git?.branch;
-  if (name) void navigator.clipboard.writeText(name);
+  if (!name) return;
+  // 与代码块复制同一套反馈：成功有回话，失败不静默。
+  const label = $("git-branch");
+  navigator.clipboard
+    .writeText(name)
+    .then(() => (label.title = t.copied))
+    .catch(() => (label.title = t.copyFailed))
+    .finally(() => setTimeout(() => (label.title = name), 1200));
 });
 
 function renderCheckpoints() {
@@ -5846,20 +5903,15 @@ function renderSessions(sessions) {
     // is hovered or focused, then an explicit click. Nothing here acts on
     // hover.
     if (items.length > 0 && wholeWorkspace) {
-      const remove = document.createElement("span");
+      // 真按钮而非 span+role=button：键盘行为（Enter/Space）、禁用语义、
+      // 焦点是 button 自带的，不用手工维护一份等价实现。
+      const remove = document.createElement("button");
+      remove.type = "button";
       remove.className = "session-group-remove";
-      remove.setAttribute("role", "button");
-      remove.tabIndex = 0;
       remove.title = t.workspaceRemove;
       remove.setAttribute("aria-label", t.workspaceRemove);
       remove.innerHTML = icon("archive");
       remove.addEventListener("click", (event) => {
-        event.stopPropagation();
-        void removeWorkspace(label, items);
-      });
-      remove.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
         event.stopPropagation();
         void removeWorkspace(label, items);
       });
@@ -7633,6 +7685,7 @@ const settings = createSettings({
   closeModal,
   applyCodeFont,
   getT: () => t,
+  confirmAction,
 });
 
 // Kept as free functions so the rest of this file can call them by name.

@@ -529,11 +529,13 @@
                       id="serial-send-input"
                       spellcheck="false"
                       autocomplete="off"
+                      aria-describedby="serial-send-error"
                       data-i18n-placeholder="serialSendPlaceholder"
                       placeholder="Send to the port…"
                     />
                     <button class="btn btn-primary small" id="serial-send" data-i18n="serialSend">Send</button>
                   </div>
+                  <p class="serial-send-error" id="serial-send-error" role="status" aria-live="polite" hidden></p>
                 </div>
               </div>
               <div class="artifact-root" id="artifact-root" hidden></div>
