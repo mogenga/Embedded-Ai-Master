@@ -51,6 +51,7 @@
         "to": "node_modules"
       }
     ],
+    "npmRebuild": false,
     "win": {
       "target": "nsis"
     }
