@@ -2070,7 +2070,7 @@ describe("desktop host", () => {
     expect(events.some((entry) => entry.type === "ready")).toBe(true);
 
     // The `kb` entry landed, pointing at the snapshot OTA maintains.
-    // The embedded servers (serial/keil/cubeide/datasheet) seed here too —
+    // The embedded servers (serial/keil/datasheet) seed here too —
     // their dist-mcp stubs exist in this fixture's fake kernel root — but the
     // kb assertions below are what this case is about.
     const onDisk = JSON.parse(readFileSync(path.join(home, "mcp.json"), "utf8"));
@@ -2108,7 +2108,7 @@ describe("desktop host", () => {
     // seed regardless — they have no corpus prerequisite.
     expect(existsSync(path.join(home, "kb"))).toBe(false);
     const onDisk = JSON.parse(readFileSync(path.join(home, "mcp.json"), "utf8"));
-    expect(Object.keys(onDisk.mcpServers)).toStrictEqual(["serial", "keil", "cubeide", "datasheet"]);
+    expect(Object.keys(onDisk.mcpServers)).toStrictEqual(["serial", "keil", "datasheet"]);
     const event = events.find((entry) => entry.type === "kb");
     expect(event.kb.source).toBe("default");
     // No warning: "you have no corpus yet" is a state, not a fault.

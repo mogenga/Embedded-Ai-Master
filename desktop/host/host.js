@@ -2510,8 +2510,8 @@ async function seedFirstRun() {
     });
   }
 
-  // 3. 嵌入式 server（serial/keil/cubeide/datasheet）：与 kb 同一套种子规矩。
-  //    产物随包分发，server 进程总能启动；没装 Keil/CubeIDE 的机器是工具动作
+  // 3. 嵌入式 server（serial/keil/datasheet）：与 kb 同一套种子规矩。
+  //    产物随包分发，server 进程总能启动；没装 Keil 的机器是工具动作
   //    如实报「未安装」，不是连不上。没有这段，全新安装的 agent 领不到
   //    embed_serial 等工具——上一轮「agent 自写 python 脚本抢串口」的根因
   //    正是配置里从来没有这个条目。

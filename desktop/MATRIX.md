@@ -65,7 +65,7 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 
 > **`skills` 已于 2026-10-22 第十六轮移出本清单**（见下表 `getSkills` / `saveSkill` / `removeSkill`）。它当初在这里的原因和别的项不一样：git/终端/worktree 那些是「内核有能力、前端没接」，技能是**内核根本没有这个能力**，所以这一轮先补内核再加前端入口。
 
-串口监视器**已在 2026-10-23 接通**：`serialOpen` / `serialClose` / `serialStatus` / `serialClear` / `serialWrite` / `listSerialPorts` 都有宿主实现（`desktop/host/serial-bridge.js`，PowerShell .NET SerialPort 泵，零 npm 依赖），工作台 tab 条常驻 Serial tab。面板与 agent 双通道共享数据但不共享口：面板持口并镜像环形缓冲到 `$HARNESS_HOME/serial/ring.json`，agent 经 `embed_serial`（cubeide server）读镜像或开一次性捕获；同口冲突诚实报错 `port_busy`。
+串口监视器**已在 2026-10-23 接通**：`serialOpen` / `serialClose` / `serialStatus` / `serialClear` / `serialWrite` / `listSerialPorts` 都有宿主实现（`desktop/host/serial-bridge.js`，PowerShell .NET SerialPort 泵，零 npm 依赖），工作台 tab 条常驻 Serial tab。面板与 agent 双通道共享数据但不共享口：面板持口并镜像环形缓冲到 `$HARNESS_HOME/serial/ring.json`，agent 经 `embed_serial`（serial server，2026-10-25 从 cubeide 拆出独立挂载）读镜像或开一次性捕获；同口冲突诚实报错 `port_busy`。
 
 原因逐项登记在 `docs/deferred-issues.md` 的 D-166 与 D-169。技能的边界（没有权限语义、模型不能自己挑、参数只有字符串替换、项目作用域没有信任门）另见 D-198。
 

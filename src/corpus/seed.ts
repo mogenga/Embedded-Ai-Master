@@ -415,14 +415,14 @@ async function isFile(target: string): Promise<boolean> {
 /**
  * 嵌入式 server 清单：名称 → 相对 `dist-mcp/` 的产物路径。
  *
- * `serial` 不需要外部软件（Node 实现），无条件种子；`keil` / `cubeide` /
- * `datasheet` 的产物同样随包分发，server 进程总能启动，没装对应软件时是
- * 工具动作如实报「未安装」——所以它们的门槛与 kb 相同：只看产物文件在不在。
+ * `serial` 不需要外部软件（Node 实现），无条件种子；`keil` 的产物同样随包
+ * 分发，server 进程总能启动，没装 Keil 时是工具动作如实报「未安装」——
+ * 所以门槛与 kb 相同：只看产物文件在不在。（cubeide/espidf/arduino 已从
+ * 本产品剔除，2026-10-25；需要时按同一条目的形状加回来。）
  */
 const EMBEDDED_SERVER_FILES: ReadonlyArray<{ name: string; file: string }> = [
   { name: "serial", file: "serial/server.js" },
   { name: "keil", file: "keil/server.js" },
-  { name: "cubeide", file: "cubeide/server.js" },
   { name: "datasheet", file: "datasheet/server.js" },
 ];
 

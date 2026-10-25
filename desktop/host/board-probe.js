@@ -30,10 +30,6 @@ const STATUS_TOOLS = new Set([
   // that had nothing to do with the hardware.
   "keil_debug:capabilities",
   "keil_debug:version",
-  // cubeide: backend presence + target probe list, no session needed
-  "cubeide_build:probe",
-  "cubeide_debug:status",
-  "cubeide_build:version",
 ]);
 
 /** Actions allowed on action-style tools (name:action whitelist). */
@@ -57,7 +53,7 @@ export async function probeBoardState(opts) {
   const embedded = servers.filter((server) =>
     // The embedded backends by name; anything else has nothing to say to a
     // board pane. KB/pack servers would only slow the connect.
-    /^(keil|cubeide|espidf|arduino|probe|embedded)$/.test(server.name),
+    /^(keil|serial|probe|embedded)$/.test(server.name),
   );
   if (embedded.length === 0) {
     return [];

@@ -18,33 +18,16 @@ import { dirname, join } from "node:path";
 /** kind → 探测规格。names 原序即优先序。 */
 const SPECS = [
   { kind: "gcc-arm", names: ["arm-none-eabi-gcc"], versionArgs: ["--version"] },
-  { kind: "gcc-riscv", names: ["riscv64-unknown-elf-gcc", "riscv32-esp-elf-gcc"], versionArgs: ["--version"] },
   { kind: "cmake", names: ["cmake"], versionArgs: ["--version"] },
-  { kind: "ninja", names: ["ninja"], versionArgs: ["--version"] },
   { kind: "make", names: ["make", "gmake"], versionArgs: ["--version"] },
-  { kind: "west", names: ["west"], versionArgs: ["--version"] },
-  { kind: "idf", names: ["idf.py"], versionArgs: ["--version"] },
-  { kind: "pio", names: ["pio", "platformio"], versionArgs: ["--version"] },
-  { kind: "arduino-cli", names: ["arduino-cli"], versionArgs: ["version", "--format", "json"] },
-  { kind: "cargo", names: ["cargo"], versionArgs: ["--version"] },
   { kind: "cbuild", names: ["cbuild"], versionArgs: ["--version"] },
   { kind: "cpackget", names: ["cpackget"], versionArgs: ["--version"] },
   { kind: "svdconv", names: ["SVDConv", "svdconv"], versionArgs: [] },
-  { kind: "openocd", names: ["openocd"], versionArgs: ["--version"] },
   { kind: "pyocd", names: ["pyocd"], versionArgs: ["--version"] },
-  { kind: "probe-rs", names: ["probe-rs"], versionArgs: ["--version"] },
   { kind: "jlink", names: ["JLinkExe", "JLink"], versionArgs: [] },
-  { kind: "esptool", names: ["esptool.py", "esptool"], versionArgs: ["version"] },
-  { kind: "st-flash", names: ["st-flash"], versionArgs: ["--version"] },
   { kind: "stm32-programmer", names: ["STM32_Programmer_CLI"], versionArgs: ["--version"] },
-  { kind: "dfu-util", names: ["dfu-util"], versionArgs: ["--version"] },
-  { kind: "avrdude", names: ["avrdude"], versionArgs: ["-?"] },
-  { kind: "qemu", names: ["qemu-system-arm"], versionArgs: ["--version"] },
-  { kind: "renode", names: ["renode"], versionArgs: ["--version"] },
-  { kind: "sigrok", names: ["sigrok-cli"], versionArgs: ["--version"] },
   { kind: "cppcheck", names: ["cppcheck"], versionArgs: ["--version"] },
-  { kind: "clang-tidy", names: ["clang-tidy"], versionArgs: ["--version"] },
-];
+]
 
 const isWindows = process.platform === "win32";
 
