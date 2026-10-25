@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "updateBaseUrl": "https://embedded-ai-master-kb.obs.cn-east-3.myhuaweicloud.com/",
+  "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAtxuwkiAsf7RXEkOHYkm0s1M/1qN2xNiwPhGxnRHdr+U=\n-----END PUBLIC KEY-----\n"
+}

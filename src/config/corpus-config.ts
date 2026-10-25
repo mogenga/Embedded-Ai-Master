@@ -5,8 +5,10 @@ import path from "node:path";
  * 语料 OTA 的配置层：`corpus.json`（桶地址 + Ed25519 公钥）的读取与校验。
  *
  * **为什么要有配置而不是写死**：安装包公开分发，语料本身可以公开，但桶地址与
- * 公钥得能在不发版的前提下更换（运维改 `$HARNESS_HOME/corpus.json`），打包形态
- * 又要带一份构建时注入的默认值（`<resources>/corpus.json`）。
+ * 公钥得能在不发版的前提下更换（运维改 `$HARNESS_HOME/corpus.json`），安装包
+ * 又要带一份默认值。默认值那一级由调用方按形态给出**文件路径** `bundledPath`：
+ * 打包形态是 `<resources>/corpus.json`，源码形态是 `<dist 的父目录>/config/corpus.json`
+ * （即仓库里的 `config/corpus.json`，随仓库分发）。
  *
  * **失败语义（契约 §2、R3）：不静默降级。** 文件存在但解析/校验失败时返回
  * `invalid` 并指出具体字段，**不**回落到下一级来源。否则用户改了 home 级配置，
@@ -27,23 +29,36 @@ export interface CorpusConfig {
   publicKeyPem: string;
 }
 
-/** 配置来自哪一级；设置页据此告诉用户该改哪个文件。 */
-export type CorpusConfigSource = "home" | "resources";
+/**
+ * 配置来自哪一级；设置页据此告诉用户该改哪个文件。
+ *
+ * `bundled` 指「随发行物分发的默认值那一级」：打包形态是 `<resources>/corpus.json`，
+ * 源码形态是仓库里的 `config/corpus.json`。两种形态共用同一个标签，因为对用户
+ * 而言它们是同一件事——「不是你自己改的那份」。
+ */
+export type CorpusConfigSource = "home" | "bundled";
 
 /**
  * 加载结果。`invalid` 带着给用户看的中文短句（哪一个字段、错在哪），
  * 设置页原样展示；调用方不得把它折叠成「没有配置」。
+ *
+ * `ok` 带着实际读到的文件路径：调用方否则只能从 `source` 反推路径，那是同一
+ * 事实的第二份拷贝，形态一变就会和这里读到的那份漂移。
  */
 export type CorpusConfigLoadResult =
-  | { kind: "ok"; config: CorpusConfig; source: CorpusConfigSource }
+  | { kind: "ok"; config: CorpusConfig; source: CorpusConfigSource; path: string }
   | { kind: "none" }
   | { kind: "invalid"; reason: string; source: CorpusConfigSource };
 
 export interface LoadCorpusConfigOptions {
   /** `$HARNESS_HOME`：用户/运维的运行时覆盖放这里，优先级最高。 */
   harnessHome: string;
-  /** 打包形态的 `<安装目录>/resources`；开发形态没有这一级，不传。 */
-  resourcesRoot?: string;
+  /**
+   * 随发行物分发的那份配置的**完整文件路径**（不是目录）。由调用方按形态给出：
+   * 打包形态 `<resources>/corpus.json`，源码形态 `<仓库根>/config/corpus.json`。
+   * 不传即没有这一级。
+   */
+  bundledPath?: string;
 }
 
 const CONFIG_FILE_NAME = "corpus.json";
@@ -172,11 +187,15 @@ async function attemptSource(filePath: string, source: CorpusConfigSource): Prom
   if (!validation.ok) {
     return { kind: "invalid", source, reason: validation.reason };
   }
-  return { kind: "ok", config: validation.config, source };
+  return { kind: "ok", config: validation.config, source, path: filePath };
 }
 
 /**
- * 按优先级读取配置：`$HARNESS_HOME/corpus.json` → `<resourcesRoot>/corpus.json` → 无。
+ * 按优先级读取配置：`$HARNESS_HOME/corpus.json` → `bundledPath` → 无。
+ *
+ * 第二级是一个明确的文件路径而不是一个目录：源码形态与打包形态的默认配置
+ * 不在同一层目录里（前者 `config/corpus.json`，后者 `<resources>/corpus.json`），
+ * 让调用方按自己的形态给出路径，比在这里猜布局可靠。
  *
  * 返回判别联合而不是抛异常或返回 null：调用方（OTA 客户端、设置页）必须能区分
  * 「没有配置」「配置坏了」「读到了」三种情况，且后者带着可展示的原因。
@@ -192,13 +211,10 @@ export async function loadCorpusConfig(
     return homeResult;
   }
 
-  if (opts.resourcesRoot !== undefined) {
-    const resourcesResult = await attemptSource(
-      path.join(opts.resourcesRoot, CONFIG_FILE_NAME),
-      "resources",
-    );
-    if (resourcesResult.kind !== "missing") {
-      return resourcesResult;
+  if (opts.bundledPath !== undefined) {
+    const bundledResult = await attemptSource(opts.bundledPath, "bundled");
+    if (bundledResult.kind !== "missing") {
+      return bundledResult;
     }
   }
 

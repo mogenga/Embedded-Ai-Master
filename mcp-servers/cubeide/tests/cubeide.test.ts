@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { findEclipseProjects, readEclipseName } from "../eclipseProject.js";
@@ -111,11 +111,6 @@ describe("routeProject", () => {
 
   it("never treats a backup .uvprojx.orig as a project", () => {
     const root = mkdtempSync(join(tmpdir(), "cubeide-test-"));
-    try {
-      copyFileSync(join(root, "nothing"), join(root, "APP.uvprojx.orig")).valueOf;
-    } catch {
-      /* copyFileSync needs a real source; write directly instead */
-    }
     writeFileSync(join(root, "APP.uvprojx.orig"), UVPROJ);
     writeFileSync(join(root, "APP.uvprojx.bak"), UVPROJ);
     expect(routeProject(root).kind).toBe("none");
@@ -127,7 +122,7 @@ describe("gdbMi parsing", () => {
   it("parses result records with tokens", () => {
     const parsed = parseMiLine(`12^done,bkpt={number="1",addr="0x08000123"}~"load\\n"`);
     expect(parsed).not.toBeNull();
-    if ("resultClass" in parsed && parsed && "token" in parsed) {
+    if (parsed !== null && "resultClass" in parsed && "token" in parsed) {
       expect(parsed.token).toBe(12);
       expect(parsed.resultClass).toBe("done");
       expect(parsed.values["bkpt"]).toContain('number="1"');

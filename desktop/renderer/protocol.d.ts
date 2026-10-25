@@ -75,4 +75,3 @@ export function sessionLoadedEvent(
   events: readonly KernelSessionEvent[],
   options?: { cwd?: string; mode?: string },
 ): HostEvent;
-export const LAST_SESSION_STORAGE_KEY: string;

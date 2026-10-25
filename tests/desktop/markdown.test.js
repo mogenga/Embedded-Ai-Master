@@ -126,6 +126,58 @@ describe("分割线", () => {
   });
 });
 
+describe("数学公式块", () => {
+  it("多行 $$ 块渲染为 div.math，源样保留", () => {
+    const html = renderMarkdown("$$\nE = mc^2\n\\int_0^1 x dx\n$$");
+    expect(html).toBe('<div class="math">E = mc^2\n\\int_0^1 x dx</div>');
+  });
+
+  it("单行 $$...$$ 渲染为 div.math", () => {
+    expect(renderMarkdown("$$E=mc^2$$")).toBe('<div class="math">E=mc^2</div>');
+  });
+
+  it("$$ 前后的段落各自独立", () => {
+    const html = renderMarkdown("上\n\n$$\nE=mc^2\n$$\n\n下");
+    expect(html).toBe('<p>上</p><div class="math">E=mc^2</div><p>下</p>');
+  });
+
+  it("未闭合的 $$ 块宽容渲染到文件尾", () => {
+    expect(renderMarkdown("$$\nE=mc^2")).toBe('<div class="math">E=mc^2</div>');
+  });
+
+  it("公式体里的 HTML 元字符必须转义", () => {
+    const html = renderMarkdown("$$\na < b & c > d\n$$");
+    expect(html).toBe('<div class="math">a &lt; b &amp; c &gt; d</div>');
+  });
+
+  it("公式体里的行内语法不生效", () => {
+    const html = renderMarkdown("$$\n**x** `y`\n$$");
+    expect(html).toContain("**x** `y`");
+    expect(html).not.toContain("<strong>");
+    expect(html).not.toContain("<code>");
+  });
+
+  it("开 $$ 同行与闭 $$ 同行的内容都算公式体", () => {
+    const html = renderMarkdown("$$ E=mc^2\nF=ma $$");
+    expect(html).toBe('<div class="math">E=mc^2\nF=ma</div>');
+  });
+
+  it("公式块中间的空行保留在公式体里", () => {
+    const html = renderMarkdown("$$\na=1\n\nb=2\n$$");
+    expect(html).toBe('<div class="math">a=1\n\nb=2</div>');
+  });
+
+  it("代码围栏内的 $$ 不识别为公式块", () => {
+    const html = renderMarkdown("```\n$$\n```");
+    expect(html).not.toContain('class="math"');
+    expect(html).toContain("<code>$$</code>");
+  });
+
+  it("单个 $ 行不构成公式块", () => {
+    expect(renderMarkdown("$x$")).toBe("<p>$x$</p>");
+  });
+});
+
 describe("IncrementalRenderer", () => {
   it("逐字符追加「段落 + 表格 + 段落」的最终 HTML 与一次性渲染一致", () => {
     const source = ["Paragraph one.", "", "| a | b |", "| --- | --- |", "| 1 | 2 |", "", "Paragraph two."].join("\n");
@@ -152,5 +204,18 @@ describe("IncrementalRenderer", () => {
     }
     expect(last).toBe(renderMarkdown(source));
     expect(last).toBe("<p>上</p><hr><p>下</p>");
+  });
+
+  it("含空行的 $$ 块在增量渲染里与一次性渲染一致", () => {
+    const source = "上\n\n$$\nE=mc^2\n\nF=ma\n$$\n\n下";
+    const renderer = new IncrementalRenderer();
+    let accumulated = "";
+    let last = "";
+    for (const ch of source) {
+      accumulated += ch;
+      last = renderer.render(accumulated);
+    }
+    expect(last).toBe(renderMarkdown(source));
+    expect(last).toBe('<p>上</p><div class="math">E=mc^2\n\nF=ma</div><p>下</p>');
   });
 });

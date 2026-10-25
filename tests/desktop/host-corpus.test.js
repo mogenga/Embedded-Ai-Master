@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -153,6 +153,23 @@ async function writeCorpusConfig(home, updateBaseUrl) {
     JSON.stringify({ version: 1, updateBaseUrl, publicKeyPem }, null, 2),
     "utf8",
   );
+}
+
+/**
+ * A kernel root with no `config/corpus.json`, for the cases whose subject is
+ * "this install has no config at all".
+ *
+ * Since `config/corpus.json` ships in the repository, a development host now
+ * finds it and would answer from the real bucket's address — which is neither
+ * offline nor "unconfigured". The directory is otherwise empty, so the host
+ * needs the built kernel beside it: a junction to the real `dist/` (no
+ * developer mode required; `rm({recursive:true})` removes the link, not the
+ * target — both measured, see `docs/corpus-ota.md` §3).
+ */
+async function kernelRootWithoutConfig() {
+  const root = await tempDir("eam-kernel-noconfig-");
+  await symlink(path.join(REPO_ROOT, "dist"), path.join(root, "dist"), "junction");
+  return root;
 }
 
 /** Seed `kb/snapshots/v1` and point `current` at it. */
@@ -332,8 +349,10 @@ describe.skipIf(!CORPUS_BUILT)("corpus commands", () => {
   it("没有 corpus.json 时 getCorpusStatus 报 config_invalid 并给出可创建的文件路径", async () => {
     const home = await tempDir("eam-corpus-no-config-");
     await seedSnapshot(home);
+    const kernelRoot = await kernelRootWithoutConfig();
 
     const events = await runHost(home, [{ cmd: "init", cwd: home }, { cmd: "getCorpusStatus" }], {
+      env: { HARNESS_KERNEL_ROOT: kernelRoot },
       until: (all) => all.some((event) => event.type === "corpus_status"),
     });
 
@@ -378,8 +397,10 @@ describe.skipIf(!CORPUS_BUILT)("corpus commands", () => {
   it("没有配置时 checkCorpusUpdate 返回 config_invalid，不发起请求也不崩宿主", async () => {
     const home = await tempDir("eam-corpus-check-noconfig-");
     await seedSnapshot(home);
+    const kernelRoot = await kernelRootWithoutConfig();
 
     const events = await runHost(home, [{ cmd: "init", cwd: home }, { cmd: "checkCorpusUpdate" }], {
+      env: { HARNESS_KERNEL_ROOT: kernelRoot },
       until: (all) => all.some((event) => event.type === "corpus_status"),
     });
 
@@ -443,8 +464,10 @@ describe.skipIf(!CORPUS_BUILT)("corpus commands", () => {
   it("没有配置时 applyCorpusUpdate 明确拒绝并给原因，不假装成功", async () => {
     const home = await tempDir("eam-corpus-apply-noconfig-");
     await seedSnapshot(home);
+    const kernelRoot = await kernelRootWithoutConfig();
 
     const events = await runHost(home, [{ cmd: "init", cwd: home }, { cmd: "applyCorpusUpdate" }], {
+      env: { HARNESS_KERNEL_ROOT: kernelRoot },
       until: (all) => all.some((event) => event.type === "corpus_update_result"),
     });
 
@@ -561,6 +584,45 @@ describe.skipIf(!CORPUS_BUILT)("corpus commands", () => {
     const after = events.filter((event) => event.type === "corpus_status").at(-1);
     expect(after.status.kind).toBe("up_to_date");
     expect(after.status.corpusVersion).toBe(2);
+  }, HOST_TIMEOUT_MS);
+
+  /**
+   * A checkout layout: the config ships at `<repo>/config/corpus.json` and the
+   * host must find it without `$HARNESS_HOME` holding a copy.
+   *
+   * This is the case the field report was about ("另一个人的 clone 里显示没有
+   * corpus.json"), and it is driven through `HARNESS_KERNEL_ROOT` because that is
+   * the only switch that moves `roots.distParent` — and `corpusBundledPath` is
+   * derived from it. The kernel is a junction to the real `dist/`, so the host
+   * loads this build while `config/corpus.json` sits in the temp directory.
+   * Windows junctions need no developer mode and `rm({recursive:true})` removes
+   * the link, not its target (both measured; see `docs/corpus-ota.md` §3).
+   */
+  it("源码形态从 <distParent>/config/corpus.json 读到配置，不再报 config_invalid", async () => {
+    const root = await tempDir("eam-corpus-src-layout-");
+    const home = await tempDir("eam-corpus-src-home-");
+    await symlink(path.join(REPO_ROOT, "dist"), path.join(root, "dist"), "junction");
+    await mkdir(path.join(root, "config"), { recursive: true });
+    await writeFile(
+      path.join(root, "config", "corpus.json"),
+      JSON.stringify({ version: 1, updateBaseUrl: unreachableBaseUrl(), publicKeyPem }, null, 2),
+      "utf8",
+    );
+    await seedSnapshot(home);
+
+    const events = await runHost(home, [{ cmd: "init", cwd: home }, { cmd: "getCorpusStatus" }], {
+      env: { HARNESS_KERNEL_ROOT: root },
+      until: (all) => all.some((event) => event.type === "corpus_status"),
+    });
+
+    const answer = events.find((event) => event.type === "corpus_status");
+    // The stored state (there is none) reads as `bundled` — the point is that
+    // it is *not* `config_invalid`, which is what a missing file produced.
+    expect(answer.status).toStrictEqual({ kind: "bundled" });
+    expect(answer.configSource).toBe("bundled");
+    // The path shown is the file actually read, not `$HARNESS_HOME/corpus.json`.
+    expect(answer.configPath).toBe(path.join(root, "config", "corpus.json"));
+    expect(events.some((event) => event.type === "fatal")).toBe(false);
   }, HOST_TIMEOUT_MS);
 
   /**

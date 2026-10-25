@@ -11,17 +11,24 @@ sha256 清单**挡不住**这种攻击：能写桶的人同时改文件和清单
 
 ## 2. 地址与公钥：配置文件，不硬编码
 
-真实值不进仓库。三个位置，优先级从高到低：
+两个位置，优先级从高到低：
 
 | 位置 | 用途 | 进仓库 |
 |---|---|---|
-| `$HARNESS_HOME/corpus.json` | 用户/运维运行时覆盖 | 否 |
-| `<安装目录>/resources/corpus.json` | 构建时注入，随安装包分发 | 否（由 gitignore 的 `config/corpus.local.json` 生成） |
-| 源码内无默认值 | — | — |
+| `$HARNESS_HOME/corpus.json` | 用户/运维运行时覆盖。改了它就不必发版 | 否 |
+| 随发行物分发的默认值 | 见下：源码形态 `<仓库根>/config/corpus.json`，打包形态 `<安装目录>/resources/corpus.json` | **是** |
 
-`config/corpus.example.json` 只有占位符，进仓库。`config/corpus.local.json` 被 gitignore 忽略，构建脚本读它生成 `resources/corpus.json`。
+**为什么默认值进仓库（2026-10-25 决定）。** 原先的约定是「真实值不进仓库，构建脚本读 gitignore 的 `config/corpus.local.json` 生成 `resources/corpus.json`」。那个构建脚本从未存在，而 `corpus.local.json` 也没有任何代码读过——结果是别人 clone 下来，知识库页只会显示「没有语料更新配置」，唯一的解法是手工往自己家目录里放一个文件。
 
-模板里 `updateBaseUrl` 是 `https://example.invalid/`、`publicKeyPem` 是 `-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----\n`——前者故意用不可解析的 `.invalid` 域名，后者故意不是真密钥。**这两个占位值必须替换**，否则验签必然失败。JSON 不支持注释，因此使用说明只能写在这里：复制 `config/corpus.example.json` 为 `config/corpus.local.json` 后按下方格式填入真实值。
+这两个值本来就不是秘密，也不可能保密：安装包必须携带它们才能连上更新源，而桶是匿名可读的（这正是 OTA 无需鉴权的前提）。「不进仓库」只防了 git，没防任何人。它唯一真正保护的性质是**可换性**，而那由两级优先级保证——运维改 `$HARNESS_HOME/corpus.json` 就换源，与仓库里那份无关。
+
+因此：
+
+- `config/corpus.json` —— **真实值，进仓库**。源码形态直接读它。
+- 打包时由 `desktop/package.json` 的 `extraResources` 把它原样拷成 `resources/corpus.json`。**同一个文件服务两种形态**，不存在「构建时注入」这一步。
+- `config/corpus.local.json` —— 已被 gitignore，**没有代码读它**，此后只是本机备忘。留着不冲突（`$HARNESS_HOME` 仍优先），但不要再以为它是生效的那份。
+
+`config/corpus.example.json` 只有占位符，其 `updateBaseUrl`（`https://example.invalid/`）与假 PEM **都能通过 `validateCorpusConfig` 的结构校验**——`.invalid` 是合法域名形状、PEM 也含 BEGIN/END 标记。若把模板当真实配置用，症状不是「未配置」而是「检查失败：DNS 解析失败」，把配置错误伪装成网络问题（见 D-207）。复制模板时两个值都要替换。
 
 ### 格式
 
@@ -36,7 +43,8 @@ sha256 清单**挡不住**这种攻击：能写桶的人同时改文件和清单
 - `updateBaseUrl` 必须以 `/` 结尾；客户端拼 `latest.json` 与相对路径。
 - **对象直接放在桶根下**，不加前缀（2026-10-23 定案：`latest.json`、`index.yaml`、`protocols/uart/no-output.md` 都是桶根下的键）。因此 `updateBaseUrl` 形如 `https://<桶域名>/`。
 - `publicKeyPem` 是 Ed25519 公钥（SPKI PEM）。公钥不是秘密，可进安装包。
-- 缺失或不合法时：**不静默降级**。知识库照常可用（内置快照），但更新功能报 `corpus_config_invalid` 并在设置页如实展示（R3）。
+- 缺失或不合法时：**不静默降级**。知识库照常可用（内置快照），但更新功能报 `corpus_config_invalid` 并在设置页如实展示（R3）。「缺失」与「不合法」是两种状态：前者只有在**两级都没有文件**时成立，后者带点名字段的原因，且**不**回落到下一级——否则用户改了 home 级配置，只因一个拼写错误就继续用旧地址，界面上还显示「已配置」。
+- 加载器（`src/config/corpus-config.ts`）只知道两级和两个文件路径，不知道形态。第二级是**完整文件路径**（`bundledPath`），由调用方按形态给出：宿主在源码形态传 `<distParent>/config/corpus.json`、打包形态传 `<distParent>/corpus.json`。布局知识留在宿主，加载器不猜。
 
 ## 3. 目录布局
 
@@ -80,6 +88,11 @@ $HARNESS_HOME/kb/
 安装包里带 `resources/corpus/`（语料正文）与 `resources/corpus/latest.json`（同格式，`corpusVersion` 为出厂版本）。首次启动把它物化成 `snapshots/v<N>`。
 
 好处：物化与 OTA 走同一条校验路径，不需要第二套逻辑。
+
+这两个目录由 `scripts/package-prepare.mjs` 在打包前生成（`npm --prefix desktop run dist` 会先跑它）：
+
+- `desktop/build/corpus/` → `resources/corpus`。经 `scripts/corpus-stage.mjs` 按 `latest.json` 的 `files` **逐文件**搬并校验 sha256，因此 `_inbox.md`、`manifest.sha256` 这类不纳管的文件不会进包，语料被本地改过也装不进去。
+- `desktop/build/node_modules/` → `resources/node_modules`。**这一项不显然但缺了就整个打不开**：内核产物保留了裸说明符（`import { z } from "zod"`），安装后内核住在 `resources/dist/`，Node 从那里向上找 `node_modules`；`resources/` 下没有它，宿主会以 `Cannot find package 'zod'` 退出，窗口根本起不来。闭包由 `scripts/runtime-deps.mjs` 从 `package-lock.json` 算，只装运行时真正需要的十几个包，不装 electron-builder / typescript / vitest 这些构建工具。
 
 ## 6. 更新流程（状态机）
 
@@ -148,5 +161,6 @@ GET <base>/latest.json
 
 ## 9. 待实测（不能凭记忆断言）
 
-1. Electron 打包后能否从 asar 内 `import()` ESM（内核是 ESM + 动态 import）。倾向把 `dist/` 放 `extraResources` 绕开，但必须在真实打包产物上验证。
-2. junction 在 NSIS 安装到 `%LOCALAPPDATA%` 后的创建与访问权限。
+1. **asar 内 `import()` ESM** —— 已绕开而不是验证：`dist/` 走 `extraResources` 放在 `resources/` 里，不在 asar 内。2026-10-25 用模拟布局端到端跑通了宿主启动（`hello` → `ready`）与随包语料物化（`kb.current` 就位、`fileCount: 107`），但那是在真实文件系统上，不是真实 NSIS 产物。
+2. **junction 在 NSIS 安装到 `%LOCALAPPDATA%` 后的创建与访问权限** —— 仍未实测。已知的是：junction 不需要开发者模式（不同于 symlink），且 `rm({recursive:true})` 删链接不删目标（两者本机实测过，见 §3）。
+3. **真实安装包从未产出** —— 配置已就位（`desktop/package.json` 的 `build` 段，经 electron-builder 26.15.3 的 `scheme.json` 校验），但 `desktop/node_modules` 里没有 `serialport`（它装在仓库根，靠 hoisting 解析），且打包机上没有 MSVC 工具链。见 D-208。

@@ -345,8 +345,29 @@ describe("readSessionDir", () => {
     expect(error.detail).toMatchObject({ file: "session.v1.jsonl", line: 1 });
   });
 
-  it("空目录 → invalid_header（通用读取语义；resumeSession 另行判定 missing_session_dir）", () => {
-    expect(captureCorruption(() => readSessionDir(makeTempDir())).code).toBe("invalid_header");
+  it("空目录（header.json 不存在）→ session_not_found，不是 invalid_header", () => {
+    // 这条以前断言 invalid_header，固化的正是 D-215：「文件没了」被说成
+    // 「header 坏了」。不存在的会话要报不存在，否则用户会去查一份早已不在的
+    // JSON。
+    expect(captureCorruption(() => readSessionDir(makeTempDir())).code).toBe(
+      "session_not_found",
+    );
+  });
+
+  it("header.json 是非法 JSON → 仍是 invalid_header", () => {
+    const dir = makeTempDir();
+    writeFileSync(path.join(dir, "header.json"), "{bad", "utf8");
+    writeLines(dir, "session.v1.jsonl", [JSON.stringify(makeEvent(0))]);
+
+    expect(captureCorruption(() => readSessionDir(dir)).code).toBe("invalid_header");
+  });
+
+  it("header.json 缺必需字段 → 仍是 invalid_header", () => {
+    const dir = makeTempDir();
+    writeFileSync(path.join(dir, "header.json"), '{"id":"sess-1"}\n', "utf8");
+    writeLines(dir, "session.v1.jsonl", [JSON.stringify(makeEvent(0))]);
+
+    expect(captureCorruption(() => readSessionDir(dir)).code).toBe("invalid_header");
   });
 
   it("有 header 但无日志 → invalid_header", () => {

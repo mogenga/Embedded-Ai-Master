@@ -9,9 +9,10 @@ import type { CorpusConfig } from "../src/config/corpus-config.js";
  * 配置层测试。
  *
  * **绝不碰真实 `$HARNESS_HOME`**：每个用例都拿 mkdtemp 造一个隔离根，把 home 与
- * resources 都指进临时目录。这里刻意不读 `process.env.HARNESS_HOME`——测试一旦
- * 依赖运行者的真实配置目录，用例结果就不再只由代码决定（`D-170` 的同类教训：
- * fixture 静默写进用户真实配置，事后只能靠文件内容反推来源）。
+ * bundled（`<该根>/resources/corpus.json`）都指进临时目录。这里刻意不读
+ * `process.env.HARNESS_HOME`——测试一旦依赖运行者的真实配置目录，用例结果就
+ * 不再只由代码决定（`D-170` 的同类教训：fixture 静默写进用户真实配置，事后
+ * 只能靠文件内容反推来源）。
  */
 
 const roots: string[] = [];
@@ -72,11 +73,13 @@ describe("loadCorpusConfig", () => {
   it("读取 home 级配置", async () => {
     const { home, resources } = await setup({ home: validConfig() });
 
-    const result = await loadCorpusConfig({ harnessHome: home, resourcesRoot: resources });
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath: path.join(resources, "corpus.json") });
 
     expect(result).toEqual({
       kind: "ok",
       source: "home",
+      // The winning file's real path, so the host never has to re-derive it.
+      path: path.join(home, "corpus.json"),
       config: {
         version: 1,
         updateBaseUrl: "https://bucket.example/kb/",
@@ -85,15 +88,47 @@ describe("loadCorpusConfig", () => {
     });
   });
 
-  it("home 缺失时读取 resources 级配置", async () => {
+  it("home 缺失时读取 bundled 级配置", async () => {
     const { home, resources } = await setup({ resources: validConfig() });
+    const bundledPath = path.join(resources, "corpus.json");
 
-    const result = await loadCorpusConfig({ harnessHome: home, resourcesRoot: resources });
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath });
 
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
-    expect(result.source).toBe("resources");
+    expect(result.source).toBe("bundled");
+    expect(result.path).toBe(bundledPath);
     expect(result.config.updateBaseUrl).toBe("https://bucket.example/kb/");
+  });
+
+  it("源码形态从 config/corpus.json 读到", async () => {
+    // The checkout layout: `<repo>/config/corpus.json`, one level below the
+    // directory that holds `dist/`. The loader is told the file, not a shape.
+    const root = await tempRoot();
+    const home = path.join(root, "home");
+    const configDir = path.join(root, "config");
+    await mkdir(home, { recursive: true });
+    await mkdir(configDir, { recursive: true });
+    const bundledPath = path.join(configDir, "corpus.json");
+    await writeFile(bundledPath, JSON.stringify(validConfig(), null, 2), "utf8");
+
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath });
+
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(result.source).toBe("bundled");
+    expect(result.path).toBe(bundledPath);
+  });
+
+  it("bundledPath 不传时不会去读第二级", async () => {
+    // No `bundledPath` means this install has no bundled level at all — not
+    // "look in some default directory", which would be a second layout rule
+    // living in the loader.
+    const home = await tempRoot();
+
+    const result = await loadCorpusConfig({ harnessHome: home });
+
+    expect(result).toEqual({ kind: "none" });
   });
 
   it("两级都存在时 home 优先", async () => {
@@ -102,7 +137,7 @@ describe("loadCorpusConfig", () => {
       resources: validConfig({ updateBaseUrl: "https://resources.example/kb/" }),
     });
 
-    const result = await loadCorpusConfig({ harnessHome: home, resourcesRoot: resources });
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath: path.join(resources, "corpus.json") });
 
     expect(result.kind).toBe("ok");
     if (result.kind !== "ok") return;
@@ -110,13 +145,13 @@ describe("loadCorpusConfig", () => {
     expect(result.config.updateBaseUrl).toBe("https://home.example/kb/");
   });
 
-  it("home 级配置不合法时不回落到 resources 级", async () => {
+  it("home 级配置不合法时不回落到 bundled 级", async () => {
     const { home, resources } = await setup({
       home: validConfig({ version: 2 }),
       resources: validConfig(),
     });
 
-    const result = await loadCorpusConfig({ harnessHome: home, resourcesRoot: resources });
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath: path.join(resources, "corpus.json") });
 
     // 静默降级会让用户以为改的是实际生效的那份配置（契约 §2 / R3）。
     expect(result.kind).toBe("invalid");
@@ -129,7 +164,7 @@ describe("loadCorpusConfig", () => {
       home: validConfig({ updateBaseUrl: "https://bucket.example/kb" }),
     });
 
-    const result = await loadCorpusConfig({ harnessHome: home, resourcesRoot: resources });
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath: path.join(resources, "corpus.json") });
 
     expect(result.kind).toBe("invalid");
     if (result.kind !== "invalid") return;
@@ -141,7 +176,7 @@ describe("loadCorpusConfig", () => {
   it("version 不是 1 时 invalid 且点名 version", async () => {
     const { home, resources } = await setup({ home: validConfig({ version: 2 }) });
 
-    const result = await loadCorpusConfig({ harnessHome: home, resourcesRoot: resources });
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath: path.join(resources, "corpus.json") });
 
     expect(result.kind).toBe("invalid");
     if (result.kind !== "invalid") return;
@@ -151,7 +186,7 @@ describe("loadCorpusConfig", () => {
   it("非 JSON 时 invalid 且 reason 提到解析失败", async () => {
     const { home, resources } = await setup({ home: "{ not json" });
 
-    const result = await loadCorpusConfig({ harnessHome: home, resourcesRoot: resources });
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath: path.join(resources, "corpus.json") });
 
     expect(result.kind).toBe("invalid");
     if (result.kind !== "invalid") return;
@@ -163,11 +198,12 @@ describe("loadCorpusConfig", () => {
       home: "\uFEFF" + JSON.stringify(validConfig(), null, 2),
     });
 
-    const result = await loadCorpusConfig({ harnessHome: home, resourcesRoot: resources });
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath: path.join(resources, "corpus.json") });
 
     expect(result).toEqual({
       kind: "ok",
       source: "home",
+      path: path.join(home, "corpus.json"),
       config: {
         version: 1,
         updateBaseUrl: "https://bucket.example/kb/",
@@ -179,15 +215,7 @@ describe("loadCorpusConfig", () => {
   it("两级都不存在时返回 none", async () => {
     const { home, resources } = await setup({});
 
-    const result = await loadCorpusConfig({ harnessHome: home, resourcesRoot: resources });
-
-    expect(result).toEqual({ kind: "none" });
-  });
-
-  it("未传 resourcesRoot 时只看 home 级", async () => {
-    const { home } = await setup({});
-
-    const result = await loadCorpusConfig({ harnessHome: home });
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath: path.join(resources, "corpus.json") });
 
     expect(result).toEqual({ kind: "none" });
   });
@@ -197,7 +225,7 @@ describe("loadCorpusConfig", () => {
       home: validConfig({ publicKeyPem: "not-a-key" }),
     });
 
-    const result = await loadCorpusConfig({ harnessHome: home, resourcesRoot: resources });
+    const result = await loadCorpusConfig({ harnessHome: home, bundledPath: path.join(resources, "corpus.json") });
 
     expect(result.kind).toBe("invalid");
     if (result.kind !== "invalid") return;

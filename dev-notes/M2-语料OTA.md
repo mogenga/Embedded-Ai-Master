@@ -238,3 +238,124 @@
 **遗留（未做）**
 - 打包配置（T10）仍暂缓：`seedCorpus` 在开发形态返回 `no_bundled_corpus`，其「物化内置语料」路径只在 `tests/desktop/host-seed.test.js` 里用合成语料验证过，**未在真实打包产物上跑过**。
 - 渲染器无自动化测试，知识库页视觉对齐与模型测试按钮位置两处改动只能人工验收。
+
+## 2026-10-25 T10 前置：源码形态也能读到 `corpus.json`
+
+**用户关键原话**
+- 「按方案 A 做，T10打包也做。发子代理，不得提交」
+
+**问题（他人 clone 的实际症状）**
+- 设置 → 知识库页显示「没有语料更新配置（corpus.json 缺失），无法检查更新」。
+- 根因：`loadCorpusConfig` 原来只认两级——`$HARNESS_HOME/corpus.json` 与 `<resourcesRoot>/corpus.json`，而第二级只有打包形态才传（`roots.form === "packaged"`）。源码形态两级都落空 → `{ kind: "none" }` → 宿主转成 `config_invalid`。
+- 仓库里那份 `config/corpus.local.json` 被 gitignore，**且没有任何代码读它**（只是留给人看的备忘）。别人的 clone 里根本没有这个文件。
+
+**关键产出**
+- `src/config/corpus-config.ts`：第二级从「目录 `resourcesRoot`」改成「明确的文件路径 `bundledPath`」；`CorpusConfigSource` 由 `"home" | "resources"` 改为 `"home" | "bundled"`；`ok` 分支新增 `path: string`（实际读到的文件路径）。
+- `desktop/host/host.js`：`corpusResourcesRoot` 改为 `corpusBundledPath`——打包形态 `path.join(roots.distParent, "corpus.json")`，其它形态 `path.join(roots.distParent, "config", "corpus.json")`；`CORPUS_CONFIG_FILE` 常量提到首次使用点之前；`readCorpusConfig` 去掉「按 source 反推 path」的分支，直接用 `loaded.path`。
+- `config/corpus.json`（新，进仓库）：真实桶地址 + 公钥。这两个值按 `docs/corpus-ota.md` §2 本就不是秘密，且必然随安装包分发；源码形态从此有一份默认配置。
+- 测试：`tests/corpus-config.test.ts` 12 例（原 11 例改标签 + 新增「源码形态从 `config/corpus.json` 读到」「`bundledPath` 不传时不读第二级」）；`tests/desktop/host-corpus.test.js` 15 例（原 14 例 + 新增源码形态用例，并用 `kernelRootWithoutConfig()` 让三条「没有配置」用例真的没有配置）。
+
+**为什么 `source` 从 `"resources"` 改成 `"bundled"`**
+- 源码形态也走这一级了，`"resources"` 名不副实：值是 `<仓库根>/config/corpus.json`，与 `resources/` 无关。
+- `"bundled"` 表达的是这一级的**语义**（随发行物分发的默认值），不是它所在的目录——打包与源码两种形态共用同一个标签，因为对用户而言是同一件事。
+- 渲染层不使用该字段（只有宿主原样透传给 `corpus_status.configSource`），改动面只到宿主与 `desktop/MATRIX.md`。
+
+**必须原样保留的既有语义（本次一字未动）**
+- 只有 `ENOENT` 算「这一级不存在」，其余读取失败（EACCES/EISDIR…）一律 `invalid`；文件存在但不合法不回落到下一级；`stripBom`；`validateCorpusConfig` 逐字段报错且每条 reason 点名字段与文件路径；这一层只读文件，不发网络请求、不建目录、不写文件。
+- `CORPUS_CONFIG_MISSING` 文案未改（`src/corpus/update.ts:171` 的 `normalizeConfig` 有同款，两处刻意互为镜像）。
+
+**被拒绝或纠偏的内容**
+- 宿主侧取值在「(a) 加载器返回 path」与「(b) 宿主按 source 反推 path」之间选了 **(a)**。(b) 是同一事实的第二份拷贝，形态一变（本次就是）必定漂移；改完后 `readCorpusConfig` 的 `ok` 分支只剩一行。`invalid`/`none` 分支仍给 `homePath`——那两个分支的 `reason` 已含实际路径（或本来就没有文件），页面需要的只是「该去改哪个文件」。
+- 未选「保持 `resourcesRoot` 目录语义、源码形态传仓库根」。那样加载器要猜 `corpus.json` 与 `config/corpus.json` 哪个布局，等于把宿主的布局知识塞进内核。
+
+**翻车与返工**
+- 改完 `src/` 后先跑 `tests/desktop/host-corpus.test.js`：自己的新用例与「home 级 path」断言都红。原因是宿主 import 的是 `dist/`——**没 `npm run build` 时跑的是旧内核**。`npm run build` 后新用例转绿。
+- `config/corpus.json` 进仓库后，三条「没有任何配置」的既有用例（`config_invalid` × 2、apply 拒绝 × 1）开始红——它们原本依赖「源码形态第二级落空」。这不是回归，是改动**按设计生效**的证据。修法：加 `kernelRootWithoutConfig()`（临时目录 + 指向真实 `dist/` 的 junction），让这三条用 `HARNESS_KERNEL_ROOT` 指向一个确实没有 `config/corpus.json` 的根。未改用例语义。
+- 先前记的「`rm -rf`/`rm({recursive:true})` 会不会顺着 junction 把 `dist/` 删掉」必须实测：实测**不会**（`holder gone: true` / `target survives: true`），否则这个测试辅助函数就成了删除构建产物的隐患。
+- `npm run typecheck` 仍是既有的 7 个错误（`mcp-servers/cubeide`、`mcp-servers/keil` 测试），本次 0 新增；`desktop/` 是纯 JS，不进 tsconfig。
+- `npm test` 全量的 3 个失败（`tests/mcp-manager.test.ts`、`mcp-servers/cubeide/tests/embed-serial.test.ts`、`mcp-servers/keil/tests/uvsock-protocol.test.ts`）与本任务无关：前两个单独跑通过（并行满载超时），`embed-serial` 的 `SERIAL_ACTIONS` 断言失败是既有串口动作扩展（`open`/`close`）未同步到测试，三个文件本次均未修改。
+
+**已知未做**
+- 打包形态（`roots.distParent` 为 `resources/` 时）的路径分支没有宿主级用例：真跑需要一份打包产物，而构造它等于伪造 T10 的输出。该分支只是一次 `path.join`，真正的分支在加载器（`bundledPath` 传没传），已由 `tests/corpus-config.test.ts` 覆盖。
+- `README.md`、`docs/corpus-ota.md` 未改（主代理收尾统一改）；契约 §2 的表格仍写「构建时注入」，与源码形态新增的这一份需要主代理决定措辞。
+
+## 2026-10-25 T10 打包配置与语料暂存脚本
+
+**用户关键原话**
+- 「按方案 A 做，T10打包也做。发子代理，不得提交」
+- （前置约束，同轮）「绝不执行打包构建」「绝不执行任何安装命令」——本轮只落配置与脚本，不产出安装包。
+
+**关键产出**
+- `desktop/package.json`：补 `main: "main.js"`（缺它 Electron 会去找不存在的 `index.js`）与 `build` 段。形状：`appId: com.embedded-ai-master.app`、`productName: Embedded AI Master`、`directories.output: dist-installer`（不叫 `dist`，避开内核产物同名）、`files: [main.js, preload.cjs, host/**/*, renderer/**/*, package.json]`、四个 `extraResources` FileSet（`../dist`→`dist`、`../dist-mcp`→`dist-mcp`、`build/corpus`→`corpus`、`../config/corpus.json`→`corpus.json`）、`win.target: nsis`。用 electron-builder 自带的 `scheme.json` 经 ajv 校验过，`valid: true`。
+- 新增 `scripts/corpus-stage.mjs`：读已签名 `latest.json` → **只**复制清单点名的文件 → 复制前/后各校验一次 sha256 → 最后写 `latest.json` 到顶层。`--verify-only` 只校验不落盘。拒绝 `..`/绝对路径/盘符/`. `/空段/反斜杠。不读私钥、不验签（验签是运行时的事）、不联网。顶层入口用 `import.meta.url === pathToFileURL(process.argv[1]).href` 判断，`stageCorpus` / `parseArgs` 可被测试直接 import。
+- 新增 `scripts/corpus-stage.d.mts`：上面那份 `.mjs` 的声明，只覆盖测试用到的出口。不加它，`tsc --noEmit` 会多一条 TS7016（隐式 any）——等于给本来就红的 typecheck 再加一条。
+- 新增 `tests/corpus-stage.test.ts`：29 例，全部 mkdtemp 内，sha256 参照实现独立于被测脚本（共用一份会「一起错」）。覆盖正常路径、篡改（断言点名路径 + 期望值/实际值）、清单多于磁盘、磁盘多于清单、5 种路径逃逸、清单结构错误、`--out` 已存在、`--out` 在语料内、`--verify-only` 不写盘但校验生效、`parseArgs` 各分支。
+- `.gitignore`：加 `desktop/build/corpus/` 与 `desktop/dist-installer/`。只忽略这一个子目录、不忽略整个 `desktop/build/`——那是 electron-builder 放图标等构建资源的常规位置。
+- `--out` 已存在时**拒绝覆盖**并提示先删，不做改名备份。理由：覆盖会静默销毁上次产物；改名备份会留下一个很容易被当成「当前语料」的旧副本（打包脚本按固定路径取）。代价是一次明确的人工删除，换来「目录里出现的东西一定是这一次的」。
+
+**为什么语料要过 `corpus-stage` 而不是直接 `extraResources: { from: "mcp-servers/kb/kb" }`**
+- 工作目录里有 `_inbox.md`（用户本地沉淀）与 `manifest.sha256`（发布侧旧校验文件），两者都不在 OTA 清单里、也不该进快照（契约 §3/§4）。直接整目录打包会把它们装进安装包，首次启动物化后 `kb_read` 读到的既不是「出厂语料」也不是「OTA 快照」。
+- 用真实输入验过：`curl` 取本机桶的真实 `latest.json`（corpusVersion=1，108 文件），`--verify-only` 与完整 `--out` 两条路径都通过；产物 109 个文件（108 + `latest.json`），`_inbox.md` 与 `manifest.sha256` 均不在输出里。
+
+**被拒绝或纠偏的内容**
+- 未给 `serialport` 改 `npmRebuild: false`（评估结论见下），也未用 `extraResources` 把根 `node_modules` 塞进去——那会让 electron-builder 的依赖解析与运行时解析分叉。
+- 未改 `electron` 版本（根 `^45.0.0` vs desktop `^44.9.0`，D-209 同类问题，需要一次 install 才能统一）。
+
+**翻车与返工**
+- `latestPath` 首版返回的是暂存目录路径（`rename` 前算好的 `latestTarget`），改名后那个路径已不存在。真跑真实语料时输出里看到 `.corpus-stage-083dBV\latest.json` 才暴露。改成 `path.join(outDir, MANIFEST_FILE_NAME)`，并在测试里加断言（既查返回值也查文件真的在那儿）。
+- 路径逃逸/依赖解析的探针第一轮**假阳性**：临时目录建在 `/tmp`，向上查找命中了 `C:\Users\mogen\node_modules`（家目录里有一份无关的 `package.json`/`node_modules`），`zod` 因此能解析。改到 `/e/Project/personal/` 下（该链路上无任何 `node_modules`）重测才得到真实结论。**凡是「能否解析到某包」的探针，必须先确认祖先目录干净。**
+
+**验证结论：`npmRebuild` 保持默认 `true`**
+- `@serialport/bindings-cpp@13.0.0` 确实声明 `binary.napi_versions: [8]`、`prebuilds/` 覆盖 win32-x64 等 13 个平台。但 `@electron/rebuild@4.2.1` 的 prebuildify 分支（`module-type/prebuildify.js`）只认 `electron.napi.node` / `node.napi.node` / `electron.abi<ABI>.node` 三种文件名；实际落盘的是 `@serialport+bindings-cpp.node`（node-gyp-build 的命名，无 `napi` tag）。prebuild-install 分支找的是 `electron-<ABI>.node`，也不存在。两处探测都返回 false，于是 @electron/rebuild 会走 node-gyp 从源码编译。
+- 也就是说 `npmRebuild: false` 并不会「保住 prebuild」，它只是**跳过检查**；默认 `true` 则会在真打包机上尝试 node-gyp 编译（需要 VS Build Tools）。两者都不是「装上就能跑」。实测已确认：现有 prebuild 在 Electron 44.9.1（`ELECTRON_RUN_AS_NODE=1`，Node 24.22.0）下**能直接加载并枚举串口**（`SerialPort.list()` 返回 1 个口）。所以更省事的路子是 `npmRebuild: false` 让 prebuild 原样进包——但这需要一次真实打包验证，本轮禁止打包，**不写入配置**，留给下一轮定。
+- 另注：`nativeModules` 这个配置键在已安装的 26.15.3 的 `scheme.json` 里**不存在**（只有扁平 `npmRebuild`），Context7 上那份带 `nativeModules.npmRebuild` 的文档对应更新版本。写 `nativeModules` 会被 schema 拒绝。
+
+**重要发现（未修复，超出本任务范围）：内核的裸包 import 在 `resources/` 布局下解析不到**
+- `dist/` 与 `dist-mcp/` 里的编译产物保留了 `import { z } from "zod"`、`import ... "@modelcontextprotocol/client"` 等裸说明符。宿主按 `resources/dist/index.js` 这类**绝对 file URL** 动态 import，Node 从该文件所在目录向上找 `node_modules`；`resources/` 下没有任何 `node_modules`，于是 `ERR_MODULE_NOT_FOUND`。
+- 实测：只摆四个 `extraResources`（不带 `resources/node_modules`）时，`dist/kernel.js` 找不到 `zod`、`dist-mcp/kb/server.js` 找不到 `zod`；补上 `resources/node_modules/{zod,@modelcontextprotocol/*,jose,eventsource,eventsource-parser,pkce-challenge,cross-spawn,which,path-key,shebang-command,shebang-regex,isexe}` 后两个都 `OK`。
+- 端到端复现（最有说服力的一步）：把 `desktop/{host,renderer,main.js,preload.cjs,package.json}` 摆成 app 目录、`dist/`+`dist-mcp/` 摆进 `resources/`，用 `HARNESS_RESOURCES_PATH=<resources>` + `ELECTRON_RUN_AS_NODE=1` 启动宿主。**没有 `resources/node_modules` 时**宿主发出 `{"type":"fatal","message":"内核未构建：Cannot find package 'zod' imported from ...\\resources\\dist\\config\\providers.js。请先在仓库根目录运行 npm run build。"}` 后退出；**补上 `resources/node_modules` 后**依次收到 `hello` → `state` → `ready`，正常启动。
+- 注意那条 fatal 文案在打包形态下是**误导性的**：它让用户「在仓库根目录运行 npm run build」，而安装包的修复办法是重装。`desktop/host/host.js:234` 的 `catch` 不分 `form`，与 `roots.js` 的 `kernelMissingMessage(form, entry)` 已经做好的区分不一致——这一处建议后续按 `form` 分文案（本轮未改 `host.js`，另一名子代理正在改它）。
+- 后果是**部分而非全部**：宿主启动时 `server/runner.js`、`config/providers.js`（引 zod）、`mcp/config.js` 等是顶层 `await`，解析失败会直接抛，宿主进程起不来。所以这一条会让安装包启动失败，且不在现有四个 `extraResources` 的覆盖范围内。
+- 另外 `serialport` 现在只装在根 `node_modules`（`desktop/node_modules/serialport` 不存在，`npm ls --omit dev` 报 ELSPROBLEMS）。**实测澄清了它的实际后果**：electron-builder 26.15.3 先试 npm collector（`npm list` 的 JSON 里 `serialport` 只有 `{required, missing: true}`、没有 `path`），它收集到 **0 个模块**；随后回落到 `TraversalNodeModulesCollector`（读 `desktop/package.json` 的 dependencies、按 Node 解析规则向上找），成功收集 **19 个模块、含 `serialport@13.0.0`**。所以根 `node_modules` 里的 hoisted 安装**能被收集进包**，早先「装不到」的判断不成立。`npm --prefix desktop install` 仍建议执行（让 desktop 自成完整一套、避免依赖回退路径与 D-209 那类版本漂移），但它不是「能进包」的前置条件。
+- 本轮未改配置去补 `resources/node_modules`：正确做法（`files` 里显式布点 vs 加一个 `extraResources` 把根 `node_modules` 相关子目录带进去 vs 给 `dist/` 造一份 `package.json` 改走 workspace）会改变依赖解析口径，属于需要用户拍板的设计决策，不适合由子代理顺手决定。
+
+**真实安装包仍未产出**
+- 本轮**没有**运行 `npx electron-builder`，也没有安装任何依赖。安装包的前置条件：①`npm run build` + `npm run build:mcp`（`extraResources` 的 `from` 指向的 `dist/`、`dist-mcp/` 必须在）；②`node scripts/corpus-stage.mjs --corpus mcp-servers/kb/kb --manifest <latest.json> --out desktop/build/corpus`（`build/corpus` 目前不存在）；③**上面那条 `resources/node_modules` 解析问题必须先定性**——按现在的配置打出来的包，宿主会在 `dist/config/providers.js` 找不到 `zod` 而直接退出。建议执行 `npm --prefix desktop install`（非阻塞项，见上）。
+- 契约 §9 的两项待实测（asar 内 ESM 动态 import、junction 在 `%LOCALAPPDATA%` 的权限）**仍然待实测**。本轮只单独验证了 asar 能读：用 `npx asar pack` 造了个最小包，`ELECTRON_RUN_AS_NODE=1` 下 `import.meta.url` 正确落在 `app.asar` 内、能读同包 `package.json`、能 `require` 包内依赖；普通 `node` 读不了 asar（不认得这个路径），这解释了为什么宿主必须用 Electron 二进制启动而不是系统 node。
+
+## 2026-10-25 打包配置落地（T10）
+
+**用户关键原话**
+- 「serialport装好了，需要吗？」
+- 「按推荐来吧，修复掉当前问题」
+
+**关键产出**
+- `desktop/package.json`：补 `main: "main.js"`（原缺失，Electron 会去找不存在的 `index.js`）与 `build` 段（`appId` / `productName` / `directories.output: dist-installer` / `files` / 五项 `extraResources` / `win.target: nsis`）。经 electron-builder 26.15.3 自带 `scheme.json` + ajv 校验通过。`dist` 脚本 = `package-prepare` + `electron-builder`。
+- `scripts/runtime-deps.mjs`（新，约 400 行）：从 `dist/`、`dist-mcp/` 的 import 抽出裸说明符，沿 `package-lock.json` 求传递闭包，按 lockfile 落点路径复制（含嵌套）。实测：3 个入口 → 14 个包 → 23 MB。
+- `scripts/corpus-stage.mjs`（另一子代理产出）：按 `latest.json` 的 `files` 逐文件搬 + 校验 sha256 + 拒绝路径逃逸。
+- `scripts/package-prepare.mjs`（新）：把上面两件串成一条命令，`npm --prefix desktop run dist` 先跑它。语料清单优先 `--manifest`，否则用 `config/corpus.json` 的地址现取。
+- `desktop/host/roots.js`：新增 `kernelLoadFailedMessage(form, detail)`。原先 `host.js` 那个 `catch` 不分形态，安装形态下会让用户「在仓库根目录运行 npm run build」——他可能根本没有源码树。
+- `.gitignore`：`desktop/build/corpus/` + `desktop/dist-installer/`。只忽略语料那一个子目录，不忽略整个 `desktop/build/`。
+
+**被拒绝或纠偏的内容**
+- **`npmRebuild: false` 没写**。我最初建议「N-API + prebuilds 齐全，所以不必重编译」，子代理核实后指出：`@electron/rebuild` 的 prebuildify 分支只认 `electron.napi.node` / `node.napi.node` / `electron.abi<ABI>.node`，而实际落盘的是 `@serialport+bindings-cpp.node`（node-gyp-build 命名，无 `napi` tag）→ 两条分支都不命中 → 退到 `node-gyp` 从源码编译。所以 `false` 不是「保住 prebuild」，只是「跳过检查」。保持默认 `true` —— 在没验证过打包的前提下显式写 `false`，等于把未验证的假设固化成配置。
+- **`nativeModules` 这个键不写**：装好的 26.15.3 的 `scheme.json` 里不存在（只有扁平 `npmRebuild`），写了会被 schema 拒绝。Context7 上带 `nativeModules.npmRebuild` 的文档对应更新版本。
+- **`--out` 已存在时拒绝覆盖，不做改名备份**：覆盖会静默销毁上一次的产物，改名备份会在按固定路径取用的目录里留一份容易被当成「当前」的旧副本。
+- **`--verify-only` 与 `--out` 同时给就报错**，不静默忽略 `--out`——那会让人以为已经产出了。
+
+**翻车与返工**
+- **`resources/node_modules` 这个遗漏是本轮最要紧的发现**。子代理做了端到端复现：按原配置打出包，宿主以 `Cannot find package 'zod'` 退出，窗口根本起不来。四个 `extraResources` 全对也没用——内核用绝对 file URL 动态 import，Node 从 `resources/dist/` 向上找 `node_modules`，`resources/` 下没有它。它没有擅自改配置（会改变依赖解析口径，属需拍板的决策），只报上来；我按推荐补了 `scripts/runtime-deps.mjs`。
+- **我原先判断「serialport 在根不在 desktop/ 所以不会进包」是错的**。子代理用 electron-builder 的收集器做只读实测：npm collector 收 0 个（`npm list` 里 serialport 是 `missing: true`），回落到 `TraversalNodeModulesCollector` 后收到 19 个模块、含 `serialport@13.0.0`。hoisted 安装能被收进包；`npm --prefix desktop install` 仍值得做，但不是「能进包」的前置条件。
+- **`rename` 到不存在的父目录在 Windows 上是 EPERM 而不是 ENOENT**。`desktop/build/` 不存在时装配失败，报错看着像权限问题。修法：rename 前先 `mkdir(path.dirname(outDir), { recursive: true })`。
+- **探针假阳性**：子代理第一轮「能否解析到某包」的探针建在 `/tmp`，向上查找命中了 `C:\Users\mogen\node_modules`，得出了错误结论。改到 `E:\Project\personal\` 下重测才得到真实结果——该链路无任何 `node_modules`。
+- **`stageCorpus` 首版返回的 `latestPath` 是 rename 前的暂存路径**（真跑真实语料时才暴露，输出里出现 `.corpus-stage-083dBV\latest.json`）。已修并加断言。
+- **`config/corpus.json` 进仓库后，三条「没有任何配置」的宿主用例会红**。它们原本靠「源码形态第二级必然落空」制造 `config_invalid`，现在会读到仓库里那份真实地址。这不是回归，是改动按设计生效的证据。修法：`kernelRootWithoutConfig()`（临时目录 + 指向真实 `dist/` 的 junction）。顺带实测了 `rm({recursive:true})` **不会**顺着 junction 删掉 `dist/`。
+
+**实测证据（模拟打包布局，非真实 NSIS 产物）**
+- 宿主启动：`hello` → `state` → `ready` → `sessions` → `skills` → … 无 `fatal`。
+- 随包语料：`seedCorpus` 物化到 `snapshots/v1` 并切 junction `current`，`getKb` 回报 `fileCount: 107`、`indexPresent: true`、`source: "mcp.json"`。
+- 语料配置：`corpus_status` 报 `{"kind":"bundled"}`、`configSource: "bundled"`、`configPath: <resources>\corpus.json`。
+
+**已知未做**
+- 真实 NSIS 安装包从未产出（D-208）。`serialport` 在根不在 `desktop/`；打包机无 MSVC 工具链。
+- 契约 §9 两项仍待实测：asar 内 ESM 动态 import（已用 `extraResources` 绕开而非验证）、junction 在 `%LOCALAPPDATA%` 的创建权限。

@@ -69,11 +69,39 @@ function regularFileError(
   );
 }
 
+/**
+ * 文件不存在不是「损坏」。
+ *
+ * `lstatSync` 的 ENOENT / ENOTDIR 以前和「内容读不懂」一样被包成
+ * `invalid_header`，于是「你上次那个会话已经被删了」在界面上说成
+ * 「Invalid session header」——用户会去查 JSON，而真正该做的是那件事早已
+ * 不存在。两者用不同的码分开（D-215）：`session_not_found` 是「没了」，
+ * `invalid_header` 是「在、但坏了」。
+ */
+function missingFileError(
+  kind: RegularFileKind,
+  file: string,
+  cause: unknown,
+): SessionCorruptionError {
+  const isHeader = kind === "header";
+  return new SessionCorruptionError(
+    "session_not_found",
+    `${isHeader ? "Session header" : "Session log"} not found: ${file}`,
+    { file: path.basename(file), cause },
+  );
+}
+
+function isMissingError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
 function assertRegularFile(file: string, kind: RegularFileKind): void {
   let info;
   try {
     info = lstatSync(file);
   } catch (error) {
+    if (isMissingError(error)) throw missingFileError(kind, file, error);
     throw regularFileError(kind, file, error);
   }
   if (info.isSymbolicLink() || !info.isFile()) {

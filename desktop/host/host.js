@@ -27,7 +27,12 @@ import {
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { kernelMissingMessage, RESOURCES_PATH_ENV, resolveRoots } from "./roots.js";
+import {
+  kernelLoadFailedMessage,
+  kernelMissingMessage,
+  RESOURCES_PATH_ENV,
+  resolveRoots,
+} from "./roots.js";
 import { SerialBridge, listSerialPorts, serialRingPath } from "./serial-bridge.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -230,9 +235,10 @@ try {
     protocol,
   };
 } catch (error) {
-  fatal(
-    `内核未构建：${error instanceof Error ? error.message : String(error)}。请先在仓库根目录运行 npm run build。`,
-  );
+  // 形态不同，可采取的行动也不同：开发形态是「去 build」，安装形态是「重装」。
+  // 让一个装好的用户去仓库根目录跑 npm run build 是纯粹的误导——他可能根本没有
+  // 那棵源码树。
+  fatal(kernelLoadFailedMessage(roots.form, error instanceof Error ? error.message : String(error)));
   // Same reason as the entry check above: the message must reach the parent.
   await exitAfterFlush(1);
 }
@@ -341,6 +347,8 @@ function seedModule() {
   return seedModulePromise;
 }
 
+const CORPUS_CONFIG_FILE = "corpus.json";
+
 /**
  * The kernel's toolchain-pack stack (`dist/packs/*`), loaded lazily by the
  * Tools settings page.
@@ -428,25 +436,34 @@ let packAbort = null;
 let packInstallRunning = false;
 
 /**
- * Where `<resources>/corpus.json` would live, or `undefined` when this install
- * has no such level.
+ * The bundled `corpus.json` for this install: the level below
+ * `$HARNESS_HOME/corpus.json`, and the one the operator is not supposed to edit.
  *
- * Packaged, `roots.distParent` is the app's `resources/` directory, which is
- * exactly where the build injects `corpus.json` (contract §2). In a checkout
- * it is the repository root — a directory that holds `config/corpus.local.json`
- * rather than `corpus.json`, so pointing the loader at it would only ever
- * produce "not found" for a file that was never meant to be there.
+ * One file path, derived from `roots.distParent` — the same directory the
+ * kernel lives in, so there is exactly one layout decision in play:
  *
- * **Testing and development** therefore use the level that outranks it anyway:
- * `$HARNESS_HOME/corpus.json` (contract §2, highest precedence). Point
- * `HARNESS_HOME` at a temporary directory, drop a `corpus.json` in it, and the
- * whole check/apply path runs against that file — no extra environment
- * variable and no second validation path in this host. A `HARNESS_CORPUS_CONFIG`
- * override was considered and rejected for that reason: it would have to
- * re-implement `loadCorpusConfig`'s validation here, and two validators for one
- * file will eventually disagree about what "configured" means.
+ * - Packaged, `roots.distParent` is the app's `resources/` directory (contract
+ *   §2), and the file sits at its root.
+ * - Development (and `HARNESS_KERNEL_ROOT`), it is the checkout root, and the
+ *   file lives at `config/corpus.json` — the copy that ships in the repository
+ *   so a fresh clone can check for updates without first hand-writing one.
+ *
+ * A path rather than a directory, because those two shapes differ in their
+ * *last* segment, not just their parent: a loader handed a directory would have
+ * to know which layout it was looking at, and that is this host's fact, not the
+ * loader's.
+ *
+ * **Testing** can still use `$HARNESS_HOME/corpus.json` (highest precedence) to
+ * run the whole check/apply path against a temporary file without touching the
+ * bundled one. A `HARNESS_CORPUS_CONFIG` override was considered and rejected:
+ * it would have to re-implement `loadCorpusConfig`'s validation here, and two
+ * validators for one file will eventually disagree about what "configured"
+ * means.
  */
-const corpusResourcesRoot = roots.form === "packaged" ? roots.distParent : undefined;
+const corpusBundledPath =
+  roots.form === "packaged"
+    ? path.join(roots.distParent, CORPUS_CONFIG_FILE)
+    : path.join(roots.distParent, "config", CORPUS_CONFIG_FILE);
 
 /**
  * Wording for "there is no `corpus.json` at any level".
@@ -2128,7 +2145,34 @@ async function handleLoadSession(id) {
   try {
     detail = await sessions.detailTolerant(id);
   } catch (error) {
-    send({ type: "error", message: `会话打开失败：${error instanceof Error ? error.message : String(error)}` });
+    // Errors here are not a run failure, so they must not wear the `error`
+    // banner (which sets the window's status to 错误): the launch opened no
+    // session and the user did nothing wrong.
+    //
+    // Two facts must stay apart (D-214 / D-215). A session whose files are
+    // gone is *not* a damaged header: the old code wrapped ENOENT into
+    // `invalid_header`, so a deleted directory was reported as
+    // "Invalid session header: <path>" and pointed the reader at a JSON file
+    // that no longer existed. The kernel now raises `session_not_found` for
+    // that case; `invalid_header` means the file is there and unreadable.
+    const code = error instanceof Error && "code" in error ? error.code : "";
+    if (code === "session_not_found") {
+      // R3: "gone" is not "broken". Saying which one it is saves the reader
+      // from opening a header file that does not exist any more.
+      send({ type: "notice", level: "warn", text: `会话不存在：${id}（目录或 header.json 已被删除）` });
+      return;
+    }
+    if (code === "invalid_header" || code === "invalid_event_line" || code === "invalid_seq" || code === "unknown_event_type") {
+      // The file is there and the parser rejected it. Name the code so a
+      // report of this notice can be matched to the kernel's own vocabulary.
+      send({
+        type: "notice",
+        level: "warn",
+        text: `会话文件损坏（${code}）：${messageOf(error)}。文件在磁盘上，但内容无法解析；请从侧栏另开会话。`,
+      });
+      return;
+    }
+    send({ type: "notice", level: "error", text: `会话读取失败：${messageOf(error)}` });
     return;
   }
   sessionId = id;
@@ -2311,7 +2355,6 @@ async function handleTestProvider(payload) {
 // would eventually disagree with the one that writes `state.json`, and the page
 // would then describe a corpus that is not the one on disk (R3).
 
-const CORPUS_CONFIG_FILE = "corpus.json";
 const CORPUS_MANIFEST_FILE = "latest.json";
 
 /**
@@ -2325,20 +2368,18 @@ const CORPUS_MANIFEST_FILE = "latest.json";
  * there (R3).
  *
  * `path` travels with every answer: it is what makes `config_invalid`
- * actionable. When no file exists at any level it names the one the user can
- * create, which is the only level this host can see on every install.
+ * actionable. On `ok` it is the file the loader actually read (`loaded.path`),
+ * not one re-derived from `source` — a second copy of that fact is exactly what
+ * drifts when a layout changes. When no file exists at any level it names the
+ * one the user can create, `$HARNESS_HOME/corpus.json`, which is the only level
+ * this host can see on every install (and the one that outranks the bundled
+ * file anyway).
  */
 async function readCorpusConfig(modules) {
   const homePath = path.join(harnessHome, CORPUS_CONFIG_FILE);
   let loaded;
   try {
-    loaded = await modules.config.loadCorpusConfig({
-      harnessHome,
-      // Absent in development on purpose: a checkout holds
-      // `config/corpus.local.json`, not `corpus.json`, and the build (not this
-      // host) is what copies one to the other. See `corpusResourcesRoot`.
-      ...(corpusResourcesRoot === undefined ? {} : { resourcesRoot: corpusResourcesRoot }),
-    });
+    loaded = await modules.config.loadCorpusConfig({ harnessHome, bundledPath: corpusBundledPath });
   } catch (error) {
     // The loader reports read failures as `invalid` rather than throwing; this
     // is for a shape it did not anticipate, and it still has to become a corpus
@@ -2346,17 +2387,7 @@ async function readCorpusConfig(modules) {
     return { config: null, reason: `读取语料配置失败：${messageOf(error)}`, path: homePath };
   }
   if (loaded.kind === "ok") {
-    const source = loaded.source;
-    return {
-      config: loaded.config,
-      source,
-      // The file that actually won. Showing the home path when the packaged
-      // file is the one in use would send the operator to edit a file the
-      // loader never read.
-      path: source === "resources" && corpusResourcesRoot !== undefined
-        ? path.join(corpusResourcesRoot, CORPUS_CONFIG_FILE)
-        : homePath,
-    };
+    return { config: loaded.config, source: loaded.source, path: loaded.path };
   }
   if (loaded.kind === "invalid") {
     // `reason` already names the offending file and field; the path is for the
@@ -2378,9 +2409,10 @@ async function readCorpusConfig(modules) {
  *
  * **Development and packaged differ in exactly one input.** A checkout holds no
  * `resources/corpus/`, so `resourcesRoot` stays `undefined` and the kernel
- * answers `no_bundled_corpus` — the same shape `corpusResourcesRoot` already
- * uses for `corpus.json`. That is deliberate: a developer's `~/.harness/kb`
- * must not be filled with a shipped corpus that then looks like an OTA result.
+ * answers `no_bundled_corpus`. That is deliberate, and separate from
+ * `corpusBundledPath`: a developer's `~/.harness/kb` must not be filled with a
+ * shipped corpus that then looks like an OTA result. (The shipped `corpus.json`
+ * *is* used in a checkout — it says where to fetch, not what the corpus is.)
  *
  * **Nothing here blocks or fails the boot.** Every outcome is reported at most
  * as a warn notice, and only when something actually went wrong: a successful
@@ -2417,8 +2449,8 @@ async function seedFirstRun() {
   }
 
   // 1. The corpus itself. Packaged, `roots.distParent` is `resources/`, where
-  //    the build puts `corpus/` — the same value `readCorpusConfig` already
-  //    uses for `corpus.json`.
+  //    the build puts `corpus/` — the same directory `corpusBundledPath` takes
+  //    `corpus.json` from.
   try {
     await seed.seedCorpus({
       harnessHome,
@@ -3516,6 +3548,56 @@ const handlers = {
       send({ type: "notice", level: "warn", text: `会话未更新：${messageOf(error)}` });
       return;
     }
+    send(sessionsEvent());
+  },
+
+  /**
+   * Archive several conversations in one go — the sidebar's "remove
+   * workspace".
+   *
+   * A workspace has no manifest of its own: the sidebar derives it by
+   * grouping sessions on `cwd`, so "remove this workspace" can only mean
+   * "archive the conversations inside it". Deleting the folder is not an
+   * option — it is the user's real project directory — and deleting the
+   * session directories would be unrecoverable, while archiving is a
+   * reversible flag in `meta.json`.
+   *
+   * The renderer sends **ids**, not a cwd. It already knows which rows the
+   * group contains, and it is the only place that owns the workspace key
+   * (`normalizeCwd`: `G:\x` and `G:/x` are one workspace there). Copying that
+   * rule into the host would give the same fact two definitions that can
+   * drift; an id list has nothing to normalize.
+   *
+   * Partial failure is reported, not rolled back: the sessions that could be
+   * archived stay archived. The one that failed keeps its previous state and
+   * is named with its reason (R3).
+   */
+  async archiveSessions(payload) {
+    const raw = Array.isArray(payload.ids) ? payload.ids : [];
+    const ids = [...new Set(raw.map((value) => String(value ?? "")).filter((id) => id !== ""))];
+    if (ids.length === 0) {
+      send({ type: "notice", level: "warn", text: "没有可归档的会话" });
+      return;
+    }
+    const admin = kernel.createSessionAdmin({ harnessHome });
+    const failed = [];
+    let archived = 0;
+    for (const id of ids) {
+      if (!kernel.isValidSessionId(id)) {
+        failed.push({ id, reason: "非法的会话 id" });
+        continue;
+      }
+      try {
+        await admin.update(id, { archived: true });
+        archived += 1;
+      } catch (error) {
+        failed.push({ id, reason: messageOf(error) });
+      }
+    }
+    send({ type: "sessions_archived", archived, failed });
+    // The list is pushed from the host so the sidebar redraws from the same
+    // data every other mutation answers with — a renderer-side guess could
+    // disagree with what the meta files now say.
     send(sessionsEvent());
   },
 

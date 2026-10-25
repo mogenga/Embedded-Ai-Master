@@ -27,6 +27,7 @@
 | `savePermissions` | 整份写 `permissions.json`（`preset` / `approvalTimeoutMs` / `rules`） |
 | `saveRunLimits` | 整份写 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`），下一回合生效。`maxTurns: null` 表示**不限制轮数**（2026-10-22 起默认值就是 `null`，见 D-183 补充）；`0` / 负数 / 非整数仍会被拒绝——把笔误当「不限」会让用户以为上限生效了 |
 | `sessionFlags` | 改名/置顶/归档，写旁挂 `meta.json`（header 校验会丢弃未知字段） |
+| `archiveSessions` | 批量归档 `{ids: string[]}`，回 `sessions_archived{archived, failed:[{id, reason}]}` 并推一份 `sessions`。侧栏「移除工作区」就是它：工作区是渲染层按 `cwd` 分组**派生**的概念，没有独立清单，所以「移除」只能是「归档其中的会话」——**不删任何文件，也不删项目文件夹**。收 **id 列表而不是 cwd**：分组键 `normalizeCwd` 归渲染层所有，宿主再算一遍就是同一事实的第二份定义。逐个处理，某个失败不回滚其余，失败项带原因如实回报（R3） |
 | `deleteSession` | 删除会话目录；锁被占用时 409。拒绝删除当前打开的会话 |
 | `forkSession` | `forkSession(dir, atSeq)`，分叉后直接打开新会话 |
 | `exportSession` | 读日志渲染 Markdown，经 `saveFile` 存盘 |
@@ -50,7 +51,7 @@
 | `saveSettings` | 只接 `settings.locale`（en/zh），转调 `setLocale`；其他字段回 warn。不提供万能写配置入口——配置写入口是 `saveProviders`/`saveMcpServer`/`savePermissions`/`saveRunLimits` |
 | `getTree` | 列一层子项（`listDirectory`）。边界＝已登记工作区 ∪ 会话目录 ∪ 会话工作目录，`realpath` 后判定；目录在前、按名排序、跳过符号链接、超 500 项截断。失败先发 warn notice **再**发空 `tree`——空树是释放 `pendingTreeTarget` 的信号，不是「目录是空的」 |
 | `getKb` | 知识库定位 + 树（`dist/server/kb-locate.js`）。根解析优先级：`KB_ROOT` 环境变量 → `$HARNESS_HOME/mcp.json` 里任一 server 的 `env.KB_ROOT` → 仓库默认 `mcp-servers/kb/kb`；`source` 如实回报来自哪一级，`note` 说明选择理由。根不存在时**保留候选路径** + 空树 + `note`（「没找到」≠「是空的」）。`fileCount` 只数 `.md`；`truncated` 表示触顶（深度 8 / 条目 2000 / 文件数 20000），此时 `fileCount` 是「至少 N」而不是精确值。惰性 import：旧 `dist/` 缺该模块时回 warn「请先 npm run build」并回空 `kb`，不崩宿主 |
-| `getCorpusStatus` | 语料 OTA 的只读状态（`dist/corpus/update.js` 的 `readCorpusStatus`）。**不联网**：只读 `$HARNESS_HOME/kb/state.json` 与 `current` 指针，回 `corpus_status{status}`。`status.kind` 是内核的七种状态判别联合（`bundled` / `up_to_date` / `update_available` / `check_failed` / `verify_failed` / `config_invalid` / `unavailable`），宿主**原样转发**、不重新推导（两份 switch 迟早会给出不同结论）。两条覆盖规则：`unavailable` 优先于配置结论（没有 `current` 就没有可更新的语料，先让用户看知识库状态），其余状态下若 `corpus.json` 缺失或不合法则报 `config_invalid`（契约 §2：知识库照常可用，更新功能如实报错）。附带 `configPath`（该改哪个文件）与 `configSource`（`home` / `resources`）。内核未编译时发 warn notice「请先 npm run build」**再发一条 `{error}`**——空应答会让页面永远等下去，但也不能编一个七状态之一充数 |
+| `getCorpusStatus` | 语料 OTA 的只读状态（`dist/corpus/update.js` 的 `readCorpusStatus`）。**不联网**：只读 `$HARNESS_HOME/kb/state.json` 与 `current` 指针，回 `corpus_status{status}`。`status.kind` 是内核的七种状态判别联合（`bundled` / `up_to_date` / `update_available` / `check_failed` / `verify_failed` / `config_invalid` / `unavailable`），宿主**原样转发**、不重新推导（两份 switch 迟早会给出不同结论）。两条覆盖规则：`unavailable` 优先于配置结论（没有 `current` 就没有可更新的语料，先让用户看知识库状态），其余状态下若 `corpus.json` 缺失或不合法则报 `config_invalid`（契约 §2：知识库照常可用，更新功能如实报错）。附带 `configPath`（该改哪个文件）与 `configSource`（`home` / `bundled`：`bundled` 指随发行物分发的那份，打包形态是 `<resources>/corpus.json`，源码形态是 `<仓库根>/config/corpus.json`）。内核未编译时发 warn notice「请先 npm run build」**再发一条 `{error}`**——空应答会让页面永远等下去，但也不能编一个七状态之一充数 |
 | `checkCorpusUpdate` | 请求更新源。**会触网**，只由用户点「检查更新」触发。走内核 `checkForUpdate`（403/404 一律 `check_failed` 并说明 OBS 的 GetObject 语义，**绝不当成已是最新**）。宿主在 fetch 外套一层：`latest.json` 的 200 响应 `clone()` 一份留着，但**只在 check 自己得出 `update_available` 时**才用——即那串字节已经被内核解析并验签过。缓存按 `updateBaseUrl + publicKeyPem` 指纹失效：改了任一项，旧清单就是关于另一个源的断言。回 `corpus_status{status, configPath}` |
 | `applyCorpusUpdate` | 装上次检查到的版本。**会触网**（逐个下载变更文件），只由用户点「立即更新」触发（契约 §6：不自动应用）。manifest 来源两级：缓存命中就直接用（不重取 `latest.json`，「更新到你看到的那个版本」因此是字面意义）；缓存没有或配置变了就走一次**带捕获的** `checkForUpdate`，由内核判断有没有可装的版本，失败时把内核自己的状态原因转述回去。两条路径得到的文本都交给 `applyUpdate`，它会**再解析并再验签一次**才落盘。进度来自内核 `onProgress`，逐文件转成 `corpus_update_progress{completed,total,path,action}`——没有定时器、没有估算百分比。结果 `corpus_update_result{ok, corpusVersion?, reason?, corpusVersionUnchanged?}`，成功后再推一次 `corpus_status` 并重新 `getKb`（刚被换掉的语料，树也得重读）。三条命令**共用一条队列**串行执行（`enqueueCorpus`）：它们共用 `state.json` 与 manifest 缓存，「点检查、再点更新」是正常操作，排队而不是拒绝 |
 | `setWorkspace` | 宿主登记目录后委托给 `setCwd` 的全部语义（运行中拒绝、仅新建会话生效）。登记是进程内的，重启失效 |
@@ -91,7 +92,11 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 | `background_result` | `notice{dim\|warn}`（后台终端作业结束）。退出码 0 用 dim，非零/被信号结束/超时用 warn；输出被截断时同一行同时给出**总字节数与保留字节数**——只报保留量会让人把一段尾巴当成全部输出（R3）。**写进会话日志而不是临时提示**：这类作业按定义比它所属的回合同长，十分钟的构建结束后用户可能已经重开窗口，只有日志能让那次结果留到下次。宿主用 1s 的泵轮询内核的完成队列，经 `resumeSession` 取锁后 append，再关掉句柄——与 `/compact` 取锁的方式一致 |
 | `system` / `user` / `checkpoint` / `tool_call` | 不产出（用户消息在提交时已回显） || 未知类型 | `notice{warn}`（R3，不静默） |
 
-宿主另发：`hello`、`ready`、`state`、`sessions`、`session_loaded`、`session_matches`、`commands`、`skills`、`setup_checklist`、`settings`、`usage_summary`、`models`、`locale`、`ui_preference`、`tree`、`file_matches`、`export_ready`、`notice`、`error`、`fatal`、`run_start`、`run_end`、`permission_closed`。
+宿主另发：`hello`、`ready`、`state`、`sessions`、`session_loaded`、`session_matches`、`sessions_archived`、`commands`、`skills`、`setup_checklist`、`settings`、`usage_summary`、`models`、`locale`、`ui_preference`、`tree`、`file_matches`、`export_ready`、`notice`、`error`、`fatal`、`run_start`、`run_end`、`permission_closed`。
+
+**启动不再自动打开上次的会话。** 用户明确要求「开启时应该默认无会话」。原先 `ready` 会读 `localStorage` 的 `prometheus.lastSession` 发 `loadSession`，上次那个会话被删或 header 损坏时，这条自动请求会把一条报错推到刚打开、用户还没做任何事的空界面上（D-214）。现在启动停在空会话，打开会话只能从侧栏点；`prometheus.lastSession` / `prometheus.restartSession` 两个键与设置页的「恢复上次会话」开关一并删除，避免留下只写不读的死键与假控件。
+
+**`loadSession` 失败按两类说话。** 文件不存在（ENOENT，目录或 `header.json` 被删）→ `session_not_found`，宿主报「会话不存在」；文件在但解析失败 → `invalid_header` / `invalid_event_line` / `invalid_seq` / `unknown_event_type`，宿主报「会话文件损坏（码）」。两者都用 `notice`（warn），不用 `error`——用户没做错事，窗口状态不该翻成「错误」。D-215 记录了这个错误码曾经的分工错误。
 
 宿主另发的事件里只有两条带库状态，它们的职责不能互换：
 

@@ -1349,6 +1349,153 @@ describe("desktop host", () => {
     expect(lists.at(-1).total).toBe(1);
   }, HOST_TIMEOUT_MS);
 
+  it("archiveSessions 归档指定 id，默认列表清空、includeArchived 仍能看到", async () => {
+    const home = await tempHome();
+    await writeSession(home, { id: "sess-a", workdir: home, text: "a" });
+    await writeSession(home, { id: "sess-b", workdir: home, text: "b" });
+    // A session in another workspace must not be touched: the renderer sends
+    // the ids of one group, and the host must act on exactly those.
+    await writeSession(home, { id: "sess-other", workdir: path.join(home, "other"), text: "c" });
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "archiveSessions", ids: ["sess-a", "sess-b"] },
+        { cmd: "listSessions", includeArchived: false },
+        { cmd: "listSessions", includeArchived: true },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "sessions_archived")
+          && all.filter((event) => event.type === "sessions").at(-1)?.sessions.length === 3,
+      },
+    );
+
+    const result = events.find((event) => event.type === "sessions_archived");
+    expect(result).toStrictEqual({ type: "sessions_archived", archived: 2, failed: [] });
+
+    const lists = events.filter((event) => event.type === "sessions");
+    // Boot list: all three rows.
+    expect(lists[0].sessions).toHaveLength(3);
+    // Push after the archive (default filter): only the untouched session.
+    const afterPush = lists[1];
+    expect(afterPush.sessions.map((session) => session.id)).toStrictEqual(["sess-other"]);
+    // The explicit non-archived query agrees with the push.
+    expect(afterPush.sessions).toHaveLength(1);
+    // Asked for archived rows: all three, with the two flagged.
+    const withArchived = lists.at(-1);
+    expect(withArchived.sessions).toHaveLength(3);
+    expect(
+      withArchived.sessions
+        .filter((session) => session.archived)
+        .map((session) => session.id)
+        .sort(),
+    ).toStrictEqual(["sess-a", "sess-b"]);
+
+    // Nothing was deleted: every session directory is still on disk.
+    expect((await readdir(path.join(home, "sessions"))).sort()).toStrictEqual([
+      "sess-a",
+      "sess-b",
+      "sess-other",
+    ]);
+  }, HOST_TIMEOUT_MS);
+
+  it("archiveSessions 部分失败时报告失败清单，其余照常归档", async () => {
+    const home = await tempHome();
+    await writeSession(home, { id: "sess-ok", workdir: home, text: "ok" });
+    // A directory that passes the id check but has no readable header: its
+    // meta write fails after `readSessionHeader`, so it stands in for an
+    // unwritable/vanished session without needing a read-only filesystem.
+    const broken = path.join(home, "sessions", "sess-broken");
+    await mkdir(broken, { recursive: true });
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "archiveSessions", ids: ["sess-ok", "sess-broken"] },
+      ],
+      { until: (all) => all.some((event) => event.type === "sessions_archived") },
+    );
+
+    const result = events.find((event) => event.type === "sessions_archived");
+    expect(result.archived).toBe(1);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0].id).toBe("sess-broken");
+    expect(result.failed[0].reason).not.toBe("");
+    // The session that could be archived really is archived.
+    const list = events.filter((event) => event.type === "sessions").at(-1);
+    expect(list.sessions.some((session) => session.id === "sess-ok")).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  it("archiveSessions 拒绝非法 id 并如实报告", async () => {
+    const home = await tempHome();
+    await writeSession(home, { id: "sess-ok", workdir: home, text: "ok" });
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "archiveSessions", ids: ["sess-ok", "../escape"] },
+      ],
+      { until: (all) => all.some((event) => event.type === "sessions_archived") },
+    );
+
+    const result = events.find((event) => event.type === "sessions_archived");
+    expect(result.archived).toBe(1);
+    expect(result.failed).toStrictEqual([{ id: "../escape", reason: "非法的会话 id" }]);
+  }, HOST_TIMEOUT_MS);
+
+  it("loadSession 打开已消失的会话报「不存在」而不是「header 无效」", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "loadSession", id: "sess-gone" },
+      ],
+      { until: (all) => all.some((event) => event.type === "notice") },
+    );
+
+    const notices = events.filter((event) => event.type === "notice");
+    // The boot handshake emits none on a healthy home, so the last one is the
+    // answer to `loadSession`.
+    const notice = notices.at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("会话不存在");
+    // The bug was the wording, so the wording is what this asserts: the
+    // message must not claim the header is invalid (the file is gone, not
+    // corrupt).
+    expect(notice.text).not.toContain("损坏");
+    expect(notice.text).not.toContain("Invalid session header");
+    // It is a notice, not a run failure: the window must not flip to 错误.
+    expect(events.some((event) => event.type === "error")).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  it("loadSession 打开 header 损坏的会话报损坏码，且不是「不存在」", async () => {
+    const home = await tempHome();
+    const dir = path.join(home, "sessions", "sess-bad");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, "header.json"), "{not json", "utf8");
+    await writeFile(path.join(dir, "session.v1.jsonl"), "", "utf8");
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "loadSession", id: "sess-bad" },
+      ],
+      { until: (all) => all.some((event) => event.type === "notice") },
+    );
+
+    const notice = events.filter((event) => event.type === "notice").at(-1);
+    expect(notice.level).toBe("warn");
+    expect(notice.text).toContain("invalid_header");
+    expect(notice.text).not.toContain("会话不存在");
+    expect(events.some((event) => event.type === "error")).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
   it("listSessions 的 limit 只返回一页，total 是过滤后的全量", async () => {
     const home = await tempHome();
     // Two sessions: each prompt that creates one writes another directory.
