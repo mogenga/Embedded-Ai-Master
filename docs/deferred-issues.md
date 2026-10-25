@@ -2021,6 +2021,26 @@
 - **仍然未验证**：真实 CA 签发证书（含硬件令牌 / Azure）下的签名；`latest.yml` 与 `app-update.yml` 随发布上传后的实际一致性；`signingHashAlgorithms` 改单签后**旧版 SHA-1 校验方**（如很老的 Windows）的兼容性——本项目最低支持 Windows 10，未实测更早系统。
 - **相关的自签名结论**（为什么不把自签名写进构建流程）见 `docs/code-signing.md` §10。
 
+#### 2026-10-25 补充 2：证书存储路径也跑通了，并补了打包前预检
+
+用户确认手上的证书形态是 **USB 令牌 / 证书存储**（不是 `.pfx` 文件）。本机此刻**没有插入任何令牌**：`Get-PnPDevice -Class SmartCardReader,SmartCard` 为空、`SCardSvr` 停止、`Cryptography\Calais\Readers` 下没有任何曾接入过的读卡器记录、也没有装 SafeNet/ePass 一类的 CSP；`where.exe pwsh` 能命中 PS7。
+
+- **实测（一次性自签名证书，产物与证书都已删除）**：用 `-c.win.signtoolOptions.certificateSha1=<指纹>` 让 electron-builder 26.15.3 **从证书存储**选证书，`--dir` 构建退出 0，日志里出现
+  ```
+  • signing  file=...\Embedded AI Master.exe subject=CN=..., O=Test Only, C=CN
+             thumbprint=<指纹> store=My user=current user
+  signtool args= sign /tr http://timestamp.digicert.com /sha1 <指纹> /s My /fd sha256 /td sha256
+                  /d "Embedded AI Master" /debug <exe>
+  ```
+  `verify-signature.mjs` 退出 0（Security Directory 7568 字节），`signtool verify /pa /v` 输出 `The signature is timestamped` + `Timestamp Verified by: DigiCert Trusted G4 TimeStamping RSA4096 SHA256 2025 CA1`；证书链校验按预期失败（自签名根不受信任），**与签名是否有时间戳无关**。
+- **这条路径不需要 `SIGNTOOL_PATH` 才能签，但本机需要**：electron-builder 自带的 winCodeSign 缓存目录只有一层空目录（`winCodeSign-2.6.0/winCodeSign-2.6.0-5puky/`，下载未完成），所以本次全程用 `SIGNTOOL_PATH` 指向本机 SDK 的 `10.0.22621.0/x64/signtool.exe`。有网时让它自己下即可。
+- **`certificateSubjectName` 是子串匹配、`certificateSha1` 是全等**（`getCertificateFromStoreInfo` 源码）。续期后同名证书并存时前者会命中多张、取第一张，未必是新的那张——**用指纹**。
+- **点号传参对数组无效**：`-c.win.signtoolOptions.certificateSha1=…` 可靠；`-c.win.signtoolOptions.signingHashAlgorithms=sha512` 会被 yargs 当字符串并以 `configuration.win should be a null` 报 schema 错（**实测**）。所以 `signingHashAlgorithms` 只留在 `desktop/package.json`。
+- **新增 `scripts/sign-preflight.mjs`**（+ `scripts/sign-preflight.d.mts`、`tests/sign-preflight.test.ts` 49 条）：打包前回答「这台机器现在能不能签」。它跑 electron-builder 用来挑证书的**同一条命令、同一个 shell**（先试 `Get-Command pwsh.exe`，成功即用 pwsh），按真实匹配规则过滤，并逐条报出「无证书 / 有证书但无选择器 / 选不中 / 无私钥 / 已过期」。退出码 0/1/2。
+  - **它与 `verify-signature.mjs` 不是一回事**：后者查「PE 头里有没有证书表」（签上了没有），前者查「证书在不在、选不选得中」（能不能签）。一个在打包后，一个在打包前。
+  - **一个必须记住的坑**：若 `pwsh` 不可用、electron-builder 回落到 PowerShell 5.1，`-CodeSigningCert` 那条动态参数会被 `PSModulePath` 里的 PS7 目录搅坏（与 §6 记录的是同一根因），结果是**签名在没有任何提示的情况下被跳过**。本机现在走 pwsh，所以暂时不触发；预检脚本与 electron-builder 走同一条 shell 选择路径，就是为了让这种分叉在打包前暴露。
+- **仍未关闭**：真实 CA 证书（令牌插入后）下的签名、`app-update.yml` 里 `publisherName` 与真实证书 CN 的一致性、令牌驱动装好后 `sign-preflight.mjs` 的结论。**本机此刻没有任何代码签名证书**（实测 `Get-ChildItem -Recurse Cert: -CodeSigningCert` 为空），所以「能不能签」目前是 `false` 这件事本身是准确的。
+
 ### D-212 · GitHub Releases 发布链路配置就位，但从未真正发过一次 release；`electron-updater` 未接入
 
 > **2026-10-25 状态更新**：本条的两半都已落地——`v0.1.0` 已发布到 Releases（3 个资产，匿名 HTTP 206 可下载），**应用内自动更新已接入**（见下方「修复」）。拆分保留条目，是因为「一次真实更新从未跑过」这部分仍未验证。

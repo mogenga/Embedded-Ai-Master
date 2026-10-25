@@ -76,6 +76,35 @@ npm --prefix desktop run dist
 
 **EV 的差别**：私钥在令牌里，没有 `.pfx` 可指。做法是把证书装进 Windows 证书存储，然后配置 `certificateSubjectName`（或 `certificateSha1` 区分多张同名证书），让 signtool 从存储里选。这两个字段因证书而异，**不写进 `desktop/package.json`**，用环境变量或本地覆盖配置传（见 §4）。
 
+**存储路径的完整跑法（2026-10-25 用一次性自签名证书实测，产物已删）**：
+
+```bash
+# 1) 先问「现在能不能签」，它跑的是 electron-builder 用来挑证书的那条命令
+node scripts/sign-preflight.mjs --subject "<证书 Subject 里的名字>"
+#    → 选中 + 打印打包命令；没证书 / 够不着 / 已过期的原因都会逐条列出来
+
+# 2) 按它打印的命令打包（证书指纹走 CLI，不进仓库配置）
+SIGNTOOL_PATH="C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.22621.0\\x64\\signtool.exe" \
+  npm --prefix desktop run dist -- -c.win.signtoolOptions.certificateSha1=<指纹>
+```
+
+实测证据（`--dir` 构建，同一份 `.pfx` 与存储路径各跑一次）：
+
+```
+• identified pwsh.exe
+• signing  file=...\Embedded AI Master.exe subject=CN=..., O=Test Only, C=CN
+           thumbprint=<指纹> store=My user=current user
+• resolved SIGNTOOL_PATH from environment variable
+signtool args= sign /tr http://timestamp.digicert.com /sha1 <指纹> /s My /fd sha256 /td sha256
+                /d "Embedded AI Master" /debug <exe>
+```
+
+三个可验证的判据：`verify-signature.mjs` 退出 0（证书表 7568 字节）、`signtool verify /pa /v` 里出现 `The signature is timestamped` 且 `Timestamp Verified by: DigiCert …`、构建日志里出现 `subject=` / `thumbprint=` 那行（`signing with signtool.exe` 这行本身不算，理由见 §7）。
+
+- **`certificateSubjectName` 是子串匹配，`certificateSha1` 是全等**（`getCertificateFromStoreInfo`：`Subject.includes(x)` vs `Thumbprint.toUpperCase() === x.toUpperCase()`）。续期后新旧两张同名证书并存时，前者会命中两张、electron-builder 取第一张，未必是新的那张——**优先用指纹**。
+- **点号传参只对字符串字段可靠。** `-c.win.signtoolOptions.certificateSha1=…` 会被 yargs 解析成字符串再 `deepAssign` 进配置；**数组字段不行**——`signingHashAlgorithms` 用点号传会报 `configuration.win should be a null`（实测过）。所以它在 `package.json` 里，CLI 不碰。
+- **本机无证书时的完整链路也要知道**：`node scripts/sign-preflight.mjs` 退出 1，说明的是「这台机器签不了」。它不是把 `verify-signature.mjs` 的检查提前，而是查另一个问题——**能不能签**，而不是**签上没有**。
+
 ### ② Azure Trusted Signing（现名 **Artifact Signing**）
 
 > **改名（2026-10-25 查证）**：微软已把该服务从 **Trusted Signing** 更名为 **Artifact Signing**，文档站 `/azure/trusted-signing/...` 301 到 `/azure/artifact-signing/...`，定价页 `pricing/details/trusted-signing/` 301 到 `pricing/details/artifact-signing/`。**electron-builder 26.15.3 仍用旧名**（配置键 `azureSignOptions`、PowerShell 模块 `TrustedSigning`、资源提供者 `Microsoft.CodeSigning`），所以本文的配置片段不变，只是别再照旧名去搜微软文档。
@@ -370,6 +399,16 @@ Windows SDK 自带。本机装了多个版本：
 
 `win.forceCodeSigning: true` 会让 `signIf` 在未签名时抛 `InvalidConfigurationError`。**当前没有开启**——本机无证书，开了会让日常构建直接失败。等证书就位、每次构建都应当签名时再开，这是让「签名静默跳过」无法被忽略的唯一开关。
 
+### 打包前先问一句：这台机器现在能签吗
+
+`node scripts/sign-preflight.mjs`（退出码：0 能签 / 1 不能签 / 2 无法检查）。
+
+它跑的是 **electron-builder 用来挑证书的那条命令**（`Get-ChildItem -Recurse Cert: -CodeSigningCert`，在同一个 shell 里），并按 `certificateSubjectName` / `certificateSha1` 的**实际匹配规则**过滤，所以「它说能签」与「electron-builder 会选中这张」是同一件事。逐条回答四类失败原因：没有证书 / 有证书但没有选择器（**electron-builder 不会自动挑**）/ 选不中 / 选中的没有私钥或已过期。
+
+**它不是 `verify-signature.mjs` 的替代**：那个查「签上了没有」（PE 头里有没有证书表），这个查「能不能签」（证书在不在、选不选得中）。一个在打包后跑，一个在打包前跑。
+
+**一个本机实测的陷阱**：electron-builder 26 的 `VmManager.powershellCommand` 会先试 `Get-Command pwsh.exe`，成功就用 **PowerShell 7**，否则回落 5.1。本机装的是 PS7，所以它走 pwsh——这条路径**不碰** §6 那个 `PSModulePath` 污染问题。若哪天 `pwsh` 不可用而只能回落 5.1，那条命令会因加载 PS7 的 `Microsoft.PowerShell.Security` 而报 `CodeSigningCert` 参数不存在，**签名会在没有任何提示的情况下被跳过**（`cscInfo` 拿不到，走 `no signing info identified`）。`sign-preflight.mjs` 与 electron-builder 走同一条 shell 选择路径，就是为了让这种分叉在打包前暴露，而不是打包后。
+
 ## 8. 发布流程（当前状态）
 
 1. `npm run build` 与 `npm run build:mcp`（生成 `dist/`、`dist-mcp/`）；
@@ -385,17 +424,20 @@ Windows SDK 自带。本机装了多个版本：
 
 按顺序做完这五步即可；每一步都有可验证的判据，不靠「看起来像成功了」。
 
+0. **先跑一次预检**：`node scripts/sign-preflight.mjs`（退出码 0 = 能签）。它说的是「这台机器现在能不能签」，与下面的「签上没有」是两件事，见 §7 末。
 1. **确认私钥形态**（买之前就该问清，见 §2 ①）：
    - 能导出 `.pfx` → 走第 2 步；
-   - 只能在令牌/云 HSM 里 → `WIN_CSC_LINK` 用不了，需要 `certificateSubjectName`（证书已装进存储）或厂商的云签名工具。**后者本仓库未实现，是新增开发工作**。
+   - 只能在令牌/云 HSM 里 → `WIN_CSC_LINK` 用不了，需要 `certificateSubjectName`（证书已装进存储）或厂商的云签名工具。**后者本仓库未实现，是新增开发工作**。存储路径的具体跑法见 §2 ① 末尾（含实测日志与两个匹配规则的差别）。
 2. **设两个环境变量**（证书放仓库外；`WIN_CSC_LINK` 接受路径 / `https://` URL / base64）：
    ```bash
    export WIN_CSC_LINK="C:\\Users\\<you>\\certs\\embedded-ai-master.pfx"
    export WIN_CSC_KEY_PASSWORD="<pfx password>"
    ```
+   （存储路径跳过这一步，改用预检打印出的 `-c.win.signtoolOptions.certificateSha1=…`。）
 3. **打包**：`npm --prefix desktop run dist`
-   - 判据：日志里出现 `• signing  file=... certificateFile=...`（带 `certificateFile` 的那行才代表真的在签）；
+   - 判据：日志里出现 `• signing  file=... certificateFile=...`（带 `certificateFile` 的那行才代表真的在签）；存储路径则是 `subject=... thumbprint=... store=My`。
    - **若出现 `SignTool Error: No file digest algorithm specified`**，说明 `signingHashAlgorithms` 又变回默认双签了——见 §3。
+   - **若出现 `no signing info identified, signing is skipped`**，说明证书没被选中（不是「签失败」）——回去跑第 0 步的预检。
 4. **验证签名存在**：
    ```bash
    node scripts/verify-signature.mjs "desktop/dist-installer/Embedded-AI-Master-Setup-<ver>.exe"
@@ -459,3 +501,4 @@ Windows SDK 自带。本机装了多个版本：
 - `docs/deferred-issues.md` **D-208**：真实安装包从未产出。
 - `docs/deferred-issues.md` **D-217**：未签名期间 `electron-updater` 不做签名校验（`publisherName == null` 时视为通过）。
 - `scripts/verify-signature.mjs`、`tests/verify-signature.test.ts`：签名检查脚本与其测试。
+- `scripts/sign-preflight.mjs`、`tests/sign-preflight.test.ts`：打包前的「能不能签」检查与其测试（49 条，纯函数 + 注入数据，不读证书存储、不触网）。
