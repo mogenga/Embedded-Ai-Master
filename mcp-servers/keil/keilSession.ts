@@ -20,6 +20,7 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { diagnoseFlashFailure } from "./flash.js";
 import { fromelfFor } from "./fromelf.js";
 import { decodeGbk, encodeGbk } from "./gbk.js";
 import { decodeXmlText } from "./xmlText.js";
@@ -364,7 +365,14 @@ export async function enterDebug(
     const failure = frames.map((frame) => asyncText(frame)).find((text) => /cannot access target|flash download failed|error \d+:/i.test(text));
     if (failure) {
       session.debugging = false;
-      return { ok: false, log, reason: `uVision could not start the debug session: ${failure.trim()}` };
+      // The launch fails while loading the image, and the log line never says
+      // why. Attach the same diagnosis the standalone flasher path uses.
+      const why = diagnoseFlashFailure("keil", log.join(String.fromCharCode(10)));
+      return {
+        ok: false,
+        log,
+        reason: `uVision could not start the debug session: ${failure.trim()}${why ? ` — ${why}` : ""}`,
+      };
     }
 
     const status = await client.send(OP.DBG_STATUS, Buffer.alloc(0), 5_000);

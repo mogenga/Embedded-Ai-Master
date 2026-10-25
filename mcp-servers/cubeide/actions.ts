@@ -137,10 +137,20 @@ export const serialInputSchema = z
     since: z.number().int().min(0).optional(),
     duration_ms: z.number().int().min(50).max(30_000).optional(),
     data: z.string().max(4096).optional(),
+    /**
+     * `write`: send `data` as hex bytes ("0D0A" → CRLF) instead of text.
+     *
+     * Without this a caller cannot express a non-printable byte at all: the
+     * string goes out verbatim, so `"\r\n"` arrives as the four characters
+     * backslash-r-backslash-n. The desktop bridge has always accepted a hex
+     * flag — it was simply never exposed here, and an agent debugging a
+     * CRLF-terminated protocol burned seventeen tool calls discovering that.
+     */
+    hex: z.boolean().optional(),
     // RX text codec for `open`: Keil and most Chinese MCU tutorials print GBK.
-    encoding: z.enum(["utf-8", "gbk"]).optional(),
+    encoding: z.enum(["utf-8", "gbk", "auto"]).optional(),
   })
   .strict();
 
 export const SERIAL_DESCRIPTION =
-  "Serial monitor access for the agent — the same data the desktop panel shows. action `read` without `port` returns the panel's live ring buffer (the desktop host keeps writing it to <home>/.harness/serial/ring.json); action `read` with `port`+`baud`+`duration_ms` opens the COM port directly for that window and returns the lines captured (fails honestly if the panel already owns the port — COM ports are exclusive). action `write` sends data out through the panel's open port or a transient one. action `ports` lists COM ports with friendly names. action `status` reports which port is open and who owns it.";
+  "Serial monitor access for the agent — the same data the desktop panel shows. action `read` without `port` returns the panel's live ring buffer (the desktop host keeps writing it to <home>/.harness/serial/ring.json); action `read` with `port`+`baud`+`duration_ms` opens the COM port directly for that window and returns the lines captured (fails honestly if the panel already owns the port — COM ports are exclusive). action `write` sends data out through the panel's open port or a transient one; pass `hex:true` to send raw bytes (`data:\"0D0A\"` is CRLF), because text is written verbatim with no escape processing. action `ports` lists COM ports with friendly names. action `status` reports which port is open and who owns it.";

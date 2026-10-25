@@ -64,10 +64,10 @@ mcp-servers/         领域 MCP server（探针 / 知识库 / keil / cubeide / e
 desktop/
 ├── main.js          Electron 主进程（窗口、IPC、宿主生命周期）
 ├── preload.cjs      contextBridge 桥
-├── host/            host.js（NDJSON 分发器）、roots.js、serial-bridge.js
+├── host/            host.js（NDJSON 分发器）、roots.js、serial-bridge.js、toolchains.js（Tools 页工具链探测）
 ├── renderer/        纯 ES 模块前端（app / protocol / settings / markdown / i18n）
 └── MATRIX.md        前端命令/事件能力矩阵
-scripts/             端到端脚本（probe、diagnosis、kb 回归与审核、语料发布）
+scripts/             端到端脚本（probe、diagnosis、kb 回归与审核、语料发布、packs）
 config/              corpus.example.json（模板）
 tests/               Vitest（tests/desktop 为桌面宿主与协议层）
 docs/                设计、契约与已知问题
@@ -364,6 +364,16 @@ npm run kb:review -- --accept <id> --target <正式条目>   # 指标不降才�
 
 四套后端都不下载、不捆绑、不重分发任何厂商组件，只驱动本机已安装的工具链。`diagnose` 下运行控制、烧录、擦除、写参数、改工程为 `ask`，headless 降级为拒绝；取证读数带 `evidence`，破坏性动作带 `declaration`。
 
+
+## 工具链包管理器
+
+`src/packs/`（平台层，多 MCP server 共用的基础设施）实现按需下载的编译工具链包：Arm GNU / OpenOCD / CMake / Ninja 等 9 个 Windows x64 条目，URL 与 SHA-256 全部钉死。安装是九阶段事务（preflight → lock → download → verify → list → extract → inspect → validate → commit），半装状态不可见、断电可恢复、根目录级 `.lock` 防 CLI 与桌面双入口竞争。桌面设置页 Tools 已接通装/卸/进度/磁盘统计；keil MCP server 经注入读取已装 pack 的 bin 目录（无系统 PATH 也能找到工具链）。结构、不变量与权限语义见 `docs/toolchain-packs.md`。
+
+```bash
+npm run packs:e2e   # 装（默认 Ninja，~300 KB 真实下载）→ 验证可执行 → 卸 → 无残留
+```
+
+根目录由 `HARNESS_TOOLCHAIN_HOME` 覆盖（默认 `%LOCALAPPDATA%\Embedded-Ai-Master\toolchains`）；`dist/` 缺失时退出码 2 并提示 `npm run build`。默认测试不触网，该脚本是验收动作。出网需代理的机器上加 `NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:7897`（Node 内置 fetch 默认不读代理变量，端口以本机为准，详见 `docs/toolchain-packs.md`）。
 ## 桌面工作台
 
 `desktop/renderer/` 是纯 ES 模块，只跑在 Electron 里：Electron 窗口 + `desktop/host/host.js` 宿主进程（NDJSON over stdio），宿主复用 `dist/`（打包形态下是 `resources/`）的内核模块。**无框架、无打包器、无构建步骤。**
@@ -373,7 +383,7 @@ npm run kb:review -- --accept <id> --target <正式条目>   # 指标不降才�
 - **输入框两个前缀**：`@` 打开文件名补全；`/` 打开命令补全——内置 `/clear`、`/context`、`/compact` 三个，其后是你保存的技能。三个内置命令都不接受参数。
 - **流式与实时**：模型适配层默认请求 SSE 流式响应，增量写 `assistant_delta`（按批落盘：60ms 或 400 字符），`assistant` 仍承载完整内容并用于重建上下文。宿主以 200ms 轮询跟随日志，实际延迟约 200–250ms（D-134）。
 - **设备状态契约**：MCP 工具在成功结果的 `structuredContent.deviceStatus` 返回普通 JSON 对象（≤8 KiB、深度 ≤4）；内核校验后写 `device_status`。`state` 的键值完全由 server 决定，内核与 UI 不解释、不补全、不推断。失败、权限拒绝、超时/取消不产生该事件。
-- **诚实边界**：内核没有的能力（git/PR、终端面板、worktree、packs、memory/hooks、subagents、检查点恢复）在前端隐藏入口，宿主收到对应命令时回显式 `notice`，不静默吞掉。完整能力矩阵见 `desktop/MATRIX.md`。
+- **诚实边界**：内核没有的能力（git/PR、终端面板、worktree、memory/hooks、subagents、检查点恢复）在前端隐藏入口，宿主收到对应命令时回显式 `notice`，不静默吞掉。完整能力矩阵见 `desktop/MATRIX.md`。（`packs` 已不在这个清单里——工具链包管理器已落地，入口在设置 → Tools。）
 
 ### 串口助手
 

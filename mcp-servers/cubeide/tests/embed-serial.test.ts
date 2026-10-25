@@ -59,11 +59,24 @@ describe("portOwnership", () => {
 
 describe("serial actions/whitelists", () => {
   it("actions and meta sets agree", () => {
-    expect(SERIAL_ACTIONS).toEqual(["read", "write", "ports", "status"]);
+    expect(SERIAL_ACTIONS).toEqual(["read", "write", "ports", "status", "open", "close"]);
     for (const action of ["read", "ports", "status"]) expect(SERIAL_EVIDENCE_ACTIONS.has(action)).toBe(true);
     expect(SERIAL_EVIDENCE_ACTIONS.has("write")).toBe(false);
     expect(SERIAL_DESTRUCTIVE_ACTIONS.has("write")).toBe(true);
+    // open/close change who owns the port, so they are not read-only.
+    expect(SERIAL_DESTRUCTIVE_ACTIONS.has("open")).toBe(true);
+    expect(SERIAL_DESTRUCTIVE_ACTIONS.has("close")).toBe(true);
     for (const action of ["read", "ports", "status"]) expect(SERIAL_DESTRUCTIVE_ACTIONS.has(action)).toBe(false);
+  });
+
+  it("schema accepts hex on write, so raw bytes are expressible", () => {
+    // Without this flag the only payload a caller can send is printable text:
+    // "\r\n" leaves as four literal characters and a CRLF-terminated device
+    // never sees a line end. Session 16c03283 burned 17 tool calls on that.
+    expect(serialInputSchema.safeParse({ action: "write", port: "COM3", data: "0D0A", hex: true }).success).toBe(true);
+    expect(serialInputSchema.safeParse({ action: "write", port: "COM3", data: "hi" }).success).toBe(true);
+    const parsed = serialInputSchema.parse({ action: "write", port: "COM3", data: "0D0A", hex: true });
+    expect(parsed.hex).toBe(true);
   });
 
   it("schema rejects unknown fields and out-of-range values", () => {

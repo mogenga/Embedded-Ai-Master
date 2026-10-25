@@ -17,6 +17,7 @@
     "test:mcp": "vitest run mcp-servers",
     "probe:e2e": "node scripts/probe-e2e.mjs",
     "diagnosis:e2e": "node scripts/diagnosis-e2e.mjs",
+    "packs:e2e": "node scripts/packs-e2e.mjs",
     "kb:regression": "node scripts/kb-regression.mjs",
     "kb:review": "node scripts/kb-review.mjs",
     "test:desktop": "vitest run tests/desktop"

@@ -5,8 +5,10 @@ import path from "node:path";
  * 测试运行器的环境标记。出现任一即视为「在测试进程里」。
  *
  * `VITEST` 由 vitest 注入；`NODE_ENV=test` 覆盖其他以 Node 约定标记测试的运行器。
+ * 供需要 D-170 防污染约定的模块复用（如 `src/packs/paths.ts`），检测始终基于
+ * 传入的 env 而非 `process.env`——测试可以用空 env 显式绕开，但忘传时兜底生效。
  */
-function testRunner(env: NodeJS.ProcessEnv): string | undefined {
+export function testRunner(env: NodeJS.ProcessEnv): string | undefined {
   const vitest = env.VITEST?.trim();
   if (vitest !== undefined && vitest !== "") return `VITEST=${vitest}`;
   if (env.NODE_ENV === "test") return "NODE_ENV=test";

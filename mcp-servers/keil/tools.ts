@@ -106,6 +106,7 @@ import {
   type KeilSession,
   type OptionName,
 } from "./keilSession.js";
+import { diagnoseFlashFailure } from "./flash.js";
 import { keilCli } from "./keilCli.js";
 import { NEEDS_EXTENDED_STACK, UNSUPPORTED_ON_MDK_5_43 } from "./keilExtra.js";
 import { readProjectFacts } from "./keilProjectFile.js";
@@ -1026,7 +1027,11 @@ const keilDebugTool: LegacyTool = {
         if (flashed.lines.length > 30) lines.push(`(showing the last 30 of ${flashed.lines.length} download lines)`);
         lines.push(...flashed.lines.slice(-30));
         if (!flashed.ok) {
-          fail("the download did not finish cleanly");
+          // The raw download log is accurate and unhelpful: it never says the
+          // probe is held by something else, which is the usual cause. Name
+          // the cause so the caller does not go hunting through tasklist.
+          const why = diagnoseFlashFailure("keil", flashed.lines.join("\n"));
+          fail(why ? `the download did not finish cleanly — ${why}` : "the download did not finish cleanly");
         } else {
           lines.push("downloaded to flash");
           // The downloader says "Verify OK"; this is the chip's own answer.

@@ -709,7 +709,7 @@ const embedSerialTool: ProbeToolSpec = {
           // A write through a transient pump: open, write, brief settle for
           // the echo/reply, capture, exit. duration_ms applies to the reply
           // window, not the write.
-          const capture = await captureThenWrite(port, baud, data, Number(input.duration_ms ?? 1500));
+          const capture = await captureThenWrite(port, baud, data, Number(input.duration_ms ?? 1500), input.hex === true);
           const text = [
             `wrote ${JSON.stringify(data.length > 60 ? `${data.slice(0, 60)}…` : data)} to ${port} @ ${baud}`,
             `captured ${capture.lines.length} line(s) in reply window (${Number(input.duration_ms ?? 1500)}ms)`,
