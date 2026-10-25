@@ -184,7 +184,11 @@ describe.skipIf(!SEED_BUILT || !MCP_SERVER_BUILT)("first-run seeding (packaged)"
     expect(existsSync(path.join(kbRoot, "inbox"))).toBe(true);
 
     const document = JSON.parse(await readFile(path.join(home, "mcp.json"), "utf8"));
-    expect(Object.keys(document.mcpServers)).toStrictEqual(["kb"]);
+    // The embedded servers (serial/keil/datasheet) seed alongside kb —
+    // the fixture's dist-mcp junction makes every real server.js visible — so
+    // the key set is kb plus those four, in seed order (kb first, then the
+    // embedded list order).
+    expect(Object.keys(document.mcpServers)).toStrictEqual(["kb", "serial", "keil", "datasheet"]);
     const entry = document.mcpServers.kb;
     expect(entry.env.KB_ROOT).toBe(path.join(kbRoot, "current"));
     expect(entry.env.KB_INBOX_PATH).toBe(path.join(kbRoot, "inbox", "_inbox.md"));
@@ -236,9 +240,12 @@ describe.skipIf(!SEED_BUILT || !MCP_SERVER_BUILT)("first-run seeding (packaged)"
     expect(events.some((event) => event.type === "ready")).toBe(true);
     expect(events.some((event) => event.type === "fatal")).toBe(false);
     expect(existsSync(path.join(home, "kb"))).toBe(false);
-    // No half-written entry either: the MCP half needs `current`, which the
-    // failed seed never created.
-    expect(existsSync(path.join(home, "mcp.json"))).toBe(false);
+    // No kb entry either: the kb MCP half needs `current`, which the failed
+    // seed never created. The embedded servers seed regardless — they have no
+    // external prerequisite — so mcp.json exists, without a kb entry in it.
+    expect(existsSync(path.join(home, "mcp.json"))).toBe(true);
+    const mcp = JSON.parse(await readFile(path.join(home, "mcp.json"), "utf8"));
+    expect(Object.keys(mcp.mcpServers)).toStrictEqual(["serial", "keil", "datasheet"]);
   }, HOST_TIMEOUT_MS);
 });
 
@@ -250,7 +257,12 @@ describe.skipIf(!SEED_BUILT)("first-run seeding (development)", () => {
 
     expect(events.some((event) => event.type === "ready")).toBe(true);
     expect(existsSync(path.join(home, "kb"))).toBe(false);
-    expect(existsSync(path.join(home, "mcp.json"))).toBe(false);
+    // Development still seeds the embedded MCP servers (their dist-mcp output
+    // exists in a checkout) — only the bundled corpus is dev-excluded. The
+    // kb entry is absent: no `current` snapshot to point at.
+    expect(existsSync(path.join(home, "mcp.json"))).toBe(true);
+    const mcp = JSON.parse(await readFile(path.join(home, "mcp.json"), "utf8"));
+    expect(Object.keys(mcp.mcpServers)).toStrictEqual(["serial", "keil", "datasheet"]);
     // Skipping is silent: nothing here is the operator's problem.
     expect(events.some((event) => event.type === "notice" && event.text.includes("知识库"))).toBe(false);
   }, HOST_TIMEOUT_MS);

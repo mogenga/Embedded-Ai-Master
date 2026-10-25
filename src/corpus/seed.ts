@@ -407,3 +407,85 @@ async function isFile(target: string): Promise<boolean> {
     throw new Error(`MCP server 产物无法访问：${target}（${messageOf(error)}）`, { cause: error });
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* 嵌入式 MCP server 的首启种子                                         */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 嵌入式 server 清单：名称 → 相对 `dist-mcp/` 的产物路径。
+ *
+ * `serial` 不需要外部软件（Node 实现），无条件种子；`keil` 的产物同样随包
+ * 分发，server 进程总能启动，没装 Keil 时是工具动作如实报「未安装」——
+ * 所以门槛与 kb 相同：只看产物文件在不在。（cubeide/espidf/arduino 已从
+ * 本产品剔除，2026-10-25；需要时按同一条目的形状加回来。）
+ */
+const EMBEDDED_SERVER_FILES: ReadonlyArray<{ name: string; file: string }> = [
+  { name: "serial", file: "serial/server.js" },
+  { name: "keil", file: "keil/server.js" },
+  { name: "datasheet", file: "datasheet/server.js" },
+];
+
+export interface SeedEmbeddedMcpOptions {
+  /** `$HARNESS_HOME`；`mcp.json` 在它下面。 */
+  harnessHome: string;
+  /** 含 `dist-mcp/` 的目录；打包形态是 `resources/`，开发形态是仓库根。 */
+  kernelRoot: string;
+  mcpModules: SeedMcpModules;
+}
+
+export interface SeedEmbeddedMcpResult {
+  /** 本次写入的 server 名。 */
+  seeded: string[];
+  /** 每个未写入项及其原因（产物缺失 / 用户已配置过）。 */
+  skipped: Array<{ name: string; reason: "server_missing" | "entry_exists" }>;
+}
+
+/**
+ * 把嵌入式 MCP server 一次性写进 `$HARNESS_HOME/mcp.json`。
+ *
+ * 与 `seedKbMcpEntry` 同一套规矩：绝不覆盖用户已有的同名条目（用户可能自己
+ * 指过另一份安装）；产物不存在就跳过而不是写一条必然失败的配置；失败抛错
+ * 由调用方上报。区别在于 kb 有「没有语料快照就不写」的前置，嵌入式 server
+ * 没有外部状态——产物在就能挂。
+ */
+export async function seedEmbeddedMcpEntries(opts: SeedEmbeddedMcpOptions): Promise<SeedEmbeddedMcpResult> {
+  if (opts.kernelRoot.trim() === "") {
+    throw new Error("kernelRoot 不能为空：无法定位 dist-mcp/");
+  }
+  const distMcp = path.join(path.resolve(opts.kernelRoot), "dist-mcp");
+
+  const snapshot = opts.mcpModules.readAppConfig(opts.harnessHome);
+  const existing = snapshot.mcpServers;
+  const next = [...existing];
+  const seeded: string[] = [];
+  const skipped: SeedEmbeddedMcpResult["skipped"] = [];
+
+  for (const { name, file } of EMBEDDED_SERVER_FILES) {
+    if (existing.some((server) => server.name === name)) {
+      skipped.push({ name, reason: "entry_exists" });
+      continue;
+    }
+    const serverPath = path.join(distMcp, ...file.split("/"));
+    if (!(await isFile(serverPath))) {
+      skipped.push({ name, reason: "server_missing" });
+      continue;
+    }
+    // 与 buildKbEntry 同一权衡：用运行时的 execPath（打包形态是 Electron 二
+    // 进制 + ELECTRON_RUN_AS_NODE，开发形态本来就是 node），绝对路径不随会话
+    // 工作目录漂移。
+    next.push({
+      name,
+      command: process.execPath,
+      args: [serverPath],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      timeoutMs: 120_000,
+    });
+    seeded.push(name);
+  }
+
+  if (seeded.length > 0) {
+    await opts.mcpModules.writeMcpServers(opts.harnessHome, next);
+  }
+  return { seeded, skipped };
+}

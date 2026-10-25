@@ -606,7 +606,9 @@ describe("目录", () => {
       .map(([kind]) => kind);
     expect(flashKinds.includes("pyocd")).toBe(true);
     const provided = new Set(CATALOG.flatMap((item) => item.provides));
-    for (const kind of ["openocd", "pyocd", "probe-rs", "esptool"]) {
+    // openocd/probe-rs/esptool 目录条目随 cubeide/espidf 剔除一并移除
+    // （2026-10-26）：产品只保 Keil5 链路，目录只覆盖仍在用的 kind。
+    for (const kind of ["pyocd"]) {
       expect(provided.has(kind), `${kind} 不能从目录安装`).toBe(true);
     }
   });
@@ -615,9 +617,7 @@ describe("目录", () => {
     // 哈希是实测的，但 URL 和归档结构是会随项目发布流程漂移的部分。
     // 这里钉住的是"这条 URL 属于这个项目"，真正的字节校验在安装时做。
     const cases = [
-      { id: "probe-rs-0.32.0-win32-x64", host: "github.com/probe-rs/probe-rs", exe: "probe-rs.exe" },
       { id: "pyocd-0.46.0-win32-x64", host: "github.com/pyocd/pyOCD", exe: "pyocd.exe" },
-      { id: "esptool-5.6.0-win32-x64", host: "github.com/espressif/esptool", exe: "esptool.exe" },
     ];
     for (const expected of cases) {
       const item = catalogEntry(expected.id);

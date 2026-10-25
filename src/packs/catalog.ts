@@ -115,40 +115,6 @@ export const CATALOG: CatalogEntryDef[] = [
     priority: 10,
   },
   {
-    // xPack's build of OpenOCD. Single self-contained directory, one
-    // executable, and `--version` prints to stderr — which is why `expect`
-    // matches the banner text rather than an anchored line.
-    id: "xpack-openocd-0.12.0-6-win32-x64",
-    name: "OpenOCD (xPack)",
-    version: "0.12.0-6",
-    provider: "xpack",
-    platform: "win32",
-    arch: "x64",
-    downloadBytes: 3_090_548,
-    unpackedBytes: 12_000_000,
-    sources: [
-      {
-        url: `${XPACK_RELEASES}/openocd-xpack/releases/download/v0.12.0-6/xpack-openocd-0.12.0-6-win32-x64.zip`,
-        archive: "zip",
-        // 实测：2026-10-19 下载 3,090,548 字节后计算得到。
-        sha256: "c57724f87219bafde78f61b54fb7f303f456fed9826a3d0ee2d54d461ad58020",
-        bytes: 3_090_548,
-        hosts: GITHUB_HOSTS,
-      },
-    ],
-    license: {
-      name: "GPL-2.0-or-later",
-      url: "https://github.com/xpack-dev-tools/openocd-xpack/blob/v0.12.0-6/LICENSE",
-      sourceUrl: "https://github.com/xpack-dev-tools/openocd-xpack",
-      separateProcess: true,
-    },
-    provides: ["openocd"],
-    executables: [{ name: "openocd", path: "bin/openocd.exe", toolchain: "openocd" }],
-    env: { pathPrepend: ["payload/bin"], vars: {} },
-    validation: { command: "bin/openocd.exe", args: ["--version"], expect: "Open On-Chip Debugger" },
-    priority: 10,
-  },
-  {
     // xPack's Arm GCC. Listed alongside the Arm-built one as a second choice:
     // some projects pin xPack specifically, and its layout differs.
     id: "xpack-arm-none-eabi-gcc-14.2.1-1.1-win32-x64",
@@ -186,43 +152,6 @@ export const CATALOG: CatalogEntryDef[] = [
     priority: 5,
   },
   {
-    // RISC-V is the one compiler the default Arm install does not cover. Same
-    // xPack packaging, so the same layout and validation shape.
-    id: "xpack-riscv-none-elf-gcc-14.2.0-3-win32-x64",
-    name: "RISC-V GNU Toolchain (xPack)",
-    version: "14.2.0-3",
-    provider: "xpack",
-    platform: "win32",
-    arch: "x64",
-    downloadBytes: 378_807_720,
-    unpackedBytes: 1_400_000_000,
-    sources: [
-      {
-        url: `${XPACK_RELEASES}/riscv-none-elf-gcc-xpack/releases/download/v14.2.0-3/xpack-riscv-none-elf-gcc-14.2.0-3-win32-x64.zip`,
-        archive: "zip",
-        // 实测：2026-10-19 下载 378,807,720 字节后计算得到。
-        sha256: "9bb15efdeca256532c4a83ce6462c7dc1f9cfebe1f1f43d581b2ad7d077209b6",
-        bytes: 378_807_720,
-        hosts: GITHUB_HOSTS,
-      },
-    ],
-    license: {
-      name: "GPL-3.0-or-later with GCC Runtime Library Exception; newlib BSD",
-      url: "https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack/blob/v14.2.0-3/LICENSE",
-      sourceUrl: "https://github.com/xpack-dev-tools/riscv-none-elf-gcc-xpack",
-      separateProcess: true,
-    },
-    provides: ["gcc-riscv"],
-    executables: [
-      { name: "riscv-none-elf-gcc", path: "bin/riscv-none-elf-gcc.exe", toolchain: "gcc-riscv" },
-      { name: "riscv-none-elf-gdb", path: "bin/riscv-none-elf-gdb.exe", toolchain: "gcc-riscv" },
-      { name: "riscv-none-elf-size", path: "bin/riscv-none-elf-size.exe", toolchain: "gcc-riscv" },
-    ],
-    env: { pathPrepend: ["payload/bin"], vars: {} },
-    validation: { command: "bin/riscv-none-elf-gcc.exe", args: ["-dumpmachine"], expect: "^riscv" },
-    priority: 10,
-  },
-  {
     // CMake is the build-system front end most Cortex-M projects use. The
     // archive wraps everything in `cmake-4.2.3-windows-x86_64/`, which the
     // installer strips.
@@ -253,82 +182,6 @@ export const CATALOG: CatalogEntryDef[] = [
     executables: [{ name: "cmake", path: "bin/cmake.exe", toolchain: "cmake" }],
     env: { pathPrepend: ["payload/bin"], vars: {} },
     validation: { command: "bin/cmake.exe", args: ["--version"], expect: "^cmake version" },
-  },
-  {
-    // Ninja's release zip is one bare `ninja.exe`: no wrapper directory. The
-    // extractor keeps it whole because a single entry that is a file is the
-    // payload, not a wrapper.
-    id: "ninja-1.13.2-win32-x64",
-    name: "Ninja",
-    version: "1.13.2",
-    provider: "ninja-build",
-    platform: "win32",
-    arch: "x64",
-    downloadBytes: 291_570,
-    unpackedBytes: 800_000,
-    sources: [
-      {
-        url: "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip",
-        archive: "zip",
-        // 实测：2026-10-19 下载 291,570 字节后计算得到。
-        sha256: "07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65",
-        bytes: 291_570,
-        hosts: GITHUB_HOSTS,
-      },
-    ],
-    license: {
-      name: "Apache-2.0",
-      url: "https://github.com/ninja-build/ninja/blob/v1.13.2/COPYING",
-      separateProcess: true,
-    },
-    provides: ["ninja"],
-    // No wrapper was stripped, so the executable sits at the payload root.
-    executables: [{ name: "ninja", path: "ninja.exe", toolchain: "ninja" }],
-    env: { pathPrepend: ["payload"], vars: {} },
-    validation: { command: "ninja.exe", args: ["--version"], expect: "^1\\.13" },
-  },
-  {
-    // probe-rs ships a prebuilt Windows zip from its own release page, so it
-    // can be pinned and verified like any other toolchain here — no Rust
-    // toolchain needed on the user's machine. The archive is flat (binaries at
-    // the root, no wrapper directory), which planExtraction keeps as-is.
-    id: "probe-rs-0.32.0-win32-x64",
-    name: "probe-rs",
-    version: "0.32.0",
-    provider: "probe-rs",
-    platform: "win32",
-    arch: "x64",
-    // 实测 Content-Length：11502414 字节
-    downloadBytes: 11_502_414,
-    unpackedBytes: 42_000_000,
-    sources: [
-      {
-        url: "https://github.com/probe-rs/probe-rs/releases/download/v0.32.0/probe-rs-tools-x86_64-pc-windows-msvc.zip",
-        archive: "zip",
-        // 实测：2026-10-20 下载 11,502,414 字节后计算得到，与发布页的
-        // probe-rs-tools-x86_64-pc-windows-msvc.zip.sha256 逐字相符。
-        sha256: "56fc0564cc23d604b27dc2d57606194159c49f951999f3e47bd2cbffcba64103",
-        bytes: 11_502_414,
-        hosts: GITHUB_HOSTS,
-      },
-    ],
-    license: {
-      name: "MIT OR Apache-2.0",
-      url: "https://github.com/probe-rs/probe-rs/blob/master/LICENSE-MIT",
-      sourceUrl: "https://github.com/probe-rs/probe-rs",
-      separateProcess: true,
-    },
-    provides: ["probe-rs"],
-    executables: [
-      { name: "probe-rs", path: "probe-rs.exe", toolchain: "probe-rs" },
-      { name: "cargo-flash", path: "cargo-flash.exe", toolchain: "probe-rs" },
-      { name: "cargo-embed", path: "cargo-embed.exe", toolchain: "probe-rs" },
-    ],
-    // The binaries sit at the payload root, so the root itself joins PATH.
-    env: { pathPrepend: ["payload"], vars: {} },
-    // `probe-rs --version` prints `probe-rs 0.32.0 (git commit: …)` to stdout.
-    validation: { command: "probe-rs.exe", args: ["--version"], expect: "^probe-rs 0\\.32\\.0" },
-    priority: 10,
   },
   {
     // pyOCD's Windows release is a PyInstaller one-directory build: pyocd.exe
@@ -364,45 +217,6 @@ export const CATALOG: CatalogEntryDef[] = [
     env: { pathPrepend: ["payload"], vars: {} },
     // `pyocd --version` prints the bare number.
     validation: { command: "pyocd.exe", args: ["--version"], expect: "^0\\.46\\.0" },
-    priority: 10,
-  },
-  {
-    // esptool's release zip has a single wrapper directory
-    // (`esptool-windows-amd64/`), which planExtraction strips, so the payload
-    // root is what was inside it.
-    id: "esptool-5.6.0-win32-x64",
-    name: "esptool",
-    version: "5.6.0",
-    provider: "espressif",
-    platform: "win32",
-    arch: "x64",
-    downloadBytes: 64_810_332,
-    unpackedBytes: 150_000_000,
-    sources: [
-      {
-        url: "https://github.com/espressif/esptool/releases/download/v5.6.0/esptool-v5.6.0-windows-amd64.zip",
-        archive: "zip",
-        // 实测：2026-10-20 下载 64,810,332 字节后计算得到。
-        sha256: "d55a96fbeb97fd4cb05bd93f201e5c8f6518b7bfcde2fc6966fd0190fd891629",
-        bytes: 64_810_332,
-        hosts: GITHUB_HOSTS,
-      },
-    ],
-    license: {
-      name: "GPL-2.0-or-later",
-      url: "https://github.com/espressif/esptool/blob/master/LICENSE",
-      sourceUrl: "https://github.com/espressif/esptool",
-      separateProcess: true,
-    },
-    provides: ["esptool"],
-    executables: [
-      { name: "esptool", path: "esptool.exe", toolchain: "esptool" },
-      { name: "espsecure", path: "espsecure.exe", toolchain: "esptool" },
-      { name: "espefuse", path: "espefuse.exe", toolchain: "esptool" },
-    ],
-    env: { pathPrepend: ["payload"], vars: {} },
-    // `esptool version` prints `esptool v5.6.0` on the first line.
-    validation: { command: "esptool.exe", args: ["version"], expect: "esptool v5\\.6\\.0" },
     priority: 10,
   },
 ];

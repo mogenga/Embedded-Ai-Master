@@ -2509,6 +2509,33 @@ async function seedFirstRun() {
       text: `知识库 MCP 配置写入失败：${messageOf(error)}`,
     });
   }
+
+  // 3. 嵌入式 server（serial/keil/datasheet）：与 kb 同一套种子规矩。
+  //    产物随包分发，server 进程总能启动；没装 Keil 的机器是工具动作
+  //    如实报「未安装」，不是连不上。没有这段，全新安装的 agent 领不到
+  //    embed_serial 等工具——上一轮「agent 自写 python 脚本抢串口」的根因
+  //    正是配置里从来没有这个条目。
+  try {
+    const result = await seed.seedEmbeddedMcpEntries({
+      harnessHome,
+      kernelRoot: roots.distParent,
+      mcpModules: { readAppConfig: kernel.readAppConfig, writeMcpServers: kernel.writeMcpServers },
+    });
+    // 写进去了才值得一句话；全跳过（用户配过/产物缺）是安静的。
+    if (result.seeded.length > 0) {
+      send({
+        type: "notice",
+        level: "dim",
+        text: `已接入嵌入式工具：${result.seeded.join("、")}`,
+      });
+    }
+  } catch (error) {
+    send({
+      type: "notice",
+      level: "warn",
+      text: `嵌入式 MCP 配置写入失败：${messageOf(error)}`,
+    });
+  }
 }
 
 /**
@@ -4652,10 +4679,27 @@ rl.on("line", (line) => {
 rl.on("close", () => {
   stopFollow();
   stopBackgroundPump();
+  // stdin 断开意味着主进程不再回话：串口必须在这里释放，否则这个 host
+  // 若因任何原因多活一会儿（例如退出竞态），COM 口就跟着被攥住。
+  serialBridge.stopMailbox();
+  void serialBridge.closeAll();
   kernel.background?.killAllBackgroundJobs?.();
   void runner?.close().finally(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();
 });
+
+// 窗口全部关掉后 Electron 会走 quit；就算 shutdown 命令因竞态没送到，
+// 这里是最后一道闸：进程退出前释放串口，不留孤儿占着 COM 口。
+for (const signal of ["exit", "SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    try {
+      serialBridge.stopMailbox();
+      void serialBridge.closeAll();
+    } catch {
+      /* 退出路径：清理失败也不能拦住退出 */
+    }
+  });
+}
 
 process.on("uncaughtException", (error) => {
   send({ type: "error", message: `宿主异常：${error.message}` });

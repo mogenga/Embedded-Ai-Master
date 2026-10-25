@@ -88,6 +88,9 @@ function startWindow(options = {}) {
     show: false,
     backgroundColor: "#0e0e10",
     title: "Embedded AI Master",
+    // Windows 任务栏/标题栏图标。打包后的 exe 用自身的资源图标，但开发
+    // 模式（electron .）不传这个就是 Electron 默认图标。
+    icon: join(here, "build", process.platform === "win32" ? "icon.ico" : "icon.png"),
     // The renderer draws its own caption buttons on Windows so they match the
     // top bar and follow the theme; macOS keeps its traffic lights.
     titleBarStyle: "hidden",
@@ -307,11 +310,20 @@ app.on("second-instance", () => {
 
 app.whenReady().then(() => {
   if (!app.hasSingleInstanceLock()) return;
+  // Windows 任务栏归属：不设 AppUserModelId 时窗口可能被归进
+  // electron.exe 的分组，图标与通知都跟着错。
+  if (process.platform === "win32") app.setAppUserModelId("com.embedded-ai.master");
   startWindow();
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
+  if (process.platform !== "darwin") {
+    // 关窗即退出前先请 host 走 shutdown：里面会关串口、停后台作业。上一轮
+    // 事故的孤儿实例就是这里直接 quit，host（和它攥着的 COM 口）没收到任何
+    // 通知，任务栏图标没了进程还在，串口被占到手动杀进程为止。
+    stopHost();
+    setTimeout(() => app.quit(), 300);
+  }
 });
 
 app.on("activate", () => {
