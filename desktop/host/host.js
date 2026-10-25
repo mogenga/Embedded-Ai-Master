@@ -4652,10 +4652,27 @@ rl.on("line", (line) => {
 rl.on("close", () => {
   stopFollow();
   stopBackgroundPump();
+  // stdin 断开意味着主进程不再回话：串口必须在这里释放，否则这个 host
+  // 若因任何原因多活一会儿（例如退出竞态），COM 口就跟着被攥住。
+  serialBridge.stopMailbox();
+  void serialBridge.closeAll();
   kernel.background?.killAllBackgroundJobs?.();
   void runner?.close().finally(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();
 });
+
+// 窗口全部关掉后 Electron 会走 quit；就算 shutdown 命令因竞态没送到，
+// 这里是最后一道闸：进程退出前释放串口，不留孤儿占着 COM 口。
+for (const signal of ["exit", "SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    try {
+      serialBridge.stopMailbox();
+      void serialBridge.closeAll();
+    } catch {
+      /* 退出路径：清理失败也不能拦住退出 */
+    }
+  });
+}
 
 process.on("uncaughtException", (error) => {
   send({ type: "error", message: `宿主异常：${error.message}` });
