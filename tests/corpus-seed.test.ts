@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readAppConfig, writeMcpServers } from "../src/config/app-config.js";
-import { seedCorpus, seedKbMcpEntry } from "../src/corpus/seed.js";
+import { seedCorpus, seedEmbeddedMcpEntries, seedKbMcpEntry } from "../src/corpus/seed.js";
 import { getKbLayout, readCurrentVersion } from "../src/corpus/snapshot.js";
 import { resolveKbRoot } from "../src/server/kb-locate.js";
 
@@ -538,5 +538,85 @@ describe("seedKbMcpEntry", () => {
     expect(path.isAbsolute(entry.args[0]!)).toBe(true);
     expect(path.isAbsolute(entry.env.KB_ROOT!)).toBe(true);
     expect(path.isAbsolute(entry.env.KB_INBOX_PATH!)).toBe(true);
+  });
+});
+
+describe("seedEmbeddedMcpEntries", () => {
+  const modules = { readAppConfig, writeMcpServers };
+
+  /** kernelRoot 里造出指定 server 的产物文件。 */
+  function makeEmbeddedKernelRoot(files: string[]): string {
+    const root = makeDir("corpus-seed-kernel-");
+    for (const file of files) {
+      const target = path.join(root, "dist-mcp", file);
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, "// stub\n", "utf8");
+    }
+    return root;
+  }
+
+  const ALL = ["serial/server.js", "keil/server.js", "cubeide/server.js", "datasheet/server.js"];
+
+  it("产物齐全时四个 server 全写入，命令为运行时可执行文件且带 ELECTRON_RUN_AS_NODE", async () => {
+    const kernelRoot = makeEmbeddedKernelRoot(ALL);
+    const home = makeDir("corpus-seed-home-");
+
+    const result = await seedEmbeddedMcpEntries({ harnessHome: home, kernelRoot, mcpModules: modules });
+    expect(result.seeded.sort()).toStrictEqual(["cubeide", "datasheet", "keil", "serial"]);
+    expect(result.skipped).toStrictEqual([]);
+
+    const document = readMcp(home);
+    expect(document.mcpServers.serial).toStrictEqual({
+      command: process.execPath,
+      args: [path.join(kernelRoot, "dist-mcp", "serial", "server.js")],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+      timeoutMs: 120_000,
+    });
+  });
+
+  it("产物缺失的 server 跳过并如实报告，其余照写", async () => {
+    const kernelRoot = makeEmbeddedKernelRoot(["serial/server.js", "keil/server.js"]);
+    const home = makeDir("corpus-seed-home-");
+
+    const result = await seedEmbeddedMcpEntries({ harnessHome: home, kernelRoot, mcpModules: modules });
+    expect(result.seeded.sort()).toStrictEqual(["keil", "serial"]);
+    expect(result.skipped.sort((a, b) => a.name.localeCompare(b.name))).toStrictEqual([
+      { name: "cubeide", reason: "server_missing" },
+      { name: "datasheet", reason: "server_missing" },
+    ]);
+
+    const document = readMcp(home);
+    expect(Object.keys(document.mcpServers).sort()).toStrictEqual(["keil", "serial"]);
+  });
+
+  it("用户已配置的同名 server 不覆盖", async () => {
+    const kernelRoot = makeEmbeddedKernelRoot(ALL);
+    const home = makeDir("corpus-seed-home-");
+    await writeRawMcp(home, [{ name: "serial", command: "node", args: ["my-own-serial.js"] }]);
+
+    const result = await seedEmbeddedMcpEntries({ harnessHome: home, kernelRoot, mcpModules: modules });
+    expect(result.seeded.sort()).toStrictEqual(["cubeide", "datasheet", "keil"]);
+    expect(result.skipped).toStrictEqual([{ name: "serial", reason: "entry_exists" }]);
+
+    const document = readMcp(home);
+    expect(document.mcpServers.serial).toStrictEqual({ command: "node", args: ["my-own-serial.js"] });
+  });
+
+  it("没有可写项时不触碰 mcp.json（连文件都不创建）", async () => {
+    const kernelRoot = makeEmbeddedKernelRoot([]);
+    const home = makeDir("corpus-seed-home-");
+
+    const result = await seedEmbeddedMcpEntries({ harnessHome: home, kernelRoot, mcpModules: modules });
+    expect(result.seeded).toStrictEqual([]);
+    expect(result.skipped.map((s) => s.reason)).toStrictEqual([
+      "server_missing", "server_missing", "server_missing", "server_missing",
+    ]);
+    expect(existsSync(mcpPath(home))).toBe(false);
+  });
+
+  it("kernelRoot 为空时抛错", async () => {
+    await expect(
+      seedEmbeddedMcpEntries({ harnessHome: makeDir("corpus-seed-home-"), kernelRoot: "", mcpModules: modules }),
+    ).rejects.toThrow(/kernelRoot/);
   });
 });

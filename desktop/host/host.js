@@ -2509,6 +2509,33 @@ async function seedFirstRun() {
       text: `知识库 MCP 配置写入失败：${messageOf(error)}`,
     });
   }
+
+  // 3. 嵌入式 server（serial/keil/cubeide/datasheet）：与 kb 同一套种子规矩。
+  //    产物随包分发，server 进程总能启动；没装 Keil/CubeIDE 的机器是工具动作
+  //    如实报「未安装」，不是连不上。没有这段，全新安装的 agent 领不到
+  //    embed_serial 等工具——上一轮「agent 自写 python 脚本抢串口」的根因
+  //    正是配置里从来没有这个条目。
+  try {
+    const result = await seed.seedEmbeddedMcpEntries({
+      harnessHome,
+      kernelRoot: roots.distParent,
+      mcpModules: { readAppConfig: kernel.readAppConfig, writeMcpServers: kernel.writeMcpServers },
+    });
+    // 写进去了才值得一句话；全跳过（用户配过/产物缺）是安静的。
+    if (result.seeded.length > 0) {
+      send({
+        type: "notice",
+        level: "dim",
+        text: `已接入嵌入式工具：${result.seeded.join("、")}`,
+      });
+    }
+  } catch (error) {
+    send({
+      type: "notice",
+      level: "warn",
+      text: `嵌入式 MCP 配置写入失败：${messageOf(error)}`,
+    });
+  }
 }
 
 /**
