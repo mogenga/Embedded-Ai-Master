@@ -284,6 +284,11 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
       case "tool_call":
       case "tool_started":
       case "assistant_delta":
+      // 推理过程只用于显示，**绝不**进模型上下文：`assistant` 正文会被原样
+      // 送回下一次请求，把推理也投影进去等于让模型重复消费自己的思考。这条
+      // 与 `assistant_delta` 同处一个 switch 分支，两者都只是到达过程中的片段，
+      // 完整结论由随后的 `assistant` 事件承载。
+      case "thinking_delta":
       case "mcp_status":
       case "device_status":
       case "usage":

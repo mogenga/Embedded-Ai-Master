@@ -972,3 +972,373 @@ describe("OpenAI 流式响应", () => {
     expect(captured?.stream_options).toBeUndefined();
   });
 });
+
+/**
+ * 推理内容（`reasoning_content` / `reasoning`）是网关的可选扩展字段。
+ *
+ * 两条不变量：
+ *   1. 它只走 `onReasoningDelta`，**绝不**混进 `onDelta`——后者落成 `assistant`
+ *      正文，会被投影回下一次请求（模型重复消费自己的思考）；
+ *   2. 它是可选的，字段缺失或类型不对都不能让一次调用失败——把可选扩展当
+ *      协议必需字段处理，会让每个不支持推理的模型都在这里挂掉。
+ */
+describe("OpenAI 推理内容（reasoning）", () => {
+  function sseResponse(lines: string[]): Response {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        for (const line of lines) controller.enqueue(encoder.encode(`${line}\n`));
+        controller.close();
+      },
+    });
+    return new Response(body, {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  }
+
+  function sseFetch(lines: string[]): typeof fetch {
+    return vi.fn(async () => sseResponse(lines)) as unknown as typeof fetch;
+  }
+
+  it("delta.reasoning_content 走 onReasoningDelta，不进 onDelta", async () => {
+    const onDelta = vi.fn();
+    const onReasoningDelta = vi.fn();
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: sseFetch([
+        'data: {"choices":[{"delta":{"reasoning_content":"先看"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"reasoning_content":"串口"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+      ]),
+    });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onDelta,
+      onReasoningDelta,
+    });
+
+    expect(onReasoningDelta.mock.calls).toEqual([["先看"], ["串口"]]);
+    // 推理不得混进正文：`state.content` 与 onDelta 都必须是空的。
+    expect(onDelta).not.toHaveBeenCalled();
+    expect(result.content).toBe("");
+  });
+
+  it("delta.content 仍走 onDelta，两者同时出现时顺序是推理在前", async () => {
+    const order: string[] = [];
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: sseFetch([
+        'data: {"choices":[{"delta":{"reasoning_content":"想"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"content":"答"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+      ]),
+    });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onDelta: (text) => order.push(`content:${text}`),
+      onReasoningDelta: (text) => order.push(`reasoning:${text}`),
+    });
+
+    expect(order).toEqual(["reasoning:想", "content:答"]);
+    expect(result.content).toBe("答");
+  });
+
+  it("同一帧里 content 与 reasoning 并存时也是推理先回调", async () => {
+    const order: string[] = [];
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: sseFetch([
+        'data: {"choices":[{"delta":{"reasoning_content":"R","content":"C"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+      ]),
+    });
+
+    await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onDelta: (text) => order.push(`content:${text}`),
+      onReasoningDelta: (text) => order.push(`reasoning:${text}`),
+    });
+
+    expect(order).toEqual(["reasoning:R", "content:C"]);
+  });
+
+  it("delta.reasoning 也认，且两者都有时只用 reasoning_content", async () => {
+    const onReasoningDelta = vi.fn();
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: sseFetch([
+        'data: {"choices":[{"delta":{"reasoning":"旧式"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"reasoning_content":"首选","reasoning":"次选"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+      ]),
+    });
+
+    await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onReasoningDelta,
+    });
+
+    // 第二次只报「首选」：同一段推理换字段名出现两次时两个都读会显示两遍。
+    expect(onReasoningDelta.mock.calls).toEqual([["旧式"], ["首选"]]);
+  });
+
+  it("字段缺失时静默跳过，不报错", async () => {
+    const onReasoningDelta = vi.fn();
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: sseFetch([
+        'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+      ]),
+    });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onReasoningDelta,
+    });
+
+    expect(onReasoningDelta).not.toHaveBeenCalled();
+    expect(result.content).toBe("hi");
+  });
+
+  it.each([
+    ["数字", "42"],
+    ["布尔", "true"],
+    ["对象", '{"text":"x"}'],
+    ["数组", '["x"]'],
+    ["null", "null"],
+  ])("推理字段类型是%s时不抛错，按缺失处理", async (_label, value) => {
+    const onDelta = vi.fn();
+    const onReasoningDelta = vi.fn();
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: sseFetch([
+        `data: {"choices":[{"delta":{"reasoning_content":${value},"content":"hi"},"finish_reason":null}]}`,
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+      ]),
+    });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onDelta,
+      onReasoningDelta,
+    });
+
+    expect(onReasoningDelta).not.toHaveBeenCalled();
+    expect(onDelta.mock.calls).toEqual([["hi"]]);
+    expect(result.content).toBe("hi");
+  });
+
+  it("空串的推理字段不回调（与空 content 同等处理）", async () => {
+    const onReasoningDelta = vi.fn();
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: sseFetch([
+        'data: {"choices":[{"delta":{"reasoning_content":""},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+      ]),
+    });
+
+    await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onReasoningDelta,
+    });
+
+    expect(onReasoningDelta).not.toHaveBeenCalled();
+  });
+
+  it("不传 onReasoningDelta 时行为与没有该字段完全一致", async () => {
+    const onDelta = vi.fn();
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: sseFetch([
+        'data: {"choices":[{"delta":{"reasoning_content":"想"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"content":"答"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+      ]),
+    });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onDelta,
+    });
+
+    // 推理被丢弃，正文与完成结果不受影响：这是向后兼容的判据。
+    expect(onDelta.mock.calls).toEqual([["答"]]);
+    expect(result.content).toBe("答");
+    expect(result.stopReason).toBe("stop");
+  });
+
+  it("一次性响应读 message.reasoning_content，且在 onDelta 之前", async () => {
+    const order: string[] = [];
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: successFetch({
+        choices: [{
+          message: { content: "答", reasoning_content: "想" },
+          finish_reason: "stop",
+        }],
+      }),
+      stream: false,
+    });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onDelta: (text) => order.push(`content:${text}`),
+      onReasoningDelta: (text) => order.push(`reasoning:${text}`),
+    });
+
+    expect(order).toEqual(["reasoning:想", "content:答"]);
+    // 推理不污染返回的 content：那是会被投影回下一轮的正文。
+    expect(result.content).toBe("答");
+  });
+
+  it("一次性响应也认 message.reasoning", async () => {
+    const onReasoningDelta = vi.fn();
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: successFetch({
+        choices: [{ message: { content: "答", reasoning: "想" }, finish_reason: "stop" }],
+      }),
+      stream: false,
+    });
+
+    await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onReasoningDelta,
+    });
+
+    expect(onReasoningDelta.mock.calls).toEqual([["想"]]);
+  });
+
+  it("一次性响应的推理字段类型不对时忽略，不抛错", async () => {
+    const onDelta = vi.fn();
+    const onReasoningDelta = vi.fn();
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl: successFetch({
+        choices: [{
+          message: { content: "答", reasoning_content: [{ type: "thinking", text: "x" }] },
+          finish_reason: "stop",
+        }],
+      }),
+      stream: false,
+    });
+
+    const result = await provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onDelta,
+      onReasoningDelta,
+    });
+
+    expect(onReasoningDelta).not.toHaveBeenCalled();
+    expect(onDelta.mock.calls).toEqual([["答"]]);
+    expect(result.content).toBe("答");
+  });
+
+  /**
+   * 「已经交付过文本就不再重试」这条守卫原先只由正文触发。推理走的是另一条
+   * 通道，如果它不置位，一次超时重试会把同一段思考在转录里写两遍。
+   *
+   * 用「流到一半超时」来构造：那是唯一能走到重试判定的交付后失败（读取阶段
+   * 的原生错误不会被重试）。mock 的 fetch 必须自己响应 signal，否则被挂起的
+   * `reader.read()` 永远不会结束，模拟不出真实 fetch 的中断行为。
+   */
+  function hangingSseFetch(frame: string): typeof fetch {
+    return vi.fn(async (_url, init?: RequestInit) => {
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode(`${frame}\n`));
+          init?.signal?.addEventListener("abort", () => {
+            controller.error(new DOMException("The operation was aborted", "AbortError"));
+          });
+        },
+      });
+      return new Response(body, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream" },
+      });
+    }) as unknown as typeof fetch;
+  }
+
+  it("已经交付过推理之后超时不再重试（否则同一段思考会出现两次）", async () => {
+    const fetchImpl = hangingSseFetch(
+      'data: {"choices":[{"delta":{"reasoning_content":"想"},"finish_reason":null}]}',
+    );
+    const onReasoningDelta = vi.fn();
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      requestTimeoutMs: 40,
+      retry: { maxRetries: 3, baseDelayMs: 1, sleep: async () => undefined },
+    });
+
+    await expect(provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onReasoningDelta,
+    })).rejects.toMatchObject({ code: "request_timeout" });
+
+    // 只发了一次请求：交付过推理即不可重试，同一段思考不会出现两遍。
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(onReasoningDelta.mock.calls).toEqual([["想"]]);
+  });
+
+  it("同样的超时在未交付任何文本时会重试（证明上一条靠的是交付判定）", async () => {
+    // 帧里既没有 content 也没有 reasoning：这一帧之后才超时，什么都没交付。
+    const fetchImpl = hangingSseFetch(
+      'data: {"choices":[{"delta":{},"finish_reason":null}]}',
+    );
+    const provider = createOpenAIProvider({
+      baseUrl: "http://gw/v1",
+      model: "m",
+      fetchImpl,
+      requestTimeoutMs: 40,
+      retry: { maxRetries: 2, baseDelayMs: 1, sleep: async () => undefined },
+    });
+
+    await expect(provider.complete(MESSAGES, [], {
+      signal: new AbortController().signal,
+      maxOutputTokens: 16,
+      onReasoningDelta: () => undefined,
+    })).rejects.toMatchObject({ code: "request_timeout" });
+
+    // maxRetries=2 → 最多 3 次；至少不止一次，说明重试路径本身是通的。
+    expect((fetchImpl as unknown as { mock: { calls: unknown[] } }).mock.calls.length)
+      .toBeGreaterThan(1);
+  });
+});

@@ -10,6 +10,16 @@ export type EventType =
   | "user"
   | "assistant"
   | "assistant_delta"
+  // 模型的推理过程（reasoning_content / reasoning）逐段到达。
+  //
+  // **只有这一种事件，没有 thinking_start / thinking_end**：段落边界是纯投影
+  // 状态——「上一条事件是不是 thinking_delta」就能推出来，多两种事件类型就多
+  // 两处必须与 `assistant_delta` 保持一致的判定，而它们不携带任何新事实。
+  //
+  // 它绝不能被投影进模型上下文（`buildMessages` 显式跳过）：`assistant` 正文
+  // 会被原样送回下一次请求，把推理也塞进去等于让模型重复消费自己的思考，
+  // 既浪费 token，也可能诱导它照抄上一轮的推理路径。
+  | "thinking_delta"
   | "tool_call"
   | "tool_result"
   | "tool_started"
@@ -63,6 +73,17 @@ export interface ToolStartedPayload {
  * 投影层忽略 delta，用 `assistant` 重建上下文；UI 用 delta 做逐字显示。
  */
 export interface AssistantDeltaPayload {
+  text: string;
+}
+
+/**
+ * 模型推理过程的一段增量文本。
+ *
+ * 与 `AssistantDeltaPayload` 同形，但**不是**同一种东西：它只用于显示，
+ * 投影层必须跳过它（见 `EventType` 的 `thinking_delta` 注释）。字段单独成类型
+ * 是为了让「哪些 payload 可以进上下文」在类型层面就看得出来。
+ */
+export interface ThinkingDeltaPayload {
   text: string;
 }
 

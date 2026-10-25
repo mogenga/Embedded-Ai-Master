@@ -25,6 +25,12 @@ const KNOWN_TYPES = new Set([
   "user",
   "assistant",
   "assistant_delta",
+  // The model's reasoning fragments. The renderer has had start / text / end
+  // handlers for this since before the kernel produced any; this module is
+  // where the three are synthesised (`openThinking` / `closeThinking`, plus the
+  // `thinking_delta` case below). Leaving it out of this set would turn every
+  // reasoning fragment into an "unknown event type" warning line.
+  "thinking_delta",
   "tool_call",
   "tool_result",
   "tool_started",
@@ -45,6 +51,27 @@ const KNOWN_TYPES = new Set([
   // moment the operator has walked away from the window, and the one line that
   // says it finished would otherwise be a warning that it could not be read.
   "background_result",
+]);
+
+/**
+ * Kernel events that end an open reasoning block.
+ *
+ * Only events that either put something in the transcript after the block or
+ * end the turn belong here. Status-carrying events (`usage`, `checkpoint`,
+ * `mcp_status`, `device_status`, `compaction`, `permission_decision`, …) are
+ * deliberately absent: they produce no transcript content of their own, and
+ * closing on them would cut one chain of thought into several blocks for a
+ * reason the reader cannot see.
+ */
+const THINKING_INTERRUPTING_TYPES = new Set([
+  "assistant",
+  "assistant_delta",
+  "tool_call",
+  "tool_started",
+  "tool_result",
+  "user",
+  "status",
+  "interrupted",
 ]);
 
 /** Tool output larger than this is truncated before it reaches the DOM. */
@@ -285,6 +312,13 @@ function toolAnnotations(value) {
  * `todos` is deliberately absent. The plan is interface state drawn beside the
  * transcript, not something the model said, so it travels in `sessionLoadedEvent`'s
  * own field and never becomes a bubble (which would also put it in an export).
+ *
+ * Reasoning is present as `role: "thinking"`. The kernel writes it as many
+ * small `thinking_delta` fragments (batched by the delta writer), so adjacent
+ * runs are merged into one completed block — the same shape the live
+ * `thinking_start` / `thinking_text` / `thinking_end` sequence leaves behind.
+ * Without this a reopened conversation would silently lose content its log
+ * still contains.
  */
 export function sessionEventsToMessages(events) {
   const out = [];
@@ -293,9 +327,28 @@ export function sessionEventsToMessages(events) {
   /** callId → { name, arguments } for the assistant event that spawned it. */
   const calls = new Map();
   let index = 0;
+  /** The open reasoning row, or `null` when the last event was not reasoning. */
+  let thinkingRow = null;
+  const closeThinkingRow = () => {
+    thinkingRow = null;
+  };
   for (const event of events) {
     if (!isRecord(event)) continue;
     const payload = isRecord(event.payload) ? event.payload : {};
+    if (event.type === "thinking_delta") {
+      const text = textOf(payload.text);
+      if (text === "") continue;
+      if (thinkingRow === null) {
+        thinkingRow = { role: "thinking", text: "" };
+        out.push(thinkingRow);
+      }
+      thinkingRow.text += text;
+      continue;
+    }
+    // Every other event ends the run: reasoning that arrives either side of a
+    // tool call or a paragraph is two blocks in the live transcript, and the
+    // replay has to draw the same two.
+    closeThinkingRow();
     if (event.type === "user") {
       const content = textOf(payload.content);
       if (content !== "") {
@@ -364,7 +417,48 @@ export function createContext(options = {}) {
      * appended a second time and the bubble would show the answer twice.
      */
     streamedText: "",
+    /**
+     * Whether a reasoning block is currently open in the renderer.
+     *
+     * The kernel emits one `thinking_delta` type, with no start/end of its own:
+     * a segment boundary is derivable ("is the previous event a thinking
+     * fragment?"), so writing them into the log would add two types that must
+     * be kept consistent with `assistant_delta` and carry no new fact. The
+     * renderer, though, needs an explicit `thinking_start` / `thinking_end`
+     * pair — it builds one node on start and finalises it on end. This flag is
+     * that boundary, tracked here so the renderer's state machine stays as it
+     * is.
+     */
+    thinkingOpen: false,
   };
+}
+
+/**
+ * Open the reasoning block if it is not already open.
+ *
+ * `thinking_start` is emitted exactly once per segment, before its first text
+ * fragment: `appendThinking` on the renderer side silently drops text when no
+ * block has been started, so a fragment without a start would be invisible.
+ */
+function openThinking(ctx, out) {
+  if (ctx.thinkingOpen) return;
+  ctx.thinkingOpen = true;
+  out.push({ type: "thinking_start" });
+}
+
+/**
+ * Close the reasoning block if one is open.
+ *
+ * Called before anything that is not a reasoning fragment. This is what keeps
+ * a long chain of thought from swallowing the rest of the transcript: the
+ * renderer finalises the block (it stops showing "thinking…" and, in the
+ * Normal view, collapses to a one-line marker) as soon as the model moves on
+ * to prose, a tool, or the end of the turn.
+ */
+function closeThinking(ctx, out) {
+  if (!ctx.thinkingOpen) return;
+  ctx.thinkingOpen = false;
+  out.push({ type: "thinking_end" });
 }
 
 function toolNameFor(ctx, callId, fallback) {
@@ -431,6 +525,18 @@ export function sessionEventToHostEvents(event, ctx) {
     return out;
   }
 
+  // Anything that is not another reasoning fragment ends the open reasoning
+  // block, and does so *before* it produces its own messages: the renderer
+  // gives `thinking_end` no content, so closing first keeps the block above
+  // the prose / tool row that follows rather than after it. Status-only
+  // events (`usage`, `checkpoint`, `mcp_status`, …) are excluded on purpose —
+  // they frequently land in the middle of a reasoning stream (a usage frame
+  // arrives between deltas), and closing on them would split one chain of
+  // thought into several blocks.
+  if (type !== "thinking_delta" && THINKING_INTERRUPTING_TYPES.has(type)) {
+    closeThinking(ctx, out);
+  }
+
   switch (type) {
     case "system":
     case "tool_call":
@@ -449,6 +555,19 @@ export function sessionEventToHostEvents(event, ctx) {
       if (text !== "") {
         ctx.streamedText += text;
         out.push({ type: "assistant_delta", text });
+      }
+      break;
+    }
+
+    case "thinking_delta": {
+      // The kernel's reasoning fragment. The renderer needs an explicit block
+      // lifecycle, so the first fragment of a segment opens one. The text is
+      // shown as it arrives and never mixed into the answer bubble: it is not
+      // part of what the model said in reply.
+      const text = textOf(payload.text);
+      if (text !== "") {
+        openThinking(ctx, out);
+        out.push({ type: "thinking_text", text });
       }
       break;
     }

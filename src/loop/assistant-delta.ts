@@ -18,14 +18,22 @@ export interface AssistantDeltaWriterOptions {
 export interface AssistantDeltaWriter {
   /** 收下一段增量文本。同步，不阻塞模型调用。 */
   push(text: string): void;
+  /** 收下一段推理文本。同步，不阻塞模型调用。 */
+  pushThinking(text: string): void;
   /** 把缓冲写完并等待落盘完成。 */
   flush(): Promise<void>;
-  /** 因写失败而丢失的字符数。 */
+  /** 因写失败而丢失的字符数（两个通道合计）。 */
   readonly dropped: number;
 }
 
 const DEFAULT_MAX_DELAY_MS = 60;
 const DEFAULT_MAX_CHARS = 400;
+
+/** 一次待落盘的连续同通道文本。 */
+interface Segment {
+  type: "assistant_delta" | "thinking_delta";
+  text: string;
+}
 
 /**
  * 把模型的增量文本批量写进会话日志。
@@ -36,6 +44,12 @@ const DEFAULT_MAX_CHARS = 400;
  *
  * 为什么写失败不致命：同一轮回答的完整内容在随后的 `assistant` 事件里，
  * 增量只是把它提前显示出来。丢几段增量等于少了几次流式刷新，不等于丢内容。
+ *
+ * **推理与正文共用一个队列**：两者来自同一次模型调用，各自的到达顺序就是
+ * 模型的输出顺序。两个独立缓冲各带一个定时器时，正文可能先到 400 字符而
+ * 立刻落盘、推理还在等 60ms 的定时器，日志里就会出现「正文在前、推理在后」。
+ * 用一个按到达顺序追加的队列，顺序由构造保证，不需要任何额外判定；相邻的
+ * 同通道片段仍会合并成一条事件，批量的粒度不变。
  */
 export function createAssistantDeltaWriter(
   opts: AssistantDeltaWriterOptions,
@@ -43,15 +57,16 @@ export function createAssistantDeltaWriter(
   const session = opts.session;
   const maxDelayMs = opts.maxDelayMs ?? DEFAULT_MAX_DELAY_MS;
   const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS;
-  let buffer = "";
+  let pending: Segment[] = [];
+  let pendingChars = 0;
   let timer: NodeJS.Timeout | undefined;
   let chain: Promise<void> = Promise.resolve();
   let dropped = 0;
 
-  function write(text: string): Promise<void> {
+  function write(type: Segment["type"], text: string): Promise<void> {
     chain = chain.then(async () => {
       try {
-        await session.append({ type: "assistant_delta", payload: { text } });
+        await session.append({ type, payload: { text } });
       } catch (error) {
         dropped += text.length;
         opts.onError?.(error);
@@ -60,15 +75,20 @@ export function createAssistantDeltaWriter(
     return chain;
   }
 
+  function takePending(): Segment[] {
+    const taken = pending;
+    pending = [];
+    pendingChars = 0;
+    return taken;
+  }
+
   async function flush(): Promise<void> {
     if (timer !== undefined) {
       clearTimeout(timer);
       timer = undefined;
     }
-    if (buffer !== "") {
-      const text = buffer;
-      buffer = "";
-      await write(text);
+    for (const segment of takePending()) {
+      await write(segment.type, segment.text);
     }
     await chain;
   }
@@ -83,19 +103,32 @@ export function createAssistantDeltaWriter(
     timer.unref?.();
   }
 
+  function enqueue(type: Segment["type"], text: string): void {
+    if (text === "") return;
+    const last = pending[pending.length - 1];
+    if (last !== undefined && last.type === type) {
+      last.text += text;
+    } else {
+      pending.push({ type, text });
+    }
+    pendingChars += text.length;
+    if (pendingChars >= maxChars) {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+      void flush();
+      return;
+    }
+    schedule();
+  }
+
   return {
     push(text) {
-      if (text === "") return;
-      buffer += text;
-      if (buffer.length >= maxChars) {
-        if (timer !== undefined) {
-          clearTimeout(timer);
-          timer = undefined;
-        }
-        void flush();
-        return;
-      }
-      schedule();
+      enqueue("assistant_delta", text);
+    },
+    pushThinking(text) {
+      enqueue("thinking_delta", text);
     },
     flush,
     get dropped() {

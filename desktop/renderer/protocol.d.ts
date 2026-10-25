@@ -15,7 +15,12 @@ export interface KernelSessionEvent {
 }
 
 export interface PublicMessage {
-  role: "user" | "assistant" | "tool";
+  /**
+   * `thinking` is the model's reasoning, replayed as an already-finished
+   * block (adjacent `thinking_delta` fragments merged). It is display only:
+   * the renderer draws it de-emphasised and it never reaches the model.
+   */
+  role: "user" | "assistant" | "tool" | "thinking";
   text?: string;
   name?: string;
   summary?: string;
@@ -40,6 +45,13 @@ export interface ProtocolContext {
   openTool: string;
   startedTools: Set<string>;
   pendingApprovals: Set<string>;
+  streamedText: string;
+  /**
+   * Whether a reasoning block is open. The kernel emits only `thinking_delta`
+   * (no start/end of its own), so this layer synthesises the renderer's
+   * `thinking_start` / `thinking_end` around each run of fragments.
+   */
+  thinkingOpen: boolean;
 }
 
 export interface ModelOption {

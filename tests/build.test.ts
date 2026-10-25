@@ -133,6 +133,48 @@ describe("buildMessages 投影重组", () => {
     expect(messages).toStrictEqual([{ role: "user", content: "hi" }]);
   });
 
+  /**
+   * 推理内容绝不进模型上下文。
+   *
+   * `assistant` 正文会被原样投影回下一次请求；把推理也塞进去等于让模型重复
+   * 消费自己的思考——既浪费 token，也可能诱导它照抄上一轮的推理路径。这条
+   * 断言是这条边界唯一的守卫：`buildMessages` 的 switch 有 `default: throw`，
+   * 漏掉 `thinking_delta` 会先让整个会话不可投影（表现为「工具批次未闭合」
+   * 之类的错误），修法若被顺手改成「并入 assistant 正文」则这条会红。
+   */
+  it("thinking_delta 不进投影结果（推理不得污染下一次请求）", () => {
+    const messages = buildMessages([
+      mk(0, "user", { content: "串口没输出" }),
+      mk(1, "thinking_delta", { text: "先确认波特率" }),
+      mk(2, "thinking_delta", { text: "再看引脚" }),
+      mk(3, "assistant", { content: "先查波特率。", toolCalls: [] }),
+    ]);
+
+    expect(messages).toStrictEqual([
+      { role: "user", content: "串口没输出" },
+      { role: "assistant", content: "先查波特率。", tool_calls: [] },
+    ]);
+    // 文本本身也不得出现在任何消息里——形状对、内容被偷偷带上同样算污染。
+    const serialized = JSON.stringify(messages);
+    expect(serialized).not.toContain("先确认波特率");
+    expect(serialized).not.toContain("再看引脚");
+  });
+
+  it("thinking_delta 可以出现在工具批次中间（不得触发批次守卫）", () => {
+    // 模型在 assistant 与 tool_result 之间再想一段是完全可能的；它与
+    // `background_result` 同理，不能并进会在未闭合批次上抛错的那三类。
+    const messages = buildMessages([
+      mk(0, "assistant", {
+        content: "调用工具",
+        toolCalls: [{ id: "c1", name: "echo", arguments: { text: "x" } }],
+      }),
+      mk(1, "thinking_delta", { text: "等结果" }),
+      mk(2, "tool_result", { id: "c1", ok: true, text: "x" }, 0),
+    ]);
+
+    expect(messages.map((message) => message.role)).toStrictEqual(["assistant", "tool"]);
+  });
+
   it("未知 type 事件抛错,不静默丢弃", () => {
     expect(() => buildMessages([mk(0, "mystery" as EventType, { content: "x" })])).toThrow();
   });

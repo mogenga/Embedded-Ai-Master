@@ -55,6 +55,14 @@ export interface ModelProtocol {
       signal: AbortSignal;
       maxOutputTokens: number;
       onDelta?: (text: string) => void;
+      /**
+       * 模型的推理过程增量，与 `onDelta` 是两条独立通道。
+       *
+       * 可选：不传时适配器行为与没有推理字段时完全一致（不产生任何推理事件）。
+       * 推理**不得**混进 `onDelta`——那是正文，会被落成 `assistant` 事件并投影
+       * 回下一次请求。
+       */
+      onReasoningDelta?: (text: string) => void;
     },
   ): Promise<CompletionResult>;
   countTokens(messages: ModelChatMessage[]): number;
