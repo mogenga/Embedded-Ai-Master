@@ -2701,6 +2701,18 @@ function handleEvent(message) {
       break;
 
     case "serial_agent_write":
+      // The agent's write enters the transcript like any other send, tagged
+      // so the operator can tell who drove the port — the animation alone
+      // leaves no record once it finishes.
+      appendSerialLines([
+        {
+          text: message.hex === true ? hexViewOfHex(String(message.data ?? "").replace(/\s+/g, "")) : String(message.data ?? "").replace(/\r\n$/, ""),
+          at: Date.now(),
+          level: "info",
+          dir: "tx",
+          tag: t.serialSenderAgent,
+        },
+      ]);
       replayAgentWrite(message);
       break;
 
@@ -4578,7 +4590,13 @@ function renderSerialStatus() {
 /** One row per line; `serial_text` keeps the message, the rest is gutter. */
 function serialLineNode(line) {
   const row = document.createElement("div");
-  row.className = `serial-line${line.level ? ` ${line.level}` : ""}`;
+  // `dir` is the line's direction: absent means what the device sent (RX).
+  // The gutter carries a plain RX/TX badge for both directions instead of a
+  // level word for one and an arrow for the other — one vocabulary, read at a
+  // glance without decoding color, and legible to a screen reader.
+  const dir = line.dir === "tx" ? "tx" : "rx";
+  row.className = `serial-line ${dir}${line.level ? ` ${line.level}` : ""}`;
+  row.dataset.dir = dir;
   const time = new Date(line.at).toTimeString().slice(0, 8);
   const millis = String(new Date(line.at).getMilliseconds()).padStart(3, "0");
 
@@ -4586,20 +4604,30 @@ function serialLineNode(line) {
   timeEl.className = "serial-time";
   timeEl.textContent = `${time}.${millis}`;
 
-  const levelEl = document.createElement("span");
-  levelEl.className = `serial-level${line.level ? ` ${line.level}` : ""}`;
-  levelEl.textContent = line.level ? line.level.toUpperCase().slice(0, 5) : "";
+  // The badge replaces the level column. A warn/error RX line keeps its level
+  // inside the badge's tooltip and its color, so the filter bar still works
+  // and the row still reads at a glance.
+  const badgeEl = document.createElement("span");
+  badgeEl.className = `serial-badge ${dir}`;
+  badgeEl.textContent = dir === "tx" ? "TX" : "RX";
+  badgeEl.title = line.level && line.level !== "info" ? `${dir} · ${line.level.toUpperCase()}` : dir.toUpperCase();
 
+  // What produced the line: the operator typed it, or the agent did. Kept in
+  // its own column so both kinds of send are distinguishable at once.
   const tagEl = document.createElement("span");
   tagEl.className = "serial-tag";
-  tagEl.textContent = line.tag ?? "";
+  tagEl.textContent = line.tag ?? (dir === "tx" ? t.serialSenderUser : "");
 
   const textEl = document.createElement("span");
   textEl.className = "serial-text";
-  textEl.textContent = viewHex() ? hexView(line.text) : line.text;
+  // A TX line holds the plain text that was sent, so it is shown as written —
+  // in HEX view mode the send box already took hex, and `hexView` would print
+  // the digits rather than the bytes they encode.
+  textEl.textContent = viewHex() && dir !== "tx" ? hexView(line.text) : line.text;
 
-  row.append(timeEl, levelEl, tagEl, textEl);
+  row.append(timeEl, badgeEl, tagEl, textEl);
   if (line.level) row.dataset.level = line.level;
+  if (line.tag === t.serialSenderAgent) row.dataset.agent = "true";
   return row;
 }
 
@@ -4798,6 +4826,29 @@ function viewHex() {
 }
 
 /** Hex dump of a received line: bytes spaced, 16 per row kept on one line. */
+/**
+ * Render an already-hex string (what the send box holds when HEX mode is on)
+ * for the transcript. The bytes are known exactly here, so this must not go
+ * through `hexView`, which would re-encode the *text of the hex* — "41" would
+ * show up as the two bytes 0x34 0x31 instead of 0x41.
+ */
+function hexViewOfHex(clean) {
+  const bytes = [];
+  for (let i = 0; i + 1 < clean.length; i += 2) bytes.push(parseInt(clean.slice(i, i + 2), 16));
+  if (bytes.length === 0) return "(empty)";
+  const out = [];
+  for (let i = 0; i < bytes.length; i += 16) {
+    const row = bytes.slice(i, i + 16).map((b) => b.toString(16).padStart(2, "0").toUpperCase());
+    const ascii = bytes
+      .slice(i, i + 16)
+      .map((b) => (b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : "·"))
+      .join("");
+    out.push(`${row.join(" ").padEnd(47)}  ${ascii}`);
+    if (i + 16 < bytes.length) out.push("\n");
+  }
+  return out.join("");
+}
+
 function hexView(text) {
   const bytes = new TextEncoder().encode(text);
   if (bytes.length === 0) return "(empty)";
@@ -4838,6 +4889,7 @@ function sendSerialLine() {
     return;
   }
   const hex = $("serial-send-hex").checked;
+  const crlf = $("serial-send-crlf").checked;
   if (hex) {
     const normalized = normalizeHexSend(text);
     if (normalized === null) {
@@ -4848,8 +4900,15 @@ function sendSerialLine() {
       return;
     }
     api.send({ cmd: "serialWrite", data: normalized, hex: true });
+    // The pane shows what went out as well as what came back: a monitor that
+    // only prints RX cannot be read as a conversation, and the operator has no
+    // way to tell their own write from the device's answer.
+    appendSerialLines([
+      { text: hexViewOfHex(normalized), at: Date.now(), level: "info", dir: "tx", tag: t.serialSenderUser },
+    ]);
   } else {
-    api.send({ cmd: "serialWrite", data: text + ($("serial-send-crlf").checked ? "\r\n" : "") });
+    api.send({ cmd: "serialWrite", data: text + (crlf ? "\r\n" : "") });
+    appendSerialLines([{ text, at: Date.now(), level: "info", dir: "tx", tag: t.serialSenderUser }]);
   }
   serialSendHistory.push(text);
   if (serialSendHistory.length > SERIAL_HISTORY_MAX) serialSendHistory.shift();

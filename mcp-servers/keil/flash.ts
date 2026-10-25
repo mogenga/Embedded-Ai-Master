@@ -191,16 +191,21 @@ function firstMatchLine(output: string, pattern: RegExp): string {
  * Turn a flasher's failure line into something the caller can act on.
  *
  * The raw text is accurate and useless: "Flash Download failed - Target DLL
- * has been cancelled" does not say that a second uVision holds the probe, and
- * an agent reading it spent ten shell calls listing processes to guess. The
- * mapping below names the cause and the next step; the original line is kept
- * alongside it so nothing is hidden.
+ * has been cancelled" does not say what to do, and an agent reading it spent
+ * ten shell calls listing processes guessing at a phantom owner.
+ *
+ * The wording matters more than it looks. Keil's cancelled download has three
+ * distinct causes — another program holding the probe, the probe gone from
+ * USB, and the probe enumerated but unresponsive — and the message is the
+ * same for all three. Naming only the first sent an agent hunting for a
+ * process that did not exist; the hints below list the causes in the order
+ * worth checking, with the check for each.
  */
 export function diagnoseFlashFailure(kind: FlasherKind, output: string): string | undefined {
   const has = (re: RegExp) => re.test(output);
   if (kind === "keil") {
     if (has(/Target DLL has been cancelled/i) || has(/Cannot access target/i)) {
-      return "the probe (ST-Link/ULINK) is held by another program — another uVision debug session, an OpenOCD/gdbserver, or a vendor flash tool. Close it (or run this tool's `close`, which releases the probe) and retry; the same message appears when the board is powered off or USB is disconnected.";
+      return "the debugger could not be opened. Most often another program holds the probe (another uVision debug session, OpenOCD/gdbserver, a vendor flash tool) — this tool's `close` releases the sessions it opened. If nothing else is running, the probe itself is at fault: unplug and replug its USB cable, and check it still enumerates as ST-Link (VID 0483) with a real PID. An unplugged cable and a powered-off board give the same message.";
     }
     if (has(/No ULINK|No ST-Link|No Debug Unit/i)) {
       return "no debugger is attached: check the USB cable and that Windows enumerates the probe (ST-Link shows as VID 0483), then retry.";
@@ -210,7 +215,13 @@ export function diagnoseFlashFailure(kind: FlasherKind, output: string): string 
     }
   }
   if (kind === "openocd" && has(/LIBUSB_ERROR_ACCESS|Permission denied/i)) {
-    return "another process holds the USB probe — close other OpenOCD/gdbserver/uVision instances and retry.";
+    // On Windows this is also what a wedged dongle reports: the handle opens
+    // at the libusb level and the device refuses. Jumping straight to "another
+    // process" sends the caller after a phantom.
+    return "libusb could not open the probe. A second OpenOCD/gdbserver/uVision may hold it; if none is running, the dongle is wedged — unplug and replug it, and confirm it re-enumerates with a real VID:PID (a probe reporting 0000:0000 is not usable).";
+  }
+  if (kind === "openocd" && has(/VID:PID 0000:0000|init mode failed/i)) {
+    return "the probe answered but could not be identified (VID:PID 0000:0000) or the target did not respond to the debug request: replug the probe, check SWD wiring and board power, then retry.";
   }
   if (kind === "openocd" && has(/no device found|unable to find a matching CMSIS-DAP|Error: open failed/i)) {
     return "the probe did not answer: check the cable and that the probe is enumerated; a stale OpenOCD may still own it.";

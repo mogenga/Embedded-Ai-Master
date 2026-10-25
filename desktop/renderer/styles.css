@@ -5673,6 +5673,62 @@ mark.find-hit.current {
   color: var(--warn);
 }
 
+/* Direction badge: one vocabulary for both directions.
+   Color is a second channel, never the only one — the letters RX/TX read the
+   same on a monochrome screen and to a color-blind operator. */
+.serial-badge {
+  flex: 0 0 30px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.75;
+  text-align: center;
+  border-radius: 4px;
+  height: 18px;
+  align-self: flex-start;
+  margin-top: 1px;
+}
+
+.serial-badge.rx {
+  color: var(--text-secondary);
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+}
+
+.serial-badge.tx {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+/* The left rule repeats the badge in a form visible while scrolling; the tint
+   stays subtle because a monitor is a wall of text. */
+.serial-line.rx {
+  border-left: 2px solid transparent;
+  padding-left: 6px;
+}
+
+.serial-line.tx {
+  border-left: 2px solid var(--accent);
+  padding-left: 6px;
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.serial-line.tx .serial-text {
+  color: var(--text-secondary);
+  font-style: italic;
+}
+
+.serial-line.tx .serial-tag {
+  color: var(--accent);
+  opacity: 0.85;
+}
+
+/* An agent's send travels the same direction as the operator's; the tag
+   separates them without inventing a second color for the same arrow. */
+.serial-line.tx[data-agent] .serial-tag::after {
+  content: " ◆";
+}
+
 .serial-notice {
   padding: 6px 0;
   font-size: var(--text-xs);
