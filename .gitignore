@@ -55,3 +55,6 @@ id_dsa.*
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# datasheet MCP 回归语料（ST 版权材料，本地资产，scripts/datasheet-corpus.mjs 下载）
+mcp-servers/datasheet/corpus/

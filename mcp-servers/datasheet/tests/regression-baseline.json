@@ -1,0 +1,13 @@
+{
+  "date": "2026-10-24",
+  "queries": {
+    "total": 50,
+    "recallAt2": 1,
+    "hitAt1": 1,
+    "mrr": 1
+  },
+  "negatives": {
+    "total": 25,
+    "falsePositiveRate": 0.04
+  }
+}

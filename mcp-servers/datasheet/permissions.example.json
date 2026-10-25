@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "preset": "readonly-demo",
+  "rules": [
+    {
+      "tool": "mcp__datasheet__datasheet_search",
+      "action": "allow",
+      "reason": "只读检索:页码与摘录是证据,不改变任何状态"
+    },
+    {
+      "tool": "mcp__datasheet__datasheet_read",
+      "action": "allow",
+      "reason": "只读整页读取:命中后取上下文原文"
+    },
+    {
+      "tool": "mcp__datasheet__datasheet_status",
+      "action": "allow",
+      "reason": "只读状态查询"
+    },
+    {
+      "tool": "mcp__datasheet__datasheet_registers",
+      "action": "allow",
+      "reason": "只读结构化查询(当前未实现,恒返回 not_available)"
+    }
+  ]
+}

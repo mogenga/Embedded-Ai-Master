@@ -20,7 +20,9 @@
     "packs:e2e": "node scripts/packs-e2e.mjs",
     "kb:regression": "node scripts/kb-regression.mjs",
     "kb:review": "node scripts/kb-review.mjs",
-    "test:desktop": "vitest run tests/desktop"
+    "test:desktop": "vitest run tests/desktop",
+    "datasheet:regression": "node scripts/datasheet-regression.mjs",
+    "datasheet:corpus": "node scripts/datasheet-corpus.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.3.1",
