@@ -101,21 +101,21 @@
 - **位置**: `mcp-servers/keil/tools.ts:1048-1065`（fail 只在 `compared.expected && compared.got` 时触发）+ `keilSession.ts:249-266`（复用只查 closed，不查/不恢复 debugging）+ `closeDebugSessions:139`（只关 debugging 会话，非调试残留不清理）。
 - **现象**: 4823 残留非调试会话 → 复用 → readMemory 失败 → verifyFlash 返回无 expected/got 的失败 → flash 仍报成功。芯片不一致时最后一道防线失效。
 - **修复建议**: openKeilSession 复用分支检查 `existing.debugging`，不符则 enterDebug 或弃用重开；tools.ts:1053 对 verifyFlash 的任何失败都视为校验未完成（fail-closed），而不是只认 expected/got。
-- **状态**: 待修。
+- **状态**: **已解决**（2026-10-25 P2 批次）。keilSession.ts 复用分支新增调试态守卫（`!existing.debugging && !connectOnly` → 拒绝并说明）；tools.ts flash verify 对 verifyFlash 任何失败 fail-closed（含「调试器打不开」也显式 fail 而不是跳过）。测试：mcp-servers/keil/tests/session-reuse.test.ts 5/5（拒绝非调试复用/放行正常复用/connectOnly 例外/目标守卫保留/键登记）。
 
 ### T-021 · fitUtf8 用 UTF-8 模式截断 GBK，常用汉字被劈成半截
 
 - **位置**: `mcp-servers/keil/uvsock.ts:320-328`（`(b & 0xc0) === 0x80` 是 UTF-8 continuation 判据，GBK trail 范围 0x40–0xFE）。
 - **现象**: 已用仓库 gbk.ts 复现：trail ≥ 0xC0 的字（中/文/测/组…）cut 不回退 → 孤立 lead byte；trail 在 0x80–0xBF 的字则整字被吞。影响 sstr 定长字段写中文组名/路径。
 - **修复建议**: 按正在写入的实际编码（GBK lead/trail 表）回退 cut；函数名与注释一并改（fitUtf8 名不副实）。
-- **状态**: 待修。
+- **状态**: **已解决**（2026-10-25 P2 批次）。推演证明纯字节形状无法判定 GBK 边界（trail 与 lead 范围重叠），改为逐字符编码装填到装不下为止——正确性由构造保证。测试：fitutf8-gbk.test.ts 5/5（trail≥0xC0 汉字、0x80–0xBF 字符、100 个 size 扫描无悬空 lead、sstr 长度字段一致）。
 
 ### T-022 · closeKeilSession 固定 sleep 后强杀，可能损坏 .uvprojx
 
 - **位置**: `mcp-servers/keil/keilSession.ts:99-113`（exit 后 sleep 800/2500ms → taskkill /T /F）。
 - **现象**: uVision 收到 GEN_EXIT 后写大工程慢于 sleep → 强杀 → 编辑丢失或工程文件半写。
 - **修复建议**: kill 前轮询工程文件 mtime 稳定（如 1s 内无变化才 kill），sleep 作为上限兜底。
-- **状态**: 待修。
+- **状态**: **已解决**（2026-10-25 P2 批次）。UvSocketClient.exit 接受 `settlePath`：GEN_EXIT 后轮询工程文件 mtime，稳定 1s（或 timeoutMs 上限）才 destroy+kill；closeKeilSession 传入工程路径，固定 800/2500ms sleep 删除。测试：exit-settle.test.ts 4/4（持续写入推迟到超时、已稳定 ~1s 返回、无 settlePath 保持旧行为、文件缺失不挂死）。
 
 ---
 
@@ -126,34 +126,34 @@
 - **位置**: `desktop/renderer/settings.js:499-505`（sButton 无 disabled）+ `desktop/host/host.js:4430-4435`（守卫检查后即 `packAbort?.abort()`）。
 - **现象**: 1GB pack 下载中点另一个 Install → 第一个被 abort，用户视角「点了第二个，第一个坏了」。
 - **修复建议**: packProgress 活跃时禁用全部 pack 按钮；host 侧 abort 只针对同一 pack。
-- **状态**: 待修。
+- **状态**: **已解决**（2026-10-25 P3 批次）。renderPackProgress 按 busy 态统一 disable 带 `data-pack-action` 的按钮（install/prune/verify/remove 五处全打标）。host 侧 abort 语义未动（单安装是当前产品形态）。
 
 ### T-031 · HEX 视图显示「解码文本的 UTF-8 再编码」，GBK 流字节错误
 
 - **位置**: `desktop/renderer/app.js:4626,4852-4853`（hexView 用 TextEncoder 恒 UTF-8）+ `serial-bridge.js:573`（ring 只存解码后 text）。
 - **现象**: GBK 发「你好」（C4 E3 BA C3）→ HEX 显示 E4 BD A0...（UTF-8 字节），与逻辑分析仪抓的不一致。
 - **修复建议**: ring 条目带原始字节（base64 或 latin1 字符串），HEX 模式直接渲染原始字节。
-- **状态**: 待修。
+- **状态**: **已解决**（2026-10-25 P3 批次）。桥在 data 事件把原始 chunk（latin1，一字节一字符）压入 rawQueue，#acceptLine/#teardown 按行配额切出 `line.raw`；renderer hexView 优先用 `line.raw`，无 raw 才回退 UTF-8 重编码。
 
 ### T-032 · 中文界面下 "Port"/"Send" 残留英文
 
 - **位置**: `desktop/renderer/index.html:474,546`（`data-i18n="serialPort"/"serialSend"`）——两份字典均无这两个 key。
 - **修复建议**: i18n.js 补 key，或改用已有的等价 key。
-- **状态**: 待修。
+- **状态**: **已解决**（2026-10-25 P3 批次）。en/zh 双字典补 `serialPort`（Port/串口）与 `serialSend`（Send/发送）。
 
 ### T-033 · host serial 操作一律取 openPorts[0]，agent 开第二口后错位
 
 - **位置**: `desktop/host/host.js:4191,4200,4210`（serialStatus/serialClear/serialWrite）。
 - **现象**: agent 经 mailbox open 第二个口后，面板 status/clear/write 打到非用户所选的口。当前 UI 单口时无害。
 - **修复建议**: 面板消息带目标 port 字段，host 不再默认取 [0]。
-- **状态**: 待修（agent 多口使用成为现实时升级为 P1）。
+- **状态**: **已解决**（2026-10-25 P3 批次）。serialStatus/serialClear/serialWrite/serialLine/serialBaud 五个 handler 均接受 `payload.port`，未传才回退 openPorts[0]；renderer 五个发送点附 `state.serial.port`。
 
 ### T-034 · agent 写失败仍播放动画并留假 TX 记录
 
 - **位置**: `desktop/host/serial-bridge.js:251-259`（先发 serial_agent_write 再写）+ `app.js:2703-2717` + 非法 hex 渲染成 "NAN"（hexViewOfHex parseInt NaN）。
 - **现象**: agent 传非法 hex → 面板播放「助手打字」动画、落一条 NaN 的 TX，随后 MCP 才报失败。
 - **修复建议**: 先写后发事件（写失败不发）；hexViewOfHex 对非法 hex 显示原文+错误色；schema 补 hex 格式校验（与 T-015 同一改动）。
-- **状态**: 待修。
+- **状态**: **已解决**（2026-10-25 P1/P3 批次）。桥侧 write 分支先写后发事件（P1）；hexViewOfHex 对非 hex/奇长显示 `原文 (invalid hex)` 而非 NAN（P3）；schema 校验随 T-015 落地。
 
 ### T-035 · dropped 计数反复累加，越跑越大
 
@@ -174,7 +174,7 @@
 - **建议方案**（工作量小）: 删独立 tab；串口小节删掉、5 行尾巴并入串口 tab 顶部；端口选择并入串口 tab 下拉；工具链信息并入设置页（getToolchains 现成）；保留 setBoardSelection 数据路径（串口 tab 选端口时写入）。
 - **备选**: 若坚持保留入口，必须先补 host board_state 形状（probes/identity/tools），工作量大且产出仍不如串口 tab。
 - **附带小修**: board-probe.js:28 `keil_debug:status` → `keil_debug:capabilities`（若保留探测）。
-- **状态**: 待用户拍板（删 / 重做）。
+- **状态**: **部分解决**（2026-10-25 P4 批次，保留入口路线）。①探测 bug 已修：`keil_debug:status` → `keil_debug:capabilities`/`version`（STATUS_ACTIONS 同步扩展），必失败行消失；②「本机 0 个工具链」已修：board_state 补发 `tools` 字段（detectToolchainsForPacks，packs registry 缺席时降级 PATH 探测）。③「目标永远未连接探针」为已知形态：identity/probes 依赖 agent 侧探针工具回报，仍按原设计留白，不做假数据（R3）。④删独立 tab 与两个「串口」合并：上游 main 已重排该区域（boardPort/boardSerial 分离），标题重复在当前版本不复现；整 tab 去留待用户拍板后再动。
 
 ---
 
