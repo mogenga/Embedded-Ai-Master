@@ -2145,7 +2145,34 @@ async function handleLoadSession(id) {
   try {
     detail = await sessions.detailTolerant(id);
   } catch (error) {
-    send({ type: "error", message: `会话打开失败：${error instanceof Error ? error.message : String(error)}` });
+    // Errors here are not a run failure, so they must not wear the `error`
+    // banner (which sets the window's status to 错误): the launch opened no
+    // session and the user did nothing wrong.
+    //
+    // Two facts must stay apart (D-214 / D-215). A session whose files are
+    // gone is *not* a damaged header: the old code wrapped ENOENT into
+    // `invalid_header`, so a deleted directory was reported as
+    // "Invalid session header: <path>" and pointed the reader at a JSON file
+    // that no longer existed. The kernel now raises `session_not_found` for
+    // that case; `invalid_header` means the file is there and unreadable.
+    const code = error instanceof Error && "code" in error ? error.code : "";
+    if (code === "session_not_found") {
+      // R3: "gone" is not "broken". Saying which one it is saves the reader
+      // from opening a header file that does not exist any more.
+      send({ type: "notice", level: "warn", text: `会话不存在：${id}（目录或 header.json 已被删除）` });
+      return;
+    }
+    if (code === "invalid_header" || code === "invalid_event_line" || code === "invalid_seq" || code === "unknown_event_type") {
+      // The file is there and the parser rejected it. Name the code so a
+      // report of this notice can be matched to the kernel's own vocabulary.
+      send({
+        type: "notice",
+        level: "warn",
+        text: `会话文件损坏（${code}）：${messageOf(error)}。文件在磁盘上，但内容无法解析；请从侧栏另开会话。`,
+      });
+      return;
+    }
+    send({ type: "notice", level: "error", text: `会话读取失败：${messageOf(error)}` });
     return;
   }
   sessionId = id;
@@ -3521,6 +3548,56 @@ const handlers = {
       send({ type: "notice", level: "warn", text: `会话未更新：${messageOf(error)}` });
       return;
     }
+    send(sessionsEvent());
+  },
+
+  /**
+   * Archive several conversations in one go — the sidebar's "remove
+   * workspace".
+   *
+   * A workspace has no manifest of its own: the sidebar derives it by
+   * grouping sessions on `cwd`, so "remove this workspace" can only mean
+   * "archive the conversations inside it". Deleting the folder is not an
+   * option — it is the user's real project directory — and deleting the
+   * session directories would be unrecoverable, while archiving is a
+   * reversible flag in `meta.json`.
+   *
+   * The renderer sends **ids**, not a cwd. It already knows which rows the
+   * group contains, and it is the only place that owns the workspace key
+   * (`normalizeCwd`: `G:\x` and `G:/x` are one workspace there). Copying that
+   * rule into the host would give the same fact two definitions that can
+   * drift; an id list has nothing to normalize.
+   *
+   * Partial failure is reported, not rolled back: the sessions that could be
+   * archived stay archived. The one that failed keeps its previous state and
+   * is named with its reason (R3).
+   */
+  async archiveSessions(payload) {
+    const raw = Array.isArray(payload.ids) ? payload.ids : [];
+    const ids = [...new Set(raw.map((value) => String(value ?? "")).filter((id) => id !== ""))];
+    if (ids.length === 0) {
+      send({ type: "notice", level: "warn", text: "没有可归档的会话" });
+      return;
+    }
+    const admin = kernel.createSessionAdmin({ harnessHome });
+    const failed = [];
+    let archived = 0;
+    for (const id of ids) {
+      if (!kernel.isValidSessionId(id)) {
+        failed.push({ id, reason: "非法的会话 id" });
+        continue;
+      }
+      try {
+        await admin.update(id, { archived: true });
+        archived += 1;
+      } catch (error) {
+        failed.push({ id, reason: messageOf(error) });
+      }
+    }
+    send({ type: "sessions_archived", archived, failed });
+    // The list is pushed from the host so the sidebar redraws from the same
+    // data every other mutation answers with — a renderer-side guess could
+    // disagree with what the meta files now say.
     send(sessionsEvent());
   },
 

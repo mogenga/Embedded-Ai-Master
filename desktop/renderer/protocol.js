@@ -50,9 +50,6 @@ const KNOWN_TYPES = new Set([
 /** Tool output larger than this is truncated before it reaches the DOM. */
 export const MAX_TOOL_OUTPUT_BYTES = 8 * 1024;
 
-/** Matches the renderer's own preference key for the active conversation. */
-const LAST_SESSION_KEY = "prometheus.lastSession";
-
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -966,9 +963,6 @@ export function sessionLoadedEvent(events, options = {}) {
     ...(costUsd === undefined ? {} : { costUsd }),
   };
 }
-
-/** Where the renderer remembers the last conversation, mirroring its boot code. */
-export const LAST_SESSION_STORAGE_KEY = LAST_SESSION_KEY;
 
 /**
  * Render a session log as Markdown.

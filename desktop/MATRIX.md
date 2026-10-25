@@ -27,6 +27,7 @@
 | `savePermissions` | 整份写 `permissions.json`（`preset` / `approvalTimeoutMs` / `rules`） |
 | `saveRunLimits` | 整份写 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`），下一回合生效。`maxTurns: null` 表示**不限制轮数**（2026-10-22 起默认值就是 `null`，见 D-183 补充）；`0` / 负数 / 非整数仍会被拒绝——把笔误当「不限」会让用户以为上限生效了 |
 | `sessionFlags` | 改名/置顶/归档，写旁挂 `meta.json`（header 校验会丢弃未知字段） |
+| `archiveSessions` | 批量归档 `{ids: string[]}`，回 `sessions_archived{archived, failed:[{id, reason}]}` 并推一份 `sessions`。侧栏「移除工作区」就是它：工作区是渲染层按 `cwd` 分组**派生**的概念，没有独立清单，所以「移除」只能是「归档其中的会话」——**不删任何文件，也不删项目文件夹**。收 **id 列表而不是 cwd**：分组键 `normalizeCwd` 归渲染层所有，宿主再算一遍就是同一事实的第二份定义。逐个处理，某个失败不回滚其余，失败项带原因如实回报（R3） |
 | `deleteSession` | 删除会话目录；锁被占用时 409。拒绝删除当前打开的会话 |
 | `forkSession` | `forkSession(dir, atSeq)`，分叉后直接打开新会话 |
 | `exportSession` | 读日志渲染 Markdown，经 `saveFile` 存盘 |
@@ -91,7 +92,11 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 | `background_result` | `notice{dim\|warn}`（后台终端作业结束）。退出码 0 用 dim，非零/被信号结束/超时用 warn；输出被截断时同一行同时给出**总字节数与保留字节数**——只报保留量会让人把一段尾巴当成全部输出（R3）。**写进会话日志而不是临时提示**：这类作业按定义比它所属的回合同长，十分钟的构建结束后用户可能已经重开窗口，只有日志能让那次结果留到下次。宿主用 1s 的泵轮询内核的完成队列，经 `resumeSession` 取锁后 append，再关掉句柄——与 `/compact` 取锁的方式一致 |
 | `system` / `user` / `checkpoint` / `tool_call` | 不产出（用户消息在提交时已回显） || 未知类型 | `notice{warn}`（R3，不静默） |
 
-宿主另发：`hello`、`ready`、`state`、`sessions`、`session_loaded`、`session_matches`、`commands`、`skills`、`setup_checklist`、`settings`、`usage_summary`、`models`、`locale`、`ui_preference`、`tree`、`file_matches`、`export_ready`、`notice`、`error`、`fatal`、`run_start`、`run_end`、`permission_closed`。
+宿主另发：`hello`、`ready`、`state`、`sessions`、`session_loaded`、`session_matches`、`sessions_archived`、`commands`、`skills`、`setup_checklist`、`settings`、`usage_summary`、`models`、`locale`、`ui_preference`、`tree`、`file_matches`、`export_ready`、`notice`、`error`、`fatal`、`run_start`、`run_end`、`permission_closed`。
+
+**启动不再自动打开上次的会话。** 用户明确要求「开启时应该默认无会话」。原先 `ready` 会读 `localStorage` 的 `prometheus.lastSession` 发 `loadSession`，上次那个会话被删或 header 损坏时，这条自动请求会把一条报错推到刚打开、用户还没做任何事的空界面上（D-214）。现在启动停在空会话，打开会话只能从侧栏点；`prometheus.lastSession` / `prometheus.restartSession` 两个键与设置页的「恢复上次会话」开关一并删除，避免留下只写不读的死键与假控件。
+
+**`loadSession` 失败按两类说话。** 文件不存在（ENOENT，目录或 `header.json` 被删）→ `session_not_found`，宿主报「会话不存在」；文件在但解析失败 → `invalid_header` / `invalid_event_line` / `invalid_seq` / `unknown_event_type`，宿主报「会话文件损坏（码）」。两者都用 `notice`（warn），不用 `error`——用户没做错事，窗口状态不该翻成「错误」。D-215 记录了这个错误码曾经的分工错误。
 
 宿主另发的事件里只有两条带库状态，它们的职责不能互换：
 

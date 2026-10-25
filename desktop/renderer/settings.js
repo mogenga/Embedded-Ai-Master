@@ -529,7 +529,6 @@ function applyUiPreference(key, value) {
       document.documentElement.style.setProperty("--font-scale", String(value));
       localStorage.setItem("prometheus.fontScale", String(value));
       break;
-    case "restartSession":
     case "suggestions":
     case "updateCheck":
       localStorage.setItem(`prometheus.${key}`, value ? "1" : "0");
@@ -629,14 +628,6 @@ function buildGeneralPage() {
             { value: "explanatory", label: s.outputExplanatory },
           ],
           onChange: (value) => applyPref("outputStyle", value),
-        }),
-      }),
-      sRow({
-        label: s.restartSession,
-        desc: s.restartSessionDesc,
-        control: sToggle({
-          checked: state.restartSession !== false,
-          onChange: (value) => applyPref("restartSession", value),
         }),
       }),
       sRow({

@@ -1506,6 +1506,42 @@ body.resizing-workbench * {
   color: var(--text);
 }
 
+/* "Remove workspace" (archives its conversations). Same reveal rule as the
+   `+` beside it and the row's own … menu: absent until the group is hovered
+   or focused, so it cannot be hit by accident, and always reachable by
+   keyboard. It sits to the right of the count, not over it. */
+.session-group-remove {
+  width: 18px;
+  height: 18px;
+  border-radius: var(--radius-sm);
+  display: none;
+  place-items: center;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.session-group-remove .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.session-group:hover .session-group-remove,
+.session-group:focus-visible .session-group-remove,
+.session-group:focus-within .session-group-remove {
+  display: grid;
+}
+
+.session-group-remove:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.session-group-remove:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 /* Second level: an empty workspace says so and offers the way out of being
    empty. It stands where its conversations would, on the same indent and in
    the same muted voice — but it is not a session row: nothing here opens, and

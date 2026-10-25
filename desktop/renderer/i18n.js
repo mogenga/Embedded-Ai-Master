@@ -71,6 +71,14 @@ export const dictionaries = {
     noProject: "No project",
     noWorkspaceSessions: "No conversations yet",
     newSessionIn: (name) => `New chat in ${name}`,
+    workspaceRemove: "Remove workspace",
+    workspaceRemoveConfirm: (name, count) =>
+      `Archive the ${count} conversation${count === 1 ? "" : "s"} in “${name}”? ` +
+      "Nothing is deleted — they move to the archive and can be brought back from there.",
+    workspaceRemoved: (count) =>
+      count === 1 ? "Archived 1 conversation." : `Archived ${count} conversations.`,
+    workspaceRemovePartial: (archived, failed, reasons) =>
+      `Archived ${archived}, could not archive ${failed}: ${reasons}`,
     clearSession: "Clear conversation",
     rememberScope: "Remember this approval for…",
     rememberTool: "Every call of this tool",
@@ -591,6 +599,12 @@ export const dictionaries = {
     noProject: "无项目",
     noWorkspaceSessions: "还没有对话",
     newSessionIn: (name) => `在 ${name} 中新建对话`,
+    workspaceRemove: "移除工作区",
+    workspaceRemoveConfirm: (name, count) =>
+      `将归档「${name}」下的 ${count} 个会话。会话不会被删除，可在归档中找回。`,
+    workspaceRemoved: (count) => `已归档 ${count} 个会话。`,
+    workspaceRemovePartial: (archived, failed, reasons) =>
+      `已归档 ${archived} 个，${failed} 个未能归档：${reasons}`,
     clearSession: "清空对话",
     rememberScope: "记住这次批准的范围…",
     rememberTool: "该工具的所有调用",

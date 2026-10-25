@@ -2526,13 +2526,17 @@ function handleEvent(message) {
     case "ready": {
       setBusy(false);
       if (state.statusKey !== "statusError") setStatus("statusReady");
-      // Reopen the conversation the window was in last time. The host starts
-      // a fresh session on every launch, so without this every restart lost
-      // the context of what the user was doing.
-      const remembered = localStorage.getItem("prometheus.lastSession");
-      if (remembered && remembered !== state.sessionId && localStorage.getItem("prometheus.restartSession") !== "0") {
-        api.send({ cmd: "loadSession", id: remembered });
-      }
+      // A launch starts with no session open, deliberately.
+      //
+      // This used to reopen whatever conversation the window was last in
+      // (`prometheus.lastSession` + the "reopen last session" setting). The
+      // user asked for the opposite: the window should open empty. The
+      // remembered-id approach also had a failure mode that made the choice
+      // for us: when that session directory was deleted or its `header.json`
+      // was damaged, the automatic `loadSession` pushed an error notice onto
+      // a window that had just opened and had nothing the user wanted to do.
+      // Opening a conversation is a sidebar click; the sidebar already lists
+      // them, so there is nothing to restore automatically.
       if (state.needsSetup) {
         state.needsSetup = false;
         $("setup-button").hidden = true;
@@ -2571,11 +2575,10 @@ function handleEvent(message) {
 
     case "state":
       state.sessionId = message.sessionId;
-      // Remember the conversation the user is in, so a restart comes back to
-      // it instead of opening a blank window. The setting can be turned off.
-      if (message.sessionId && localStorage.getItem("prometheus.restartSession") !== "0") {
-        localStorage.setItem("prometheus.lastSession", message.sessionId);
-      }
+      // Nothing is remembered here any more. `prometheus.lastSession` used to
+      // be written on every state event so the next launch could reopen this
+      // conversation; the launch no longer restores anything (see `ready`), so
+      // keeping the write would leave a key nothing reads.
       if (message.cwd) state.cwd = message.cwd;
       state.locale = message.locale || state.locale;
       applyLocale(state.locale);
@@ -2966,8 +2969,10 @@ function handleEvent(message) {
       // setting was removed from the page, and it never reached a git worktree
       // anyway — the kernel has no such capability. Keeping the mapping would
       // leave a localStorage key written by a control that no longer exists.
+      // `restartSession` left for the same reason: the launch no longer
+      // restores a session, so the toggle would describe a behaviour that
+      // does not exist.
       const map = {
-        restartSession: "restartSession",
         suggestions: "suggestions",
         updateCheck: "updateCheck",
       };
@@ -3659,6 +3664,26 @@ function handleEvent(message) {
       state.sessionMatches = message.query ? message.sessions || [] : null;
       renderSessions(state.sessions);
       break;
+
+    case "sessions_archived": {
+      // Answer to `archiveSessions` (the workspace row's remove action). The
+      // host pushes the redrawn list itself; this event carries what could
+      // not be archived, and silence would look like a clean result (R3).
+      const archived = Number(message.archived) || 0;
+      const failed = Array.isArray(message.failed) ? message.failed : [];
+      if (failed.length === 0) {
+        addNotice("dim", t.workspaceRemoved(archived));
+      } else {
+        const reasons = failed
+          .map((entry) => `${entry.id}：${entry.reason}`)
+          .join("；");
+        addNotice("warn", t.workspaceRemovePartial(archived, failed.length, reasons));
+      }
+      // No scroll: this came from the sidebar, not from the conversation the
+      // reader is looking at. Yanking a scrolled transcript to the bottom
+      // would be a side effect of a list action.
+      break;
+    }
 
     case "session_saved":
       api.send({ cmd: "listSessions", includeArchived: state.showArchived });
@@ -5599,6 +5624,41 @@ function renderSessions(sessions) {
       startSessionIn(target);
     });
     head.append(twisty, glyph, name, count, add);
+    // "Remove this workspace" — which here means archiving its conversations.
+    // A workspace is derived from session `cwd`s, so there is no folder entry
+    // to delete, and the folder itself is the user's own project: this
+    // control never touches the filesystem.
+    //
+    // Absent in three cases, all because `items` would not be the whole
+    // workspace: an empty active workspace (nothing to archive), a live search
+    // (rows are matches, not a workspace), and the archived filter (the rows
+    // are already archived). Acting on a partial group while looking like a
+    // workspace action would archive fewer sessions than the label promises.
+    const wholeWorkspace = !query && !state.sessionMatches && state.showArchived !== true;
+    //
+    // Same interaction as the row's own … menu: out of the way until the row
+    // is hovered or focused, then an explicit click. Nothing here acts on
+    // hover.
+    if (items.length > 0 && wholeWorkspace) {
+      const remove = document.createElement("span");
+      remove.className = "session-group-remove";
+      remove.setAttribute("role", "button");
+      remove.tabIndex = 0;
+      remove.title = t.workspaceRemove;
+      remove.setAttribute("aria-label", t.workspaceRemove);
+      remove.innerHTML = icon("archive");
+      remove.addEventListener("click", (event) => {
+        event.stopPropagation();
+        void removeWorkspace(label, items);
+      });
+      remove.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        event.stopPropagation();
+        void removeWorkspace(label, items);
+      });
+      head.appendChild(remove);
+    }
     head.addEventListener("click", () => {
       if (open) {
         state.expandedProjects.delete(cwd);
@@ -5706,6 +5766,31 @@ function renderSessions(sessions) {
     });
     sessionList.appendChild(more);
   }
+}
+
+/**
+ * Remove a workspace from the sidebar by archiving the conversations inside
+ * it.
+ *
+ * There is no "workspace" object to delete: the level is derived from the
+ * `cwd` each session recorded, so the only thing the sidebar can act on is
+ * the rows in that group. Archiving them is the recoverable form of removal —
+ * the sessions disappear from the default list, the "show archived" filter
+ * brings them back, and not one file is touched. That matters twice over:
+ * deleting session directories is unrecoverable, and the workspace path is the
+ * user's real project folder, which this app must never remove.
+ *
+ * The ids come from the group being rendered rather than from a `cwd` match on
+ * the host: the renderer owns the workspace key (`normalizeCwd`) and already
+ * knows exactly which rows are in the group. Sending a cwd would make the host
+ * re-derive the same grouping with a second copy of the rule.
+ */
+async function removeWorkspace(label, sessions) {
+  const ids = sessions.map((session) => session.id).filter((id) => typeof id === "string" && id !== "");
+  if (ids.length === 0) return;
+  const yes = await confirmAction(t.workspaceRemoveConfirm(label, ids.length), { danger: false });
+  if (!yes) return;
+  api.send({ cmd: "archiveSessions", ids });
 }
 
 let sessionMenu = null;

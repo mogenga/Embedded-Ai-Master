@@ -343,7 +343,7 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 
 ```
 prometheus.locale  theme  density  width  view  motion  uiScale  fontScale
-prometheus.codeFont  sidebarWidth  sidebarCollapsed  lastSession  restartSession
+prometheus.codeFont  sidebarWidth  sidebarCollapsed
 prometheus.suggestions  updateCheck  setupDismissed  workbench  pane
 prometheus.expandedProjects  collapsedProjects
 ```
@@ -457,7 +457,7 @@ prometheus.expandedProjects  collapsedProjects
 
 | id | 内容 |
 |---|---|
-| `general` | profile 卡（只读，显示 cwd）；语言选择；outputStyle、restartSession、suggestions、updateCheck、isolateByDefault 五个开关 |
+| `general` | profile 卡（只读，显示 cwd）；语言选择；outputStyle、suggestions、updateCheck 三个开关 |
 | `appearance` | 主题（4 态，带预览色块）；字号、宽度、代码字体；视图模式、密度、减少动效；界面缩放 |
 | `about` | 版本号、检查更新、数据目录（只读） |
 
@@ -527,7 +527,6 @@ interface SessionEventEnvelope extends SessionEvent {
 | `initialState` | `(options?) => HostEvent` | boot 时的 `state` 事件 |
 | `sessionsEvent` | `(summaries) => HostEvent` | `sessions` 事件 |
 | `sessionLoadedEvent` | `(events, options?) => HostEvent` | `session_loaded` 事件 |
-| `LAST_SESSION_STORAGE_KEY` | `= "prometheus.lastSession"` | 渲染器记忆上次会话的键 |
 
 **`sessionEventToHostEvents` 完整映射**：
 
