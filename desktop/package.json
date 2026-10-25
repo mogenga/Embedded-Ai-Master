@@ -53,7 +53,19 @@
     ],
     "npmRebuild": false,
     "win": {
-      "target": "nsis"
-    }
+      "target": "nsis",
+      "signtoolOptions": {
+        "timeStampServer": "http://timestamp.digicert.com",
+        "rfc3161TimeStampServer": "http://timestamp.digicert.com"
+      }
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "mogenga",
+        "repo": "Embedded-Ai-Master",
+        "releaseType": "release"
+      }
+    ]
   }
 }

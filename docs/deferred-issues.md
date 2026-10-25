@@ -1975,6 +1975,31 @@
 - **修复建议**: 统一到一个版本，并让 `desktop/` 用 workspace 或 `file:` 依赖引用根那份，而不是各装一份。
 - **状态**: 未解决。统一需要一次 `npm install`（agent 不代为执行）。
 
+### D-211 · Windows 代码签名配置就位，但从未验证过真实签名
+
+- **发现**: 2026-10-25,发布准备（用户「处理签名、发布渠道是github Releases，图标后面再说」）。
+- **现象**: 签名配置已就位——`desktop/package.json` 的 `win.signtoolOptions` 加了两个时间戳服务器（`timeStampServer` / `rfc3161TimeStampServer`，均指向 `http://timestamp.digicert.com`），环境变量路径（`WIN_CSC_LINK` + `WIN_CSC_KEY_PASSWORD`，回落 `CSC_LINK` / `CSC_KEY_PASSWORD`）经 electron-builder 26.15.3 的 `WindowsSignToolManager.cscInfo` 源码确认为第四优先级兜底，`scripts/verify-signature.mjs` 提供了可进门禁的检查手段。但**本机没有任何签名证书，也没有 `CSC_*` / `WIN_CSC_*` 环境变量**，因此：
+  - `signtool.exe` 从未真正被调用过（`--dir` 构建走到 `no signing info identified, signing is skipped`，`cscInfo=null`）；
+  - 时间戳服务器这些字段只是被 schema 接受，**没有被真实签名流程消费过**；
+  - `app-update.yml` 的 `publisherName` 在没有证书时拿不到值，`electron-updater` 的更新校验路径同样未验证。
+- **影响**: 配置合法性与无证书行为已验证（`npx electron-builder --win --x64 --dir` 退出 0、无 schema 报错、产物 Security Directory size=0、`verify-signature.mjs` 退出 1），但「有证书时能否真的签上」这一步**完全未验证**。风险集中在：时间戳服务器可达性、双签（默认 `['sha1','sha256']`）两轮的 `/t` 与 `/tr` 参数、`publisherName` 与 `app-update.yml` 的一致性。
+- **触发升级条件**: 第一次对外分发前必须关闭；或拿到证书后立即关闭。
+- **修复建议**: 按 `docs/code-signing.md` §2 设 `WIN_CSC_LINK` + `WIN_CSC_KEY_PASSWORD`（证书放仓库外），重打包（不带 `--dir`，需要 winCodeSign 工具链），然后用 `node scripts/verify-signature.mjs "<安装包路径>"` 确认退出码 0；再用 `signtool verify /pa /v` 确认时间戳字段非空。最后确认安装包内 `resources/app-update.yml` 的 `publisherName` 与证书 Subject 一致。
+- **状态**: 未解决（配置就位，真实签名未验证）。文档见 `docs/code-signing.md`。
+
+### D-212 · GitHub Releases 发布链路配置就位，但从未真正发过一次 release；`electron-updater` 未接入
+
+- **发现**: 2026-10-25，接发布渠道（用户「处理签名、发布渠道是github Releases，图标后面再说」）时。
+- **现象**: 配置与流程文档齐备，但没有一条走过真实链路——
+  - `desktop/package.json` 的 `build.publish` 已指向 GitHub Releases（`provider: "github"`、`owner: "mogenga"`、`repo: "Embedded-Ai-Master"`、`releaseType: "release"`），经 electron-builder 26.15.3 的 `scheme.json`（`GithubOptions`，required 仅 `provider`）校验通过，`npx electron-builder --win --x64 --dir` 退出 0。但 `--dir` 不产 `latest.yml`（那是 NSIS 目标在 `isWriteUpdateInfo` 时生成的），所以「加 `publish` 后 `latest.yml` 真会出现」这一步**只有源码依据、没有产物证据**。
+  - `scripts/release.mjs` 提供 `--check` 门禁（版本号 / 构建产物 / 安装包 / 签名 / `gh` 登录 / 工作区干净 / tag 状态）与逐步命令打印，但**从未对一次真实发布跑过**。
+  - 仓库 `has_downloads: false`：GitHub 上一条 release 都没有。`gh` CLI 已装并登录（`mogenga`），但从未用它发过任何东西。
+  - **`electron-updater` 未安装**，宿主也没有任何更新检查代码。因此 `latest.yml` 与 `app-update.yml`（`publish` 存在时 electron-builder 会写进 `resources/`）都是**死文件**：没人读，用户收不到任何应用内更新提醒，只能自己去 Releases 页面看有没有新版。
+- **影响**: 「发布」这件事目前只有纸面流程。真实风险集中在没人验证过的部分：`gh release create` 三个附件（`.exe` / `latest.yml` / `.exe.blockmap`）的命名与上传后 `latest.yml` 里 `path` / `sha512` 是否仍与远端文件名一致（`safeArtifactName` 对 GitHub provider 会改写 `files[0].url`，只有真实上传后回读才能确认）；`releaseType: "release"` 与手工建 tag 的顺序（先推 tag 再建 release，否则 `gh` 会从默认分支 HEAD 新建 tag）也未经实践检验。
+- **触发升级条件**: 第一次对外发布时（必须关闭）；或用户反馈「收不到更新」时（`electron-updater` 接入部分）。
+- **修复建议**: 按 `docs/release.md` 走一次完整流程（构建 → `--check` → 打 tag → `gh release create` 上传三件套），发布后从 Releases 页面下载 `latest.yml` 核对 `path` 与 `sha512` 是否指向真实存在的资产；随后用 `node scripts/release.mjs --check` 复验（tag 项应从 WARN 变 OK）。自动更新是独立的一步：装 `electron-updater`、在宿主启动路径调 `autoUpdater.checkForUpdates()`、确认 `app-update.yml` 的 provider 与仓库一致，再发一版验证「旧版能提示新版」。
+- **状态**: 未解决（配置就位，从未发布，无应用内更新）。文档见 `docs/release.md`。
+
 ## 变更记录
 
 | 日期 | 变更 |
