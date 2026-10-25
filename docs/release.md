@@ -8,6 +8,7 @@
 - `docs/deferred-issues.md` **D-212** —— 发布链路从未真正跑过一次，且没有应用内自动更新。
 - `docs/deferred-issues.md` **D-211** —— 签名配置就位但从未验证过真实签名。
 - `docs/deferred-issues.md` **D-209** —— 根与 `desktop/` 的 Electron 版本不一致。
+- `docs/deferred-issues.md` **D-213** —— `resources/` 缺 `{ "type": "module" }`，所有安装用户多付一次重解析（已修，原因见 §11）。
 
 ---
 
@@ -337,12 +338,123 @@ node scripts/verify-signature.mjs "desktop/dist-installer/Embedded-AI-Master-Set
 | `gh release create` 后 tag 指向了别的提交 | 先建 release 后打 tag | 先推 tag，或加 `--verify-tag`，见 §2 |
 | 手动上传后远端资产名与 `latest.yml` 里的不一致 | GitHub 把空格改写为连字符 | 见 §2 末「手动上传时要注意文件名不一致」 |
 | 用户说「我没收到更新提醒」 | 没有 `electron-updater` | 这是 D-212，不是 bug |
+| 首次启动 stderr 有 `MODULE_TYPELESS_PACKAGE_JSON` 警告 | `resources/` 缺 `package.json` | 已修（见 §11）；若复现说明 `resources/package.json` 丢了 |
+| 启动时的重解析开销（无警告，只是变慢） | 同上，警告按进程只报一次且 `node_modules` 下不报 | 已修（见 §11） |
 
 ---
 
-## 11. 相关条目
+## 11. `resources/package.json` 为什么必须存在（不要删）
+
+安装目录的 `resources/` 根下有一份只有一行的文件：
+
+```json
+{ "type": "module" }
+```
+
+**它在仓库里的源文件是 `desktop/resources-package.json`**，由 `desktop/package.json` 的 `extraResources` 搬到 `resources/package.json`。它看起来像个莫名其妙的多余文件，**清理无用文件时一定会被盯上**，所以这里把原因写清楚。
+
+### 11.1 Node 怎么判定一个 `.js` 是 ESM 还是 CJS
+
+`.js` 文件的模块类型不写在文件里，而是由**最近的 `package.json` 的 `type` 字段**决定（Node 源码 `internal/modules/esm/get_format.js` 的 `getFileProtocolModuleFormat`，经由 `getPackageScopeConfig` 实现）：
+
+- 从该 `.js` 所在目录起，**逐级向上**找第一个能找到的 `package.json`；
+- 那份就是「控制文件」（package scope）。`type: "module"` → ESM；`type: "commonjs"` 或**没有 `type` 字段** → 先按 CJS 解析；
+- 若那份 `package.json` 没有 `type`，Node 会读源码**检测**语法：查到 `import`/`export` 就重解析为 ESM。这次「先试再重解析」就是代价。
+
+语法检测（`--experimental-detect-module`）在 Node 22.7+ 起默认开启，实测 Node 24.14.1 不加任何 flag 就会出现本节的警告；`node --help` 里只有关闭开关 `--no-experimental-detect-module`，也印证默认是开的。
+
+### 11.2 为什么打包形态下会一路找到用户家目录
+
+安装后 `resources/dist/` 里全是编译出来的 ESM（`dist/server/runner.js` 等）。它向上查找的顺序是：
+
+```
+...\embedded-ai-master-desktop\resources\dist\   ← 从这里起
+...\embedded-ai-master-desktop\resources\        ← 没有 package.json（修复前）
+...\embedded-ai-master-desktop\                  ← 没有（只有 app.asar，见下）
+...\Local\Programs\                              ← 没有
+...\AppData\Local\                               ← 没有
+...\mogen\                                       ← C:\Users\mogen\package.json（如果有）
+C:\                                              ← 没有
+```
+
+**关键点：`app.asar` 挡住的那一层，是「asar 里的 `package.json` 只管 asar 里面的文件」。** 安装目录下确实有一份 `app.asar`，它**内部**也有 `package.json`（就是 `desktop/package.json` 打进去的那份，含 `"type": "module"`）。但 Electron 的 asar 支持是按**路径**生效的：只有 URL 落在 `...\app.asar\...` 里的文件才会走 asar 的 `fs` 补丁、才看得见 asar 里的那份 `package.json`。
+
+`resources/dist/` 与 `resources/dist-mcp/` 是 asar **外面**的普通磁盘文件，向上查找时 `app.asar` 对它们只是一个叫 `app.asar` 的**文件**，路径不是 `app.asar/...`，asar 补丁不介入，所以那份 `"type": "module"` 对它们不可见。祖先链于是越过整个安装目录，落到用户家目录、甚至盘根。
+
+（实测佐证，2026-10-25：用打包产物的 exe 以 `ELECTRON_RUN_AS_NODE=1` 导入 `t.asar/lib/q.js`，警告文案是 `add "type": "module" to \\?\...\t.asar\package.json`——asar **内部**的 `package.json` 确实被读到了；把 asar 根改成 `{ "type": "module" }` 后同一 import 直接按 ESM 加载、无警告。同一 `import` 用系统 Node 跑则是 `ERR_MODULE_NOT_FOUND`。可见「进得去 asar」与「asar 的声明管到外面」是两回事。）
+
+- 家目录**有** `package.json` 且没有 `type`：行为是「先 CJS、失败、重解析」，并弹一条点名**用户家目录**的警告——对用户完全无意义，像是安装包在抱怨他家目录里有个无关文件。
+- 家目录**没有** `package.json`（干净机器）：查找一路到盘根都没有，行为**一样**是先 CJS 再重解析，只是不发那条警告（源码里 `foundPackageJson` 为假时不警告）。
+
+**两种机器都付了重解析的代价。** 这不是某台机器脏了，是安装包缺了这份声明。
+
+### 11.3 缺了会怎样（两句实话）
+
+1. **性能**：每个 `.js` 都要先当 CJS 试一遍、发现语法是 ESM 再换解析器。
+2. **误导性警告**：警告文案是 `To eliminate this warning, add "type": "module" to C:\Users\<用户名>\package.json`。用户按提示去改家目录的 `package.json` 也不会好——不是那个文件的事。
+
+### 11.4 为什么放在 `resources/` 根，而不是 `dist/` 里
+
+`resources/` 下有三个目录与模块类型有关，但**只有前两个需要救**：
+
+| 目录 | 内容 | 修复前最近的 `package.json` | 需要 `resources/package.json`？ |
+|---|---|---|---|
+| `resources/dist/` | 内核编译产物 | 用户家目录（或没有） | **是** |
+| `resources/dist-mcp/` | MCP server 编译产物 | 同上 | **是** |
+| `resources/node_modules/` | 运行时依赖闭包 | 各包自己的 | 否（见 11.5） |
+
+一份 `resources/package.json` 就位于前两个目录的**共同祖先**上，两者向上找都会先命中它。**逐文件实测过**（2026-10-25）：`resources/dist/server/y.js` 与 `resources/dist-mcp/arduino/x.js`，有该文件时各 0 条警告、删掉后各 1 条。放在 `dist/` 里就只能救 `dist/`，`dist-mcp/` 照旧。
+
+`node_modules/` 也在同一层祖先下（`resources/package.json` 对它同样「最近」），但它**本来就不需要**这份声明，见下。
+
+### 11.5 为什么它实际上不影响 `node_modules/` 里的第三方包
+
+两层原因，第二层是这次读源码才知道的：
+
+1. **Node 取的是最近的 `package.json`，不是最上面那份。** 第三方包各自带着自己的 `package.json`（`serialport`、`@serialport/*`、`@modelcontextprotocol/*` 全都有），查找在包的根目录就停下。实测：`resources/package.json` 声明 `type: module` 时，一个自己声明 `type: "commonjs"` 的包里的 ESM 语法文件**仍然报错**——控制权确实在包自己手里。
+2. **`node_modules` 下的文件根本不会发这条警告。** `internal/modules/esm/get_format.js` 的 `warnTypelessPackageJsonFile` 第一句就是 `if (!underNodeModules(url) && !typelessPackageJsonFilesWarnedAbout.has(pjsonPath))`——URL 路径含 `/node_modules/` 时，即使控制它的 `package.json` 无 `type`、即使要重解析，也**静默**。实测：单独导入 `node_modules/<包>/lib/index.js`（包内 `package.json` 无 `type`、文件是 ESM 语法），有/无 `resources/package.json` 都是 0 条警告、都能加载。
+
+所以 `node_modules/` 那一格既不会因为缺 `resources/package.json` 出问题，也不会因为多了它而出问题。**重解析的代价照旧存在**（`node_modules` 里只是不报警），这也是为什么真正要覆盖的是 `dist/` 与 `dist-mcp/`。
+
+### 11.6 但 `node_modules/` 里确实有一个包**没有** `package.json`
+
+`desktop/build/node_modules/@modelcontextprotocol/` 是**作用域目录**（scoped package 的父目录），它本身不是包，本来就不该有 `package.json`。真正的包在它下面（`client/`、`core/`、`server/`），三者的 `package.json` 齐全且都带 `type` 字段。这一条不是缺陷，只是提醒：看到 `@scope/` 下没有 `package.json` 不要误判。
+
+### 11.7 一个容易误判的验证陷阱（实测踩过）
+
+**在仓库里跑验证命令，测不出这个问题。** `desktop/dist-installer/win-unpacked/resources/` 位于仓库内部，它的祖先链上有 `desktop/package.json`（`"type": "module"`），所以即使在**删掉** `resources/package.json` 之后，警告计数依然为 **0**——看起来「没问题」，实际什么都没验证到。
+
+实测确认过这个假阴性：删掉 `win-unpacked/resources/package.json`，再跑一遍那条验证命令，仍然得到 0。**所以「0」在仓库内不构成任何证据。**
+
+要复现真实安装布局，必须把 `resources/` 复制到**仓库之外**的位置（且祖先链上不能有带 `type: module` 的 `package.json`），例如 `%TEMP%`。验证记录见 D-213。
+
+### 11.7.1 顺便记住：警告是去重的
+
+`typelessPackageJsonFilesWarnedAbout` 是一个 `SafeSet`，键是**控制文件 `package.json` 的路径**。一个进程里同一份 `package.json` 只报一次警告（实测：一个进程导入两个不同目录的 ESM `.js`，只报第一条）。
+
+**去重只作用于文案，不作用于代价。** 每个 `.js` 的格式探测照旧逐个发生。所以「只看到一条警告」不等于「只有一个文件被重解析」，不能拿警告条数当受影响的文件数。
+
+### 11.8 谁负责把它带进产物
+
+`desktop/package.json`：
+
+```json
+"extraResources": [
+  ...
+  { "from": "resources-package.json", "to": "package.json" }
+]
+```
+
+`to` 相对 `resources/`，所以落在 `resources/package.json`。**源文件名刻意不叫 `package.json`**——`desktop/` 下已经有一个给 electron-builder 读的 `package.json`（应用的 `main`、`build` 配置都在里面），同名会覆盖或混淆。
+
+**改完必须重新完整打包才有产物证据**，`--dir` 也够验证布局（它同样会复制 `extraResources`），但发布前按 §2 跑完整 NSIS。
+
+---
+
+## 12. 相关条目
 
 - **D-212** —— 发布链路从未真正跑过一次 release；`electron-updater` 未接入。
 - **D-211** —— 签名配置就位但从未验证过真实签名。
 - **D-208** —— 真实安装包从未产出（已被 2026-10-25 的 113 MB 产物部分关闭，仍缺干净机器安装验证）。
 - **D-209** —— 根与 `desktop/` 的 Electron 版本不一致。
+- **D-213** —— `resources/` 缺 ESM 模块声明，所有安装用户多付一次重解析（2026-10-25 已修，见 §11）。

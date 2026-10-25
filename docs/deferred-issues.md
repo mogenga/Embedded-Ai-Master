@@ -2000,6 +2000,59 @@
 - **修复建议**: 按 `docs/release.md` 走一次完整流程（构建 → `--check` → 打 tag → `gh release create` 上传三件套），发布后从 Releases 页面下载 `latest.yml` 核对 `path` 与 `sha512` 是否指向真实存在的资产；随后用 `node scripts/release.mjs --check` 复验（tag 项应从 WARN 变 OK）。自动更新是独立的一步：装 `electron-updater`、在宿主启动路径调 `autoUpdater.checkForUpdates()`、确认 `app-update.yml` 的 provider 与仓库一致，再发一版验证「旧版能提示新版」。
 - **状态**: 未解决（配置就位，从未发布，无应用内更新）。文档见 `docs/release.md`。
 
+### D-213 · `resources/` 缺 ESM 模块声明，所有安装用户多付一次重解析
+
+- **发现**: 2026-10-25，用户装完 NSIS 安装包启动后报 `MODULE_TYPELESS_PACKAGE_JSON` 警告。
+- **现象**: 安装目录 `resources/` 下没有 `package.json`（`dist/`、`dist-mcp/`、`node_modules/` 三处也都没有），而 `resources/dist/` 与 `resources/dist-mcp/` 里全是编译后的 ESM `.js`。Node 判定 `.js` 模块类型要沿目录**逐级向上**找最近的 `package.json`：`resources/` 缺这一份，而安装目录下的 `app.asar` 内部虽有 `package.json`（含 `"type": "module"`），但 asar 的 `fs` 补丁只对 `app.asar\...` 路径内的文件生效，`resources/dist/` 在 asar 外面、看不见它。查找于是越过整个安装目录，一路找到用户家目录（`C:\Users\<用户>\package.json`，无 `type` 字段）或盘根（什么都没有）。两种情况都先按 CJS 解析、检测到 ESM 语法后再重解析。
+  - **实测佐证 asar 那一条**（不是推测）：用打包产物的 exe 以 `ELECTRON_RUN_AS_NODE=1` 导入一个测试 asar 里的 `lib/q.js`，警告文案指向 `...\t.asar\package.json`，说明 asar **内部**的 `package.json` 确实被读到；把该 asar 根改成 `{ "type": "module" }` 后同一 import 直接按 ESM 加载、无警告。可见 asar 里的声明只覆盖 asar 内部。
+- **影响**:
+  - **每一个**安装用户都多付一次「CJS 试解析 + ESM 重解析」的启动开销，与用户机器无关。
+  - 家目录恰好有 `package.json` 的用户还会看到点名自己家目录的警告（`To eliminate this warning, add "type": "module" to C:\Users\<用户>\package.json`），按提示去改也不会好，属于误导。
+- **实测证据（2026-10-25）**: 把 `resources/` 复制到仓库外（祖先链无 `type: module` 的 `package.json`）后，用 `ELECTRON_RUN_AS_NODE=1` 跑打包产物里的 `app.asar/host/host.js`：修复前 stderr 出现 1 条完整警告（文案与原报告一致）；加上 `resources/package.json` 后计数为 0、stderr 完全为空、正常启动到 `ready`。反去掉该文件后警告复现（1 条），还原后回到 0。
+- **触发升级条件**: 已触发并修复；若将来「清理无用文件」时把 `resources/package.json` 删掉会重新出现。
+- **修复建议**: `desktop/resources-package.json`（内容 `{ "type": "module" }`）经 `desktop/package.json` 的 `extraResources` 落到 `resources/package.json`。放在 `resources/` 根是因为一份文件同时覆盖 `dist/` 与 `dist-mcp/`（两者向上查找都先命中它，已逐文件实测：各 1 条 → 各 0 条）；`node_modules/` 也在同一祖先下但**本来就不需要它**——Node 源码 `internal/modules/esm/get_format.js` 的 `warnTypelessPackageJsonFile` 有 `!underNodeModules(url)` 前置条件，`node_modules` 下的文件即使重解析也**不发这条警告**（实测：无 `type` 的包内 ESM 文件，有/无 `resources/package.json` 都是 0 条）。对第三方包的类型判定无影响——各包有自己的 `package.json`，Node 取最近的那份（实测：`type: "commonjs"` 的包内 ESM 文件在 `resources/` 声明 module 后仍然报错）。另注意警告按 `pjsonPath` **去重**（每进程每份 `package.json` 只报一次），但重解析的代价逐文件存在，警告条数不等于受影响文件数。原因与验证陷阱见 `docs/release.md` §11。
+- **状态**: **已解决**（2026-10-25，加 `resources/package.json`；完整 NSIS 打包复验通过）。保留条目以备查——「清理无用文件」时容易再次删掉它。
+
+### D-214 · 启动自动恢复上次会话：会话消失/损坏时把一条报错推到刚打开的空界面上
+
+- **发现**: 2026-10-25，用户报「会话打开失败：Invalid session header: `C:\Users\mogen\.harness\sessions\27fafbdb-...\header.json`。开启时应该默认无会话。」
+- **现象**: 渲染器在 `ready` 分支里读 `localStorage` 的 `prometheus.lastSession`，非空就自动发 `loadSession`（另由设置页「恢复上次会话」开关 `prometheus.restartSession` 控制）。宿主 `loadSession` 打到 `sessions.detailTolerant`，抛错时发 `{type:"error", message:"会话打开失败：<原始 message>"}`。于是**启动**就等于一次用户没发起的打开请求：那个会话目录已被删（或 header 损坏）时，窗口一打开就顶着一条错误横幅，状态被置为「错误」，而用户此时什么都没做，界面里也没有他想做的事。
+- **影响**: 破坏性在于启动语义。「上次那个会话」是本地存储里的一串 id，没有任何东西保证它还存在于磁盘上；只要用户清过一次 `~/.harness/sessions`，此后每次启动都会重复这条报错。用户明确要求改为「启动默认无会话」。
+- **修复**（2026-10-25）:
+  - 删掉 `ready` 分支里的自动 `loadSession` 及其 `localStorage` 读取；`state` 分支里配套的 `prometheus.lastSession` 写入一并删除——否则留下一个只写不读的键。
+  - `prometheus.restartSession` 随之失去读者：设置页「恢复上次会话」开关、`ui_preference` 映射、中英文案一并删除。**不能只删行为留着控件**——那正是 D-188 类「假控件」。
+  - `desktop/renderer/protocol.js` 的 `LAST_SESSION_STORAGE_KEY` 与 `protocol.d.ts` 的声明同时删除（它只是这个键的第二处拼写）。
+  - 侧栏不受影响：`init` 握手仍发 `sessions`（`app.js` 启动即发 `listSessions`），会话照常列出并可点开。
+  - `loadSession` 的错误改用 `notice`（warn）并区分两类事实，见 D-215。
+- **状态**: **已解决**（2026-10-25，渲染层移除自动恢复；`tests/desktop/host.test.js` 钉住两类错误文案）。
+
+### D-215 · 不存在的会话被报成 `invalid_header`：把「文件没了」说成「header 坏了」
+
+- **发现**: 2026-10-25，随 D-214 一起定位。用户看到的原文是 `Invalid session header: <路径>`，但那个路径下的文件**根本不存在**。
+- **现象**: `src/session/persistence.ts` 的 `assertRegularFile` 把 `lstatSync` 抛出的**所有**错误都经 `regularFileError` 包成 `invalid_header`（日志文件则包成 `invalid_event_line`），`ENOENT` / `ENOTDIR` 也在其中。于是会话目录被删时，错误码与文案都在说「header 内容无效」，读者会去打开一份不存在的 JSON 找语法错误。
+- **影响**: 错误码是排查方向的唯一线索（R3）。「不存在」与「损坏」对应完全不同的动作：前者确认是否被删/换机器，后者才是查写入中断或外部改动。用同一个码把前者伪装成后者，等于把用户引向错误的方向——本次用户报告正是照着 `Invalid session header` 去查 header 的。
+- **修复**（2026-10-25）:
+  - `SessionCorruptionCode` 新增 `session_not_found`；`assertRegularFile` 对 `ENOENT` / `ENOTDIR` 抛该码，文案为 `Session header not found` / `Session log not found`，其余（EACCES、非普通文件、符号链接）仍走原有码。`detail.cause` 保留原始 errno，`log-tail.ts` 既有的 `cause.code` 判定不受影响。
+  - 宿主 `handleLoadSession` 按码分流：`session_not_found` → 「会话不存在：<id>（目录或 header.json 已被删除）」；四个损坏码 → 「会话文件损坏（<code>）：<message>」；其余 → 「会话读取失败」。**全部是 `notice`，不再是 `error`**：打开一个会话失败不是一次运行失败，不该把窗口状态翻成「错误」。
+  - `tests/session-persistence.test.ts` 里原本断言「空目录 → invalid_header」的那条测试**固化的正是这个 bug**，已改为断言 `session_not_found` 并写明原因；另补「非法 JSON → invalid_header」「缺必需字段 → invalid_header」两条守住损坏一侧不回归。
+  - 「有 header 但无日志」仍是 `invalid_header`：`header.json` 在、被解析了，缺的是日志文件（该分支在 `readSessionDir` / `readSessionHeader` 里，不经 `assertRegularFile`）。语义上它也可以算「不全」，但改它会牵动日志轮转与崩溃恢复的判定面，本轮不动，**明确留在这里**。
+- **状态**: **已解决**（错误码与文案已分开；「无日志」一项维持原码，见上）。
+
+### D-216 · 「移除工作区」的语义决定：只归档其会话，不删任何文件
+
+- **发现**: 2026-10-25，用户要求「需要允许删除工作区（文件夹）操作」，并在被问到范围时明确选定：**只从侧栏移除分组，并把其中的会话归档**（不删磁盘上的任何文件）。
+- **事实（决定了实现只能长这样）**:
+  - 「工作区」在代码里**没有独立清单**。它是 `desktop/renderer/app.js` 的 `renderSessions()` 用 `normalizeCwd(session.cwd)` 给会话分组后**派生**出来的层级。不存在「工作区文件」可以被删。
+  - 那个路径是用户**自己的项目目录**。删它等于删用户的代码，且不可恢复。
+  - 删会话目录同样不可恢复（`deleteSession` 走 `rm -r`，UI 上还有一句「对话记录将无法恢复」）。归档只是 `meta.json` 里的一个布尔标记，随时能取消。
+- **决定**:
+  - 宿主新增 `archiveSessions{ids}` → `sessions_archived{archived, failed:[{id, reason}]}` + 一份新的 `sessions` 推送。**逐个**归档，某个失败不回滚其余，失败项带原因回报（R3）。
+  - 收 **id 列表，不收 cwd**。分组键 `normalizeCwd` 归渲染层所有；让宿主按 cwd 再匹配一遍就是把同一规则写成第二份，`G:\x` 与 `G:/x` 迟早会在一边算成两个工作区。渲染层本来就知道这个组里有哪几行。
+  - 渲染层：工作区分组标题右侧加一个归档图标，与 `+`、会话行的 `…` 同一套交互（悬停/聚焦才出现，必须显式点击）。点击后经 `confirmAction` 二次确认，文案如实说明「将归档 N 个会话，会话不会被删除，可在归档中找回」。结果（含失败原因）以 `notice` 显示。
+  - 搜索中、已归档筛选下、以及空工作区**不显示**该入口：那时 `items` 不是整个工作区，按钮会做出比标签承诺更少的事。
+- **为什么不做真删除**: 三件事都是不可逆的（工作区目录、会话日志、产物），而「从侧栏消失」这个诉求用可逆的归档就能完全满足。这不是能力不足的妥协——用户要的是「让它别碍事」，归档正好是这件事的准确说法。
+- **状态**: **已实现**（2026-10-25）。测试见 `tests/desktop/host.test.js` 的三条 `archiveSessions` 用例（含部分失败与非法 id）；渲染层无自动化测试（`app.js` 零导出、顶层读 `localStorage`，已知限制），靠代码审查。语义已写入 `desktop/MATRIX.md`。
+
 ## 变更记录
 
 | 日期 | 变更 |
@@ -2092,3 +2145,5 @@
 | 2026-10-22 | 第十六轮（用户「接入skills功能，发子代理」，并发 4 个子代理）：**技能＝保存下来的提示词模板**，`$ARGUMENTS` 由渲染层替换。①内核新增 `src/skills/`（`store.ts` / `types.ts`）：用户级 `<home>/skills/<name>.md`、项目级 `<workdir>/.harness/skills/<name>.md`，frontmatter 只认 `description` / `argument-hint`（未知键是额外元数据，不是故障），无 frontmatter 时整份文件就是正文；名称须匹配 `/^[a-z][a-z0-9_-]{0,63}$/` 且不得与内置命令 `clear`/`context`/`compact` 同名（同名者永远轮不到执行）；frontmatter 未闭合、文件读失败、名称非法一律进 `problems` 并跳过该文件，**不静默丢弃**（R3）；项目作用域同名覆盖用户作用域；输出按名称排序；写入走「临时文件 + fsync + rename」。②宿主新增 `getSkills` / `saveSkill` / `removeSkill`，`init` 与 `listCommands` 的目录里追加 `source: "skill"` 行，保存成功后重播 `skills` + `commands`，**保存失败什么都不播**并说明原因。③渲染层 `mergeCommands` 认 `source: "skill"`，`expandSkill` 做 `$ARGUMENTS` 替换（正文无占位符时把参数作为追加段落），设置页「技能」页恢复。④**刻意不做**模型可调用的 `Skill` 工具（用户要的是技能，不是模型自选技能）。登记 **D-198**：四条边界（无权限语义 / 无自动调用 / 参数只有字符串替换 / 项目作用域无信任门与同名覆盖缺口）＋两处**已在本轮内修掉**的缺陷（①技能名允许 `_` 而 `parseSlashText` 的 `SLASH` 字符类不含 `_`，`/review_diff` 会被当普通提示词原样发给模型——`SLASH` 补 `_` 并补「合法技能名必须能被斜杠语法还原」的不变量测试；②保存/删除失败只发 `notice`，而渲染器把它写进被设置页遮住的转录、`settings.js` 又没有 `notice` 分支——失败提示加 `domain: "skills"` 转进设置页就地显示，表单不再无条件关闭，草稿留在原处）；**D-166 的 skills 一项标记已解决**，其余能力未动 |
 | 2026-10-22 | Keil 移植步骤 14–15：新增 `mcp-servers/keil/README.md` 与 `docs/keil-headless.md`（安装检查 → 接线 → 典型流程 → 故障排查），根 README 补「领域 MCP：Keil」一节；`mcp.json` 接线与 `KEIL_SELECTION_JSON` 服务级选中项写入文档；`createKeilTools` 的 `_meta` 补 `evidence: true`（内核只认工具级标志，见 `src/mcp/manager.ts:625`）并附 `evidenceActions` / `destructiveActions` 白名单。录入 D-200（构建诊断未迁移）与 D-201（整片擦除依赖 STM32CubeProgrammer 且需先关会话） |
 | 2026-10-25 | 修复「他人 clone 后知识库页报没有语料更新配置」（用户「按方案 A 做，T10打包也做。发子代理，不得提交」）：①**配置加第三级**——`loadCorpusConfig` 的第二级从「目录 `resourcesRoot`」改为「文件路径 `bundledPath`」，`CorpusConfigSource` 由 `home`/`resources` 改为 `home`/`bundled`，`ok` 分支带实际读到的 `path`（宿主不再按 source 反推，那是同一事实的第二份拷贝）；宿主按形态派生：打包 `resources/corpus.json`、源码 `<仓库根>/config/corpus.json`。②**`config/corpus.json` 进仓库**——真实桶地址与公钥。原先契约说「构建脚本读 gitignore 的 `corpus.local.json` 生成 `resources/corpus.json`」，**那个脚本从未存在**、`corpus.local.json` 也没有任何代码读过，所以别人 clone 下来必然缺配置。两值本就不可保密（安装包必须带、桶匿名可读），真正要保的是可换性，由 `$HARNESS_HOME` 那一级保证。③**打包配置就位**——`desktop/package.json` 补 `main`（原先缺它，Electron 会找不存在的 `index.js`）与 `build` 段（五项 `extraResources`，经 electron-builder 26.15.3 的 `scheme.json` 校验）。④**补上一项会让安装包启动不起来的遗漏**——`dist/` 与 `dist-mcp/` 保留裸说明符（`import { z } from "zod"`），宿主用绝对 file URL 动态 import 内核，Node 从 `resources/dist/` 向上找 `node_modules`，`resources/` 下没有就以 `Cannot find package 'zod'` 退出。新增 `scripts/runtime-deps.mjs` 从 `package-lock.json` 算闭包装到 `resources/node_modules`（14 包 / 23 MB，不装构建工具），与 `scripts/corpus-stage.mjs`（按清单逐文件搬语料 + 校验 sha256）一起由 `scripts/package-prepare.mjs` 串起，`npm --prefix desktop run dist` 先跑它。⑤**fatal 文案分形态**——`kernelLoadFailedMessage` 新增，安装形态说「重新安装」而不是让一个没有源码树的用户去跑 `npm run build`。模拟布局端到端实测通过（`hello`→`ready`、随包语料物化出 107 文件、`corpus_status` 报 `bundled`）。录入 **D-207**（模板占位值能通过结构校验）、**D-208**（真实安装包未产出）、**D-209**（根与 desktop 的 electron 版本不一致）。
+| 2026-10-25 | 修复安装包启动的 `MODULE_TYPELESS_PACKAGE_JSON` 警告（用户报的是警告原文：`Module type of file:///.../resources/dist/server/runner.js is not specified and it doesn't parse as CommonJS`）：`desktop/resources-package.json`（`{ "type": "module" }`，刻意不叫 `package.json` 以免与 `desktop/package.json` 冲突）经 `extraResources` 落到 `resources/package.json`，一份文件同时覆盖 `resources/dist/` 与 `resources/dist-mcp/` 的向上查找；不影响 `node_modules/` 内第三方包（Node 取最近的 `package.json`，实测 `type: "commonjs"` 的包内 ESM 文件仍按其自身声明报错；且 `node_modules` 下本来就抑制这条警告）。完整 NSIS 打包后 `win-unpacked/resources/package.json` 存在且内容正确。**验证必须把 `resources/` 复制到仓库外**：`win-unpacked` 在仓库内时祖先链上的 `desktop/package.json` 带 `type: module`，删掉 `resources/package.json` 也测出 0 条警告（假阴性，已实测）。仓库外实测：修复前 1 条（文案点名 `C:\Users\mogen\package.json`）、修复后 0 条且 stderr 为空、反向删掉后回到 1 条、还原后 0 条。录入 **D-213**（已解决）；Node 源码 `internal/modules/esm/get_format.js` 另外证实两条：警告按 `pjsonPath` 去重（每进程每份 `package.json` 只报一次），且 `underNodeModules(url)` 为真时**根本不发**这条警告。`docs/release.md` 新增 §11 解释文件为何必须保留。 | 
+| 2026-10-25 | 启动默认无会话 + 会话错误码分工 + 侧栏「移除工作区」（用户「会话打开失败：Invalid session header: …。开启时应该默认无会话。」「需要允许删除工作区（文件夹）操作。」）：①**删掉启动自动恢复**——`ready` 分支不再读 `prometheus.lastSession` 发 `loadSession`，`state` 分支不再写该键；设置页「恢复上次会话」开关、`ui_preference` 映射、中英文案与 `protocol.js` / `protocol.d.ts` 的 `LAST_SESSION_STORAGE_KEY` 一并删除（否则留下假控件与只写不读的死键）。启动停在空会话，侧栏照常列出（`init` 与启动时的 `listSessions` 都在）。②**新增 `session_not_found`**——`assertRegularFile` 原先把 `lstatSync` 的所有错误都包成 `invalid_header`，ENOENT 也不例外，于是「上次那个会话被删了」被说成「header 无效」，把用户引向不存在的 JSON。现按 errno 分流，宿主按码报「会话不存在」或「会话文件损坏（<code>）」，且都改用 `notice`——打开失败不是一次运行失败，不该把窗口状态翻成「错误」。③**`archiveSessions{ids}`**（宿主）→ `sessions_archived{archived, failed}` + 新的 `sessions` 推送；侧栏工作区分组标题加归档图标，二次确认文案写明「会话不会被删除，可在归档中找回」。收 id 而非 cwd：分组键 `normalizeCwd` 归渲染层，宿主再算一遍就是同一规则的第二份定义。**不删任何文件、不删项目文件夹**。录入 **D-214 / D-215 / D-216**（均已解决或已实现）。`tests/session-persistence.test.ts` 里断言「空目录 → invalid_header」的那条测试固化的正是 D-215，已改为 `session_not_found`。 |
