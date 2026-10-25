@@ -49,11 +49,16 @@
       {
         "from": "build/node_modules",
         "to": "node_modules"
+      },
+      {
+        "from": "resources-package.json",
+        "to": "package.json"
       }
     ],
     "npmRebuild": false,
     "win": {
       "target": "nsis",
+      "artifactName": "Embedded-AI-Master-Setup-${version}.${ext}",
       "signtoolOptions": {
         "timeStampServer": "http://timestamp.digicert.com",
         "rfc3161TimeStampServer": "http://timestamp.digicert.com"

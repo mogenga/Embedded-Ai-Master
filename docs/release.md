@@ -78,9 +78,9 @@ git push origin v0.1.0
 
 # 6) 创建 release 并上传三个附件
 gh release create v0.1.0 \
-  "desktop/dist-installer/Embedded AI Master Setup 0.1.0.exe" \
+  "desktop/dist-installer/Embedded-AI-Master-Setup-0.1.0.exe" \
   "desktop/dist-installer/latest.yml" \
-  "desktop/dist-installer/Embedded AI Master Setup 0.1.0.exe.blockmap" \
+  "desktop/dist-installer/Embedded-AI-Master-Setup-0.1.0.exe.blockmap" \
   --title "Embedded AI Master v0.1.0" \
   --notes "首个发布版本。"
 
@@ -109,43 +109,34 @@ gh release create v0.1.0 ... --verify-tag
 
 | 文件 | 作用 | 大小（0.1.0 实测） |
 |---|---|---|
-| `Embedded AI Master Setup 0.1.0.exe` | NSIS 安装包 | ~113 MB |
-| `Embedded AI Master Setup 0.1.0.exe.blockmap` | 差量更新用的块索引；`electron-updater` 靠它只下载变化的块 | ~123 KB |
+| `Embedded-AI-Master-Setup-0.1.0.exe` | NSIS 安装包 | ~113 MB |
+| `Embedded-AI-Master-Setup-0.1.0.exe.blockmap` | 差量更新用的块索引；`electron-updater` 靠它只下载变化的块 | ~123 KB |
 | `latest.yml` | 更新描述文件，见 §4 | ~0.5 KB |
 
 ### 手动上传时要注意文件名不一致（实测发现）
 
 **这一段是手动上传路径的一个真实陷阱，`gh release create` 与网页上传都会碰到。**
 
-产物名里有空格（`Embedded AI Master Setup 0.1.0.exe`）。GitHub 只接受 `[0-9A-Za-z._-]` 的资产名（`app-builder-lib/out/platformPackager.js` 的 `isSafeGithubName`），于是 electron-builder 会把空格换成连字符，并在 `latest.yml` 里写成：
+**产物名必须不含空格和中文。** GitHub 只接受 `[0-9A-Za-z._-]` 的资产名（`app-builder-lib/out/platformPackager.js` 的 `isSafeGithubName`）。默认产物名由 `productName` + version 拼成（`Embedded AI Master Setup 0.1.0.exe`，含空格），electron-builder 会把 `latest.yml` 里的 `url`/`path` 改写成连字符版本——**而磁盘上仍是带空格的原名**，手动上传后两者对不上，将来 `electron-updater` 会去下载一个不存在的资产。
 
-```yaml
-files:
-  - url: Embedded-AI-Master-Setup-0.1.0.exe
-    ...
-path: Embedded-AI-Master-Setup-0.1.0.exe
+2026-10-25 已从源头修掉，`desktop/package.json` 显式指定：
+
+```json
+"win": {
+  "artifactName": "Embedded-AI-Master-Setup-${version}.${ext}"
+}
 ```
 
-**而磁盘上的文件名仍是带空格的原名。**
+现在磁盘名与 `latest.yml` 天然一致：
 
-- 走 `--publish always` 时**没有问题**：`GitHubPublisher` 的构造是 `super(context, true)`（`httpPublisher.js` 的 `useSafeArtifactName`），上传时用的就是 `safeArtifactName`，远端资产名与 `latest.yml` 一致。
-- 走 `gh release create` 或网页手动上传时**会不一致**：上传用的是磁盘原名（带空格），`latest.yml` 写的是带连字符的名字。将来接了 `electron-updater`，它会照着 `latest.yml` 去下载一个**不存在的**资产。
-
-两条修法，任选一条：
-
-```bash
-# (a) 上传前把文件改名，让磁盘名与 latest.yml 一致
-cp "desktop/dist-installer/Embedded AI Master Setup 0.1.0.exe" \
-   "desktop/dist-installer/Embedded-AI-Master-Setup-0.1.0.exe"
-cp "desktop/dist-installer/Embedded AI Master Setup 0.1.0.exe.blockmap" \
-   "desktop/dist-installer/Embedded-AI-Master-Setup-0.1.0.exe.blockmap"
-# 然后上传改名后的两个文件 + latest.yml
-
-# (b) 反过来：把 latest.yml 的 url/path 改成磁盘上的原名
-#     注意 YAML 里含空格的值要加引号
+```
+dist-installer/Embedded-AI-Master-Setup-0.1.0.exe
+latest.yml → url: Embedded-AI-Master-Setup-0.1.0.exe
 ```
 
-`node scripts/release.mjs --check` 会以 `WARN` 报出这一项并给出对应的两个文件名——**它不判 FAIL**，因为这不是配置错误，只是一个上传时的操作注意事项。但如果你打算接 `electron-updater`，就该把这条 WARN 当成必须处理的一项。
+`node scripts/release.mjs --check` 有一项专门比对这两者，改名前它报 WARN，现在报 OK。**改 `artifactName` 前必须重新打包**，旧产物仍然带着空格的名字。
+
+注意：`artifactName` 只影响**安装包**文件名，不影响解压后目录里的 `Embedded AI Master.exe`（那个由 `productName` 决定）。
 
 ---
 
@@ -314,7 +305,7 @@ cd desktop && npx electron-builder --win --x64 --dir
 发布前用下面这条确认签名状态：
 
 ```bash
-node scripts/verify-signature.mjs "desktop/dist-installer/Embedded AI Master Setup 0.1.0.exe"
+node scripts/verify-signature.mjs "desktop/dist-installer/Embedded-AI-Master-Setup-0.1.0.exe"
 ```
 
 退出码 `0` = 有证书表，`1` = 未签名，`2` = 无法检查。注意它**只回答「有没有证书表」**，不验证证书链与时间戳（那条边界写在脚本头部）。
