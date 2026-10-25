@@ -14,6 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { createUpdater } from "./updater.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const HOST = join(here, "host", "host.js");
@@ -22,6 +23,62 @@ const pkg = JSON.parse(readFileSync(join(here, "package.json"), "utf8"));
 
 /** Workspace the host is started in; the renderer can narrow it, not widen it. */
 const startCwd = process.cwd();
+
+/**
+ * Update state goes to every open window over the same `host-event` channel
+ * the host uses. A second channel would mean two listeners in the renderer and
+ * two orders for the page to reconcile; one channel keeps the "the page draws
+ * whatever arrived last" rule.
+ *
+ * `BrowserWindow.getAllWindows()` rather than a captured window: the updater is
+ * created once at startup, before any window exists, and must keep working when
+ * the window is recreated from `activate`.
+ */
+function sendToAllWindows(message) {
+  for (const target of BrowserWindow.getAllWindows()) {
+    if (!target.isDestroyed()) target.webContents.send("host-event", message);
+  }
+}
+
+/**
+ * Every window's way to stop its host, so an install can shut them down first.
+ *
+ * A `Set` rather than one function: the window is recreated from `activate`, and
+ * a stale entry must not keep a dead host's stopper alive. Each entry removes
+ * itself when the window closes.
+ */
+const hostStoppers = new Set();
+
+/**
+ * The updater controller, created once.
+ *
+ * `app.isPackaged` decides whether a check is even attempted: in a checkout
+ * there is no `resources/app-update.yml`, so every check would fail with a
+ * config error that says nothing about the release. `createUpdater` reports
+ * that as `unsupported` and never loads `electron-updater` at all.
+ */
+let updaterController = null;
+function updater() {
+  updaterController ??= createUpdater({
+    isPackaged: app.isPackaged,
+    onStatus: (status) => sendToAllWindows({ type: "update_status", status }),
+    // The NSIS installer's `CHECK_APP_RUNNING` force-kills a running app on the
+    // `--updated` path. Asking each host to run its own `shutdown` first is
+    // what keeps spawned MCP servers from outliving the process they belonged
+    // to (the same reason `stopHost` exists at all).
+    onBeforeInstall: async () => {
+      for (const stop of hostStoppers) stop();
+    },
+  });
+  return updaterController;
+}
+
+// Registered once, outside `startWindow`: IPC handlers are global, and a
+// second registration throws.
+ipcMain.handle("update-status", () => updater().status());
+ipcMain.handle("update-check", () => updater().check());
+ipcMain.handle("update-download", () => updater().download());
+ipcMain.handle("update-install", () => updater().install());
 
 function startWindow(options = {}) {
   const win = new BrowserWindow({
@@ -219,7 +276,14 @@ function startWindow(options = {}) {
     }
   });
 
+  // Registered with the updater so an install shuts this host down before the
+  // installer runs. Removed on `closed`: a dead window's stopper would be a
+  // no-op, but keeping it would make the set grow with every recreated window.
+  const stopForInstall = () => stopHost();
+  hostStoppers.add(stopForInstall);
+
   win.on("closed", () => {
+    hostStoppers.delete(stopForInstall);
     stopHost();
   });
   startHost(hostCwd);

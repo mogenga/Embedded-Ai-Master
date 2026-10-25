@@ -408,6 +408,11 @@ export async function* query(
       const toolSchemas = toModelToolSchemas(ctx.tools.all());
       // 增量文本先落盘再被投影：会话日志是唯一事实源，实时事件不允许绕过它。
       // 完整内容仍由随后的 `assistant` 事件承载，所以写失败不终止这一轮。
+      //
+      // 推理走同一个 writer、同一个队列：`onReasoningDelta` 的每一段都落成
+      // `thinking_delta`，与正文的 `assistant_delta` **按到达顺序**交错保存。
+      // 推理**绝不**拼进 `assistant` 正文——那条正文会被 `buildMessages` 投影回
+      // 下一次请求，等于让模型重复消费自己的思考。
       const deltaWriter = createAssistantDeltaWriter({
         session,
         onError: () => {
@@ -419,6 +424,7 @@ export async function* query(
           signal: ctx.signal,
           maxOutputTokens: resolveMaxOutput(ctx.modelCfg),
           onDelta: (text) => deltaWriter.push(text),
+          onReasoningDelta: (text) => deltaWriter.pushThinking(text),
         });
       } catch (error) {
         await deltaWriter.flush();

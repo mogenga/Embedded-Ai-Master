@@ -255,6 +255,32 @@ function normalizeUsage(usage: unknown): {
   };
 }
 
+type ReasoningDeltaCallback = (text: string) => void;
+
+/**
+ * 从一帧 `delta`（流式）或一条 `message`（一次性）里取出推理文本。
+ *
+ * 两个字段名都来自网关的**可选**扩展，没有统一规范：
+ * - `reasoning_content`：DeepSeek 系（含多数 OpenAI 兼容国产网关）的惯例；
+ * - `reasoning`：OpenRouter 与 GPT-OSS 自托管实现的惯例（OpenAI 自己的
+ *   cookbook 推荐这个字段名）。
+ *
+ * 优先 `reasoning_content`，两者都有时只用前者——同一段推理换个字段名出现
+ * 两次时，两个都读会把同一段话显示两遍。
+ *
+ * 字段缺失、为空串、或**类型不是字符串**一律返回 `undefined`：这是网管的
+ * 可选扩展，不是协议必需字段。部分实现把它放成数组（OpenRouter 的
+ * `reasoning_details`）或对象，把那种形状当错误处理会让每个不支持推理的
+ * 模型都在这里挂掉（R3 的另一面：未知的扩展字段不等于响应损坏）。
+ */
+function reasoningTextOf(record: Record<string, any>): string | undefined {
+  const primary = record.reasoning_content;
+  if (typeof primary === "string" && primary !== "") return primary;
+  const secondary = record.reasoning;
+  if (typeof secondary === "string" && secondary !== "") return secondary;
+  return undefined;
+}
+
 interface SseToolCall {
   id: string;
   name: string;
@@ -279,7 +305,12 @@ function createSseState(): SseState {
  *   data: {"choices":[{"delta":{"content":"…"},"finish_reason":null}],"usage":null}
  *   data: [DONE]
  */
-function applySseFrame(payload: unknown, state: SseState, onDelta: ((text: string) => void) | undefined): void {
+function applySseFrame(
+  payload: unknown,
+  state: SseState,
+  onDelta: ((text: string) => void) | undefined,
+  onReasoningDelta: ReasoningDeltaCallback | undefined,
+): void {
   if (typeof payload !== "object" || payload === null) {
     throw new ModelResponseError("Model API returned a malformed stream frame");
   }
@@ -302,6 +333,11 @@ function applySseFrame(payload: unknown, state: SseState, onDelta: ((text: strin
     if (typeof delta !== "object" || Array.isArray(delta)) {
       throw new ModelResponseError("Model API returned a malformed stream delta");
     }
+    // 推理先于正文：同一帧里两者都出现时，模型确实是先想后写。两条通道各自
+    // 回调，推理**不**进 `state.content`——那是最终结论，写进去会让它变成
+    // 下一轮上下文的一部分。
+    const reasoning = reasoningTextOf(delta);
+    if (reasoning !== undefined) onReasoningDelta?.(reasoning);
     if (typeof delta.content === "string" && delta.content !== "") {
       state.content += delta.content;
       onDelta?.(delta.content);
@@ -327,7 +363,12 @@ function applySseFrame(payload: unknown, state: SseState, onDelta: ((text: strin
   }
 }
 
-function applySseLine(line: string, state: SseState, onDelta: ((text: string) => void) | undefined): void {
+function applySseLine(
+  line: string,
+  state: SseState,
+  onDelta: ((text: string) => void) | undefined,
+  onReasoningDelta: ReasoningDeltaCallback | undefined,
+): void {
   const trimmed = line.trim();
   if (trimmed === "") return;
   // 注释行（": ping"）与 event:/id: 行不是数据帧，忽略。
@@ -340,7 +381,7 @@ function applySseLine(line: string, state: SseState, onDelta: ((text: string) =>
   } catch (error) {
     throw new ModelResponseError("Model API returned a malformed stream frame", error);
   }
-  applySseFrame(payload, state, onDelta);
+  applySseFrame(payload, state, onDelta, onReasoningDelta);
 }
 
 function sseStateToResult(state: SseState): CompletionResult {
@@ -410,6 +451,7 @@ async function readCompletionBody(
   response: Response,
   maxBytes: number,
   onDelta: ((text: string) => void) | undefined,
+  onReasoningDelta: ReasoningDeltaCallback | undefined,
 ): Promise<AttemptResult> {
   const body = response.body;
   const state = createSseState();
@@ -420,7 +462,9 @@ async function readCompletionBody(
       throw new ModelResponseError(`Model API response exceeds ${maxBytes} bytes`);
     }
     if (isEventStreamContentType(response) || looksLikeEventStream(text)) {
-      for (const line of text.split("\n")) applySseLine(line, state, onDelta);
+      for (const line of text.split("\n")) {
+        applySseLine(line, state, onDelta, onReasoningDelta);
+      }
       return { kind: "sse", result: sseStateToResult(state) };
     }
     return { kind: "json", data: parseJsonText(text) };
@@ -443,7 +487,7 @@ async function readCompletionBody(
       if (index < 0) break;
       const line = buffer.slice(0, index);
       buffer = buffer.slice(index + 1);
-      applySseLine(line, state, onDelta);
+      applySseLine(line, state, onDelta, onReasoningDelta);
     }
     if (buffer.length > MAX_SSE_LINE_CHARS) {
       throw new ModelResponseError("Model API stream frame exceeds the line limit");
@@ -485,7 +529,7 @@ async function readCompletionBody(
     const tail = decoder.decode();
     if (tail !== "") buffer += tail;
     processSseBuffer();
-    if (buffer.trim() !== "") applySseLine(buffer, state, onDelta);
+    if (buffer.trim() !== "") applySseLine(buffer, state, onDelta, onReasoningDelta);
     return { kind: "sse", result: sseStateToResult(state) };
   }
 
@@ -527,10 +571,16 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
       if (cfg.apiKey) headers.Authorization = `Bearer ${cfg.apiKey}`;
 
       // 已经把增量文本交给上层之后不能再重试：重试会把同一段文字再送一遍。
+      // 推理也算「已交付」——它同样会被写成会话事件并显示出来，重试会让同一段
+      // 思考在转录里出现两次。
       let deliveredText = false;
       const onDelta = (text: string): void => {
         deliveredText = true;
         opts.onDelta?.(text);
+      };
+      const onReasoningDelta = (text: string): void => {
+        deliveredText = true;
+        opts.onReasoningDelta?.(text);
       };
       const retryConfig: RetryConfig = {
         maxRetries: cfg.retry?.maxRetries ?? 5,
@@ -620,7 +670,12 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
               throw new UnexpectedHttpError(response.status, bodyPreview);
             }
             try {
-              return await readCompletionBody(response, maxResponseBytes, onDelta);
+              return await readCompletionBody(
+                response,
+                maxResponseBytes,
+                onDelta,
+                onReasoningDelta,
+              );
             } catch (err) {
               if (timedOut) throw new RequestTimeoutError(requestTimeoutMs);
               if (isCancellationError(err) || opts.signal.aborted) throw err;
@@ -676,6 +731,13 @@ export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
         && typeof message.content !== "string"
       ) {
         throw new ModelResponseError("Model API returned non-string message content");
+      }
+      // 一次性响应里的推理：`message.reasoning_content` / `message.reasoning`，
+      // 与流式读同样的两个字段、同一套「不是字符串就忽略」的规则。它在正文
+      // 之前交付，与流式下的顺序一致（模型先想后写）。
+      if (message !== undefined && message !== null) {
+        const reasoning = reasoningTextOf(message);
+        if (reasoning !== undefined) onReasoningDelta(reasoning);
       }
       const content = typeof message?.content === "string" ? message.content : "";
       if (content) onDelta(content);

@@ -5,6 +5,7 @@ import { contextReport, expandSkill, mergeCommands, parseSlashText } from "./com
 import { escapeHtml, renderMarkdown, IncrementalRenderer } from "./markdown.js";
 import { createSettings } from "./settings.js";
 import { icon, setIcon } from "./icons.js";
+import { nextThinkingExpanded, normalizeTranscriptView, thinkingExpandedOnEnd } from "./thinking-view.js";
 
 /** Saved preferences are restored here; the host gets them on init. */
 const savedLocale = localStorage.getItem("prometheus.locale");
@@ -123,6 +124,15 @@ const state = {
   git: null,
   artifacts: [],
   selectedArtifact: null,
+  /**
+   * The last update state the main process reported, or null before the first
+   * answer. Kept here so the About page can draw immediately when it is built,
+   * and so an `update_status` that arrives while Settings is closed is not
+   * lost — the page is rebuilt on every visit.
+   */
+  updateStatus: null,
+  /** The version whose "available" banner was already announced, if any. */
+  updateAnnounced: "",
   queuedCount: 0,
   sessionQuery: "",
   showArchived: false,
@@ -216,9 +226,6 @@ function applyLocale(locale, { announce = false } = {}) {
     const value = t[node.dataset.i18n];
     if (typeof value === "string") node.textContent = value;
   });
-  document.querySelectorAll("[data-prompt-key]").forEach((node) => {
-    node.dataset.prompt = t[node.dataset.promptKey] || "";
-  });
   document.querySelectorAll("[data-i18n-title]").forEach((node) => {
     const value = t[node.dataset.i18nTitle];
     if (typeof value === "string") node.title = value;
@@ -245,11 +252,11 @@ function applyLocale(locale, { announce = false } = {}) {
   search.placeholder = t.searchSessions;
   search.title = t.searchSessions;
   $("find-input").placeholder = t.findPlaceholder;
-  // The update button lives in the About page and is built on demand, so there
-  // is nothing to relabel here; touching a missing node used to abort the rest
-  // of this function with a TypeError.
-  const updateButton = $("check-update");
-  if (updateButton) updateButton.textContent = t.checkUpdate;
+  // No update control lives here: the About page builds its own button on
+  // demand, and `#check-update` (looked up here for years) was never in the
+  // document. The update state is kept in `state.updateStatus` instead, so a
+  // language switch reaches the page through the rebuild `applyLocaleChange`
+  // already performs.
   // The chip's tooltip is the model reference, which no dictionary can supply;
   // only the fallback text changes with the language. Assigning
   // `t.refreshModels` unconditionally here used to overwrite the reference
@@ -649,8 +656,12 @@ function addToolRow(name, summary, annotations) {
   row.className = "tool-row running";
   row.innerHTML =
     `<span class="tool-glyph">${icon(toolGlyph(name))}</span>` +
-    `<span class="tool-name">${escapeHtml(toolLabel(name))}</span>` +
+    // The label gets its own element inside the name cell: the cell lays the
+    // label and the annotation badges out in a row, and only the label may
+    // elide when a long MCP name meets a narrow pane.
+    `<span class="tool-name"><span class="tool-label">${escapeHtml(toolLabel(name))}</span>` +
     toolAnnotationBadges(annotations) +
+    `</span>` +
     `<span class="tool-summary">${escapeHtml(summary || "")}</span>` +
     // A chevron, not the word "details": it reads as "there is more here" at
     // a glance and costs no width in a column of many rows. It stays hidden
@@ -871,11 +882,84 @@ function attachToolOutput(node, name, output, artifactPath) {
   });
 }
 
+/**
+ * Markup for one reasoning block: a header button plus a foldable body.
+ *
+ * Two call sites build this — the live `thinking_start` path and the
+ * `session_loaded` replay — and both must agree on the structure the toggle
+ * and the CSS rely on, so the markup has exactly one definition. The body is
+ * left empty: the caller fills it with `textContent`, because reasoning is
+ * model output and must never be parsed as markup.
+ *
+ * `expanded` is a *per-block* state, not a view setting. A streaming block
+ * starts open so the reader can watch it think; a finished one starts folded
+ * to a single line. Two blocks on screen can disagree, which is exactly what
+ * a global view switch could not express.
+ */
+function thinkingBlockHtml(label, expanded) {
+  const open = expanded ? "true" : "false";
+  return (
+    `<div class="thinking" data-expanded="${open}">` +
+    `<div class="thinking-head">` +
+    // A real `<button>`: Tab reaches it, Enter and Space fire `click`, and
+    // `aria-expanded` tells a screen reader which way it will go. Nothing
+    // interactive may be nested inside it.
+    `<button type="button" class="thinking-toggle" aria-expanded="${open}">` +
+    `<span class="thinking-label">${escapeHtml(label)}</span>` +
+    `${icon("chevron-down", "thinking-chevron")}` +
+    `</button>` +
+    `</div>` +
+    // Folded, the body is clipped to zero height by CSS but stays in the DOM
+    // (nothing is thrown away). `aria-hidden` keeps a screen reader from
+    // reading text the sighted reader has explicitly folded shut; it is safe
+    // here because the body holds nothing focusable.
+    `<div class="thinking-text"${expanded ? "" : ` aria-hidden="true"`}></div>` +
+    `</div>`
+  );
+}
+
+/**
+ * Fold or unfold one block.
+ *
+ * The state is written to the block itself (`data-expanded`), never to a
+ * module-level flag: "expand the second block" must not disturb the first.
+ * Nothing is persisted — a reopened conversation starts folded, because the
+ * reasoning is not what the reader came back for.
+ */
+function setThinkingExpanded(node, expanded) {
+  if (!node) return;
+  node.dataset.expanded = expanded ? "true" : "false";
+  const toggle = node.querySelector(".thinking-toggle");
+  if (toggle) toggle.setAttribute("aria-expanded", String(expanded));
+  const body = node.querySelector(".thinking-text");
+  if (body) {
+    if (expanded) body.removeAttribute("aria-hidden");
+    else body.setAttribute("aria-hidden", "true");
+  }
+  if (expanded) {
+    // Opening a block near the bottom pushes content down; follow only when
+    // the reader was already pinned, so a scrolled-up reader stays put.
+    const pane = scrollTarget();
+    if (pane.scrollHeight - pane.scrollTop - pane.clientHeight < 140) scrollToBottom(true);
+  }
+}
+
+/** Wire a block's header button. Called once per block, on creation. */
+function bindThinkingToggle(node) {
+  const toggle = node?.querySelector(".thinking-toggle");
+  if (!toggle) return;
+  toggle.addEventListener("click", () => {
+    // Record that this block's state is now the reader's choice: `endThinking`
+    // folds untouched blocks, and must not undo a click made mid-stream.
+    node.dataset.userToggled = "true";
+    setThinkingExpanded(node, nextThinkingExpanded(node.dataset.expanded));
+  });
+}
+
 function startThinking() {
   if (state.currentThinking) return;
-  const node = addNode(
-    `<div class="thinking streaming"><span class="thinking-label">${escapeHtml(t.thinking)}</span><span class="thinking-text"></span></div>`,
-  );
+  const node = addNode(thinkingBlockHtml(t.thinking, true));
+  node.classList.add("streaming");
   // The block is appended, so a model that reasons *between* two paragraphs
   // would have its reasoning land after the prose it came from — and the next
   // paragraph would then be appended below the reasoning, splitting one answer
@@ -883,6 +967,7 @@ function startThinking() {
   // order the model produced it: prose, reasoning, more prose.
   const current = state.currentAssistant;
   if (current?.node?.isConnected) node.before(current.node);
+  bindThinkingToggle(node);
   state.currentThinking = node;
   state.currentThinkingText = node.querySelector(".thinking-text");
   state.thinkingBuffer = "";
@@ -899,16 +984,19 @@ function appendThinking(text) {
     state.thinkingRaf = 0;
     if (!state.currentThinkingText) return;
     state.currentThinkingText.textContent = state.thinkingBuffer ?? "";
-    // Follow only while the reader is already at the bottom; scrolling up to
-    // read earlier reasoning must not be yanked back down.
+    // A block the reader folded shut mid-stream grows unseen; scrolling for
+    // it would move the transcript under a click that asked for less, not
+    // more. Follow only while it is open and the reader is at the bottom.
+    if (state.currentThinking?.dataset.expanded !== "true") return;
     const pane = scrollTarget();
     if (pane.scrollHeight - pane.scrollTop - pane.clientHeight < 140) pane.scrollTop = pane.scrollHeight;
   });
 }
 
 /**
- * Keep the block after the turn: the Normal view hides finished reasoning in
- * CSS, while the Thinking and Verbose views show what the model actually said.
+ * Settle the block: streaming leaves it open and growing, a finished block
+ * folds back to one line that the reader can open. Nothing is thrown away —
+ * the text stays in the DOM and the 320 px cap lives in CSS.
  */
 function endThinking() {
   if (!state.currentThinking) return;
@@ -923,8 +1011,16 @@ function endThinking() {
   }
   const text = state.currentThinkingText?.textContent?.trim() ?? "";
   node.classList.remove("streaming");
-  const label = node.querySelector(".thinking-label");
-  if (label) label.textContent = text ? t.thoughtBriefly : t.thinking;
+  if (text === "") {
+    // A segment with no reasoning is not a block. Keeping it would leave a
+    // finished turn labelled 思考中… ("thinking…") — a line that claims work
+    // still in progress after the turn has moved on.
+    node.remove();
+  } else {
+    const label = node.querySelector(".thinking-label");
+    if (label) label.textContent = t.thoughtBriefly;
+    setThinkingExpanded(node, thinkingExpandedOnEnd(node.dataset.expanded, node.dataset.userToggled));
+  }
   state.currentThinking = null;
   state.currentThinkingText = null;
   state.thinkingBuffer = "";
@@ -3039,6 +3135,14 @@ function handleEvent(message) {
     case "pack_error":
     case "pack_verified":
     case "pack_pruned":
+    case "update_status":
+      // `update_status` needs a branch of its own even when Settings is closed:
+      // an event no case names falls to `default`, which only logs. The About
+      // page is rebuilt from `state.updateStatus`, so the state has to be kept
+      // here too, not only in the page that happens to be open.
+      if (message.type === "update_status" && message.status?.state === "available") {
+        announceUpdate(message.status);
+      }
       settings.handleEvent(message);
       break;
 
@@ -3575,6 +3679,19 @@ function handleEvent(message) {
         else if (item.role === "assistant") {
           const node = addNode(`<div class="turn assistant"><div class="markdown">${md(item.text)}</div></div>`);
           bindCodeCopy(node);
+        } else if (item.role === "thinking") {
+          // A finished reasoning block, replayed from the log. It is built in
+          // its settled form — no `streaming` class, the "thought for a
+          // moment" label, folded to one line — because that is what the live
+          // path leaves after `thinking_end`. The reader can open it with the
+          // same header button a live block has.
+          const node = addNode(thinkingBlockHtml(t.thoughtBriefly, false));
+          // Filled as `textContent` rather than interpolated into the HTML
+          // string: reasoning is model output and must never be parsed as
+          // markup.
+          const body = node?.querySelector(".thinking-text");
+          if (body) body.textContent = item.text ?? "";
+          bindThinkingToggle(node);
         } else if (item.role === "tool") {
           const row = document.createElement("div");
           // A failed call keeps its failure when the conversation is reopened.
@@ -3585,7 +3702,7 @@ function handleEvent(message) {
           row.className = item.ok === false ? "tool-row failed done" : "tool-row done";
           row.innerHTML =
             `<span class="tool-glyph">${icon(toolGlyph(item.name))}</span>` +
-            `<span class="tool-name">${escapeHtml(toolLabel(item.name))}</span>` +
+            `<span class="tool-name"><span class="tool-label">${escapeHtml(toolLabel(item.name))}</span></span>` +
             `<span class="tool-summary">${escapeHtml(item.summary || "")}</span>`;
           toolGroup().appendChild(row);
         }
@@ -4120,9 +4237,15 @@ function renderBoard() {
   }
 
   const parts = [];
+  // A row with no label is a headline: it states the section's answer, and
+  // there is no empty `<span>` holding a hole open in the middle of the pane.
+  // It still lands on the value edge — labels sit in one column, everything
+  // else in the other — so a headline's value starts where the labelled
+  // values below it start.
   const row = (label, value, cls = "", note = "") => {
+    const labelHtml = label ? `<span class="board-label">${escapeHtml(label)}</span>` : "";
     parts.push(
-      `<div class="board-row"><span class="board-label">${escapeHtml(label)}</span>` +
+      `<div class="board-row">${labelHtml}` +
         `<span class="board-value${cls ? ` ${cls}` : ""}" title="${escapeHtml(value)}">${escapeHtml(value)}</span></div>` +
         (note ? `<div class="board-note">${escapeHtml(note)}</div>` : ""),
     );
@@ -4167,10 +4290,15 @@ function renderBoard() {
   if (source !== "none" || effective.flasher) {
     row(t.boardFlasher, effective.flasher || t.boardFlasherDefault, effective.flasher ? "" : "muted");
   }
+  // "Port", not "Serial": this row is the port the *flasher* will open, and
+  // the pane also has a "Serial" section below for the monitor. Both carried
+  // the same word, so the pane read as though it listed the serial pane
+  // twice (a section header and a row label, one above the other). `boardPort`
+  // already existed and was unused.
   const portText = effective.port
     ? `${effective.port}${selectionHasBaud(board) ? ` · ${effective.baud}` : ""}`
     : t.boardUnset;
-  row(t.boardSerial, portText, effective.port ? "" : "warn", effective.port && !selectionHasBaud(board) ? t.boardBaudDefault : "");
+  row(t.boardPort, portText, effective.port ? "" : "warn", effective.port && !selectionHasBaud(board) ? t.boardBaudDefault : "");
   parts.push(`</div>`);
 
   // ---- Serial, as the device's live voice --------------------------------
@@ -4279,7 +4407,7 @@ function renderBoard() {
   // status: no session open" is the honest answer, and hiding it would read
   // as the backend being absent.
   if ((state.boardDevices ?? []).length > 0) {
-    parts.push(`<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardDeviceProbe)}</div>`);
+    parts.push(`<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardDeviceDirect)}</div>`);
     for (const entry of state.boardDevices) {
       if (!entry.ok) {
         row(`${entry.server} · ${entry.tool}`, t.boardProbeFailed, "warn", entry.error ?? "");
@@ -5663,8 +5791,18 @@ function renderSessions(sessions) {
     const open = expandAll || explicitOpen || (!explicitClosed && cwd === activeProject);
     const label = labels.get(cwd) ?? projectLabel(displayPath.get(cwd) || cwd);
     const target = displayPath.get(cwd) || cwd;
-    const head = document.createElement("button");
+    // A `div` with the button role, not a `<button>`.
+    //
+    // The row carries two independent controls: folding the group, and
+    // archiving its conversations. A `<button>` cannot contain another
+    // interactive element — the HTML parser hoists the inner one out, which is
+    // why the remove control used to end up as a *sibling* of the row and its
+    // `:focus-within` rule could never match. A role-bearing div keeps the same
+    // keyboard and screen-reader semantics without the nesting restriction.
+    const head = document.createElement("div");
     head.className = `session-group${cwd === activeProject ? " active" : ""}`;
+    head.setAttribute("role", "button");
+    head.tabIndex = 0;
     head.setAttribute("aria-expanded", open ? "true" : "false");
     // Fold state is the chevron; identity is the folder. A workspace row
     // without the folder glyph reads as a plain text label, which is why the
@@ -5727,7 +5865,7 @@ function renderSessions(sessions) {
       });
       head.appendChild(remove);
     }
-    head.addEventListener("click", () => {
+    const toggle = () => {
       if (open) {
         state.expandedProjects.delete(cwd);
         state.collapsedProjects.add(cwd);
@@ -5738,6 +5876,19 @@ function renderSessions(sessions) {
       localStorage.setItem("prometheus.expandedProjects", JSON.stringify([...state.expandedProjects]));
       localStorage.setItem("prometheus.collapsedProjects", JSON.stringify([...state.collapsedProjects]));
       renderSessions(state.sessions);
+    };
+    head.addEventListener("click", toggle);
+    // A div with role=button gets none of a real button's keyboard behaviour.
+    // Without this the group could only be folded with a mouse, and the remove
+    // control inside it would be unreachable in a way that looks like a
+    // rendering bug rather than a missing handler.
+    head.addEventListener("keydown", (event) => {
+      // The remove control handles its own keys and stops propagation; this
+      // fires only when the row itself has focus.
+      if (event.target !== head) return;
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      toggle();
     });
     sessionList.appendChild(head);
     // A folded project shows only its name. Leaving a few conversations visible
@@ -7533,15 +7684,36 @@ async function exportSessionFile(markdown, filename) {
   if (result?.saved) addNotice("dim", `${t.exportSaved} ${result.path}`);
 }
 
-/** Background update check: only surfaces when a newer version exists. */
+/**
+ * Say once that a newer version exists.
+ *
+ * The status can arrive more than once for the same version (a check at launch,
+ * then another when the About page opens), and a line per arrival would turn
+ * one fact into a pile of notices. Keyed by version, not by state: re-entering
+ * `available` for a version already announced is the same news.
+ */
+function announceUpdate(status) {
+  const version = typeof status.version === "string" ? status.version : "";
+  if (version === "" || state.updateAnnounced === version) return;
+  state.updateAnnounced = version;
+  addNotice("dim", t.updateAvailableBanner(version));
+}
+
+/**
+ * Background update check: only surfaces when a newer version exists.
+ *
+ * The check itself lives in the main process (`desktop/updater.js`) and its
+ * result arrives as an `update_status` event. Nothing here downloads: a
+ * version that is available is announced, and the download waits for a click
+ * on the About page. Checking at launch is a preference; downloading is not.
+ */
 async function checkUpdateQuietly() {
-  if (!api.checkUpdate || localStorage.getItem("prometheus.updateCheck") === "0") return;
-  const result = await api.checkUpdate();
-  if (!result || result.status !== "available") return;
-  state.updateAvailable = result;
-  addNotice("dim", t.updateAvailableBanner(result.latest));
-  const button = $("check-update");
-  if (button) button.textContent = `${t.checkUpdate} · ${result.latest}`;
+  if (typeof api.updateCheck !== "function") return;
+  if (localStorage.getItem("prometheus.updateCheck") === "0") return;
+  // The answer is disregarded on purpose — `update_status` carries it. Reading
+  // it here too would give the same event two handlers with two chances to
+  // announce the same version.
+  await api.updateCheck();
 }
 
 /* ---------- top bar overflow menu ---------- */
@@ -7610,14 +7782,6 @@ modalScrim.addEventListener("click", () => {
   closeModal(shortcutsDialog);
 });
 
-document.querySelectorAll(".suggestion").forEach((button) => {
-  button.addEventListener("click", () => {
-    input.value = button.dataset.prompt || "";
-    autoSize();
-    input.focus();
-  });
-});
-
 transcript.addEventListener("click", (event) => {
   const link = event.target.closest("a");
   if (link && /^https?:/.test(link.href)) {
@@ -7656,7 +7820,24 @@ bootStep("width", () => {
   document.documentElement.dataset.width = localStorage.getItem("prometheus.width") || "standard";
 });
 bootStep("view", () => {
-  document.documentElement.dataset.view = localStorage.getItem("prometheus.view") || "normal";
+  // Only `verbose` still means something (tool output opens as it arrives).
+  // A stored `thinking` from an older build described thinking visibility,
+  // which each block now owns; it would be a value no rule reads.
+  //
+  // `state.transcriptView` is set here as well as in Settings: it used to be
+  // written only when the dropdown changed, so a saved `verbose` did nothing
+  // on launch until the user visited Settings and re-picked it. The host
+  // never sends this preference (it is renderer-local), so this is the only
+  // place the saved value can reach the code that reads it.
+  state.transcriptView = normalizeTranscriptView(localStorage.getItem("prometheus.view"));
+  document.documentElement.dataset.view = state.transcriptView;
+  // Write the normalised value back. Leaving a dead `thinking` on disk would
+  // make the stored preference disagree with what the app does — the same
+  // trap the `lastSession` sweep avoids — and a later change might read it
+  // again and "restore" a setting that no longer exists.
+  if (localStorage.getItem("prometheus.view") !== state.transcriptView) {
+    localStorage.setItem("prometheus.view", state.transcriptView);
+  }
 });
 bootStep("motion", () => {
   document.documentElement.dataset.motion = localStorage.getItem("prometheus.motion") || "full";
@@ -7674,6 +7855,15 @@ bootStep("codeFont", () => {
   const saved = localStorage.getItem("prometheus.codeFont");
   if (saved) applyCodeFont(saved);
 });
+// One-time sweep of keys whose features are gone. Deleting the reader and the
+// writer is not enough: a profile that ran an older build still has the value
+// on disk, and a stale `lastSession` pointing at a conversation that has since
+// been deleted is exactly the kind of leftover that invites a future change to
+// "just read it again". Cheap, idempotent, and it runs before anything reads.
+for (const dead of ["prometheus.lastSession", "prometheus.restartSession"]) {
+  localStorage.removeItem(dead);
+}
+
 void refreshVersion();
 // An update that exists should be visible without opening About. The check is
 // the same one the About page runs and does nothing when no feed is

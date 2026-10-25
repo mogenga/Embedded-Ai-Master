@@ -164,6 +164,153 @@ describe("assistant_delta 流式片段", () => {
   });
 });
 
+describe("thinking_delta → thinking_start / thinking_text / thinking_end", () => {
+  /**
+   * 内核只有 `thinking_delta` 一种事件：段落边界是纯投影状态，可以由「上一条
+   * 是不是推理片段」推出来。渲染器的三个 handler 是既有的、已测过的状态机，
+   * 所以 start/end 由这一层补——改宿主比改渲染器的状态机风险小。
+   */
+  it("一段连续推理：一次 start、逐条 text、一次 end", () => {
+    const { out, ctx } = translate([
+      ev(0, "thinking_delta", { text: "先确认" }),
+      ev(1, "thinking_delta", { text: "波特率" }),
+      ev(2, "assistant", { content: "先查波特率。", toolCalls: [] }),
+    ]);
+
+    expect(out).toStrictEqual([
+      { type: "thinking_start" },
+      { type: "thinking_text", text: "先确认" },
+      { type: "thinking_text", text: "波特率" },
+      { type: "thinking_end" },
+      { type: "assistant_start" },
+      { type: "assistant_delta", text: "先查波特率。" },
+      { type: "assistant_end" },
+    ]);
+    expect(ctx.thinkingOpen).toBe(false);
+  });
+
+  it("推理片段本身不混进 assistant_delta", () => {
+    const { out } = translate([
+      ev(0, "thinking_delta", { text: "内部推理" }),
+      ev(1, "assistant", { content: "对外结论", toolCalls: [] }),
+    ]);
+
+    // 推理绝不能落在正文气泡里：那是模型回复的内容，推理不是。
+    expect(out.filter((item) => item.type === "assistant_delta").map((item) => item.text))
+      .toStrictEqual(["对外结论"]);
+  });
+
+  it("空推理片段不开启段落，也不产出事件", () => {
+    const { out, ctx } = translate([ev(0, "thinking_delta", { text: "" })]);
+    expect(out).toStrictEqual([]);
+    expect(ctx.thinkingOpen).toBe(false);
+  });
+
+  it("被工具调用打断时先 end 再画工具行", () => {
+    const { out } = translate([
+      ev(0, "assistant", {
+        content: "",
+        toolCalls: [{ id: "c1", name: "read", arguments: { path: "a.ts" } }],
+      }),
+      ev(1, "thinking_delta", { text: "要不要再读一遍" }),
+      ev(2, "tool_started", { callId: "c1", tool: "read" }),
+    ]);
+    const types = out.map((item) => item.type);
+
+    expect(types.indexOf("thinking_end")).toBeGreaterThanOrEqual(0);
+    expect(types.indexOf("thinking_end")).toBeLessThan(types.indexOf("tool_start"));
+  });
+
+  it("段落之间以非推理事件为界，各自 start/end", () => {
+    const { out } = translate([
+      ev(0, "thinking_delta", { text: "想一" }),
+      ev(1, "assistant_delta", { text: "写一" }),
+      ev(2, "thinking_delta", { text: "想二" }),
+    ]);
+    const types = out.map((item) => item.type);
+
+    expect(types).toStrictEqual([
+      "thinking_start",
+      "thinking_text",
+      "thinking_end",
+      "assistant_delta",
+      "thinking_start",
+      "thinking_text",
+    ]);
+    // 回合结束时还开着的段落由 run_end / 会话结束收口（见下一条）。
+    expect(types.filter((type) => type === "thinking_start")).toHaveLength(2);
+  });
+
+  it("只带状态的 usage / checkpoint 不打断推理段落", () => {
+    const { out } = translate([
+      ev(0, "thinking_delta", { text: "想" }),
+      ev(1, "usage", { promptTokens: 1, completionTokens: 1 }),
+      ev(2, "checkpoint", { turn: 1 }),
+      ev(3, "thinking_delta", { text: "继续想" }),
+      ev(4, "assistant", { content: "答", toolCalls: [] }),
+    ]);
+    const types = out.map((item) => item.type);
+
+    // 一次 start 贯穿整段：usage 帧在流中途到达是常态，按它切段会把一条
+    // 思路断成几块，读者看不出为什么。
+    expect(types.filter((type) => type === "thinking_start")).toHaveLength(1);
+    expect(types.filter((type) => type === "thinking_end")).toHaveLength(1);
+  });
+
+  it("status / interrupted 收口开着的段落", () => {
+    const { out } = translate([
+      ev(0, "thinking_delta", { text: "想到一半" }),
+      ev(1, "status", { status: "done" }),
+    ]);
+    expect(out.map((item) => item.type)).toStrictEqual([
+      "thinking_start",
+      "thinking_text",
+      "thinking_end",
+      "run_end",
+    ]);
+  });
+
+  it("一个 thinking_delta 都不认识时不会变成「未识别的事件类型」警告", () => {
+    const { out } = translate([ev(0, "thinking_delta", { text: "想" })]);
+    expect(out.some((item) => item.type === "notice")).toBe(false);
+  });
+});
+
+describe("sessionEventsToMessages 的推理回放", () => {
+  it("相邻推理片段合并成一条已完成推理行", () => {
+    const messages = sessionEventsToMessages([
+      ev(0, "thinking_delta", { text: "先确认" }),
+      ev(1, "thinking_delta", { text: "波特率" }),
+    ]);
+
+    expect(messages).toStrictEqual([{ role: "thinking", text: "先确认波特率" }]);
+  });
+
+  it("推理行独自成段，夹在正文之间也保持两行", () => {
+    const messages = sessionEventsToMessages([
+      ev(0, "thinking_delta", { text: "想一" }),
+      ev(1, "assistant", { content: "写一", toolCalls: [] }),
+      ev(2, "thinking_delta", { text: "想二" }),
+      ev(3, "assistant", { content: "写二", toolCalls: [] }),
+    ]);
+
+    expect(messages.map((row) => [row.role, row.text])).toStrictEqual([
+      ["thinking", "想一"],
+      ["assistant", "写一"],
+      ["thinking", "想二"],
+      ["assistant", "写二"],
+    ]);
+  });
+
+  it("空推理片段不产生空行", () => {
+    const messages = sessionEventsToMessages([
+      ev(0, "thinking_delta", { text: "" }),
+      ev(1, "assistant", { content: "答", toolCalls: [] }),
+    ]);
+    expect(messages).toStrictEqual([{ role: "assistant", text: "答" }]);
+  });
+});
+
 describe("tool_result", () => {
   it("成功时输出 tool_end + tool_output", () => {
     const { out } = translate([

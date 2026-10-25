@@ -25,6 +25,12 @@
   max-height: none;
 }
 
+/* The rail's own 10px padding is the column's single left edge. The head, the
+   search field and the nav items used to add an inset of their own on top of
+   it (4px, 4px and 2px), so the back button, the search box and the selected
+   nav row started on three different x values inside a 215px-wide rail. None
+   of them carry an extra inset now; a row that wants its hover fill to reach
+   the edge simply has no horizontal margin. */
 .settings-rail {
   flex: 0 0 240px;
   display: flex;
@@ -39,7 +45,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 2px 4px 10px;
+  padding: 2px 0 10px;
 }
 
 .settings-rail-head h2 {
@@ -50,7 +56,7 @@
 
 .settings-search {
   position: relative;
-  margin: 0 4px 10px;
+  margin: 0 0 10px;
 }
 
 .settings-search svg {
@@ -86,7 +92,9 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
-  padding: 0 2px;
+  /* Same edge as the head and the search box above; the items carry their own
+     10px of horizontal padding for the hover fill. */
+  padding: 0;
   border: none;
   background: none;
 }
@@ -135,7 +143,7 @@
 
 .settings-rail-foot {
   border-top: 1px solid var(--border);
-  padding: 8px 2px 0;
+  padding: 8px 0 0;
   margin-top: 6px;
 }
 
@@ -229,6 +237,30 @@
   margin-bottom: 26px;
 }
 
+/* Product header: the mark at a size where its gradient reads, then the name.
+   Sits above the version row, which carries the rule. */
+.about-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 14px;
+}
+
+.about-mark {
+  width: 44px;
+  height: 44px;
+  flex: 0 0 auto;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.about-name {
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
 .about-row {
   display: flex;
   align-items: center;
@@ -237,6 +269,21 @@
   margin: 0 0 18px;
   padding-bottom: 14px;
   border-bottom: 1px solid var(--border);
+}
+
+/* The update action sits where the version line's trailing space is. It holds
+   at most one button (each state offers at most one), so it never wraps. */
+.about-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+/* The status line is text, not a control: it takes the full width under the
+   version row rather than shrinking to a button-sized column. */
+.update-note {
+  margin: -8px 0 18px;
 }
 
 .setting-group-title {
@@ -322,6 +369,23 @@
   font: inherit;
   font-size: var(--text-sm);
   outline: none;
+}
+
+/* Same reason as `.serial-select`: the native `<select>` chrome on Windows
+   ignores `border-radius`, so the 6px corner written above was never drawn.
+   Turning the appearance off hands the box back to this stylesheet; the caret
+   is drawn here instead, tinted with the body text colour to match the fields
+   it sits beside. Kept in sync with the serial toolbar's caret by shape (9×6,
+   1.4 stroke) rather than by a shared asset — one is on the surface colour and
+   this one is on a full-width field, so they stay visually equal but are not
+   the same declaration. */
+.setting-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' fill='none' stroke='%239aa3b2' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  padding-right: 26px;
 }
 
 .setting-input.mono {
@@ -1455,7 +1519,7 @@
 }
 
 .tc-path {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
   font-size: var(--text-xs);
   color: var(--text-faint);
   margin-top: 2px;
@@ -1511,7 +1575,7 @@
 }
 
 .tc-search-paths code {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
   font-size: var(--text-xs);
   color: var(--text-faint);
   word-break: break-all;
@@ -1541,7 +1605,7 @@
 
 /* 根目录是一条路径，等宽字体让它可读，也让它显然可以被复制。 */
 .pack-root {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
   font-size: var(--text-sm);
   color: var(--text-secondary);
   word-break: break-all;
@@ -1590,7 +1654,7 @@
 .pack-version {
   font-size: var(--text-xs);
   color: var(--text-faint);
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
 }
 
 .pack-meta {
@@ -1607,7 +1671,7 @@
 }
 
 .pack-provides {
-  font-family: var(--font-mono, monospace);
+  font-family: var(--mono);
   color: var(--text-faint);
 }
 

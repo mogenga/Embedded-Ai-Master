@@ -34,5 +34,17 @@ contextBridge.exposeInMainWorld("prometheus", {
   // window process can reach the shell.
   revealArtifact: (target) => ipcRenderer.invoke("reveal-artifact", target),
   notify: (title, body) => ipcRenderer.invoke("notify", { title, body }),
+  // In-app updates. Each call returns the resulting status, and every change
+  // also arrives as a `update_status` message on `onEvent` — the same channel
+  // the host uses, so the page has one place to read state from.
+  //
+  // No arguments cross this boundary on purpose: the main process owns the
+  // updater, and "which version" / "from where" are not the renderer's to
+  // choose. Checking, downloading and installing are three separate calls
+  // because none of them may happen without a click.
+  updateStatus: () => ipcRenderer.invoke("update-status"),
+  updateCheck: () => ipcRenderer.invoke("update-check"),
+  updateDownload: () => ipcRenderer.invoke("update-download"),
+  updateInstall: () => ipcRenderer.invoke("update-install"),
   platform: process.platform,
 });

@@ -1,8 +1,42 @@
-# Embedded-Ai-Master
+<div align="center">
 
-面向嵌入式调试场景的 agent：一个领域无关的内核（主循环、模型接入、上下文、工具、MCP、会话），外加经 MCP 挂载的领域能力（探针、知识库、四套工具链后端）和一个 Electron 诊断工作台。
+<img src="docs/assets/icon.png" width="128" alt="Embedded AI Master">
 
-当前状态：**M2 阶段 3 已合并**（内核 + 桌面前端 + 权限审批 + 技能 + 语料 OTA），**M3 串口面板一期已接通**。真正的缺口在 `docs/deferred-issues.md`（有编号、有升级条件），不在本文件里重复。
+# Embedded AI Master
+
+**面向嵌入式调试的 agent 工作台**
+
+用一个能读懂工程、能操作探针、能查故障库的 agent，替代「翻手册 → 猜原因 → 反复试」的排查循环。
+
+[![Release](https://img.shields.io/github/v/release/mogenga/Embedded-Ai-Master?include_prereleases&color=blue)](https://github.com/mogenga/Embedded-Ai-Master/releases)
+[![Download](https://img.shields.io/badge/download-Windows%20x64-2ea44f)](https://github.com/mogenga/Embedded-Ai-Master/releases/latest)
+[![License](https://img.shields.io/badge/license-see%20LICENSE-lightgrey)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A524-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+
+[下载](#下载) · [能做什么](#能做什么) · [快速开始](#快速开始) · [文档](#文档地图)
+
+</div>
+
+---
+
+## 下载
+
+Windows x64 安装包在 [Releases](https://github.com/mogenga/Embedded-Ai-Master/releases/latest) 页。
+
+> **安装包未做代码签名。** 首次运行 Windows 会显示「未知发布者」的 SmartScreen 提示——点「更多信息」→「仍要运行」。这是缺少签名证书所致（见 [`docs/code-signing.md`](docs/code-signing.md)），不是文件损坏。
+
+## 能做什么
+
+| | 能力 | 说明 |
+|---|---|---|
+| 🔌 | **接真实硬件** | 经 MCP 挂载探针后端：Renode 仿真、已运行的 OpenOCD。读写内存、复位、串口收发都要先声明 |
+| 🧰 | **驱动四套工具链** | Keil uVision（UVSOCK）、STM32CubeIDE（headless build）、ESP-IDF（`idf.py`）、Arduino CLI。只驱动本机已装的，不下载不捆绑 |
+| 📚 | **查本地故障库** | 108 篇嵌入式调试语料，`kb_lookup` 首跳 + `kb_grep`/`kb_glob`/`kb_read` 的 agentic 检索循环 |
+| 🖥️ | **桌面诊断工作台** | 会话、文件树、板卡面板、串口助手、知识库、工具链包管理。纯 ES 模块，无框架无打包器 |
+| 🔐 | **权限与审批** | `read-only` / `workspace-write` / `diagnose` / `danger-full-access` 四档预设，写操作逐次审批，决策写入会话日志 |
+| 🌐 | **语料 OTA** | Ed25519 签名保证完整性；不自动应用，用户确认才下载——静默换语料会让「同一问题回答不同」不可解释 |
+
+**它不做的事**：不代替人做安全判断（探针写内存前必须声明意图）、不猜故障（全 0 读数只报警告，不推断「无故障」）、不伪造能力（前端没有的内核能力就隐藏入口，不画假按钮）。
 
 ## 技术栈
 

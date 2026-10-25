@@ -791,3 +791,198 @@ describe("query assistant_delta 生产者", () => {
     expect(session.events().some((event) => event.type === "assistant")).toBe(true);
   });
 });
+
+describe("query thinking_delta 生产者", () => {
+  /**
+   * 一个同时吐推理与正文的模型。`onReasoningDelta` 与 `onDelta` 的交错顺序
+   * 由这里决定，也就是 `query` 必须原样保住的顺序。
+   */
+  function reasoningProvider(
+    steps: Array<{ reasoning?: string; content?: string }>,
+    final: CompletionResult,
+  ): ModelProtocol {
+    return {
+      async complete(_messages, _tools, opts) {
+        for (const step of steps) {
+          if (step.reasoning !== undefined) opts.onReasoningDelta?.(step.reasoning);
+          if (step.content !== undefined) opts.onDelta?.(step.content);
+        }
+        return final;
+      },
+      countTokens() {
+        return 0;
+      },
+    };
+  }
+
+  async function runWith(model: ModelProtocol): Promise<SessionHandle> {
+    const dir = await makeTempDir("events-producers-thinking-");
+    const session = await createSession(dir);
+    sessions.push(session);
+    const ctx: LoopCtx = {
+      session,
+      model,
+      modelCfg: { contextWindow: 8192, maxOutput: 512 },
+      tools: new ToolRegistry([echoTool]),
+      budget: () => ({ over: false, tokens: 0, softLimit: 1 }),
+      signal: new AbortController().signal,
+      artifactDir: path.join(dir, "artifacts"),
+    };
+    for await (const _event of query(ctx, "x", { maxTurns: 10 })) {
+      // 跑到结束即可。
+    }
+    return session;
+  }
+
+  const final: CompletionResult = {
+    content: "先查波特率。",
+    toolCalls: [],
+    truncatedByMaxTokens: false,
+    stopReason: "stop",
+  };
+
+  it("推理落成 thinking_delta，正文落成 assistant_delta，两者分开", async () => {
+    const session = await runWith(
+      reasoningProvider(
+        [{ reasoning: "先确认" }, { reasoning: "波特率" }, { content: "先查" }, { content: "波特率。" }],
+        final,
+      ),
+    );
+
+    const deltas = session.events().filter(
+      (event) => event.type === "thinking_delta" || event.type === "assistant_delta",
+    );
+
+    // 顺序与模型输出顺序一致：推理在前、正文在后。
+    expect(deltas.map((event) => event.type)).toStrictEqual([
+      "thinking_delta",
+      "assistant_delta",
+    ]);
+    expect(deltas[0]?.payload.text).toBe("先确认波特率");
+    expect(deltas[1]?.payload.text).toBe("先查波特率。");
+  });
+
+  it("推理**不**拼进 assistant 正文", async () => {
+    const session = await runWith(
+      reasoningProvider([{ reasoning: "内部推理" }, { content: "对外结论" }], {
+        ...final,
+        content: "对外结论",
+      }),
+    );
+
+    const assistant = session.events().find((event) => event.type === "assistant");
+    expect(assistant?.payload.content).toBe("对外结论");
+    // 整条 assistant 事件里都不应出现推理文本（不只是 content 字段）。
+    expect(JSON.stringify(assistant?.payload)).not.toContain("内部推理");
+  });
+
+  it("投影层跳过 thinking_delta：日志含推理，上下文里没有", async () => {
+    const session = await runWith(
+      reasoningProvider([{ reasoning: "内部推理" }, { content: "对外结论" }], {
+        ...final,
+        content: "对外结论",
+      }),
+    );
+    const { buildMessages } = await import("../src/context/build.js");
+
+    const messages = buildMessages(session.events());
+
+    expect(messages).toStrictEqual([
+      { role: "user", content: "x" },
+      { role: "assistant", content: "对外结论", tool_calls: [] },
+    ]);
+    expect(JSON.stringify(messages)).not.toContain("内部推理");
+  });
+
+  it("推理性交错（想-写-再想-再写）按到达顺序各成一段", async () => {
+    const session = await runWith(
+      reasoningProvider(
+        [
+          { reasoning: "想一" },
+          { content: "写一" },
+          { reasoning: "想二" },
+          { content: "写二" },
+        ],
+        { ...final, content: "写一写二" },
+      ),
+    );
+
+    const deltas = session.events().filter(
+      (event) => event.type === "thinking_delta" || event.type === "assistant_delta",
+    );
+
+    // 与 writer 的单测同一条判据，但这里走的是真实的 query → writer 路径。
+    expect(deltas.map((event) => [event.type, event.payload.text])).toStrictEqual([
+      ["thinking_delta", "想一"],
+      ["assistant_delta", "写一"],
+      ["thinking_delta", "想二"],
+      ["assistant_delta", "写二"],
+    ]);
+  });
+
+  it("模型不提供推理时不产生 thinking_delta（不支持思考的网关照常工作）", async () => {
+    const session = await runWith(
+      reasoningProvider([{ content: "先查波特率。" }], final),
+    );
+
+    expect(session.events().some((event) => event.type === "thinking_delta")).toBe(false);
+    expect(session.events().some((event) => event.type === "assistant_delta")).toBe(true);
+  });
+
+  it("推理事件先于 assistant 事件落盘", async () => {
+    const session = await runWith(
+      reasoningProvider([{ reasoning: "想" }, { content: "答" }], {
+        ...final,
+        content: "答",
+      }),
+    );
+
+    const types = session.events().map((event) => event.type);
+    const thinkingIndex = types.indexOf("thinking_delta");
+    const assistantIndex = types.indexOf("assistant");
+    expect(thinkingIndex).toBeGreaterThanOrEqual(0);
+    expect(thinkingIndex).toBeLessThan(assistantIndex);
+  });
+
+  it("端到端：会话日志里的推理被宿主投影成可渲染的思考段，不进正文气泡", async () => {
+    // 这一条跨过三层：内核写 `thinking_delta` → 协议层合成 start/text/end →
+    // 渲染器拿到的是它一直在等的那三个事件名。
+    const session = await runWith(
+      reasoningProvider([{ reasoning: "内部推理" }, { content: "对外结论" }], {
+        ...final,
+        content: "对外结论",
+      }),
+    );
+    const { createContext, sessionEventToHostEvents } = await import(
+      "../desktop/renderer/protocol.js"
+    );
+
+    const ctx = createContext({ sessionId: session.id });
+    const out = session.events().flatMap((event) => sessionEventToHostEvents(event, ctx));
+    const types = out.map((message) => message.type);
+
+    expect(types).toContain("thinking_start");
+    expect(types).toContain("thinking_text");
+    expect(types).toContain("thinking_end");
+    // 推理文本只出现在 thinking_text 里。
+    const reasoningInThinking = out
+      .filter((message) => message.type === "thinking_text")
+      .map((message) => message.text)
+      .join("");
+    expect(reasoningInThinking).toBe("内部推理");
+    const assistantText = out
+      .filter((message) => message.type === "assistant_delta")
+      .map((message) => message.text)
+      .join("");
+    expect(assistantText).toBe("对外结论");
+    expect(assistantText).not.toContain("内部推理");
+    // 且没有变成「未识别的事件类型」警告（`KNOWN_TYPES` 漏登记的表现）。
+    // 只筛这一种：mock 模型不返回 usage，`usage_missing` 的 dim 提示是正常的。
+    expect(
+      out.filter(
+        (message) =>
+          message.type === "notice" && String(message.text).includes("未识别的事件类型"),
+      ),
+    ).toStrictEqual([]);
+  });
+});

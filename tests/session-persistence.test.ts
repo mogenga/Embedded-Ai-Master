@@ -834,6 +834,62 @@ describe("tool_started / mcp_status / device_status 事件", () => {
   });
 });
 
+describe("thinking_delta 事件", () => {
+  /**
+   * `EVENT_TYPES` 是**读取时**白名单，不是写盘过滤器。漏登记不会让写入失败，
+   * 而会让下一次读盘抛 `unknown_event_type`——整份日志（包括其中早先写入的
+   * 真实工具结果）一起不可用。这条用例走的是真实的「写一条、关掉、读回来」，
+   * 与 `todos` 那条同一套判据。
+   */
+  it("写入 thinking_delta 后可读，回放保留文本与顺序", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "串口没输出" } });
+    await session.append({ type: "thinking_delta", payload: { text: "先确认波特率" } });
+    await session.append({ type: "thinking_delta", payload: { text: "再看引脚" } });
+    await session.append({ type: "assistant", payload: { content: "先查波特率。", toolCalls: [] } });
+    await session.close();
+
+    const result = readSessionDir(dir);
+
+    expect(result.events.map((event) => event.type)).toEqual([
+      "user",
+      "thinking_delta",
+      "thinking_delta",
+      "assistant",
+    ]);
+    expect(result.events.map((event) => event.seq)).toEqual([0, 1, 2, 3]);
+    expect(result.events[1]?.payload).toStrictEqual({ text: "先确认波特率" });
+  });
+
+  it("readSessionSnapshot 也认得它（容错路径用的是同一份白名单之外的分支）", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "thinking_delta", payload: { text: "想" } });
+    await session.close();
+
+    const snapshot = await readSessionSnapshot(dir);
+
+    expect(snapshot.events.map((event) => event.type)).toEqual(["thinking_delta"]);
+  });
+
+  it("含 thinking_delta 的日志仍可投影（回放路径不会因它整份不可用）", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "u" } });
+    await session.append({ type: "thinking_delta", payload: { text: "想" } });
+    await session.append({ type: "assistant", payload: { content: "a", toolCalls: [] } });
+    await session.close();
+
+    const { events } = readSessionDir(dir);
+
+    // 投影结果里既没有报错，也没有推理文本。
+    const messages = buildMessages(events);
+    expect(messages.map((message) => message.role)).toStrictEqual(["user", "assistant"]);
+    expect(JSON.stringify(messages)).not.toContain("想");
+  });
+});
+
 type Session = Awaited<ReturnType<typeof createSession>>;
 
 async function makeSource(): Promise<{ dir: string; session: Session }> {

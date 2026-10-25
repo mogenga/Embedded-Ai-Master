@@ -277,7 +277,8 @@ MCP 客户端收敛为"本地 stdio + 会话级生命周期":每个 server 一�
   ├── session.v1.jsonl     # append-only 事件日志(不可变,写满/压缩后 rollover 到 v2)
   └── artifacts/           # 工具结果落盘(#3 一级),按事件 id 命名
   ```
-- **事件模型**:`SessionEvent { seq, ts, type, payload, parent? }`,type 覆盖 `user / assistant / tool_call / tool_result / usage / compaction / checkpoint / status / interrupted`。**与 headless 的事件流(BR-7)与 Web 状态通道(BR-6)复用同一套类型定义**——一份事件 schema,三个消费者。
+- **事件模型**:`SessionEvent { seq, ts, type, payload, parent? }`,type 覆盖 `user / assistant / assistant_delta / thinking_delta / tool_call / tool_result / usage / compaction / checkpoint / status / interrupted` 等。**与 headless 的事件流(BR-7)与 Web 状态通道(BR-6)复用同一套类型定义**——一份事件 schema,三个消费者。
+- **流式两类增量,投影只认完整结论**:`assistant_delta` 是正文片段,`thinking_delta` 是模型推理过程(reasoning)的片段,二者**都只用于实时显示,都不进 `buildMessages`**——模型上下文由完整的 `assistant` / `tool_result` 事件重建。推理尤其不能混进 `assistant` 正文:那条正文会被原样送回下一次请求,等于让模型重复消费自己的思考(浪费 token,且可能诱导它照抄上一轮的推理路径)。`thinking_delta` 只有一种事件、没有 start/end:段落边界是纯投影状态(「上一条是不是推理片段」),由消费者自己判定;宿主在后端补成渲染器的 `thinking_start` / `thinking_text` / `thinking_end`。两类片段由同一个批量 writer(`src/loop/assistant-delta.ts`)按**到达顺序**落盘,相邻同通道片段合并。
 - **"model-visible means logged"**(母本核心原则,原样继承):重建给模型的每一 token 必能从日志派生;模型视图 = 日志的投影函数(含 #3 的压缩投影)。禁止任何"只在内存、不落日志"的上下文修改。这一条同时兑现:回放(BR-6 从 tool_result 事件重建设备状态)、可复现(NFR-3)、可恢复(断电后从日志尾重建)。
 - **可靠性三件套**(母本原样):header 校验(启动时对账);**损坏 fail-closed**——坏行不跳过,拒绝恢复该会话并报告(静默跳过 = 历史被改写,违反诚实原则);分代迁移——格式升级时显式 `vN → vN+1` 转换器链,旧文件不可变保留。
 - **checkpoint**:每次模型请求前追加 checkpoint 事件(dsh checkpoint-policy 同款),崩溃恢复到最近 checkpoint,未完成 turn 以 `interrupted` 事件闭合。

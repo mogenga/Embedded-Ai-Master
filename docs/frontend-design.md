@@ -333,7 +333,7 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 | `data-motion` | `full` / `reduced` | 动效开关 | `prometheus.motion` |
 | `data-density` | `balanced` / `compact` / `detailed` | 工具行密度 | `prometheus.density` |
 | `data-width` | `standard` / `narrow` / `wide` | `--reading-width` 780 / 620 / 980 | `prometheus.width` |
-| `data-view` | `normal` / `thinking` / `verbose` | 思考文本可见性 | `prometheus.view` |
+| `data-view` | `normal` / `verbose` | 工具结果到达时是否直接展开（**不再控制思考块**：每块由自己的标题栏折叠，见 §7.4「思考块」）。旧值 `thinking` 由 `normalizeTranscriptView` 收敛为 `normal` | `prometheus.view` |
 | `--ui-scale` | 0.9 / 1 / 1.1 / 1.25 | 界面 chrome 缩放 | `prometheus.uiScale` |
 | `--font-scale` | 0.9 / 1 / 1.12 | 转录正文缩放 | `prometheus.fontScale` |
 | `--mono` | 字体栈 | 代码字体 | `prometheus.codeFont` |
@@ -395,7 +395,33 @@ prometheus.expandedProjects  collapsedProjects
   - **审批条**：`div#pending-permission`，见 §7.7。
   - **提示**：`addNotice(level, text)`，级别 dim / warn。
   - **压缩接缝**：`.compact-marker`。
+  - **思考块**：见下节 §7.3.1。
 - 查找栏（Ctrl/Cmd+F）用 `TreeWalker` 全文标记并显示命中计数（`app.js:987-1088`）。
+
+#### 7.3.1 思考块（2026-10-25）
+
+模型的推理（`thinking_delta`）在转录里是**独立的、逐块可折叠**的段落。它不归 `data-view` 管——那是全局开关，而读者问的是「这一段」。
+
+结构（`thinkingBlockHtml`，直播与回放共用一份）：
+
+```html
+<div class="thinking" data-expanded="false">
+  <div class="thinking-head">
+    <button type="button" class="thinking-toggle" aria-expanded="false">
+      <span class="thinking-label">思考了一会儿</span><svg class="thinking-chevron">…</svg>
+    </button>
+  </div>
+  <div class="thinking-text" aria-hidden="true">…</div>
+</div>
+```
+
+- **折叠态**：一行标签 + 右向 chevron。正文用 `max-height: 0; overflow: hidden` 收起，**不是** `display: none` / `visibility: hidden`——后两者让元素不可聚焦（本仓库踩过，见 `.session-group-remove` 的注释）。文本仍在 DOM 里，按 `textContent` 写入（推理是模型输出，绝不进 HTML 字符串）。
+- **展开态**：chevron 转正向下，正文显示，`max-height: 320px; overflow-y: auto`——与 `.tool-output` 同一口径。截断是**内滚**而非截短（R3：被截短的块不得读成完整思考）。
+- **流式中**（`.streaming`）：默认展开，且**不设** 320px 上限，让「看着它想」成立。结束时若读者没碰过这一块，自动收成一行；读者在流式期间点过，则保持其选择（`thinkingExpandedOnEnd`，不让自动折叠撤销一次点击）。空推理段整块移除，不留「思考中…」的假进行态。
+- **状态**：只存在该节点的 `data-expanded`（读者点过则另标 `data-user-toggled`）。不进 `state`，不进 localStorage——两块可同时一开一合（实测 `["true","true","false",…]`），重开会话默认全折叠。
+- **无障碍**：真 `<button>`，Tab 可达，Enter / Space 都可切换；`aria-expanded` 跟随状态；折叠时正文加 `aria-hidden`（正文内无可聚焦元素，所以安全）。
+- **导航**：`<button>` 内只放文本与装饰性 `<svg aria-hidden>`，不放任何交互元素。chevron 不参与布局宽度竞争（12px）。
+- **归属视觉**：折叠行与紧随其后的 `.tool-group` 之间是双向 12px（10px 下外边距 + 2px 上外边距），反向（工具组 → 下一段思考）是 18px，且整段没有分隔线。这个不对称的窄间距让截图里的工具行容易被读成「上一段思考的从属」。**实测 DOM 顺序严格等于日志顺序**（`thinking` 与 `tool-group` 按 seq 交错；见 `docs/deferred-issues.md` 变更记录）。这是视觉归因问题，不是渲染顺序 bug；若要消除误读，应在两者之间加分隔或把间距拉齐，而不是动插入时机。
 
 ### 7.4 流式回答的渲染路径
 

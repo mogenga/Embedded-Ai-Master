@@ -391,11 +391,20 @@ body.resizing-sidebar .sidebar {
   gap: 8px;
 }
 
+/* The product mark, as a raster.
+ *
+ * It used to be an inline SVG square wave coloured by `currentColor`, which
+ * meant one ink for the whole window and no way to show the real logo. The
+ * logo is now an `<img>`: it carries its own gradient, and `--mark-size` still
+ * decides how big it is. `color` is no longer read here — leaving it would
+ * suggest a tint that nothing applies. */
 .mark {
   width: var(--mark-size);
   height: var(--mark-size);
-  color: var(--accent);
   flex: 0 0 auto;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .wordmark {
@@ -1019,8 +1028,18 @@ body.resizing-workbench * {
 /* A diff shown under the tool row that produced it. Same line tokens as the
    Changes pane; only the container differs, because this one is in the flow of
    the conversation and must not look like a second pane. */
-.inline-diff {
-  margin: -2px 0 10px 30px;
+/* An inline diff is attached with `row.after(...)`, so it ends up as a child
+   of `.tool-item` when the call produced output and as a direct child of the
+   tool block when it did not. Both are grids with the same tracks; either
+   way it starts on the name column like the output does. (`30px` was a
+   hand-kept indent that put it 6px right of that column.) The two selectors
+   are needed because `.tool-item > *` and `.tool-group > *` each set a
+   full-width span that would otherwise win. */
+.inline-diff,
+.tool-item > .inline-diff,
+.tool-group > .inline-diff {
+  grid-column: 2 / -1;
+  margin: -2px 0 10px;
   border-left: 2px solid var(--border);
   padding-left: 10px;
 }
@@ -1348,7 +1367,11 @@ body.resizing-workbench * {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 0 8px 6px;
+  /* Same left edge as the brand, the new-chat button and the section heading.
+     It used to carry an 8px margin of its own on top of the sidebar's 10px
+     padding, so its box started 6px right of every other row in the column —
+     the one row in the rail that did not line up. */
+  margin: 0 calc(var(--rail-inset) - 10px) 6px;
   padding: 4px 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -1506,19 +1529,31 @@ body.resizing-workbench * {
   color: var(--text);
 }
 
-/* "Remove workspace" (archives its conversations). Same reveal rule as the
-   `+` beside it and the row's own … menu: absent until the group is hovered
-   or focused, so it cannot be hit by accident, and always reachable by
-   keyboard. It sits to the right of the count, not over it. */
+/* "Remove workspace" (archives its conversations). Invisible until the group is
+   hovered or holds focus, so it cannot be hit by accident. It sits to the right
+   of the count, not over it.
+ *
+ * Invisible means `opacity: 0`, and that is the whole point. Both of the
+ * obvious alternatives break the keyboard:
+ *   - `display: none` removes the control from the tab order entirely.
+ *   - `visibility: hidden` also makes it unfocusable — CSS says a visibility-
+ *     hidden element cannot take focus — so `:focus-within` could never fire
+ *     and the reveal-on-focus rule was dead. (Measured: `focus()` on such a
+ *     node leaves `document.activeElement` on `<body>`.)
+ * `opacity: 0` keeps it focusable and in the tab order; `pointer-events: none`
+ * is what stops a stray click from landing on something invisible. */
 .session-group-remove {
   width: 18px;
   height: 18px;
   border-radius: var(--radius-sm);
-  display: none;
+  display: grid;
   place-items: center;
   color: var(--text-secondary);
   cursor: pointer;
   flex: 0 0 auto;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
 }
 
 .session-group-remove .icon {
@@ -1527,9 +1562,10 @@ body.resizing-workbench * {
 }
 
 .session-group:hover .session-group-remove,
-.session-group:focus-visible .session-group-remove,
-.session-group:focus-within .session-group-remove {
-  display: grid;
+.session-group:focus-within .session-group-remove,
+.session-group-remove:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .session-group-remove:hover {
@@ -2442,29 +2478,68 @@ mark.find-hit.current {
 
 /* Consecutive calls form one quiet block with a left rail, the way an editor
    groups a build's steps. The block is a list of actions, not a second
-   transcript, so it sits at a lower contrast than the prose. */
+   transcript, so it sits at a lower contrast than the prose.
+ *
+ * The block is a grid so the rows inside it can share its columns through
+ * `subgrid`. Before this, each row was its own flex line and the name cell
+ * was sized by its own text: `kb · kb status` pushed the summary 70px right,
+ * `List` pushed it 18px, so the summaries of a vertical run of calls landed
+ * on six different x values and read as a ragged edge rather than a column.
+ * The tracks are:
+ *
+ *   1  glyph             fixed, the icon column
+ *   2  name              at least 14ch, and as wide as the longest name in
+ *                        *this* group so a group of short names does not
+ *                        reserve room for a long one
+ *   3  summary           the rest; the only track that gives
+ *   4  expand chevron    fixed, right edge
+ *
+ * `minmax(14ch, max-content)` is deliberate rather than a bare `max-content`:
+ * 14ch is about the width of `kb · kb status`, so a group of ordinary tool
+ * names all resolve to the same track and their summaries line up across the
+ * whole transcript. A group containing one long MCP label widens its own
+ * track instead of truncating the label, which is the name of the tool that
+ * ran — truncating it would hide the one thing the row exists to say. */
 .tool-group {
   max-width: var(--column-width);
-  margin: 2px auto 18px;
+  margin: 22px auto;
   padding: 0 28px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
+  display: grid;
+  grid-template-columns: 16px minmax(14ch, max-content) minmax(0, 1fr) 18px;
+  column-gap: 8px;
+  row-gap: 1px;
 }
 
 .tool-group:empty {
   display: none;
 }
 
+/* Every direct child spans the block. A row, its output wrapper and an
+   inline diff are placed by different code paths, and none of them should
+   have to know how many columns the block has. */
+.tool-group > * {
+  grid-column: 1 / -1;
+}
+
+/* Shares the block's columns but not its inter-row gap: the row and its own
+   output are one item, and the 2px/8px around `.tool-output` is the spacing
+   that belongs between them. */
 .tool-item {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: subgrid;
+  column-gap: inherit;
+  row-gap: 0;
+}
+
+.tool-item > * {
+  grid-column: 1 / -1;
 }
 
 .tool-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: subgrid;
+  column-gap: inherit;
   align-items: baseline;
-  gap: 8px;
   padding: 3px 8px;
   margin-left: -8px;
   border-radius: var(--radius-sm);
@@ -2482,6 +2557,7 @@ mark.find-hit.current {
 }
 
 .tool-glyph {
+  grid-column: 1;
   display: flex;
   flex: 0 0 auto;
   align-items: center;
@@ -2524,7 +2600,9 @@ mark.find-hit.current {
    accessibility floor forbids; the row must stay legible in high contrast and
    to a colour-blind reader. The name keeps its own colour so the red reads as
    the call's outcome rather than as part of the address it was given. */
-.tool-row.failed .tool-name {
+/* On the label, not the name cell: the cell also holds the annotation
+   badges, and a wavy underline drawn across the row would strike them too. */
+.tool-row.failed .tool-label {
   text-decoration: underline wavy var(--danger);
   text-underline-offset: 3px;
 }
@@ -2553,10 +2631,24 @@ mark.find-hit.current {
   color: var(--success, var(--accent));
 }
 
+/* The name and its badges share the name track, so a badge does not push the
+   summary into a column of its own (that would move the summary only on rows
+   that happen to carry a badge). The label elides; the badges do not. */
 .tool-name {
+  grid-column: 2;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  min-width: 0;
   font-size: var(--text-sm);
   color: var(--text-secondary);
-  flex: 0 0 auto;
+}
+
+.tool-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tool-row.done .tool-name {
@@ -2568,6 +2660,7 @@ mark.find-hit.current {
 }
 
 .tool-summary {
+  grid-column: 3;
   font-family: var(--mono);
   font-size: var(--text-sm);
   color: var(--text-faint);
@@ -2585,13 +2678,18 @@ mark.find-hit.current {
   color: var(--danger);
 }
 
+/* A write's summary is rewritten after the fact to `path +15 −1`, and the
+   path used to carry a leading 8px to separate it from the counts that came
+   before it. Nothing precedes it now, so the margin only pushed the path off
+   the summary column that every other row's text starts on. */
 .tool-path {
-  margin-left: 8px;
+  margin-left: 0;
 }
 
 .tool-expand {
+  grid-column: 4;
   flex: 0 0 auto;
-  margin-left: auto;
+  align-self: center;
   width: 18px;
   height: 18px;
   display: grid;
@@ -2628,9 +2726,15 @@ mark.find-hit.current {
   color: var(--text);
 }
 
+/* The result sits in the name column, not at an arbitrary indent from the
+   row's box: `grid-column: 2 / -1` in the item's subgrid puts it exactly under
+   the tool name it belongs to. It used to be `padding-left: 22px` from the
+   block's content edge, which missed the name column by 2px and, worse, was a
+   number that had to be kept in step with the glyph width and the column gap
+   by hand. */
 .tool-output {
+  grid-column: 2 / -1;
   margin: 2px 0 8px;
-  padding: 0 0 0 22px;
   font-family: var(--mono);
   font-size: var(--text-sm);
   line-height: 1.55;
@@ -2649,47 +2753,47 @@ mark.find-hit.current {
   opacity: 0;
 }
 
+/* One reasoning block.
+ *
+ * It is self-contained: whether the body is shown is decided by the block's
+ * own `data-expanded` attribute, set by its header button. The three-view
+ * setting (`data-view`) deliberately does not appear here any more — it could
+ * only say "show every block" or "hide every block", and the reader asks
+ * about *this* one. Its remaining job is tool output detail (see
+ * `.tool-output`), which the `data-*` mapping in `settings.js` still drives.
+ *
+ * The collapsed body is clipped, not `display: none` / `visibility: hidden`:
+ * both of those make descendants unfocusable, and the header button must stay
+ * reachable (see the `.session-group-remove` note above). `max-height: 0` with
+ * `overflow: hidden` keeps the text in the DOM — nothing is thrown away, only
+ * folded.
+ *
+ * Spacing: this is a paragraph of the conversation, not a caption on the
+ * block below it, so it takes the transcript's own block interval (the 22px
+ * `.turn` uses) on *both* sides. It used to carry only a 10px bottom margin,
+ * and because adjacent vertical margins collapse to the larger one, the gap
+ * above/below a block came out as 22px above and 10px below — the narrow side
+ * being the tool group it happened to precede. That is what made a folded
+ * thought read as the tool group's title rather than as the model's own
+ * paragraph: it was attached to what followed. With equal margins a reasoning
+ * block is equidistant from whatever is next, whichever kind of block it is. */
 .thinking {
   max-width: var(--column-width);
-  margin: 0 auto 10px;
+  margin: 22px auto;
   padding: 0 28px;
   font-size: var(--text-sm);
   color: var(--text-faint);
-  font-style: italic;
+}
+
+.thinking-head {
   display: flex;
-  gap: 8px;
   align-items: baseline;
+  gap: 8px;
 }
 
-/* Normal view keeps reasoning as a one-line marker; the Thinking and Verbose
-   views show the text the model actually produced. */
-:root[data-view="normal"] .thinking-text {
-  display: none;
-}
-
-:root[data-view="thinking"] .thinking,
-:root[data-view="verbose"] .thinking {
-  display: block;
-  color: var(--text-secondary);
-  font-style: normal;
-  line-height: 1.55;
-}
-
-:root[data-view="thinking"] .thinking::before,
-:root[data-view="verbose"] .thinking::before {
-  display: none;
-}
-
-:root[data-view="thinking"] .thinking-label,
-:root[data-view="verbose"] .thinking-label {
-  display: block;
-  margin-bottom: 2px;
-  font-size: var(--text-sm);
-  color: var(--text-faint);
-  font-style: italic;
-}
-
-.thinking::before {
+/* The dot that marks a reasoning line. It sits beside the button rather than
+   inside it, so the button's own hit area stays a plain label. */
+.thinking-head::before {
   content: "";
   width: 6px;
   height: 6px;
@@ -2697,6 +2801,76 @@ mark.find-hit.current {
   background: var(--text-faint);
   flex: 0 0 auto;
   transform: translateY(-1px);
+}
+
+/* The header is the only interactive part: a real button, so Tab reaches it
+   and Enter/Space toggle it. It is styled to read as a quiet label at rest
+   and light up on hover / focus, the same way `.tool-expand` does. */
+.thinking-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 4px;
+  margin-left: -4px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-style: italic;
+  color: var(--text-faint);
+  text-align: left;
+  transition: color 120ms ease, background 120ms ease;
+}
+
+.thinking-toggle:hover {
+  color: var(--text-secondary);
+  background: var(--surface-hover);
+}
+
+/* The chevron points right when folded and down when open, like a disclosure
+   triangle. It is decoration inside the button; the label already says what
+   the block is. */
+.thinking-chevron {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
+  transform: rotate(-90deg);
+  transition: transform 160ms var(--ease);
+}
+
+.thinking[data-expanded="true"] .thinking-chevron {
+  transform: none;
+}
+
+/* Folded: the body is zero-height and clipped. Kept in the layout — no
+   `display: none` — so the text stays selectable by find-in-page once opened
+   and nothing has to be rebuilt on toggle. */
+.thinking-text {
+  max-height: 0;
+  overflow: hidden;
+  padding-left: 14px;
+  color: var(--text-secondary);
+  font-style: normal;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  transition: max-height var(--fast) var(--ease);
+}
+
+.thinking[data-expanded="true"] .thinking-text {
+  /* The same cap `.tool-output` uses: a chain of thought can run to thousands
+     of characters, and unrolled in full it pushes the answer it was reasoning
+     toward off the screen. The text is not truncated or summarised — it
+     scrolls in place, so nothing is hidden, only bounded (R3: a bounded block
+     must never read as the whole thought). */
+  max-height: 320px;
+  overflow-y: auto;
+  margin-top: 2px;
+}
+
+/* While the model is still thinking the block grows and is followed, which is
+   what "watching it think" means — the 320 px cap is for *finished* thoughts.
+   It still folds if the reader collapses it mid-stream. */
+.thinking.streaming[data-expanded="true"] .thinking-text {
+  max-height: none;
 }
 
 .plan {
@@ -2996,11 +3170,18 @@ mark.find-hit.current {
   text-align: center;
 }
 
+/* The source PNG is 128x128 but its artwork only occupies the middle
+   89x51 (alpha bounding box), so a 40px box drew a ~28x16 mark. 76px puts the
+   visible mark at ~53x30 — large enough to lead the page without outranking
+   the 22px h1 under it. Fixed px, like --text-xl: the empty state does not
+   follow --ui-scale. */
 .empty-mark {
-  width: 40px;
-  height: 40px;
-  color: var(--accent);
-  margin-bottom: 18px;
+  width: 76px;
+  height: 76px;
+  margin-bottom: 22px;
+  object-fit: contain;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .empty-state h1 {
@@ -3017,16 +3198,10 @@ mark.find-hit.current {
   max-width: 46ch;
 }
 
-/* Prompts read as inline suggestions, not as a stack of full-width cards:
-   three equal-weight rows were heavier than the thing they suggested. */
-.suggestions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px;
-  max-width: 520px;
-  margin: 0 auto;
-}
+/* The preset prompt row (three inline pills) and its `.suggestions` flex
+   wrapper were removed at the user's request. What remains is the setup
+   call-to-action, which is a direct child of .empty-state — no wrapper to
+   leave an empty box behind while it is `hidden`. */
 
 .suggestion {
   text-align: left;
@@ -3330,6 +3505,12 @@ mark.find-hit.current {
   border-radius: var(--radius-sm);
   font-size: var(--text-sm);
   color: var(--text-secondary);
+  /* This is the first chip in the row and it has no border or background at
+     rest, so what the eye sees is its *text* — which sat 8px right of the
+     textarea's text above it, a visible step in the composer's left edge.
+     The padding stays (it is the hover target); the box moves left by the
+     same 8px, the same trick `.tool-row` uses for its hover background. */
+  margin-left: -8px;
 }
 
 .mode-picker:hover,
@@ -5339,22 +5520,58 @@ mark.find-hit.current {
   flex: 0 0 auto;
 }
 
+/* ---------- board pane: one alignment system ----------
+ *
+ * The pane used to mix three rules: labels flush left, values flush right,
+ * notes centred. A row with an empty label put its value against the right
+ * edge and left a hole in the middle, and a long note ("0 probes · 1 port ·
+ * no toolchain") hugged the border where it was hardest to read.
+ *
+ * Now the whole pane is one two-column grid, and every section and row
+ * descends from it through `subgrid`, so the two edges are the grid's own
+ * tracks rather than a number repeated in each rule:
+ *
+ *   column 1 (the label edge)  section titles and row labels
+ *   column 2 (the value edge)  values, notes, empty states, chips, each
+ *                              reading in the same direction as its label
+ *
+ * A row with no label (a section's headline answer — "no probe attached",
+ * "not open") has no label element at all in the markup, and its value still
+ * lands on the value edge with every other value. The empty slot that made
+ * the hole in the middle is gone from `renderBoard`'s `row()`, not merely
+ * hidden.
+ *
+ * `max-content` on the label track means the column is as wide as the widest
+ * label actually present, so a section whose labels are short does not
+ * inherit a width chosen for the longest composite one. Every value in the
+ * pane still starts on the same x, because they all read the same track. */
 .board-body {
   flex: 1;
   overflow-y: auto;
   padding: 14px 16px;
   font-family: var(--sans);
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  column-gap: 12px;
+  align-content: start;
 }
 
 .board-section {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  column-gap: inherit;
   margin-bottom: 22px;
 }
 
+/* Sections are separated by the same interval the transcript blocks use, and
+   the title is a heading on the label edge — not a row of data. */
 .board-section:last-child {
   margin-bottom: 4px;
 }
 
 .board-section-title {
+  grid-column: 1 / -1;
   font-size: var(--text-sm);
   font-weight: 500;
   color: var(--text-faint);
@@ -5362,10 +5579,11 @@ mark.find-hit.current {
 }
 
 .board-row {
-  display: flex;
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  column-gap: inherit;
   align-items: baseline;
-  justify-content: space-between;
-  gap: 24px;
   padding: 7px 0;
   border-bottom: 1px solid var(--border);
 }
@@ -5375,16 +5593,22 @@ mark.find-hit.current {
 }
 
 .board-label {
+  grid-column: 1;
   font-size: var(--text-base);
   color: var(--text);
-  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
+/* Left, not right. A long value ("0 probes · 1 port · no toolchain") set
+   flush right ran into the pane's edge and started wherever its own length
+   put it, so it was read right-to-left against nothing. It starts on the
+   value edge now and reads in the same direction as its label. */
 .board-value {
+  grid-column: 2;
   font-family: var(--mono);
   font-size: var(--text-sm);
   color: var(--text-secondary);
-  text-align: right;
+  text-align: left;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -5403,18 +5627,29 @@ mark.find-hit.current {
   color: var(--danger);
 }
 
+/* A note explains the row (or the headline) above it, so it sits on the value
+   edge and starts where that value starts — reading a note under a row is one
+   downward step, not a trip across the pane. It used to be right-aligned,
+   which under a left-aligned value made the two lines lean away from each
+   other. */
 .board-note {
+  grid-column: 2;
   font-size: var(--text-xs);
   color: var(--text-faint);
   margin-top: 2px;
-  text-align: right;
+  text-align: left;
 }
 
+/* Empty and placeholder states are prose, not data: same edge as the notes,
+   no centring (a centred sentence under a left-aligned title was the third
+   alignment rule this pane had). */
 .board-empty {
-  padding: 24px;
-  text-align: center;
+  grid-column: 2;
+  padding: 4px 0 10px;
   font-size: var(--text-base);
+  line-height: 1.5;
   color: var(--text-faint);
+  text-align: left;
 }
 
 .board-empty strong {
@@ -5424,14 +5659,20 @@ mark.find-hit.current {
   font-weight: 500;
 }
 
+/* The chips and the tail preview are content, not labels, so they read the
+   value track like every other value. They are direct children of the
+   section's subgrid; without an explicit column the auto-placement algorithm
+   would drop them into the narrow label track. */
 .board-targets {
+  grid-column: 2;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 6px;
 }
 
-.board-target {
+.board-target,
+.board-port {
   padding: 4px 10px;
   border-radius: var(--radius-sm);
   font-family: var(--mono);
@@ -5440,17 +5681,20 @@ mark.find-hit.current {
   text-align: left;
 }
 
-.board-target:hover {
+.board-target:hover,
+.board-port:hover {
   background: var(--surface-hover);
   color: var(--text);
 }
 
-.board-target.active {
+.board-target.active,
+.board-port.active {
   background: var(--accent-soft);
   color: var(--accent-text);
 }
 
 .board-actions {
+  grid-column: 2;
   display: flex;
   gap: 6px;
   margin-top: 8px;
@@ -5478,10 +5722,13 @@ mark.find-hit.current {
   flex: 0 0 auto;
 }
 
-/* The second row holds the stream controls; it keeps its own border so the
-   two rows read as one toolbar rather than two unrelated strips. */
+/* The second row holds the stream controls. It needs its own top padding:
+   the row above ends in a 1px rule, and a zero top padding put the filter
+   chips flush against that rule — they read as struck through by it rather
+   than sitting under it. `padding: 7px 10px` is inherited from
+   `.serial-toolbar`, so this only restores the top half. */
 .serial-toolbar-controls {
-  padding-top: 0;
+  padding-top: 7px;
   border-bottom: none;
 }
 
@@ -5508,14 +5755,29 @@ mark.find-hit.current {
   white-space: nowrap;
 }
 
+/* `appearance: none` is what makes `border-radius` visible.
+ *
+ * The native `<select>` paints its own chrome on Windows — a square-ish field
+ * with the platform's combo arrow — and that chrome ignores the radius, so the
+ * measured 6px corner was there but never drawn. Turning the appearance off
+ * hands the box back to this rule; the arrow has to be drawn here instead
+ * (an inline SVG caret in the background, which also keeps it on the text
+ * colour rather than the OS accent). */
 .serial-select {
-  background: var(--surface);
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--surface);
+  /* Caret: a 9×6 chevron, 9px from the right edge, tinted with the secondary
+     text colour so it reads as affordance rather than content. */
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' fill='none' stroke='%239aa3b2' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text-secondary);
   font-family: var(--mono);
   font-size: var(--text-sm);
-  padding: 3px 6px;
+  padding: 3px 22px 3px 6px;
   outline: none;
   min-width: 0;
   max-width: 108px;
@@ -5857,7 +6119,7 @@ mark.find-hit.current {
   gap: 8px;
   padding: 8px 12px;
   border-top: 1px solid var(--border);
-  background: var(--panel);
+  background: var(--surface);
 }
 
 .serial-send-input {
@@ -5882,7 +6144,7 @@ mark.find-hit.current {
   align-items: center;
   gap: 4px;
   font-size: var(--text-xs);
-  color: var(--text-dim);
+  color: var(--text-faint);
   white-space: nowrap;
   cursor: pointer;
 }
@@ -5890,10 +6152,11 @@ mark.find-hit.current {
 /* ---------- board pane: serial tail preview ---------- */
 
 .board-serial-tail {
+  grid-column: 2;
   margin: 6px 0;
   padding: 8px 10px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   background: var(--bg);
   font-family: var(--mono);
   font-size: var(--text-xs);
@@ -5909,7 +6172,7 @@ mark.find-hit.current {
 }
 
 .board-serial-line .serial-time {
-  color: var(--text-dim);
+  color: var(--text-faint);
   margin-right: 8px;
 }
 
@@ -5917,6 +6180,8 @@ mark.find-hit.current {
 .board-serial-line.error { color: var(--danger); }
 
 .board-serial-open {
+  grid-column: 2;
+  justify-self: start;
   margin-top: 4px;
 }
 
@@ -5925,7 +6190,7 @@ mark.find-hit.current {
 .serial-counters {
   font-family: var(--mono);
   font-size: var(--text-xs);
-  color: var(--text-dim);
+  color: var(--text-faint);
   white-space: nowrap;
 }
 
@@ -5936,7 +6201,7 @@ mark.find-hit.current {
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--border);
-  background: var(--panel);
+  background: var(--surface);
 }
 
 .serial-send-options {
@@ -5963,8 +6228,8 @@ mark.find-hit.current {
   height: 26px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: var(--panel);
-  color: var(--text-dim);
+  background: var(--surface);
+  color: var(--text-faint);
   cursor: pointer;
   white-space: nowrap;
   flex: 0 0 auto;

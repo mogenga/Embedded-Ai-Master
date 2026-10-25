@@ -10,6 +10,7 @@
 import { settingsStrings } from "./settings-i18n.js";
 import { availableModelEntries, connectionSummary } from "./settings-models.js";
 import { iconEl, setIcon } from "./icons.js";
+import { normalizeTranscriptView } from "./thinking-view.js";
 
 /**
  * Does this value look like an API key rather than the NAME of a variable?
@@ -548,11 +549,19 @@ function applyUiPreference(key, value) {
       document.documentElement.dataset.width = value;
       localStorage.setItem("prometheus.width", value);
       break;
-    case "transcriptView":
-      state.transcriptView = value;
-      document.documentElement.dataset.view = value;
-      localStorage.setItem("prometheus.view", value);
+    case "transcriptView": {
+      // Thinking blocks fold per block now, so this preference no longer
+      // decides whether reasoning is visible. What it still controls is
+      // whether a tool result opens as it arrives (`verbose`) or stays behind
+      // its toggle. A stored `thinking` from an older build meant "show
+      // reasoning", which every block now does on demand — it collapses to
+      // `normal` rather than surviving as an option that changes nothing.
+      const view = normalizeTranscriptView(value);
+      state.transcriptView = view;
+      document.documentElement.dataset.view = view;
+      localStorage.setItem("prometheus.view", view);
       break;
+    }
     case "reduceMotion":
       document.documentElement.dataset.motion = value ? "reduced" : "full";
       localStorage.setItem("prometheus.motion", value ? "reduced" : "full");
@@ -722,10 +731,14 @@ function buildAppearancePage() {
         label: s.view,
         desc: s.viewDesc,
         control: sSelect({
-          value: state.transcriptView ?? "normal",
+          value: normalizeTranscriptView(state.transcriptView),
+          // Two options, not three. `thinking` used to mean "show the
+          // reasoning text"; every block now opens on its own header, so that
+          // option would be a control that changes nothing. What is left is
+          // the one difference the setting still makes: whether tool output
+          // is already open when it arrives.
           options: [
             { value: "normal", label: s.viewNormal },
-            { value: "thinking", label: s.viewThinking },
             { value: "verbose", label: s.viewVerbose },
           ],
           onChange: (value) => applyPref("transcriptView", value),
@@ -3751,26 +3764,156 @@ function dataFolderPath() {
   return "$HARNESS_HOME (default ~/.harness)";
 }
 
-function buildAboutPage() {  const s = S();
+/**
+ * How each update state is worded, and what the click does next.
+ *
+ * One table rather than a chain of ifs in the builder: the page has to answer
+ * the same question twice (on build and when a status arrives over the event
+ * channel), and two copies of this mapping would eventually disagree.
+ *
+ * `action` is the only button the state offers, or `null`. Every state that has
+ * nothing to act on gets no button — a disabled control that can never become
+ * enabled is the same lie as a control that does nothing (D-188).
+ */
+function updateStatusView(status) {
+  const s = S();
+  const version = typeof status?.version === "string" ? status.version : "";
+  switch (status?.state) {
+    case "unsupported":
+      return {
+        text: status.reason === "dev" ? s.updateUnsupportedDev : s.updateUnsupportedMissing,
+        action: null,
+      };
+    case "checking":
+      return { text: s.updateChecking, action: null };
+    case "up-to-date":
+      return {
+        text: version === "" ? s.updateCurrent : `${s.updateCurrent} ${version}`,
+        action: { id: "check", label: s.updateCheckAgain, run: "check" },
+      };
+    case "available":
+      return {
+        text: version === "" ? s.updateAvailable : `${s.updateAvailable} ${version}`,
+        action: { id: "download", label: s.updateDownload, run: "download", primary: true },
+      };
+    case "downloading":
+      return {
+        text: `${s.updateDownloading} ${typeof status.percent === "number" ? status.percent : 0}%`,
+        action: null,
+      };
+    case "downloaded":
+      return {
+        text: version === "" ? s.updateDownloaded : `${s.updateDownloaded} ${version}`,
+        action: { id: "install", label: s.updateInstall, run: "install", primary: true },
+      };
+    case "error": {
+      // The reason is the actionable half: "could not check" alone leaves the
+      // user with nothing to do. `updateErrorReason` never returns "" — an
+      // unknown code maps to its own sentence rather than to silence (R3).
+      const reason = updateErrorReason(status.reason);
+      const detail = typeof status.message === "string" && status.message !== "" ? ` (${status.message})` : "";
+      return {
+        text: `${s.updateError} ${reason}${detail}`,
+        action: { id: "check", label: s.updateCheckAgain, run: "check" },
+      };
+    }
+    default:
+      // `idle`, or a state this build does not know: offer the check, which is
+      // the only way to learn anything.
+      return {
+        text: s.updateIdle,
+        action: { id: "check", label: t.checkUpdate, run: "check" },
+      };
+  }
+}
+
+/** The reason sentence for a failed check/download. Never empty. */
+function updateErrorReason(reason) {
+  const s = S();
+  switch (reason) {
+    case "network":
+      return s.updateReasonNetwork;
+    case "no-release":
+      return s.updateReasonNoRelease;
+    case "no-manifest":
+      return s.updateReasonNoManifest;
+    case "signature":
+      return s.updateReasonSignature;
+    case "checksum":
+      return s.updateReasonChecksum;
+    case "download":
+      return s.updateReasonDownload;
+    case "config":
+      return s.updateReasonConfig;
+    case "manifest":
+      return s.updateReasonManifest;
+    default:
+      return s.updateReasonUnknown;
+  }
+}
+
+function buildAboutPage() {
+  const s = S();
   const pane = sPage(s.pageAbout, s.pageAboutDesc);
+  // The product mark, at the size where the gradient actually reads. It is a
+  // raster (`assets/mark.png`) rather than the sprite's SVG: the logo has its
+  // own colours, which `currentColor` cannot carry.
+  const head = el("div", "about-head");
+  const logo = document.createElement("img");
+  logo.className = "about-mark";
+  logo.src = "assets/mark.png";
+  logo.alt = "";
+  logo.setAttribute("aria-hidden", "true");
+  logo.draggable = false;
+  head.appendChild(logo);
+  head.appendChild(el("span", "about-name", "Embedded AI Master"));
+  pane.appendChild(head);
+
   const row = el("section", "about-row");
-  row.appendChild(el("span", "about-version", `Embedded AI Master ${state.appVersion ?? ""}`));
-  const check = sButton(t.checkUpdate, async () => {
-    const note = $("update-note");
-    note.textContent = t.updateChecking;
-    const result = await api.checkUpdate();
-    if (!result || result.status === "unconfigured") note.textContent = t.updateUnconfigured;
-    else if (result.status === "error") note.textContent = `${t.updateError} ${result.message ?? ""}`;
-    else if (result.status === "available") {
-      note.textContent = `${t.updateAvailable} ${result.latest}`;
-      if (result.url) note.appendChild(sButton(t.updateOpen, () => api.openExternal(result.url), { quiet: true }));
-    } else note.textContent = t.updateCurrent;
-  });
-  row.appendChild(check);
-  pane.appendChild(row);
-  const note = el("div", "settings-hint", "");
+  // The product name is in the header above; this row is the build identity.
+  row.appendChild(el("span", "about-version", `v${state.appVersion ?? "?"}`));
+
+  const actions = el("div", "about-actions");
+  const note = el("div", "settings-hint update-note");
   note.id = "update-note";
+  note.setAttribute("role", "status");
+  // The page is rebuilt on every visit, so it draws from whatever the main
+  // process last decided rather than starting at "checking" and waiting.
+  const paint = (status) => {
+    state.updateStatus = status;
+    const view = updateStatusView(status);
+    note.textContent = view.text;
+    actions.innerHTML = "";
+    if (view.action === null) return;
+    const button = sButton(
+      view.action.label,
+      () => {
+        // The click starts the work; the resulting state arrives as an
+        // `update_status` event, so the page never assumes an outcome.
+        if (view.action.run === "check") void api.updateCheck();
+        else if (view.action.run === "download") void api.updateDownload();
+        else if (view.action.run === "install") void api.updateInstall();
+      },
+      { primary: view.action.primary === true },
+    );
+    button.dataset.updateAction = view.action.id;
+    actions.appendChild(button);
+  };
+  paint(state.updateStatus ?? { state: "idle" });
+  state.renderAboutUpdate = paint;
+  row.appendChild(actions);
+  pane.appendChild(row);
   pane.appendChild(note);
+  // Asked for, not assumed: the main process owns the state, and this page may
+  // be the first thing that reads it after a check ran at startup. The call
+  // only reads the cached status — it does not contact the release feed.
+  if (typeof api.updateStatus === "function") {
+    void api.updateStatus().then((status) => {
+      // The page may have been closed or rebuilt while the answer was in
+      // flight; only paint if this closure still owns the visible note.
+      if (state.renderAboutUpdate === paint && status) paint(status);
+    });
+  }
   pane.appendChild(
     sGroup(s.groupData, [
       sRow({
@@ -4140,6 +4283,18 @@ function basename(path) {
         // stale answer must not land on whatever is on screen now.
         if (state.settingsTab === "kb" && !settingsDialog.hidden) state.renderKbPage?.();
         break;
+      case "update_status": {
+        // The main process owns the updater; this page only draws. Painted in
+        // place rather than by rebuilding the page, because a rebuild would
+        // throw away the scroll position and the Data group's measured paths
+        // for a line of text that changed.
+        const status = message.status;
+        if (status && typeof status.state === "string") {
+          state.updateStatus = status;
+          state.renderAboutUpdate?.(status);
+        }
+        break;
+      }
       case "corpus_status":
         // Two shapes arrive here, and they mean different things. A `status`
         // object is one of the kernel's seven states; an `error` is the host

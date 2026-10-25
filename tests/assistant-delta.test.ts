@@ -102,3 +102,113 @@ describe("createAssistantDeltaWriter", () => {
     expect(deltas).toHaveLength(1);
   });
 });
+
+describe("createAssistantDeltaWriter 的思考通道", () => {
+  const deltasOf = (session: SessionHandle) =>
+    session.events().filter(
+      (event) => event.type === "assistant_delta" || event.type === "thinking_delta",
+    );
+
+  it("pushThinking 落成 thinking_delta，与正文共用一套批量参数", async () => {
+    const session = await makeSession();
+    const writer = createAssistantDeltaWriter({ session, maxChars: 1000, maxDelayMs: 10_000 });
+
+    writer.pushThinking("先看");
+    writer.pushThinking("串口");
+    await writer.flush();
+
+    const events = deltasOf(session);
+    expect(events.map((event) => event.type)).toStrictEqual(["thinking_delta"]);
+    expect(events[0]?.payload).toStrictEqual({ text: "先看串口" });
+  });
+
+  it("推理与正文按到达顺序交错，不因批量而重排", async () => {
+    const session = await makeSession();
+    const writer = createAssistantDeltaWriter({ session, maxChars: 1000, maxDelayMs: 10_000 });
+
+    writer.pushThinking("想");
+    writer.push("答");
+    writer.pushThinking("再想");
+    writer.push("再答");
+    await writer.flush();
+
+    // 这是最重要的一条：两个独立缓冲各带一个定时器时，正文可能先攒满
+    // 400 字符而立刻落盘、推理还在等 60ms 的定时器，日志里就会变成
+    // 「答在前、想在后」——转录的真实顺序就此丢失。
+    expect(deltasOf(session).map((event) => [event.type, event.payload.text])).toStrictEqual([
+      ["thinking_delta", "想"],
+      ["assistant_delta", "答"],
+      ["thinking_delta", "再想"],
+      ["assistant_delta", "再答"],
+    ]);
+  });
+
+  it("相邻的同通道片段合并成一条事件，跨通道不合并", async () => {
+    const session = await makeSession();
+    const writer = createAssistantDeltaWriter({ session, maxChars: 1000, maxDelayMs: 10_000 });
+
+    writer.pushThinking("a");
+    writer.pushThinking("b");
+    writer.push("c");
+    writer.push("d");
+    writer.pushThinking("e");
+    await writer.flush();
+
+    const events = deltasOf(session);
+    expect(events.map((event) => [event.type, event.payload.text])).toStrictEqual([
+      ["thinking_delta", "ab"],
+      ["assistant_delta", "cd"],
+      ["thinking_delta", "e"],
+    ]);
+  });
+
+  it("超限阈值按两个通道的字符合计计算", async () => {
+    const session = await makeSession();
+    const writer = createAssistantDeltaWriter({ session, maxChars: 4, maxDelayMs: 10_000 });
+
+    writer.pushThinking("12");
+    writer.push("34");
+    // 合计已到 4 个字符，不等 flush 就应当落盘。轮询而不是睡固定时长：
+    // 落盘是带 fsync 的真实写，耗时随机器变化（见上一条用例的注释）。
+    await vi.waitFor(
+      () => {
+        expect(deltasOf(session).length).toBeGreaterThanOrEqual(1);
+      },
+      { timeout: 2000, interval: 5 },
+    );
+    await writer.flush();
+    expect(deltasOf(session).map((event) => [event.type, event.payload.text])).toStrictEqual([
+      ["thinking_delta", "12"],
+      ["assistant_delta", "34"],
+    ]);
+  });
+
+  it("pushThinking 的空串不产生事件", async () => {
+    const session = await makeSession();
+    const writer = createAssistantDeltaWriter({ session, maxDelayMs: 10_000 });
+
+    writer.pushThinking("");
+    await writer.flush();
+
+    expect(deltasOf(session)).toStrictEqual([]);
+  });
+
+  it("思考写失败也计入 dropped，不影响正文落盘", async () => {
+    const session = await makeSession();
+    await session.close();
+    const errors: unknown[] = [];
+    const writer = createAssistantDeltaWriter({
+      session,
+      maxDelayMs: 10_000,
+      onError: (error) => errors.push(error),
+    });
+
+    writer.pushThinking("思考");
+    writer.push("正文");
+    await writer.flush();
+
+    // 两条都失败（会话已关闭），dropped 按字符合计。
+    expect(errors.length).toBe(2);
+    expect(writer.dropped).toBe(4);
+  });
+});

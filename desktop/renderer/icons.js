@@ -13,14 +13,14 @@
  */
 
 const ICONS = {
-  /* brand: one cycle of a digital signal on a tile.
+  /* The brand mark is **not** in this sprite.
    *
-   * This was a monogram tile, and the letterform it carried was the previous
-   * project's initial — the mark kept naming the tool this one replaced. A
-   * square wave says what the product is (a probe reading a line that is
-   * either high or low, never "sort of"), stays legible at 16 px, and cannot
-   * be mistaken for a flame, which is what every other agent uses. */
-  mark: '<rect x="1.5" y="1.5" width="21" height="21" rx="6.2" fill="currentColor" stroke="none"/><path d="M5.6 15.2H10V8.8h4v6.4h4.4" fill="none" stroke="var(--on-accent)" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"/>',
+   * It was a single-colour SVG square wave, which is how it stayed legible at
+   * 16 px. The product now has a real logo (a gradient), and `currentColor`
+   * cannot express it — so the mark lives at `assets/mark.png` and the two
+   * places that draw it use `<img class="mark">` / `<img class="empty-mark">`.
+   * Everything else here is still a one-ink glyph on the 24×24 grid; do not
+   * move them off that grid to match the logo. */
 
   /* actions */
   plus: '<path d="M12 5v14M5 12h14"/>',
