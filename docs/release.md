@@ -5,7 +5,8 @@
 相关文档：
 
 - `docs/code-signing.md` —— Windows 代码签名（证书从哪来、怎么配、怎么验）。
-- `docs/deferred-issues.md` **D-212** —— 发布链路从未真正跑过一次，且没有应用内自动更新。
+- `docs/deferred-issues.md` **D-212** —— 发布链路从未真正跑过一次（`v0.1.0` 已发布）；应用内自动更新**已接入**（见 §12），残余边界见 §12.6。
+- `docs/deferred-issues.md` **D-217** —— 未签名构建下，下载到的更新包不做签名校验。
 - `docs/deferred-issues.md` **D-211** —— 签名配置就位但从未验证过真实签名。
 - `docs/deferred-issues.md` **D-209** —— 根与 `desktop/` 的 Electron 版本不一致。
 - `docs/deferred-issues.md` **D-213** —— `resources/` 缺 `{ "type": "module" }`，所有安装用户多付一次重解析（已修，原因见 §11）。
@@ -17,19 +18,20 @@
 | 项 | 状态 | 依据 |
 |---|---|---|
 | 仓库 | `mogenga/Embedded-Ai-Master`，**public** | GitHub API 实测 `private: false`、`visibility: public` |
-| Releases | **一条都没有** | `has_downloads: false`，从未发布过 |
+| Releases | **`v0.1.0` 已发布**（3 个资产，匿名可下载） | 发布后实测 HTTP 206 |
 | `desktop/package.json` 的 `build.publish` | 已配置 GitHub provider | `npx electron-builder --win --x64 --dir` 退出 0，schema 接受 |
 | `gh` CLI | **已安装且已登录**，但**不在 `PATH` 里** | 版本 2.103.2，路径 `C:\Program Files\GitHub CLI\gh.exe`；`gh auth status` 退出 0，账号 `mogenga` |
-| `electron-updater` | **未安装** | `package.json` / `desktop/package.json` 里都没有这个依赖 |
-| 应用内自动更新 | **没有** | 宿主没有任何更新检查代码 |
+| `electron-updater` | **已写进 `desktop/package.json`（`^6.8.11`），需用户执行 `npm --prefix desktop install`** | 依赖声明在；`node_modules` 里尚未落地（安装由用户执行） |
+| 应用内自动更新 | **已接入**（`desktop/updater.js` + 主进程 IPC + 关于页） | 见 §12 |
 | 签名 | 配置就位，**从未真实签过** | 本机无证书，见 `docs/code-signing.md` §7 |
-| 图标 | 未设置 | 构建日志 `default Electron icon is used` |
+| 图标 | 已配置 `build/icon.ico` | `desktop/package.json` 的 `win.icon` |
 
-**两条由此推出的结论，写在这里免得被误解：**
+**三条由此推出的结论，写在这里免得被误解：**
 
-1. **用户收不到应用内更新提醒。** 没有 `electron-updater`，安装了旧版的用户不会被告知有新版本。他们只能自己去
-   `https://github.com/mogenga/Embedded-Ai-Master/releases` 看。这是 D-212 的一半。
-2. **`latest.yml` 目前是死文件。** 它由 electron-builder 生成、随 release 上传，但仓库里没有任何代码读它。先产出来不碍事——将来接了 `electron-updater` 就是现成的，不用回头重发旧版本。
+1. **用户能收到应用内更新提醒，但需要手动确认。** 关于页会显示有没有新版；**下载与安装各需一次点击**，不会静默发生（§12.3）。
+2. **`latest.yml` 不再是死文件。** `electron-updater` 读它判断版本与文件哈希。因此**每次发布都必须上传它**，否则用户看到的是「该 release 缺少更新清单」。
+3. **未签名期间下载到的更新包不做签名校验。** 完整性只靠 `latest.yml` 的 sha512，见 D-217 与 §12.6。
+
 
 ### `gh` 为什么不在 PATH 里
 
@@ -190,9 +192,9 @@ sha512: <base64>
 releaseDate: '2026-10-25T...'
 ```
 
-（上面是按源码换算出的预期形状，`url` / `path` 的名字规则见 §2 末。因为从未跑过完整 NSIS 打包，**这份内容没有产物证据**，只有源码依据——D-212 记录了这一点。）
+（上面是按源码换算出的预期形状，`url` / `path` 的名字规则见 §2 末。`v0.1.0` 的完整 NSIS 打包已产出该文件，实测内容与预期一致：`url` 与 `path` 都是 `Embedded-AI-Master-Setup-0.1.0.exe`。）
 
-**本项目现在没有接 `electron-updater`，所以它暂时没用。** 先产出来不碍事：接了之后，已经发布的旧版本能直接指向这份文件，不必重发。这是 D-212 的另一半。
+**`latest.yml` 现在是活的：`electron-updater` 读它**（§12.2）。它必须与安装包一起上传，且里面的 `sha512` / `size` 必须与那个包一致——`electron-updater` 会用 `sha512` 校验下载到的文件。
 
 同一个 `publish` 配置还会让 electron-builder 在安装包的 `resources/` 下写一份 `app-update.yml`（内容是本机的 provider 配置副本，供 `electron-updater` 读取）。**`--dir` 构建不会写它**——`--dir` 的 target 不是 NSIS，`PublishManager.onAfterPack` 里的 `isSuitableWindowsTarget` 判断为假就直接返回了。完整 NSIS 打包才会出现。
 
@@ -337,7 +339,10 @@ node scripts/verify-signature.mjs "desktop/dist-installer/Embedded-AI-Master-Set
 | 构建日志有 `signing with signtool.exe` 但产物未签名 | 那行在判断之前无条件打印 | 以 `verify-signature.mjs` 的结果为准，见 `docs/code-signing.md` §7 |
 | `gh release create` 后 tag 指向了别的提交 | 先建 release 后打 tag | 先推 tag，或加 `--verify-tag`，见 §2 |
 | 手动上传后远端资产名与 `latest.yml` 里的不一致 | GitHub 把空格改写为连字符 | 见 §2 末「手动上传时要注意文件名不一致」 |
-| 用户说「我没收到更新提醒」 | 没有 `electron-updater` | 这是 D-212，不是 bug |
+| 关于页显示「当前构建缺少更新模块」 | 打包时 `electron-updater` 没进 `resources/node_modules` | 跑 `npm --prefix desktop install` 后重新完整打包（§12.6 第 5 条） |
+| 关于页显示「开发形态不提供更新」 | 从源码跑（`app.isPackaged === false`） | 不是 bug：`app-update.yml` 只在安装版里（§12.5） |
+| 关于页显示「该 release 缺少更新清单（latest.yml）」 | 发布时忘传 `latest.yml` | 补传后重试；不是「没有新版本」（§12.4） |
+| 用户说「检查更新失败：连不上更新服务器」 | 网络 / 代理 / DNS | 与发布无关，先确认能打开 `github.com` |
 | 首次启动 stderr 有 `MODULE_TYPELESS_PACKAGE_JSON` 警告 | `resources/` 缺 `package.json` | 已修（见 §11）；若复现说明 `resources/package.json` 丢了 |
 | 启动时的重解析开销（无警告，只是变慢） | 同上，警告按进程只报一次且 `node_modules` 下不报 | 已修（见 §11） |
 
@@ -451,9 +456,114 @@ C:\                                              ← 没有
 
 ---
 
-## 12. 相关条目
+## 12. 应用内自动更新
 
-- **D-212** —— 发布链路从未真正跑过一次 release；`electron-updater` 未接入。
+用户装过一版之后，新版本**从应用里就能装**，不必再回 Releases 页面下载安装包。
+
+### 12.1 用户怎么收到新版
+
+三层，全部在**设置 → 关于**页：
+
+| 环节 | 谁触发 | 用户看到 |
+|---|---|---|
+| 检查 | 启动时（可关，见「行为」页的「启动时检查更新」）或点「检查更新」 | 「正在检查…」→「已是最新版本。」/「有新版本：0.2.0」/ 失败原因 |
+| 下载 | **只有用户点「下载」** | 「正在下载 42.3%」→「已下载；安装会重启应用。」 |
+| 安装 | **只有用户点「重启并安装」** | 应用退出，NSIS 安装，装完自动启动新版本 |
+
+有新版时，转录里还会多一行提示（`Embedded AI Master 0.2.0 is available (About → Check for updates).`）——同一个版本只提示一次。
+
+### 12.2 更新源是什么
+
+**GitHub Releases**，就是 §1 那个仓库，没有另设更新服务器。
+
+安装版里有一份 `resources/app-update.yml`（由 `build.publish` 生成，完整 NSIS 打包才有，§4 讲过）：
+
+```yaml
+owner: mogenga
+repo: Embedded-Ai-Master
+provider: github
+releaseType: release
+updaterCacheDirName: embedded-ai-master-desktop-updater
+```
+
+`electron-updater` 24 小时最多查一次（库自己的节流），从
+`https://github.com/mogenga/Embedded-Ai-Master/releases/latest/download/latest.yml` 读版本号与文件信息。**所以「发一个 release」就是「发一个新版本」**——`releaseType` 显式写的是 `release` 而不是默认的 `draft`，草稿不会出现在 `releases/latest`，因此也不会被更新器看到。
+
+**发布流程本身不变**（§2）。唯一新增的约束：`latest.yml` 必须随 release 上传，否则用户会看到「该 release 缺少更新清单（latest.yml）」——那是发布事故，不是「没有新版本」。
+
+### 12.3 为什么不做静默更新
+
+这是刻意的，不是没做：
+
+**检查可以自动，下载和安装不能。**
+
+1. **用户可能正在长任务里。** 装更新要先退出应用；一次跑了十几分钟的构建或调试会话没有理由被一个后台动作打断。
+2. **静默变更让「同一问题回答不同」无法解释。** 这条理由与 `docs/corpus-ota.md` §6 对语料 OTA 的结论是同一个：如果某天回答开始不一样，而用户没做任何事，他就失去了唯一的解释线索。应用升级比语料替换动的东西更多。
+3. **下载要占带宽和磁盘。** 安装包 113 MB；用户的网络可能是计费的。
+
+代码上不是「默认关掉」而是**显式关掉**：
+
+```js
+updater.autoDownload = false;          // 库默认 true：检查到就下
+updater.autoInstallOnAppQuit = false;  // 库默认 true：正常退出就装
+```
+
+两个开关都在 `desktop/updater.js` 的 `ensureUpdater()` 里，测试 `tests/desktop/updater.test.js` 有一条专门断言它们被设成 `false`。
+
+### 12.4 失败时用户看到什么
+
+**每一类失败都有自己的句子，绝不会把失败显示成「已是最新版本」（R3）。**
+
+| 状态 | 页面上的文案 | 通常意味着 |
+|---|---|---|
+| 网络失败 | 「检查更新失败：连不上更新服务器。」 | 断网、代理、DNS |
+| 没有 release | 「…没有找到已发布的版本。」 | 仓库还没有正式 release |
+| 缺 `latest.yml` | 「…该 release 缺少更新清单（latest.yml）。」 | **发布事故**：附件漏传 |
+| 签名不符 | 「…下载到的更新未由发布者签名。」 | 证书换了或包被替换 |
+| 校验和不符 | 「…下载的文件与其校验和不符。」 | 传输损坏或清单与包不一致 |
+| 下载失败 | 「…更新文件下载失败。」 | 资产 404、磁盘满、被中断 |
+| 配置错误 | 「…更新源配置不正确。」 | `app-update.yml` 缺失或 provider 不合法 |
+| 清单格式错误 | 「…release 清单格式不正确。」 | `latest.yml` 内容坏了 |
+| 无法识别 | 「…更新模块报了一个无法识别的错误。」 | 库新增了错误码 |
+| 开发形态 | 「开发形态不提供更新：更新源只存在于安装后的版本里。」 | 从源码跑 `npm run desktop` |
+| 缺依赖 | 「当前构建缺少更新模块，无法检查更新。」 | `electron-updater` 没装进包 |
+
+错误后面还会跟一段括号里的原始信息（已脱敏：URL 的 query 与 token 值被抹掉）。**开发形态与缺依赖这两条不画按钮**——按了也只会得到同一句话，那是 D-188 那类假控件。
+
+### 12.5 为什么不在宿主里做
+
+**宿主进程里做不了。** `desktop/host/host.js` 是以 `ELECTRON_RUN_AS_NODE=1` 启动的普通 Node 进程，没有 Electron API；`electron-updater` 的 `ElectronAppAdapter` 第一行就是 `require("electron").app`。所以更新器放在 `desktop/main.js`（Electron 主进程）里，宿主完全不知道有这回事。
+
+链路：
+
+```
+main.js ──createUpdater()──> updater.js ──> electron-updater
+   │                                            │
+   └─ ipcMain.handle: update-check/-download/-install
+   │
+   └─ BrowserWindow.webContents.send("host-event", {type:"update_status", status})
+                         │
+              preload.cjs 白名单: updateStatus/updateCheck/updateDownload/updateInstall
+                         │
+              renderer: 设置 → 关于
+```
+
+**状态走的是宿主同一条 `host-event` 通道**，没有第二根管子：渲染层只有一处读事件的地方，也就不存在「两条通道的顺序谁先」的问题。
+
+### 12.6 已知边界
+
+1. **一次真实的更新从未跑过。** 接入时 `v0.1.0` 是最新版，没有更新的版本可装。要验证「旧版提示新版」，必须先发一个 `v0.1.1`。（D-212 残余）
+2. **未签名期间，下载到的更新包不做签名校验。** `electron-updater` 在 `app-update.yml` 没有 `publisherName` 时直接放行；而 `publisherName` 只在有证书时才写得进去。完整性目前只靠 `latest.yml` 的 `sha512`。见 **D-217**。
+3. **`quitAndInstall` 的 NSIS 行为只有源码依据。** 调用是非静默的（`quitAndInstall(false, true)`），用户看得见安装进度；安装器收到 `--updated` 后走「等待应用退出 → 仍在就结束进程」的免确认路径。这条路径没有在真实更新里跑过。
+4. **更新要重启应用。** 没有热替换；正在跑的回合会随退出结束。
+5. **`electron-updater` 是运行时依赖，必须真的装进包。** `desktop/package.json` 的 `build.files` 里已加 `updater.js`；依赖本身由 `scripts/package-prepare.mjs` 的运行时闭包带进 `resources/node_modules`（与内核依赖同一条路）。**装完 `npm --prefix desktop install` 后要重新完整打包**，否则旧包里没有它，用户会看到「当前构建缺少更新模块」。
+
+---
+
+## 13. 相关条目
+
+- **D-212** —— 发布链路从未真正跑过一次 release；`electron-updater` 未接入（**应用内更新部分已解决**，残余见 §12.6）。
+- **D-217** —— 未签名构建下 `publisherName == null` 时下载包不做签名校验。
 - **D-211** —— 签名配置就位但从未验证过真实签名。
 - **D-208** —— 真实安装包从未产出（已被 2026-10-25 的 113 MB 产物部分关闭，仍缺干净机器安装验证）。
 - **D-209** —— 根与 `desktop/` 的 Electron 版本不一致。

@@ -1559,7 +1559,7 @@
 - **修复建议**: 从快捷键表删掉三条（或改成实际可用的键）；`Ctrl+E` 在 `effortChoices.levels` 为空时不发命令也不弹警告（控件已经隐藏，快捷键应同样沉默）；`Ctrl+\`` 改为 `closeWorkbench` 的别名或直接删除。
 - **状态**: **部分解决（2026-10-22 第十七轮）**。`Ctrl+E` 一项已按本条自己的修复建议处理：`effortChoices.levels` 为空时不发命令、不弹警告，控件与快捷键一起沉默；等级非空时 `setEffort` 已真正生效（见 D-169 的第十七轮补注），不再每按一次多一条警告。三条快捷键（`Ctrl+Shift+D` / `Ctrl+Shift+E` / `Ctrl+\``）与实现不符的部分未动，仍是未解决。
 
-### D-196 · `todos` / `ask_user` / `thinking_start` / `tool_delta` / `assistant_discard` 五个事件渲染器都有 handler，全链路没有生产者（`todos` 已解决）
+### D-196 · `todos` / `ask_user` / `thinking_start` / `tool_delta` / `assistant_discard` 五个事件渲染器都有 handler，全链路没有生产者（`todos`、`thinking_*` 已解决）
 
 - **发现**: 2026-10-22（新增 `ls` 工具时核对渲染器的事件处理面）。
 - **现象**: `desktop/renderer/app.js` 里五个 `case` 分支完整（`todos` 走 `renderPlan` 画出整张计划卡、`ask_user` 走审批条样式、其余三个各有处理），但 `grep '"todos"' src/ desktop/host/ desktop/renderer/bridge.js` 只在渲染器命中；`todo_write` 工具在内核里也不存在（`TOOL_LABELS` 与 `toolGlyph` 都给它留了位置）。也就是说计划卡那张「卡片建一次、原地打勾」的实现从上线起就没被点亮过。
@@ -1567,8 +1567,13 @@
 - **触发升级条件**: 需要让模型显式列出待办并在执行中打勾；或需要模型主动向用户提问（`ask_user`）。
 - **修复建议**: `todos` 最直接——加一个 `todo_write` 工具，输入 `{items:[{content,status}]}`，在 `tool_result` 之后写一条 `todos` 会话事件，宿主把它投影成 `todos` 事件即可（渲染器零改动）。`ask_user` 需要一个与审批条共用但语义不同的通道（审批是 allow/deny，提问是自由文本），要做就得改权限管线，不建议顺手做。`thinking_start` / `tool_delta` / `assistant_discard` 对应的能力内核都没有（模型适配层只有 `assistant_delta`），**建议直接删掉这三个 handler**——留着它们等于留着三条永远走不通的路径。
 - **修复**: 2026-10-22，`todos` 一项**已解决**——新增 `todo_write` 工具（`src/tools/todos.ts`）与 `todos` 会话事件（`src/session/types.ts`），`src/loop/query.ts` 的 `appendTodos` 在 `tool_result` 落盘之后写该事件。`todo_write` 判成 `access: "read"`：权限门控关心的是对工作区的副作用，而它只写会话日志——这件事每次工具调用都在做（`tool_started` / `tool_result`），它连一个字节的文件都不碰；判成 `write` 会让 `read-only` / `diagnose` 预设下的计划功能直接不可用，换不来任何安全收益。**`persistence.ts` 的 `EVENT_TYPES` 是读取时白名单不是写盘过滤器**：漏登记不会让写入失败，而会让下一次读盘抛 `unknown_event_type`、整份日志一起不可用（已用「写一条再读回来」的测试钉住）。渲染器侧 `protocol.js` 的 `KNOWN_TYPES` 同理——漏了每条计划更新都会变成一条「未识别的事件类型」警告。
-- **仍未解决**: `ask_user` / `thinking_start` / `tool_delta` / `assistant_discard` 四个 handler 仍无生产者，见下。
-- **状态**: **部分解决**（2026-10-22）：`todos` 已接通；其余四项未动。
+- **第二项修复（`thinking_*`，2026-10-25）**: 本条原先的建议是「`thinking_start` / `tool_delta` / `assistant_discard` 对应的能力内核都没有，**建议直接删掉这三个 handler**」。用户随后明确要求「思考过程外显」，方向与本条建议**相反**：不是删掉 handler，而是把内核到渲染器的那条链路接通。实现如下（三条不可分割，任一条缺失都会让功能变成半成品或污染上下文）：
+  1. **内核产出**——`src/model/openai.ts` 读流式 `delta.reasoning_content`（DeepSeek 惯例）与 `delta.reasoning`（OpenRouter / GPT-OSS 惯例，OpenAI cookbook 推荐），优先前者；一次性响应读 `message.reasoning_content` / `message.reasoning`。走独立的可选回调 `onReasoningDelta`，**绝不**混进 `onDelta`。「不是字符串就忽略」而不是抛错：这是网关的可选扩展，当必需字段处理会让每个不支持推理的模型都挂掉；不确定的字段形状（OpenRouter 的 `reasoning_details` 数组）因此也不会被误读。
+  2. **内核落盘**——新增会话事件 `thinking_delta`（`src/session/types.ts`），**只有一个类型，没有 start/end**：段落边界是纯投影状态，「上一条是不是 `thinking_delta`」就能推出来，多两种事件类型就多两处必须与 `assistant_delta` 保持一致的地方，且不携带任何新事实。`persistence.ts` 的读取白名单已登记（漏登记会让整份日志不可读）。`src/loop/assistant-delta.ts` 的 writer 扩成双通道单队列：推理与正文按**到达顺序**交错落盘，相邻同通道片段仍合并，批量参数（60ms / 400 字符）不变。
+  3. **宿主补 start/end**——`desktop/renderer/protocol.js` 把 `thinking_delta` 转成 `thinking_start`（段落首次出现时）→ `thinking_text`（逐条）→ `thinking_end`（遇到 `assistant` / `assistant_delta` / `tool_*` / `user` / `status` / `interrupted` 时）。**只带状态的事件（`usage` / `checkpoint` / `mcp_status` / `device_status` / `compaction` / `permission_decision`）刻意不打断**：`usage` 帧在流中途到达是常态，按它切段会把一条思路断成读者看不出原因的几块。渲染器三个 handler 因此**零改动**——它那套状态机是既有的、已测过的，改宿主比改它风险小。
+- **最重要的一条边界**：`buildMessages` **显式跳过** `thinking_delta`。`assistant` 正文会被原样投影回下一次请求，推理若混进去等于让模型重复消费自己的思考——既浪费 token，也可能诱导它照抄上一轮的推理路径。`src/context/build.ts` 把它与 `assistant_delta` 放进同一个丢弃分支，两处测试钉住：`tests/build.test.ts`（投影结果里不含推理文本，且允许它出现在未闭合的工具批次中间）、`tests/events-producers.test.ts`（真实 `query` 路径下日志有推理、上下文里没有）。适配器的重试守卫也把推理算作「已交付」——只认正文时，一次超时重试会把同一段思考在转录里写两遍（已用「交付后超时不再重试」的用例反向验证：去掉守卫后请求数由 1 变 4）。
+- **仍未解决**: `ask_user` / `tool_delta` / `assistant_discard` 三个 handler 仍无生产者，见下。`thinking_start` / `thinking_end` 现在**有**生产者（宿主），不再是死代码；`thinking_start` 原先「建议删除」的判断已被本轮的实现取代。
+- **状态**: **部分解决**（2026-10-25 更新）：`todos`（2026-10-22）与 `thinking_*`（2026-10-25）已接通；`ask_user` / `tool_delta` / `assistant_discard` 三项未动，仍按原建议保留为「无生产者」。
 
 ### D-195 · 每一条带工具调用的回合都没有上下文占用率（`usage` 事件在工具批次闭合前测量，必然抛错被吞）
 
@@ -1987,10 +1992,32 @@
 - **修复建议**: 按 `docs/code-signing.md` §2 设 `WIN_CSC_LINK` + `WIN_CSC_KEY_PASSWORD`（证书放仓库外），重打包（不带 `--dir`，需要 winCodeSign 工具链），然后用 `node scripts/verify-signature.mjs "<安装包路径>"` 确认退出码 0；再用 `signtool verify /pa /v` 确认时间戳字段非空。最后确认安装包内 `resources/app-update.yml` 的 `publisherName` 与证书 Subject 一致。
 - **状态**: 未解决（配置就位，真实签名未验证）。文档见 `docs/code-signing.md`。
 
+#### 2026-10-25 补充：用自签名证书跑通了真实签名链路（产物已删除，配置已改）
+
+上面「有证书时能否真的签上」不再是纯纸面推断——用一张**一次性自签名证书**（`New-SelfSignedCertificate`，实验后已从证书存储与磁盘全部删除）驱动真实的 electron-builder 26.15.3 跑完了 `--dir` 与完整 NSIS 两种打包，结论如下。
+
+- **默认的双签配置在本机会直接让构建失败。** `signingHashAlgorithms` 的默认值是 `['sha1','sha256']`，第一轮 SHA-1 走 `signtool sign /t <url> /f <pfx> ...`，**不带 `/fd`**（`computeWindowsSignArgs` 里只有 `options.hash !== "sha1"` 时才 push `/fd`）。用本机的 `signtool.exe`（Windows Kits **10.0.22621.0**）实测：
+  ```
+  SignTool Error: No file digest algorithm specified. Please specify the digest algorithm with the /fd flag.
+  ```
+  退出码 1，`signFile` 抛错，`electron-builder` 以 `failedTask=build` 中止——**不是「签名被跳过」，是整个打包失败**。旧版 signtool 会隐式按 SHA-1 处理，所以这条只在较新的 SDK 上暴露；electron-builder 自带的 winCodeSign 工具链（`windows-10/x64/signtool.exe`）行为未经本机验证（本次下载遇到 `ECONNRESET`）。
+  - **已修复**：`desktop/package.json` 的 `win.signtoolOptions` 加 `"signingHashAlgorithms": ["sha256"]`。改后同一命令退出 0，安装包 / 主程序 / `elevate.exe` 三个 PE 都带上了证书表。这一改动的另一面是**放弃 SHA-1 双签**（见 `docs/code-signing.md` §3 的取舍说明）。
+- **`publisherName` 确实会被写进 `app-update.yml`，且取自证书 CN。** 签名构建产出的 `resources/app-update.yml` 多出一段：
+  ```yaml
+  publisherName:
+    - Embedded AI Master Test
+  ```
+  （`Embedded AI Master Test` 即实验证书的 CN。）这证实 D-211 原文「`publisherName` 与 `app-update.yml` 的一致性」这条风险是**具体的、可验证的**，不是假想：CN 写错 → 每个后续更新都会被 `NsisUpdater.verifySignature` 拒绝（`ERR_UPDATER_INVALID_SIGNATURE`）。
+- **`SIGNTOOL_PATH` 可以绕开 winCodeSign 下载。** 本次签名能跑起来靠的是 `SIGNTOOL_PATH=<abs path to signtool.exe>`（`getSignToolPath` 里 `resolveEnvToolsetPath("SIGNTOOL_PATH", "file")` 的优先级高于自带工具链）。这对离线/弱网环境有用，但**不是常规路径**——正常有网时不应设它，自带工具链才是 electron-builder 想用的那一份。
+- **仍然未验证**：真实 CA 签发证书（含硬件令牌 / Azure）下的签名；`latest.yml` 与 `app-update.yml` 随发布上传后的实际一致性；`signingHashAlgorithms` 改单签后**旧版 SHA-1 校验方**（如很老的 Windows）的兼容性——本项目最低支持 Windows 10，未实测更早系统。
+- **相关的自签名结论**（为什么不把自签名写进构建流程）见 `docs/code-signing.md` §10。
+
 ### D-212 · GitHub Releases 发布链路配置就位，但从未真正发过一次 release；`electron-updater` 未接入
 
+> **2026-10-25 状态更新**：本条的两半都已落地——`v0.1.0` 已发布到 Releases（3 个资产，匿名 HTTP 206 可下载），**应用内自动更新已接入**（见下方「修复」）。拆分保留条目，是因为「一次真实更新从未跑过」这部分仍未验证。
+
 - **发现**: 2026-10-25，接发布渠道（用户「处理签名、发布渠道是github Releases，图标后面再说」）时。
-- **现象**: 配置与流程文档齐备，但没有一条走过真实链路——
+- **现象**: 配置与流程文档齐备，但没有一条走过真实链路——（详见下方「修复」与「残余边界」两段；本段保留 2026-10-25 发现时的原样描述。）
   - `desktop/package.json` 的 `build.publish` 已指向 GitHub Releases（`provider: "github"`、`owner: "mogenga"`、`repo: "Embedded-Ai-Master"`、`releaseType: "release"`），经 electron-builder 26.15.3 的 `scheme.json`（`GithubOptions`，required 仅 `provider`）校验通过，`npx electron-builder --win --x64 --dir` 退出 0。但 `--dir` 不产 `latest.yml`（那是 NSIS 目标在 `isWriteUpdateInfo` 时生成的），所以「加 `publish` 后 `latest.yml` 真会出现」这一步**只有源码依据、没有产物证据**。
   - `scripts/release.mjs` 提供 `--check` 门禁（版本号 / 构建产物 / 安装包 / 签名 / `gh` 登录 / 工作区干净 / tag 状态）与逐步命令打印，但**从未对一次真实发布跑过**。
   - 仓库 `has_downloads: false`：GitHub 上一条 release 都没有。`gh` CLI 已装并登录（`mogenga`），但从未用它发过任何东西。
@@ -1998,7 +2025,23 @@
 - **影响**: 「发布」这件事目前只有纸面流程。真实风险集中在没人验证过的部分：`gh release create` 三个附件（`.exe` / `latest.yml` / `.exe.blockmap`）的命名与上传后 `latest.yml` 里 `path` / `sha512` 是否仍与远端文件名一致（`safeArtifactName` 对 GitHub provider 会改写 `files[0].url`，只有真实上传后回读才能确认）；`releaseType: "release"` 与手工建 tag 的顺序（先推 tag 再建 release，否则 `gh` 会从默认分支 HEAD 新建 tag）也未经实践检验。
 - **触发升级条件**: 第一次对外发布时（必须关闭）；或用户反馈「收不到更新」时（`electron-updater` 接入部分）。
 - **修复建议**: 按 `docs/release.md` 走一次完整流程（构建 → `--check` → 打 tag → `gh release create` 上传三件套），发布后从 Releases 页面下载 `latest.yml` 核对 `path` 与 `sha512` 是否指向真实存在的资产；随后用 `node scripts/release.mjs --check` 复验（tag 项应从 WARN 变 OK）。自动更新是独立的一步：装 `electron-updater`、在宿主启动路径调 `autoUpdater.checkForUpdates()`、确认 `app-update.yml` 的 provider 与仓库一致，再发一版验证「旧版能提示新版」。
-- **状态**: 未解决（配置就位，从未发布，无应用内更新）。文档见 `docs/release.md`。
+- **修复（2026-10-25，应用内自动更新部分）**:
+  - 新增 `desktop/updater.js`（主进程侧，零框架 ESM）。**不在宿主里做**：宿主以 `ELECTRON_RUN_AS_NODE=1` 运行，没有 Electron API，`electron-updater` 在那个进程里根本可用不了——这一点是方案里的「宿主启动路径」那句话说错了，正确位置是主进程。
+  - `desktop/main.js` 在启动时创建一次控制器，注册 `update-status` / `update-check` / `update-download` / `update-install` 四个 IPC；状态经**既有** `host-event` 通道推给渲染层（新增 `{type:"update_status", status}`），没有第二条通道。
+  - `desktop/preload.cjs` 按既有白名单加 `updateStatus` / `updateCheck` / `updateDownload` / `updateInstall` 四个成员；**不接受参数**，检查什么、从哪下不是渲染层能决定的。
+  - **绝不自动下载、绝不自动安装**：`autoDownload = false`、`autoInstallOnAppQuit = false` 显式设置（库默认两者都是 `true`）。检查 / 下载 / 安装是三个独立动作，各自需要一次点击。理由与 `docs/corpus-ota.md` §6 对语料 OTA 的结论一致（静默变更让「同一问题回答不同」不可解释），且用户可能正在长任务里。
+  - **失败不伪装成「已是最新」（R3）**：`classifyUpdaterError` 把库的错误码分成 `network` / `no-release` / `no-manifest` / `signature` / `checksum` / `download` / `config` / `manifest` / `unknown`，每个都有独立文案；`checkForUpdates()` 返回 `null`（库自认未启用）映射成 `unsupported` 而不是 `up-to-date`。其中 `ERR_UPDATER_CHANNEL_FILE_NOT_FOUND`（release 在但缺 `latest.yml`）单列成 `no-manifest`：那是发布事故，不是「没有新版本」。
+  - **开发形态直接跳过**：`isPackaged === false` 时状态是 `unsupported/dev`，**连 `electron-updater` 都不 import**——`app-update.yml` 只在打包产物里，开发形态一检查必然失败。About 页此时不画按钮，只画原因（D-188 一族：不留按不动的假控件）。
+  - **缺依赖不影响启动**：`updater.js` 顶层不 import `electron-updater`，`loadAutoUpdater()` 是挂起的惰性 import + `catch`，写法照 `host.js` 的 `packsModule()` / `kbModule()`。没装时状态是 `unsupported/missing`。
+  - **日志不泄密**：`sanitizeMessage` 抹掉 URL 的 query/fragment（GitHub provider 的下载 URL 可能带签名参数）与 `token` / `bearer` / `api_key` 的值，并截断到首行 300 字符。接到 `autoUpdater.logger` 的是 `createUpdaterLogger()`，不是裸 `console`。
+  - `desktop/package.json` 加 `"electron-updater": "^6.8.11"`（版本取自 npm registry `dist-tags.latest` 实测，非记忆），并把 `updater.js` 加进 `build.files`——**不加就不会进 asar**，安装版会退化成 `unsupported/missing`。
+- **残余边界（这一半仍未关闭）**:
+  1. **从未跑过一次真实更新。** 本轮硬约束禁止调用 GitHub Releases API、禁止下载、禁止安装；所有测试都用注入的假 updater。`v0.1.0` 是第一个"旧版"，要验证「旧版提示新版」必须先有 `v0.1.1`。
+  2. **`quitAndInstall` 的 NSIS 行为未实测。** 源码依据：`BaseUpdater.quitAndInstall(isSilent=false, isForceRunAfter)` 在非静默时忽略第二个参数、改用 `autoRunAppAfterInstall`（默认 `true`）；`NsisUpdater.doInstall` 拼 `--updated`，静默才加 `/S`。所以调用是 `quitAndInstall(false, true)`——**不静默**，用户看得见安装进度。`--updated` 让 `CHECK_APP_RUNNING` 走「Sleep 300 → 再查 → Sleep 1000 → `doStopProcess`」的免确认路径，但这条路径同样只有源码依据。
+  3. **`v0.1.0` 未签名，因此 `publisherName` 不在 `app-update.yml` 里。** `NsisUpdater.verifySignature` 在 `publisherName == null` 时**直接返回 `null`（视为通过）**。这意味着在当前配置下，下载到的更新包**不做签名校验**。签名子代理接上证书后，`win.verifyUpdateCodeSignature`（默认 `true`）会自动把 `publisherName` 写进 `app-update.yml` 并开始校验——在此之前，完整性只靠 `latest.yml` 的 sha512。
+  4. **`latest.yml` 的现代格式要求**：`electronUpdaterCompatibility` 默认 `>=2.16`。v6.8.11 读 `files[]`，也能读旧的顶层 `path`/`sha512`（v27 才删）。本仓库产物两者都有，v6 客户端不受影响。
+  5. **应用安装在 `%LOCALAPPDATA%\Programs\`（per-user），不需要提权。** `isAdminRightsRequired` 由下载时的 `downloadedFileInfo` 决定；per-machine 安装才走 `elevate.exe`。本仓库是默认 per-user NSIS，未实测提权分支。
+- **状态**: **应用内自动更新已解决（2026-10-25）**；「一次真实更新从未跑过」与上述 5 条残余边界仍未关闭，保留条目。文档见 `docs/release.md` §13。
 
 ### D-213 · `resources/` 缺 ESM 模块声明，所有安装用户多付一次重解析
 
@@ -2053,10 +2096,38 @@
 - **为什么不做真删除**: 三件事都是不可逆的（工作区目录、会话日志、产物），而「从侧栏消失」这个诉求用可逆的归档就能完全满足。这不是能力不足的妥协——用户要的是「让它别碍事」，归档正好是这件事的准确说法。
 - **状态**: **已实现**（2026-10-25）。测试见 `tests/desktop/host.test.js` 的三条 `archiveSessions` 用例（含部分失败与非法 id）；渲染层无自动化测试（`app.js` 零导出、顶层读 `localStorage`，已知限制），靠代码审查。语义已写入 `desktop/MATRIX.md`。
 
+### D-217 · 未签名的构建里，下载到的更新包不做签名校验（`electron-updater` 在 `publisherName == null` 时直接放行）
+
+- **发现**: 2026-10-25，接入应用内自动更新（D-212 的后半）时读 `electron-updater` 6.8.11 源码确认。
+- **现象**: `NsisUpdater.verifySignature(tempUpdateFile)` 先读 `app-update.yml` 的 `publisherName`；**为 `null` 时直接 `return null`**（`return null` 在调用处表示「校验通过」）。而 `publisherName` 只在 `win.verifyUpdateCodeSignature`（默认 `true`）有证书可写时才出现在 `app-update.yml` 里。本仓库当前产物**未签名**（D-211），`app-update.yml` 里没有该字段，于是：
+  - 检查、下载、安装全链路都能走；
+  - **下载到的 `.exe` 没有任何 Authenticode 校验**，完整性只靠 `latest.yml` 的 `sha512`。
+- **影响**: `sha512` 能防传输损坏与「文件与清单不符」，但清单本身来自同一个源（GitHub Releases / 同一账号），对「账号被盗后同时替换安装包与 `latest.yml`」这一情形不构成防护。这是未签名分发的固有边界，不是本仓库的配置错误——但**不能因为自动更新跑通了就认为更新链路是可信的**。
+- **触发升级条件**: 拿到证书并开启签名时（`app-update.yml` 会开始带 `publisherName`，校验自动生效）；或在此之前对外分发。
+- **修复建议**: 按 `docs/code-signing.md` §2 配 `WIN_CSC_LINK` + `WIN_CSC_KEY_PASSWORD` 重打包，确认 `resources/app-update.yml` 出现 `publisherName` 且与证书 Subject 一致（`win.verifyUpdateCodeSignature` 默认 `true`，无需改配置）。证书轮换时写数组，新旧两张都要列。
+- **状态**: 未解决（未签名期间的已知边界）。`desktop/updater.js` 的 `ERR_UPDATER_INVALID_SIGNATURE` → `signature` 映射已就位，签名开始生效后失败会有独立文案。
+
+### D-218 · 思考过程外显的残余边界：只有部分网关返回推理（逐段折叠已于 2026-10-25 补上）
+
+- **发现**: 2026-10-25，实现「思考过程外显」时逐条核对。
+- **边界（不是缺陷，是协议的现状）**:
+  1. **只有部分网关返回推理**。`delta.reasoning_content` / `delta.reasoning` 都是 OpenRouter / DeepSeek / GPT-OSS 一类的社区惯例，OpenAI 官方 Chat Completions 规范里没有这两个字段（Context7 查到的 OpenAI cookbook 原文：「there is no official spec for handling chain of thought in the published OpenAI specs」）。因此官方端点、以及一部分只做 OpenAI 子集的网关**不会**产生任何 `thinking_delta`——界面就是没有思考段，这与「模型没思考」在视觉上不可区分。
+  2. **第三种字段名不认**。OpenRouter 另有结构化的 `reasoning_details`（数组，逐条带 `type`/`text`），本实现只读两个字符串字段，遇到它按「没有推理」处理（不报错）。要支持得先定义「折叠的摘要 vs 完整 CoT」怎么显示，不是加一个字段名的事。
+  3. **~~没有逐段折叠控件~~（已解决，2026-10-25）**。原判断是「做不了『点这一行展开这一段』，只能靠三档视图整体切换」。用户实测后明确纠正：「这个思考过程应该是可隐藏可展开的，像常规AI开发工具那样，而不是用户设置」。现在每个思考块有自己的标题栏按钮（`<button class="thinking-toggle" aria-expanded>`），状态存在节点上（`data-expanded`），与全局视图设置无关；三档视图不再控制思考正文（见下条「视图设置收窄」）。实现要点见文末变更记录。
+  4. **未流式网关的思考不逐字显示**。一次性响应路径在整份响应到达后一次交付推理与正文，界面表现为「先出现整段思考、再出现整段正文」。这是降级路径的固有形态（连正文也是整段到达），不是 bug。
+- **视图设置收窄（2026-10-25）**：`data-view` 的三档（`normal` / `thinking` / `verbose`）只剩下 `verbose` 有价值——它控制**工具输出**到达时是否直接展开（`app.js` 的 `attachToolOutput`）。`normal` 与 `thinking` 对思考块已无影响，所以设置页只保留「工具输出：折叠 / 展开」两项，存过的 `thinking` 在 `normalizeTranscriptView`（`desktop/renderer/thinking-view.js`）里收敛成 `normal`。**没有硬删 `data-view`**：`verbose` 仍有真实行为，删掉属性会让工具输出失去「到达即展开」的能力。
+- **影响**: 用户可能在支持推理的网关上看到思考、换一个网关就没有。逐段折叠已不再是限制。
+- **触发升级条件**: 用户反馈「同一模型在别的客户端能看到思考、这里没有」（多半是第三种字段名或 `reasoning_details`）。
+- **修复建议**: 字段名扩展集中在 `src/model/openai.ts` 的 `reasoningTextOf` 一处，加字段时同步补 `tests/openai.test.ts` 的字段名用例。
+- **状态**: **部分解决**（2026-10-25）：逐段折叠已实现；「部分网关不返回推理」「`reasoning_details` 不认」「未流式不逐字显示」三条仍是已知边界（不修）。
+
 ## 变更记录
 
 | 日期 | 变更 |
 |---|---|
+| 2026-10-25 | 思考块逐段折叠（用户实测：「这思考过程怎么只是思考了一会儿，而且展不开」，随后纠正方向：「这个思考过程应该是可隐藏可展开的，像常规AI开发工具那样，而不是用户设置」）：①**根因两条**——(a) 思考块没有任何点击处理（全文件无 `thinking.*addEventListener`），折叠壳点不开；(b) `:root[data-view="normal"] .thinking-text { display: none }` 让常规视图下正文永不显示，于是只剩一行死标签。回放路径（`session_loaded` 的 `role: "thinking"` 分支）同样没有展开入口。②**改法**——`app.js` 新增 `thinkingBlockHtml`（唯一一份 markup：`<div class="thinking" data-expanded>` + `<div class="thinking-head">` + `<button class="thinking-toggle" aria-expanded>` + `<div class="thinking-text">`）与 `setThinkingExpanded` / `bindThinkingToggle`；直播路径（`startThinking` / `endThinking`）与回放路径共用。折叠态用 `max-height: 0; overflow: hidden` 而非 `display: none` / `visibility: hidden`——后两者让元素不可聚焦（见 `.session-group-remove` 的注释与本次 CDP 断言）。③**状态**——存节点属性 `data-expanded`（另用 `data-user-toggled` 区分「读者点过」），不进 `state`、不进 localStorage：每块独立，展开第 2 块不影响第 1 块（实测 `["true","true","false",…]`），重开会话默认全折叠。④**流式语义**——`.streaming` 下块默认展开且不设 320px 上限（看着它想）；结束时未被点过的块自动收成一行，读者在流式期间点过的块保持其选择（`thinkingExpandedOnEnd`，实现里过一次自动折叠不许撤销一次点击）。空思考段结束时整块移除，不留一行「思考中…」（诚实：回合已结束还显示进行中就是假状态）。⑤**视图设置收窄**——`data-view` 不再控制思考正文；只剩 `verbose` 有真实行为（工具输出到达即展开）。设置页从三档改为「工具输出：折叠 / 展开」，`normalizeTranscriptView`（新文件 `desktop/renderer/thinking-view.js`，纯函数）把 `thinking` 与未知值收敛成 `normal`；顺带修掉一个既有缺陷——`state.transcriptView` 原先只在设置页改动时写入，启动不恢复，所以存过的 `verbose` 在启动后不生效直到重选一次（现于 boot 的 `view` 步骤写入）。⑥**问题③核实**——用户怀疑「思考块出现在工具行之后」是插入点错误。实测（真实会话 `715f0aba` 的 DOM + 日志 seq 对照）证明是**错觉**：`thinking` 与 `tool-group` 严格按日志顺序交错（seq 18-19 思考 → 20 工具调用 → 26-27 结果 → 29 思考 → 39-40 …），live 路径同样正确（`thinking` → `assistant` → `tool-group`）；截图里的「思考行下面是上一个工具的结果」是**视觉归因**问题——折叠态的思考行与紧随其后的 `tool-group` 之间没有分界线，读者会把下一组的工具行读成上一组思考的从属。`protocol.js` 的 `THINKING_INTERRUPTING_TYPES` **未改**（本来就是对的）。⑦**验证**——真实窗口 CDP：折叠态 `offsetHeight 0` / `display: block` / `maxHeight 0px`、点击后 `aria-expanded true` + `maxHeight 320px` + 长文本 `clientHeight 320 / scrollHeight 800` 内滚、`focus()` 后 `document.activeElement === button`、Enter 与 Space 都能切换（用同页对照按钮排除 CDP 不派发 `char` 事件的假阴性）、展开第 2 块时第 1 块保持原状。新增 `tests/desktop/thinking-view.test.js`（3 个 describe / 12 条），`D-218` 第 3 条标为已解决。 |
+| 2026-10-25 | 思考过程外显（用户「思考过程外显」）：三层接通，**与本条 D-196 原先「删掉 thinking_start handler」的建议相反**。①内核产出——`src/model/openai.ts` 新增 `reasoningTextOf`（`reasoning_content` 优先，其次 `reasoning`，非字符串一律忽略）与可选回调 `onReasoningDelta`，流式与一次性两条路径都读；②内核落盘——新增 `thinking_delta` 会话事件（只有一种类型，无 start/end），`persistence.ts` 白名单登记，`src/loop/assistant-delta.ts` 的 writer 扩成**双通道单队列**（推理与正文按到达顺序交错，相邻同通道片段合并，60ms/400 字符批量参数不变），`query.ts` 把 `onReasoningDelta` 接到同一个 writer；③**上下文隔离**——`buildMessages` 显式跳过 `thinking_delta`，适配器重试守卫把推理算作「已交付」（否则超时重试会把同一段思考写两遍，反向验证：去掉守卫后请求数 1→4）；④宿主投影——`desktop/renderer/protocol.js` 把 `thinking_delta` 合成 `thinking_start`/`thinking_text`/`thinking_end`，只带状态的事件不打断段落（`usage` 帧在流中途到达是常态）；`sessionEventsToMessages` 把相邻片段合并成 `role: "thinking"` 行，**重开会话不再丢曾经的思考**；⑤渲染层——`app.js` 只加 `role === "thinking"` 的回放分支（`case "thinking_*"` 三个 handler 零改动），`styles.css` 给已结束的思考段加 320px 上限内滚（与 `.tool-output` 同一口径），常规视图仍收成一行。`D-196` 第二项标为已解决，`ask_user` / `tool_delta` / `assistant_discard` 仍未动；**新增 D-218**（只有部分网关返回推理、`reasoning_details` 不认、无逐段折叠控件、未流式网关不逐字显示）。 |
+| 2026-10-25 | 应用内自动更新接入（用户「前两个都修复一下，图标一会发你。发子代理，不提交」的第二个）：新增 `desktop/updater.js`（主进程侧，零框架 ESM）——`createUpdater()` 返回 `check` / `download` / `install` 三个独立动作，**`autoDownload = false` 与 `autoInstallOnAppQuit = false` 显式设置**（库默认都是 `true`），检查、下载、安装各需一次点击；`classifyUpdaterError` 把错误码分成 `network` / `no-release` / `no-manifest` / `signature` / `checksum` / `download` / `config` / `manifest` / `unknown`，`checkForUpdates()` 返回 `null` 映射成 `unsupported` 而非 `up-to-date`（R3：失败不许说成「已是最新」）。主进程注册 `update-status` / `update-check` / `update-download` / `update-install` 四个 IPC，状态经**既有** `host-event` 通道以 `{type:"update_status"}` 推送，不开第二条通道；`preload.cjs` 按白名单加四个无参成员。**开发形态（`isPackaged === false`）连 `electron-updater` 都不 import**，状态为 `unsupported/dev`，About 页此时不画按钮只画原因（D-188 一族：不留假控件）。`updater.js` 顶层不 import `electron-updater`，惰性 import + catch 照 `host.js` 的 `packsModule()` / `kbModule()`，**没装依赖时应用照常启动**（真实 Electron 主进程实测：`unsupported/missing`）。日志经 `sanitizeMessage` 抹掉 URL query 与 token 值。`desktop/package.json` 加 `electron-updater: ^6.8.11` 并把 `updater.js` 加进 `build.files`（不加就不进 asar）。顺带清掉三处死代码：`i18n.js` 里无人读的 `updateChecking` / `updateUnconfigured` / `updateCurrent` / `updateAvailable` / `updateOpen` / `updateError`（About 页读的是 `settingsStrings`，两份拷贝迟早漂移）、`app.js` 对 `#check-update` 的 relabel（该元素从不在文档里）、以及 `checkUpdateQuietly` 里对 `result.status` 的读取（接口形状早就不存在）。D-212 标注「应用内自动更新已解决」，残余边界逐条列出；**新增 D-217**（未签名构建下 `publisherName == null` 时下载包不做签名校验）。71 条新测试（`tests/desktop/updater.test.js`，全注入 mock，不触网）。 |
 | 2026-10-23 | 串口面板一期(用户「先转过头做右侧面板 顺便内嵌一个功能完善的串口助手 也方便agent直接读取」):宿主新增 `desktop/host/serial-bridge.js`(PowerShell .NET SerialPort 泵,零 npm 依赖)。**实测钉死四个坑**:①PS 的 `Register-ObjectEvent` Action 在主线程阻塞于 ReadLine 期间**永不执行**;②`[Console]::In.ReadLineAsync()` 同步阻塞,内部轮询 spin=0;③管道 stdin 上 `DataAvailable` 恒 false,必须 `BeginRead`+`IsCompleted` 轮询且 PS 函数作用域变量必须 `$script:` 前缀;④`[Console]::OutputEncoding` 默认 gb2312,中文行乱码,泵开头强制 UTF-8。**双口互发实测**(用户交叉接两 CH340):5 条消息全通、warn/error 分级、9000 字符长行按 8192 截断、中文往返无损、ring 500 行封顶计 dropped、mirror 落盘。宿主六命令与五个 serial 事件全链路协议实测;agent 侧 cubeide server 新增 `embed_serial`(read 镜像/一次性捕获/write/ports/status,冲突诚实报 `port_busy`);渲染层 Serial tab 解禁。11 bridge 单测 + 5 工具单测全绿;`npm test` 2793 过,3 失败为既有遗留(skills-store×2、kb-review×1)。**EPERM 风险登记 D-206**(文件脚本链路杀软拦 spawn,`-e`/Electron 链不受影响,桌面实机待验) |
 | 2026-10-23 | Cube 三件套真机全链路测试（正点原子阿波罗 F429IGT6 核心板 + ST-Link V2J48S7 + CH340）：①修复 `-c SWD`→`-c port=SWD`（v2.23 CLI 真机语法）；②`-import` 必须用 `file:///` URI（EFS 不认盘符路径）；③构建失败保留 workspace（.metadata/.log 是唯一诊断源）；④CubeMX 无头生成接入（`-q` 脚本模式，UM1718 Table 1 命令实测：load/project name/toolchain/path/generate，`STM32CubeMX.exe -q` 直跑退出码不可靠 → `jre/bin/java -jar` 路线）；⑤ST gdbserver 对 S7 后缀固件报 "No device found"（ST 克隆限制，社区多案例），**OpenOCD 回退**实现并真机通过（espidf 的 openocd-esp32 + stm32f4x.cfg，halt/寄存器/读写内存全通）；⑥真实 harness 层 E2E（loadMcpConfig→McpManager→call）：version/probe/generate(33.8s)/build(10.6s)/flash(verified) 全过。遗留：调试会话中途目标进入 "Unable to get core ID" 状态（CLI 也连不上，AP 号 1→0），需物理复位；用户工程的 `.cproject` MCU 正则是 `value="STM32\w+"` 宽匹配（target_mcu.value. 假设错误）。 |
 | 2026-10-23 | Arduino 后端接入（用户「开始做arduino路线」；范围：编译+烧录+查询，无调试——AVR 无调试硬件，`debug check` 实测不支持，不做假面）：新增 `mcp-servers/arduino/`（arduino-cli 发现 = ARDUINO_CLI→IDE 自带位置→PATH；sketch 判据 = 目录名与 .ino 同名；compile --output-dir、upload --input-dir 拒绝隐式编译；boards/search_board/libs 现查，lib 过滤为本地子串——CLI 的过滤词是精确匹配实测）。`embed_project` 路由表加 arduino（第 4 系）。真机冒烟：Blink 编译 arduino:avr:uno 924 bytes；upload 无板报错路径诚实。9 个离线单测全过；CLI JSON 形状三处实测修正（platforms 嵌套 releases、board fqbn 小写、installed_libraries 包装）。文档 `docs/arduino-headless.md`。 |

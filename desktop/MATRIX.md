@@ -76,6 +76,7 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 | 内核事件 | 渲染器事件 |
 |---|---|
 | `assistant_delta` | `assistant_delta{text}`（流式片段，追加到当前气泡） |
+| `thinking_delta` | `thinking_start` → `thinking_text{text}`（逐条）→ `thinking_end`。内核只有 `thinking_delta` 一种事件（段落边界是纯投影状态），**start/end 由这一层补**：段落首次出现推理片段时发一次 start，遇到 `assistant` / `assistant_delta` / `tool_call` / `tool_started` / `tool_result` / `user` / `status` / `interrupted` 时发 end。只带状态的事件（`usage` / `checkpoint` / `mcp_status` / `device_status` / `compaction` / `permission_decision`）**刻意不打断**——`usage` 帧在流中途到达是常态，按它切段会把一条思路断成读者看不出原因的几块。推理文本只走这条通道，**绝不**混进 `assistant_delta`（那是模型回复的内容，且会被投影回下一次请求）。重开会话时 `session_loaded` 的 `messages` 里含 `role: "thinking"` 行（相邻片段合并成一段），否则日志里的思考会静默丢失。**渲染器侧：每个思考块自带标题栏按钮（`<button class="thinking-toggle" aria-expanded>`），展开态存在该块的 `data-expanded` 上，与 `data-view` 无关**——展开第 2 块不影响第 1 块；流式中默认展开且无 320px 上限，结束后未被动过的块收成一行，被点过的块保持读者选择；折叠态用 `max-height: 0` + `overflow: hidden`（不用 `display: none` / `visibility: hidden`，那会让按钮不可聚焦） |
 | `assistant` | `assistant_start` → 补齐尚未流式过的部分 → `assistant_end`（不重复已流式的文本） |
 | `tool_started` | `tool_start{name, summary, id, annotations?}`（summary 取 assistant 事件的 `toolCalls` 参数）。`annotations` 只带值为 `true` 的 `readOnly`/`destructive`/`evidence`；缺省即「未声明」，渲染器据此不画徽标——全 false 与不存在不能混为一谈 |
 | `tool_result` | `tool_end{name, ok, summary, id}` +（成功时）`tool_output{name, content, artifactPath?}`；未被 `tool_started` 覆盖时先补一行 `tool_start`（被拒的调用也要留痕）。`artifactPath` 存在时输出块底部出现「打开产物」按钮 |
@@ -108,6 +109,23 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 **一条技能怎么到达模型**：`/name args`（用户在输入框敲的原文）→ `expandSkill(skill, args)` 在**渲染层**把正文里的 `$ARGUMENTS` 替换成 `args`（正文没有占位符时把 `args` 作为追加的一段）→ 发一条**普通 `prompt` 命令**，文本就是展开后的正文 → 内核照常写一条普通 `user` 事件。内核不认识 `$ARGUMENTS`，也不知道这条消息来自技能：展开放在内核之外是刻意的——把展开放进内核，「保存一段提示词」就会变成「运行一段脚本」。
 
 **转录显示的是用户敲的那行，不是展开后的正文。** 因为展开结果进了 `user` 事件、会随会话一起落盘，也就能在回放与导出里被读到，此时再在转录里印一遍展开文等于同一段话出现两次；而用户需要能对上自己刚才的动作（「我敲了 `/review`」），展开文属于「模型看到了什么」，不属于「我做了什么」。代价是**转录里看不到 `$ARGUMENTS` 究竟被替换成了什么**——要查这一点只能看日志。若将来需要并排显示两者，应该加在工具行那种「可展开详情」的位置，而不是改写用户气泡。
+
+## 主进程事件（不是宿主发的）
+
+自动化更新不在宿主里：宿主是 `ELECTRON_RUN_AS_NODE=1` 的普通 Node 进程，没有 Electron API，而 `electron-updater` 需要 `app`。所以更新器住在 `desktop/main.js`（经 `desktop/updater.js`），但它**复用同一条 `host-event` 通道**，渲染层只有一处读事件的地方。
+
+| 事件 | 形状与语义 |
+|---|---|
+| `update_status` | `{status: {state, reason?, version?, percent?, message?, code?, releaseDate?, releaseName?}}`。`state` 是 `unsupported` / `idle` / `checking` / `up-to-date` / `available` / `downloading` / `downloaded` / `error` 之一（`desktop/updater.js` 的 `UPDATE_STATES`）。**`unsupported` 带 `reason`**：`dev`（开发形态，`app-update.yml` 不存在，根本不加载库）或 `missing`（`electron-updater` 没装进包）。`error` 带 `reason`（九类，见 `classifyUpdaterError`）与已脱敏的 `message`。`checkForUpdates()` 返回 `null` 映射成 `unsupported/disabled`——**不是 `up-to-date`**（R3）。About 页按这张表决定文案与「最多一个按钮」：`unsupported` / `checking` / `downloading` 三种**没有按钮** |
+
+对应的四个主进程 IPC（`preload.cjs` 白名单里，**都不接受参数**——检查什么、从哪下不是渲染层能决定的）：
+
+| IPC | 语义 |
+|---|---|
+| `update-status` | 只读当前状态，**不联网**。About 页打开时调它，因为页面每次访问都重建 |
+| `update-check` | 问更新源有没有新版。启动时若「启动时检查更新」开着也调一次 |
+| `update-download` | **只有用户点「下载」才调**。`autoDownload = false`，库不会自己下 |
+| `update-install` | **只有用户点「重启并安装」才调**。`quitAndInstall(false, true)`：非静默（看得见安装进度），装完自动启动新版本 |
 
 ## 阶段 4 交互层
 
