@@ -1050,15 +1050,24 @@ const keilDebugTool: LegacyTool = {
             if (check.ok && check.session) {
               const compared = await verifyFlash(check.session, hex);
               lines.push(`flash check: ${compared.detail}`);
-              if (!compared.ok && compared.expected && compared.got) {
-                lines.push(`  image: ${compared.expected}`, `  chip:  ${compared.got}`);
-                // `Verify OK` came from the downloader; this is the chip
-                // disagreeing with the image, so the flash is not confirmed.
-                fail(`the chip does not match ${basename(hex)} after the download`);
+              // Fail closed: a verify that could not read the chip back is not
+              // a pass. The old condition (`expected && got`) treated "the
+              // debugger could not read flash" as a footnote while the tool
+              // still reported a successful download — the last line of
+              // defence against a bad image, disarmed exactly when it matters.
+              if (!compared.ok) {
+                if (compared.expected && compared.got) {
+                  lines.push(`  image: ${compared.expected}`, `  chip:  ${compared.got}`);
+                  fail(`the chip does not match ${basename(hex)} after the download`);
+                }
+                fail(`flash verify could not confirm the download — ${compared.detail}`);
               }
               await closeKeilSession(check.key!);
             } else {
+              // An unreadable chip is not a verified flash: say the download
+              // succeeded but the check did not run, and fail loudly.
               lines.push(`flash check: skipped — the debugger could not be opened to read the chip back (${check.reason ?? "no session"})`);
+              fail(`flash verify could not run — the debugger could not be opened to read the chip back (${check.reason ?? "no session"})`);
             }
           } else {
             lines.push("flash check: skipped — the build produced no .hex or .axf to compare against");

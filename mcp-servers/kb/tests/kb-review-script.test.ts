@@ -7,9 +7,14 @@ import { describe, expect, it } from 'vitest'
 const ROOT = path.join(import.meta.dirname, '..', '..', '..')
 const SCRIPT = path.join(ROOT, 'scripts', 'kb-review.mjs')
 const DIST_INBOX = path.join(ROOT, 'dist-mcp', 'kb', 'inbox.js')
+// 回归门禁的查询集是 gitignore 的本地资产（.gitignore: mcp-servers/kb/data/），
+// 干净 clone 上必然没有。没有它，门禁第一步就报「查询集不存在」退出 2，
+// 断言 exit 1 必失败——这是环境缺资产，不是被测代码回归，按 datasheet
+// 回归的做法 skip 而不是报红。
+const REGRESSION_DATA = path.join(ROOT, 'mcp-servers', 'kb', 'data', 'queries.jsonl')
 
 describe.skipIf(!existsSync(DIST_INBOX))('kb-review 脚本回归门禁', () => {
-  it('回归低于基线时拒绝接受且保持 inbox 不变', () => {
+  it.skipIf(!existsSync(REGRESSION_DATA))('回归低于基线时拒绝接受且保持 inbox 不变', () => {
     const root = mkdtempSync(path.join(tmpdir(), 'kb-review-script-'))
     try {
       writeFileSync(path.join(root, 'index.yaml'), 'version: 1\nentries:\n', 'utf8')
