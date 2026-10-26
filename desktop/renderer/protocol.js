@@ -722,11 +722,9 @@ export function sessionEventToHostEvents(event, ctx) {
     case "device_status": {
       // The probe MCP reports `{ backend, probe, cpu, serial }` and nothing
       // else — it does not know about targets, ports or the workspace scan.
-      // Passing it through as a whole `board_state` replaced the board pane's
-      // state with an object none of its fields exist on, so the pane fell back
-      // to "scanning…" and the chip stayed hidden. The device fields travel
-      // under their own key instead; the renderer draws them as their own
-      // section.
+      // It used to be folded into a `board_state`, which the Board pane then
+      // misread; that pane is gone (2026-10-26) and the kernel event is passed
+      // through under its own name so no shape is invented for it.
       const device = isRecord(payload.state) ? payload.state : {};
       out.push({
         type: "device_status",
@@ -904,7 +902,6 @@ export function initialState(options = {}) {
     // the total would be a fabricated chart.
     contextBreakdown: measuredBreakdown(options.contextBreakdown),
     usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0 },
-    board: { selection: {}, projectKind: "unknown" },
     serial: { open: false, port: null, baud: null, buffered: 0, queued: 0 },
   };
   // Spend only when the caller has a real figure. A zero here would read as

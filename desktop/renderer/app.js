@@ -12,7 +12,6 @@ const savedLocale = localStorage.getItem("prometheus.locale");
 const savedTheme = localStorage.getItem("prometheus.theme");
 const savedDensity = localStorage.getItem("prometheus.density");
 const savedWorkbench = localStorage.getItem("prometheus.workbench");
-const savedPane = localStorage.getItem("prometheus.pane");
 
 const api = window.prometheus;
 
@@ -117,10 +116,11 @@ const state = {
   expandedProjects: new Set(JSON.parse(localStorage.getItem("prometheus.expandedProjects") || "[]")),
   collapsedProjects: new Set(JSON.parse(localStorage.getItem("prometheus.collapsedProjects") || "[]")),
   workbenchOpen: savedWorkbench === "1",
-  // Only board and serial have a kernel backend. The other panes' markup is
-  // still in the document (their tabs are not), so an old saved pane must not
-  // be restored into a view nothing can fill.
-  pane: ["board"].includes(savedPane) ? savedPane : "board",
+  // Serial is the only pane with a kernel backend that is reachable by
+  // browsing; the other panes' markup is still in the document (their tabs are
+  // not), and they are opened by an action instead. So serial is both the
+  // default and the only pane the strip can start on.
+  pane: "serial",
   git: null,
   artifacts: [],
   selectedArtifact: null,
@@ -168,23 +168,20 @@ const state = {
   skills: [],
   diffScope: "session",
   currentSubagent: null,
-  /** Selection and project kind from the last state event; cheap, always current. */
-  board: { selection: {}, projectKind: "unknown" },
-  /** The last assembled board state (project, then inventory). */
-  boardState: null,
-  /** The probe's own report from the last `device_status` event. */
-  boardDevices: [],
-  device: null,
-  deviceTool: "",
-  /** Whether the target table has been loaded, and the status that follows. */
-  boardTargetStatus: { kind: "unloaded", candidates: [], total: 0 },
-  boardSuggested: [],
   /** The serial monitor is renderer-local except for the stream itself. */
   serialPorts: [],
   serial: {
     open: false,
     port: null,
     baud: null,
+    /**
+     * What the dropdowns show while the port is closed. `port`/`baud` describe
+     * an open session (the host is the authority); these hold the operator's
+     * pick so re-enumerating the port list does not reset it. They live here
+     * because the Board pane's saved selection used to carry this role.
+     */
+    selectedPort: "",
+    selectedBaud: 0,
     /** Pausing stops DOM updates; data keeps arriving in the host's ring. */
     paused: false,
     pausedBacklog: 0,
@@ -280,16 +277,12 @@ function applyLocale(locale, { announce = false } = {}) {
   if (commitButton) commitButton.textContent = t.commitAll;
   if (state.git) renderGitBar();
   applySettingsLocale();
-  // The board and serial panes assemble their text from `t` when they render
-  // and carry no `data-i18n` on it, so the sweep above cannot reach them.
-  if (!workbench.hidden && (state.pane === "board" || state.pane === "serial")) {
-    if (state.pane === "board") renderBoard();
-    else {
-      fillSerialControls();
-      renderSerialStatus();
-    }
+  // The serial pane assembles its text from `t` when it renders and carries no
+  // `data-i18n` on it, so the sweep above cannot reach it.
+  if (!workbench.hidden && state.pane === "serial") {
+    fillSerialControls();
+    renderSerialStatus();
   }
-  renderBoardChip();
   void announce;
 }
 
@@ -688,17 +681,6 @@ function addToolRow(name, summary, annotations) {
       openFile(summary);
     });
   }
-  // The embedded inventory tools answer a question the panes also answer; the
-  // row opens the pane rather than a file.
-  const paneForTool = EMBED_TOOL_PANES[name];
-  if (paneForTool) {
-    row.classList.add("openable");
-    row.title = t.boardOpenPane;
-    row.addEventListener("click", (event) => {
-      if (event.target.closest(".tool-expand")) return;
-      openWorkbench(paneForTool);
-    });
-  }
   state.currentTool = { node: row, name, summary };
   state.lastToolNode = row;
   return row;
@@ -779,17 +761,6 @@ const FILE_TOOLS = new Set([
   "write_file",
   "edit_file",
 ]);
-/** Rows that lead somewhere: the pane showing the same facts, in full. */
-const EMBED_TOOL_PANES = {
-  // Serial tools report state the board pane's Device section shows; they do
-  // not open a serial console (there is none).
-  mcp__probe__serial_read: "board",
-  mcp__probe__serial_status: "board",
-  mcp__probe__serial_open: "board",
-  mcp__probe__device_status: "board",
-  mcp__probe__attach: "board",
-  mcp__probe__device_list: "board",
-};
 
 function lastToolRow() {
   return state.lastToolNode && state.lastToolNode.isConnected ? state.lastToolNode : null;
@@ -2697,12 +2668,6 @@ function handleEvent(message) {
       state.contextBreakdown = message.contextBreakdown ?? null;
       setMode(message.mode);
       setEffort(message.effort || "auto");
-      // Board selection and project kind are cheap, so every state event carries
-      // them; the machine scan waits until the pane asks for it.
-      if (message.board) {
-        state.board = { ...state.board, ...message.board };
-        renderBoardChip();
-      }
       // A state event may arrive before the catalogue has been fetched; keep
       // whatever we already have rather than blanking the picker back to
       // "loading models…".
@@ -2729,42 +2694,12 @@ function handleEvent(message) {
       updateMeter(message.context, message.usage, { replace: true });
       break;
 
-    case "board_state":
-      setBoardState(message);
-      break;
-
     case "device_status":
-      // The probe's report. Kept apart from `board` so a device answer never
-      // erases the (empty, but present) board shape the pane renders.
-      state.device = message.device ?? null;
-      state.deviceTool = message.tool ?? "";
-      if (state.device) {
-        $("board-control").hidden = false;
-        renderBoardChip();
-        if (state.pane === "board" && !workbench.hidden) renderBoard();
-      }
-      break;
-
-    case "board_targets": {
-      state.boardTargets = {
-        total: message.total ?? 0,
-        notes: message.notes ?? [],
-        targets: message.targets ?? [],
-        error: message.error ?? "",
-      };
-      // Names the attached chip answers to. Kept apart from the table's own
-      // candidates because they were computed from the hardware, not from a
-      // substring match on whatever the user typed.
-      state.boardSuggested = Array.isArray(message.suggested) ? message.suggested : [];
-      if (message.error) addNotice("error", message.error);
-      // The host follows with a fresh board_state carrying the new verdict.
-      renderBoard();
-      break;
-    }
-
-    case "board_selection":
-      state.board = { ...state.board, selection: message.selection ?? {} };
-      renderBoardChip();
+      // The probe's report used to feed the Board pane and its composer chip;
+      // both are gone (2026-10-26). The tool's own row and output in the
+      // transcript are what report a device now, so the event is consumed and
+      // deliberately draws nothing rather than falling into the "unhandled
+      // host event" debug line.
       break;
 
     case "serial_snapshot":
@@ -2835,11 +2770,6 @@ function handleEvent(message) {
     case "serial_ports":
       state.serialPorts = message.ports ?? [];
       fillSerialControls();
-      break;
-
-    case "board_devices":
-      state.boardDevices = message.devices ?? [];
-      if (state.pane === "board" && !workbench.hidden) renderBoard();
       break;
 
     case "serial_stats":
@@ -3300,8 +3230,7 @@ function handleEvent(message) {
 
     case "tool_detail":
       // The transcript already shows the tool's text; this is the structured
-      // side, which the panes use. Only a build changes what they display.
-      if (message.name === "embed_build") api.send({ cmd: "getBoardState" });
+      // side, which the panes use.
       // A file write's diff, attached to its row: seeing what changed in place
       // is faster than opening the Changes pane and finding the file.
       if (message.data && message.data.change) {
@@ -3906,7 +3835,7 @@ function renderSubagents() {
  * `files` is the workspace tree: `getTree` is real in the host, and a
  * directory row expands through the same `getTree` the pane's root uses.
  */
-const SUPPORTED_PANES = new Set(["board", "file", "files", "artifact", "serial"]);
+const SUPPORTED_PANES = new Set(["file", "files", "artifact", "serial"]);
 
 /**
  * Fill the tree pane from `path`.
@@ -3950,7 +3879,12 @@ function openWorkbench(pane) {
   if (activeTab) activeTab.hidden = false;
   state.workbenchOpen = true;
   localStorage.setItem("prometheus.workbench", "1");
-  localStorage.setItem("prometheus.pane", state.pane);
+  // `prometheus.pane` is not written any more. It was read at boot to restore
+  // the last pane, but launch force-closes the workbench (see the bottom of
+  // this file) and every open goes through this function with an explicit
+  // pane, so the key had no reader left once the default stopped being
+  // restored. Same rule as `prometheus.lastSession`: do not keep a write
+  // nothing reads.
   workbenchTabs.querySelectorAll("button").forEach((button) => {
     const active = button.dataset.pane === state.pane;
     button.classList.toggle("active", active);
@@ -3968,7 +3902,6 @@ function openWorkbench(pane) {
   const showHistory = state.pane === "history";
   const showTasks = state.pane === "tasks";
   const showFile = state.pane === "file";
-  const showBoard = state.pane === "board";
   const showSerial = state.pane === "serial";
   const tasksRoot = $("tasks-root");
   if (tasksRoot) tasksRoot.hidden = !showTasks;
@@ -3988,7 +3921,6 @@ function openWorkbench(pane) {
   terminalRoot.hidden = !showTerminal;
   $("artifact-root").hidden = !showArtifact || !state.selectedArtifact;
   $("browser-root").hidden = !showBrowser;
-  $("board-root").hidden = !showBoard;
   $("serial-root").hidden = !showSerial;
   if (showDiff) renderDiff();
   if (showFiles) requestTree(state.cwd);
@@ -3996,11 +3928,6 @@ function openWorkbench(pane) {
   if (showArtifact) api.send({ cmd: "getArtifacts" });
   if (showTerminal) {
     openTerminal();
-  }
-  if (showBoard) {
-    // Two-phase: the host answers synchronously with the project half and
-    // fills the inventory in when the machine scan finishes.
-    api.send({ cmd: "getBoardState" });
   }
   if (showSerial) {
     openSerialPane();
@@ -4211,440 +4138,6 @@ function renderDiff() {
   }
 }
 
-/* ---------- board pane ---------- */
-
-/**
- * The Board pane is a report, not a control panel: it answers "what is attached
- * and what will the tools use". The one thing it can change is the selection,
- * because that is what the agent falls back to — and that selection is saved by
- * the host, not held here.
- */
-/**
- * The Board pane.
- *
- * One question, one block: what will the flasher be told to flash. Everything
- * else on this pane exists only to answer that or to explain why it cannot be
- * answered. The chip reading is the *evidence* for the target, never a second
- * target — when both were rows, a stale saved name and a live reading sat side
- * by side and the user was asked to adjudicate a conflict the pane invented.
- *
- * The machine inventory (every toolchain, every port, the whole target table)
- * lives in Settings and in `embed_targets`. It used to fill this pane, which
- * buried a one-second answer under a page of things that were not wrong.
- */
-function renderBoard() {
-  const body = $("board-body");
-  const board = state.boardState;
-  if (!board) {
-    // No workspace scanner in this kernel. "Reading the workspace…" would
-    // never finish; what is true is whether a probe has reported at all.
-    body.innerHTML = state.device
-      ? deviceSectionHtml()
-      : `<div class="board-empty">${escapeHtml(t.boardNoDevice)}</div>`;
-    return;
-  }
-
-  const parts = [];
-  // A row with no label is a headline: it states the section's answer, and
-  // there is no empty `<span>` holding a hole open in the middle of the pane.
-  // It still lands on the value edge — labels sit in one column, everything
-  // else in the other — so a headline's value starts where the labelled
-  // values below it start.
-  const row = (label, value, cls = "", note = "") => {
-    const labelHtml = label ? `<span class="board-label">${escapeHtml(label)}</span>` : "";
-    parts.push(
-      `<div class="board-row">${labelHtml}` +
-        `<span class="board-value${cls ? ` ${cls}` : ""}" title="${escapeHtml(value)}">${escapeHtml(value)}</span></div>` +
-        (note ? `<div class="board-note">${escapeHtml(note)}</div>` : ""),
-    );
-  };
-
-  const scanned = Boolean(board.scannedAt);
-  const project = board.project ?? { kind: "unknown", evidence: [] };
-  const effective = board.effective ?? {};
-  const source = board.targetSource ?? (effective.target ? "manual" : "none");
-  const identity = board.identity ?? null;
-  const hasProbes = (board.probes ?? []).length > 0;
-
-  // ---- Target: the one thing this pane is for -----------------------------
-  parts.push(`<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardTarget)}</div>`);
-
-  // The evidence line, under the target: family, size, probe. Never a row of
-  // its own — it is the explanation of the value above it.
-  const evidence = [];
-  if (identity?.family) {
-    evidence.push(identity.family);
-    if (identity.flashKib !== undefined) evidence.push(`${identity.flashKib} KiB`);
-  }
-  if (identity) evidence.push(t.boardReadFromChip);
-
-  if (source === "chip") {
-    row("", effective.target ?? "", "ok", evidence.join(" · "));
-  } else if (source === "unlisted") {
-    row("", t.boardNoTargetName, "warn", t.boardTargetUnlisted(identity?.family ?? ""));
-  } else if (source === "manual") {
-    row("", effective.target ?? "", "", t.boardTargetManual);
-    if (evidence.length) parts.push(`<div class="board-note">${escapeHtml(evidence.join(" · "))}</div>`);
-  } else if (!scanned) {
-    parts.push(`<div class="board-empty">${escapeHtml(t.boardScanning)}</div>`);
-  } else if (hasProbes) {
-    row("", t.boardUnknownPart, "warn", board.identityNote || t.boardNoChipRead);
-  } else {
-    row("", t.boardNoProbeShort, "warn", t.boardPlugInHint);
-  }
-
-  // What carries the name. A target name has no meaning without the flasher
-  // whose namespace it belongs to, so these live in the same block.
-  if (source !== "none" || effective.flasher) {
-    row(t.boardFlasher, effective.flasher || t.boardFlasherDefault, effective.flasher ? "" : "muted");
-  }
-  // "Port", not "Serial": this row is the port the *flasher* will open, and
-  // the pane also has a "Serial" section below for the monitor. Both carried
-  // the same word, so the pane read as though it listed the serial pane
-  // twice (a section header and a row label, one above the other). `boardPort`
-  // already existed and was unused.
-  const portText = effective.port
-    ? `${effective.port}${selectionHasBaud(board) ? ` · ${effective.baud}` : ""}`
-    : t.boardUnset;
-  row(t.boardPort, portText, effective.port ? "" : "warn", effective.port && !selectionHasBaud(board) ? t.boardBaudDefault : "");
-  parts.push(`</div>`);
-
-  // ---- Serial, as the device's live voice --------------------------------
-  // The monitor's own state, mirrored by the host. Open or not is a fact the
-  // user can act on ("my assistant cannot open the port — who holds it?");
-  // the tail says whether anything is talking without opening the other pane.
-  const serialState = board.serial;
-  if (serialState && (serialState.open || (board.ports ?? []).length > 0)) {
-    parts.push(`<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardSerial)}</div>`);
-    if (serialState.open) {
-      row("", `${serialState.port} · ${serialState.baud}`, "ok", t.boardSerialOpenBy(serialState.lines ?? 0, serialState.dropped ?? 0));
-      const tail = board.serialTail ?? [];
-      if (tail.length > 0) {
-        parts.push(`<div class="board-serial-tail">`);
-        for (const line of tail.slice(-5)) {
-          parts.push(`<div class="board-serial-line${line.level ? ` ${line.level}` : ""}"><span class="serial-time">${escapeHtml(new Date(line.at).toTimeString().slice(0, 8))}</span>${escapeHtml(line.text)}</div>`);
-        }
-        parts.push(`</div>`);
-        parts.push(`<button type="button" class="menu-action board-serial-open" data-open-serial>${escapeHtml(t.boardSerialOpen)}</button>`);
-      }
-    } else {
-      row("", t.boardSerialClosed, "muted", (board.ports ?? []).length > 0 ? t.boardSerialClosedHint : "");
-    }
-    parts.push(`</div>`);
-  }
-
-  // ---- Alternatives ------------------------------------------------------
-  // Only when the chip read leaves a real choice: 1 MiB vs 2 MiB, or two
-  // probes. These are overrides on top of the chip's answer, not a second
-  // answer to compare against.
-  const options = board.targetOptions ?? [];
-  const portChoices = (board.ports ?? []).filter((port) => port.path !== effective.port);
-  if (options.length > 1 || portChoices.length > 0) {
-    parts.push(`<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardAlternatives)}</div>`);
-    if (options.length > 1) {
-      parts.push(`<div class="board-targets">`);
-      for (const name of options) {
-        const active = name === effective.target ? " active" : "";
-        parts.push(`<button type="button" class="board-target${active}" data-target="${escapeHtml(name)}">${escapeHtml(name)}</button>`);
-      }
-      parts.push(`</div>`);
-    }
-    if (portChoices.length > 0) {
-      parts.push(`<div class="board-targets">`);
-      for (const port of portChoices) {
-        parts.push(`<button type="button" class="board-port" data-port="${escapeHtml(port.path)}">${escapeHtml(port.path)}</button>`);
-      }
-      parts.push(`</div>`);
-    }
-    parts.push(`</div>`);
-  }
-
-  // ---- Project and the last build ----------------------------------------
-  parts.push(`<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardProject)}</div>`);
-  if (project.kind === "unknown") {
-    parts.push(`<div class="board-empty"><strong>${escapeHtml(t.boardNoProject)}</strong>${escapeHtml(t.boardNoProjectHint)}</div>`);
-  } else {
-    row(t.boardKind, project.kind, "ok");
-    if (project.root) row(t.boardRoot, project.root);
-  }
-  if (board.build) {
-    if (board.build.usage) {
-      // Flash usage is a share of a capacity only when the part reported one.
-      // Without it the bytes are still true; the percentage would not be.
-      const flash = board.build.usage.flash;
-      const total = identity?.flashKib !== undefined ? identity.flashKib * 1024 : undefined;
-      const share = total ? ` (${((flash / total) * 100).toFixed(1)}%)` : "";
-      row(t.boardFlash, `${formatBytes(flash)}${share}`, "", total ? "" : t.boardRamUnknown);
-      row(t.boardRam, formatBytes(board.build.usage.ram));
-    } else {
-      row(t.boardBuild, board.build.ok ? t.boardBuildOk : t.boardBuildFailed, board.build.ok ? "ok" : "bad");
-    }
-    parts.push(`<div class="board-note">${escapeHtml(t.boardFromBuild)}</div>`);
-  }
-  parts.push(`</div>`);
-
-  // ---- Machine, as one line ----------------------------------------------
-  // The full inventory is in Settings. What belongs here is only what the user
-  // can act on: is there a probe, is there a port, and what does this project
-  // need that is missing. A list of every installed toolchain answered no
-  // question anyone asked this pane.
-  if (scanned) {
-    const probes = (board.probes ?? []).length;
-    const ports = (board.ports ?? []).length;
-    const summary = [
-      t.boardProbeCount(probes),
-      t.boardPortCount(ports),
-      (board.tools ?? []).length ? t.boardToolCount((board.tools ?? []).length) : t.boardNoTools,
-    ].join(" · ");
-    parts.push(`<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardMachine)}</div>`);
-    parts.push(`<div class="board-note">${escapeHtml(summary)}</div>`);
-    for (const note of board.probeNotes ?? []) parts.push(`<div class="board-note dim">${escapeHtml(note)}</div>`);
-    // Only the tools this project's own kind needs, and only when missing.
-    const needed = requiredMissing(board);
-    if (needed.length > 0) row(t.boardMissing, needed.join(", "), "warn");
-    parts.push(`</div>`);
-  }
-
-  if (state.device) parts.unshift(deviceSectionHtml());
-
-  // ---- Direct MCP probe results ------------------------------------------
-  // `board_devices` arrives after the refresh click (the probe connects and
-  // calls read-only tools, which takes seconds). Each row is one tool's
-  // answer: probe presence, backend version, session state — whatever the
-  // backend can say without a debug session. Failures are drawn too: "keil
-  // status: no session open" is the honest answer, and hiding it would read
-  // as the backend being absent.
-  if ((state.boardDevices ?? []).length > 0) {
-    parts.push(`<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardDeviceDirect)}</div>`);
-    for (const entry of state.boardDevices) {
-      if (!entry.ok) {
-        row(`${entry.server} · ${entry.tool}`, t.boardProbeFailed, "warn", entry.error ?? "");
-        continue;
-      }
-      // The deviceStatus shape gets the pane's own labels; everything else is
-      // a compact JSON one-liner — a probe list is data, not prose.
-      const state0 = entry.state ?? {};
-      if (typeof state0.backend === "string" || typeof state0.probe === "string") {
-        for (const [key, label] of Object.entries({ backend: t.boardDeviceBackend, probe: t.boardDeviceProbe, cpu: t.boardDeviceCpu, serial: t.boardDeviceSerial })) {
-          if (state0[key] !== undefined) row(`${entry.server} · ${label}`, String(state0[key]), state0[key] === "detached" || state0[key] === "none" ? "warn" : "");
-        }
-      } else if (state0.stlink !== undefined || state0.jlink !== undefined) {
-        const found = [];
-        if (state0.stlink) found.push("ST-Link");
-        if (state0.jlink) found.push("J-Link");
-        row(`${entry.server} · probe`, found.length > 0 ? found.join(", ") : t.boardNoProbeShort, found.length > 0 ? "ok" : "warn");
-      } else {
-        const text = JSON.stringify(state0);
-        row(`${entry.server} · ${entry.tool}`, text.length > 80 ? `${text.slice(0, 80)}…` : text);
-      }
-    }
-    parts.push(`</div>`);
-  }
-  body.innerHTML = parts.join("");
-  body.querySelectorAll("[data-target]").forEach((button) => {
-    button.addEventListener("click", () => saveBoardSelection({ target: button.dataset.target }));
-  });
-  body.querySelectorAll("[data-port]").forEach((button) => {
-    button.addEventListener("click", () => saveBoardSelection({ port: button.dataset.port }));
-  });
-  body.querySelectorAll("[data-open-serial]").forEach((button) => {
-    button.addEventListener("click", () => openWorkbench("serial"));
-  });
-}
-
-/**
- * Whether the baud rate shown was chosen or defaulted.
- *
- * A baud rate cannot be observed: nothing reads it back from the port. When
- * the user has not set one, the number on screen is this app's default, and
- * showing `COM7 · 115200` as though it were a property of the port is the same
- * mistake as showing a default context window as the model's.
- */
-function selectionHasBaud(board) {
-  const chosen = board?.selection?.baud;
-  return typeof chosen === "number" && chosen > 0;
-}
-
-/**
- * Toolchains this project's kind needs and the machine does not have.
- *
- * The full missing list is every toolchain the detector knows about — telling
- * an STM32 project it lacks RISC-V GCC, `west` and `idf.py` is noise that
- * reads like an error. Only the tools this project would actually invoke are
- * listed, and only when they are absent.
- */
-function requiredMissing(board) {
-  const kind = board?.project?.kind ?? "unknown";
-  const needs = {
-    zephyr: ["cmake", "ninja", "gcc-arm", "west"],
-    espIdf: ["idf", "cmake"],
-    platformio: ["pio"],
-    arduino: ["arduino-cli"],
-    cmake: ["cmake", "gcc-arm"],
-    // A bare Makefile or a bare-metal project still needs a compiler and make.
-    make: ["make", "gcc-arm"],
-  }[kind];
-  if (!needs) return [];
-  const missing = new Set(board?.missing ?? []);
-  return needs.filter((tool) => missing.has(tool));
-}
-
-function formatBytes(bytes) {  const value = Number(bytes) || 0;
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / (1024 * 1024)).toFixed(2)} MB`;
-}
-
-function saveBoardSelection(patch) {
-  const next = { ...(state.board.selection ?? {}), ...patch };
-  api.send({ cmd: "setBoardSelection", selection: next });
-}
-
-function setBoardState(message) {
-  // The project phase arrives first and the inventory second; each replaces the
-  // previous wholesale, so a mode change or folder switch cannot leave stale
-  // toolchains on screen.
-  state.boardState = message.state;
-  state.board = state.boardState;
-  if (message.targetStatus) state.boardTargetStatus = message.targetStatus;
-  renderBoard();
-  renderBoardChip();
-}
-
-/**
- * The probe's own report, as a section.
- *
- * This kernel has no workspace scanner: the only device facts come from the
- * probe MCP, which answers `{ backend, probe, cpu, serial }` after a tool call.
- * Rendering them under their own heading keeps them distinct from the target
- * and port fields no tool fills in.
- */
-function deviceSectionHtml() {
-  const device = state.device;
-  if (!device) return "";
-  const rows = [];
-  const labels = {
-    backend: t.boardDeviceBackend,
-    probe: t.boardDeviceProbe,
-    cpu: t.boardDeviceCpu,
-    serial: t.boardDeviceSerial,
-  };
-  for (const [key, label] of Object.entries(labels)) {
-    const value = device[key];
-    if (value === undefined) continue;
-    const bad = value === "detached" || value === "unknown" || value === "none";
-    rows.push(
-      `<div class="board-row"><span class="board-label">${escapeHtml(label)}</span>` +
-        `<span class="board-value${bad ? " warn" : ""}">${escapeHtml(String(value))}</span></div>`,
-    );
-  }
-  if (rows.length === 0) return "";
-  const source = state.deviceTool ? `<div class="board-note">${escapeHtml(t.boardDeviceFrom(state.deviceTool))}</div>` : "";
-  return (
-    `<div class="board-section"><div class="board-section-title">${escapeHtml(t.boardDevice)}</div>` +
-    rows.join("") +
-    source +
-    `</div>`
-  );
-}
-
-/* ---------- board chip in the composer ---------- */
-
-/** Hidden until there is something to say: a web project gets no extra chip. */
-function renderBoardChip() {
-  const control = $("board-control");
-  const selection = state.board.selection ?? {};
-  // The chip shows what the tools will use, not what was saved: a saved target
-  // with a swapped board is exactly the stale value the pane stopped trusting,
-  // and the chip would otherwise put it back in front of the user.
-  const effective = state.boardState?.effective ?? selection;
-  const target = effective.target;
-  const projectKind = state.board.projectKind ?? "unknown";
-  const hasPorts = (state.boardState?.ports ?? []).length > 0;
-  // The probe's answer is also something to say: with no scanner in this
-  // kernel, `device` is the only live reading the chip can carry.
-  const device = state.device;
-  const relevant =
-    Boolean(effective.port || target) || projectKind !== "unknown" || hasPorts || Boolean(device);
-  control.hidden = !relevant;
-  if (!relevant) return;
-
-  const parts = [];
-  if (target) parts.push(target);
-  if (effective.port) parts.push(effective.port);
-  // Nothing named yet, but the probe answered: show its state rather than an
-  // empty "not set" chip next to a visible device report.
-  if (parts.length === 0 && device) {
-    if (typeof device.backend === "string" && device.backend !== "none") parts.push(device.backend);
-    if (typeof device.probe === "string") parts.push(device.probe);
-  }
-  // This node carries no data-i18n on purpose: the locale sweep would overwrite
-  // it with placeholder text. Same reason as the model id label.
-  $("board-chip-value").textContent = parts.join(" · ") || t.boardChipNone;
-  $("board-chip-value").title = parts.join(" · ");
-}
-
-function openBoardMenu() {
-  const menu = $("board-menu");
-  const selection = state.board.selection ?? {};
-  const ports = state.boardState?.ports ?? [];
-  const parts = [];
-  if (ports.length === 0) {
-    parts.push(`<div class="menu-empty">${escapeHtml(t.boardNoPort)}</div>`);
-  } else {
-    for (const port of ports) {
-      const detail = port.board || port.description || (port.vid ? `${port.vid}:${port.pid ?? "?"}` : "");
-      const active = port.path === selection.port ? " active" : "";
-      parts.push(
-        `<button type="button" role="menuitem" class="model-option${active}" data-port="${escapeHtml(port.path)}">` +
-          `<span>${escapeHtml(port.path)}</span>` +
-          (detail ? `<span class="model-meta">${escapeHtml(detail)}</span>` : "") +
-          `</button>`,
-      );
-    }
-  }
-  parts.push(`<div class="menu-sep"></div>`);
-  parts.push(`<button type="button" role="menuitem" class="menu-action" data-action="board">${escapeHtml(t.boardOpenPane)}</button>`);
-  parts.push(`<button type="button" role="menuitem" class="menu-action" data-action="refresh">${escapeHtml(t.boardRefresh)}</button>`);
-  menu.innerHTML = parts.join("");
-  menu.hidden = false;
-  $("board-picker").setAttribute("aria-expanded", "true");
-
-  menu.querySelectorAll("[data-port]").forEach((button) => {
-    button.addEventListener("click", () => {
-      saveBoardSelection({ port: button.dataset.port });
-      closeBoardMenu();
-    });
-  });
-  menu.querySelector('[data-action="board"]').addEventListener("click", () => {
-    closeBoardMenu();
-    openWorkbench("board");
-  });
-  menu.querySelector('[data-action="refresh"]').addEventListener("click", () => {
-    closeBoardMenu();
-    $("board-refresh").click();
-  });
-}
-
-function closeBoardMenu() {
-  $("board-menu").hidden = true;
-  $("board-picker").setAttribute("aria-expanded", "false");
-}
-
-$("board-picker").addEventListener("click", (event) => {
-  event.stopPropagation();
-  if ($("board-menu").hidden) openBoardMenu();
-  else closeBoardMenu();
-});
-
-$("board-refresh").addEventListener("click", () => {
-  // The host answers both halves: serial/ports immediately, and the device
-  // probe (short-lived MCP connection to the configured backends, read-only
-  // status tools only) as a following `board_devices` event. No agent turn,
-  // no model call — the refresh must not depend on the model agreeing.
-  api.send({ cmd: "getBoardState" });
-});
-
 /* ---------- serial pane ---------- */
 
 const SERIAL_BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
@@ -4662,15 +4155,17 @@ function openSerialPane() {
 function fillSerialControls() {
   const portSelect = $("serial-port");
   const baudSelect = $("serial-baud");
-  const ports = state.serialPorts ?? state.boardState?.ports ?? [];
-  const selection = state.board.selection ?? {};
-  const wantedPort = state.serial.port || selection.port || (ports.length === 1 ? ports[0].path : "");
+  // The monitor's own enumeration is the only source of ports. It used to fall
+  // back to the Board pane's `boardState.ports`, which no longer exists.
+  const ports = state.serialPorts ?? [];
+  const wantedPort =
+    state.serial.port || state.serial.selectedPort || (ports.length === 1 ? ports[0].path : "");
 
   portSelect.innerHTML = "";
   if (ports.length === 0) {
     const option = document.createElement("option");
     option.value = "";
-    option.textContent = t.boardNoPort;
+    option.textContent = t.serialNoPort;
     portSelect.appendChild(option);
   }
   for (const port of ports) {
@@ -4697,7 +4192,7 @@ function fillSerialControls() {
       baudSelect.appendChild(option);
     }
   }
-  baudSelect.value = String(state.serial.baud || selection.baud || 115200);
+  baudSelect.value = String(state.serial.baud || state.serial.selectedBaud || 115200);
   portSelect.disabled = state.serial.open;
   baudSelect.disabled = state.serial.open;
   $("serial-toggle").textContent = state.serial.open ? t.serialStop : t.serialStart;
@@ -4885,10 +4380,9 @@ $("serial-toggle").addEventListener("click", () => {
   const encoding = $("serial-encoding")?.value || "auto";
   state.serial.port = port;
   state.serial.baud = baud;
+  state.serial.selectedPort = port;
+  state.serial.selectedBaud = baud;
   state.serial.encoding = encoding;
-  // Opening the monitor also states the port the agent should use; the two are
-  // the same decision, and making the user repeat it is how they diverge.
-  if ((state.board.selection ?? {}).port !== port) saveBoardSelection({ port, baud });
   api.send({ cmd: "serialOpen", port, baud, encoding });
 });
 
@@ -4971,7 +4465,15 @@ $("serial-view").addEventListener("click", (event) => {
 });
 
 $("serial-port").addEventListener("change", () => {
-  saveBoardSelection({ port: $("serial-port").value, baud: Number($("serial-baud").value) || 115200 });
+  // Remember the pick in this pane: the port list is re-enumerated whenever the
+  // pane opens or the host reports `serial_ports`, and a forgotten pick would
+  // silently snap back to the first port.
+  state.serial.selectedPort = $("serial-port").value;
+  state.serial.selectedBaud = Number($("serial-baud").value) || 115200;
+});
+
+$("serial-baud").addEventListener("change", () => {
+  state.serial.selectedBaud = Number($("serial-baud").value) || 115200;
 });
 
 $("serial-encoding")?.addEventListener("change", (event) => {
@@ -6419,8 +5921,11 @@ document.addEventListener("keydown", (event) => {
     // fall through to whatever the next branch would have done.
     event.preventDefault();
   } else if (key === "e" && event.shiftKey) {
+    // The Board pane was deleted (2026-10-26) and this binding opened it.
+    // Swallowed rather than removed: without this branch Ctrl+Shift+E would
+    // fall into the plain-`e` effort cycle below, which is a different action
+    // than the one the key used to have.
     event.preventDefault();
-    openWorkbench("board");
   } else if (key === "e") {
     event.preventDefault();
     // Silent when the model has no levels: the control is hidden, and sending
@@ -6691,7 +6196,6 @@ function paletteEntries() {
     { label: t.shortcutSettings, run: openSettings },
     { label: t.shortcutShortcuts, run: openShortcuts },
     { label: t.toggleSidebar, run: toggleSidebar },
-    { label: t.paneBoard, run: () => openWorkbench("board") },
     { label: t.shortcutFind, run: openFind },
     ...MODES.map((mode) => ({
       label: modeCopy(mode).label,

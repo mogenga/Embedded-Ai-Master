@@ -33,7 +33,7 @@ import {
   RESOURCES_PATH_ENV,
   resolveRoots,
 } from "./roots.js";
-import { SerialBridge, listSerialPorts, serialRingPath } from "./serial-bridge.js";
+import { SerialBridge, listSerialPorts } from "./serial-bridge.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // `distParent` is the directory that holds `dist/` — the checkout root in
@@ -58,56 +58,6 @@ function send(message) {
 
 /** One bridge per host process; its events leave through the same `send`. */
 const serialBridge = new SerialBridge(send);
-
-/**
- * Board pane state the host owns directly. The target part number is NOT
- * here — that answer comes from the agent's probe tools via `device_status`
- * events, and a host-side guess would be a fabricated one (R3). This is the
- * selection the tools should use, persisted per host process.
- */
-let boardSelection = {};
-
-/**
- * The device half of the board pane: call each configured embedded backend's
- * read-only status tool through a short-lived MCP manager. Undefined when the
- * kernel's MCP modules are missing (stale dist) — the pane keeps its serial
- * half either way.
- */
-async function probeBoardDevices() {
-  const config = mcpBoardModule?.config;
-  const managerCtor = mcpBoardModule?.manager?.McpManager;
-  if (typeof config?.loadMcpConfig !== "function" || typeof managerCtor !== "function") {
-    return [];
-  }
-  try {
-    const { probeBoardState } = await import("./board-probe.js");
-    return await probeBoardState({
-      loadMcpConfig: config.loadMcpConfig,
-      McpManager: managerCtor,
-      harnessHome,
-      workdir: cwd,
-    });
-  } catch {
-    // An unreachable backend is a normal finding, not a host failure; the
-    // per-tool errors travel in the results when they do.
-    return [];
-  }
-}
-
-/** Project identity from the cwd, at the shape the pane's `project` expects. */
-function state_boardProject() {  const dir = cwd ?? "";
-  if (dir === "") return { kind: "unknown", evidence: [] };
-  // The same signals the route facade uses; cheap extension checks only —
-  // this is a display hint, not a routing decision.
-  if (existsSync(path.join(dir, ".uvprojx"))) return { kind: "keil", root: dir, evidence: [] };
-  for (const marker of [[".project", ".cproject"], ["CMakeLists.txt", "project.cmake"], ["platformio.ini"], ["sdkconfig"], ["Makefile"]]) {
-    if (marker.every((name) => existsSync(path.join(dir, name)))) {
-      const kind = marker[0] === ".project" ? "cubeide" : marker[0] === "CMakeLists.txt" ? "espidf" : marker[0] === "platformio.ini" ? "platformio" : marker[0] === "sdkconfig" ? "zephyr" : "make";
-      return { kind, root: dir, evidence: [] };
-    }
-  }
-  return { kind: "unknown", evidence: [] };
-}
 
 function fatal(message) {
   send({ type: "fatal", message });
@@ -268,18 +218,6 @@ send({ type: "hello" });
 const probeModule = await import(dist("model/probe.js")).catch(() => undefined);
 
 /**
- * The kernel's MCP stack, for the board pane's device probe.
- *
- * Same lazy/namespace rule as `probeModule`: a `dist/` without these modules
- * (or without `loadMcpConfig` on config.js) must not stop the host from
- * booting — the board pane reports the gap instead.
- */
-const mcpBoardModule = await Promise.all([
-  import(dist("mcp/config.js")),
-  import(dist("mcp/manager.js")),
-]).then(([config, manager]) => ({ config, manager })).catch(() => undefined);
-
-/**
  * The kernel's knowledge-base locator, loaded lazily by `getKb`.
  *
  * Same reasoning as `probeModule`, one step further: `dist/server/kb-locate.js`
@@ -402,16 +340,6 @@ function keilToolchainModule() {
 let toolchainDetectionCache = null;
 function resetToolchainDetection() {
   toolchainDetectionCache = null;
-}
-
-/**
- * The packs registry, or null when the kernel is not compiled. getBoardState
- * needs it for toolchain detection but must not fail the whole state message
- * over a missing build.
- */
-async function packsRegistryOrNull() {
-  const packs = await packsModule();
-  return packs?.registry ?? null;
 }
 
 async function detectToolchainsForPacks(registry) {
@@ -4316,72 +4244,14 @@ const handlers = {
     }
   },
 
+  /**
+   * The serial monitor's port list. The Board pane's `board_state.ports` used
+   * to be a second source for the same dropdown; it is gone (2026-10-26), so
+   * this enumeration is the only one and therefore the authoritative one.
+   */
   async listSerialPorts() {
     const ports = await listSerialPorts();
-    // The pane's port dropdown also feeds from board_state.ports; serial
-    // enumeration is the authoritative one for the monitor, so it ships here.
     send({ type: "serial_ports", ports });
-  },
-
-  /**
-   * Board pane refresh. The kernel has no machine scanner, so what the host
-   * can answer truthfully is the serial side (ports from WMI, the mirror
-   * state the panel itself owns) plus the session selection; the target/
-   * flash answers only the agent's probe tools can give. The renderer knows
-   * this shape and prompts the agent for the tool half when the user asks
-   * for a refresh — this handler never pretends to know a part number.
-   */
-  async getBoardState() {
-    const ports = await listSerialPorts();
-    // The device half comes from the MCP backends directly: a short-lived
-    // manager connects to the configured embedded servers and calls their
-    // read-only status tools. No model, no agent turn, no approval — read-only
-    // by whitelist in board-probe.js. Slow path (connect ~seconds), so it
-    // races the serial half and the answer lands in a second event.
-    const devicePromise = probeBoardDevices();
-    devicePromise.then((devices) => {
-      if (devices.length > 0) send({ type: "board_devices", devices });
-    });
-    const mirrorPath = serialRingPath();
-    let serial = { open: false };
-    let serialTail = [];
-    try {
-      if (existsSync(mirrorPath)) {
-        const mirror = JSON.parse(readFileSync(mirrorPath, "utf8"));
-        const entry = mirror.ports?.[0];
-        if (entry) {
-          serial = { open: true, port: entry.port, baud: entry.baud, lines: entry.lines?.length ?? 0, dropped: entry.dropped ?? 0 };
-          // A short tail for the board pane's preview: five lines is enough to
-          // see the device is alive without duplicating the serial pane.
-          serialTail = (entry.lines ?? []).slice(-5).map((line) => ({ text: String(line.text ?? "").slice(0, 120), at: line.at, level: line.level }));
-        }
-      }
-    } catch {
-      // A torn mirror reads as closed; the serial pane is the authority anyway.
-    }
-    send({
-      type: "board_state",
-      state: {
-        scannedAt: Date.now(),
-        project: state_boardProject(),
-        ports,
-        serial,
-        serialTail,
-        // What toolchains the machine actually has: the renderer's「本机」line
-        // and the project's requiredMissing check read this. Previously the
-        // field was never sent, so the pane showed "0 tools" forever.
-        tools: await detectToolchainsForPacks(await packsRegistryOrNull()).catch(() => []),
-        selection: boardSelection,
-        effective: { port: boardSelection?.port, baud: boardSelection?.baud },
-      },
-    });
-  },
-
-  setBoardSelection({ selection }) {
-    boardSelection = typeof selection === "object" && selection !== null ? { ...selection } : {};
-    // Re-answer with the merged state so the pane never shows a value the
-    // tools would not use.
-    void handlers.getBoardState();
   },
 
   // ---- 工具链包 -------------------------------------------------------------

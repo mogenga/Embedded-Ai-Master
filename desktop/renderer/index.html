@@ -282,14 +282,6 @@
                       </button>
                       <div class="mode-menu" id="mode-menu" role="menu" hidden></div>
                     </div>
-                    <div class="board-control" id="board-control" hidden>
-                      <button class="chip-button board-picker" id="board-picker" aria-haspopup="menu" aria-expanded="false">
-                        <span class="chip-key" data-i18n="boardChipLabel">Board</span>
-                        <span id="board-chip-value">—</span>
-                        <svg class="icon" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
-                      </button>
-                      <div class="board-menu" id="board-menu" role="menu" hidden></div>
-                    </div>
                   </div>
                   <div class="controls controls-right">
                     <div class="model-control" id="model-control">
@@ -366,14 +358,14 @@
             ></div>
             <div class="workbench-head">
               <div class="workbench-tabs" id="workbench-tabs" role="tablist">
-                <!-- Panes with a real source: the board reads `device_status`,
-                     the file pane reads `getFile`, the artifact pane lists
-                     what `pipeline.writeArtifact` wrote, and the serial pane
-                     is fed by the host's PowerShell serial bridge. File and
-                     artifact start hidden because they are opened by an
-                     action (a tool row click), not by browsing. -->
-                <button role="tab" aria-selected="true" tabindex="0" data-pane="board" class="active" data-i18n="paneBoard">Board</button>
-                <button role="tab" aria-selected="false" tabindex="-1" data-pane="serial" data-i18n="paneSerial">Serial</button>
+                <!-- Panes with a real source: the file pane reads `getFile`,
+                     the artifact pane lists what `pipeline.writeArtifact`
+                     wrote, and the serial pane is fed by the host's
+                     PowerShell serial bridge. File and artifact start hidden
+                     because they are opened by an action (a tool row click),
+                     not by browsing. Serial is the only always-present pane
+                     with a backend in this kernel, so it is the default. -->
+                <button role="tab" aria-selected="true" tabindex="0" data-pane="serial" class="active" data-i18n="paneSerial">Serial</button>
                 <button role="tab" aria-selected="false" tabindex="-1" data-pane="file" data-i18n="paneFile" hidden>File</button>
                 <button role="tab" aria-selected="false" tabindex="-1" data-pane="files" data-i18n="paneFiles" hidden>Files</button>
                 <button role="tab" aria-selected="false" tabindex="-1" data-pane="artifact" data-i18n="paneArtifact" hidden>Artifact</button>
@@ -450,12 +442,6 @@
                   />
                   <button class="btn btn-quiet small" id="terminal-restart" data-i18n="terminalRestart">Restart</button>
                 </div>
-              </div>
-              <div class="board-root" id="board-root" hidden>
-                <div class="board-toolbar">
-                  <button class="btn btn-quiet small" id="board-refresh" data-i18n="boardRefresh">Refresh</button>
-                </div>
-                <div class="board-body" id="board-body"></div>
               </div>
               <div class="serial-root" id="serial-root" hidden>
                 <div class="serial-toolbar">
