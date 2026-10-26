@@ -38,9 +38,26 @@ const SCRIPT_PATH = path.join(REPO_ROOT, "scripts", "verify-signature.mjs");
 
 const tempDirs: string[] = [];
 
+/**
+ * 清理临时目录，**必须带重试**。
+ *
+ * 不带重试时本文件会偶发失败在清理阶段，而不是断言阶段：
+ *
+ *   Error: ENOTEMPTY: directory not empty, rmdir 'C:\...\Temp\eam-verify-sig-XXXX'
+ *
+ * 根因是 Windows 上的文件仍被持有短暂句柄——本机跑着 Kaspersky 与火绒
+ * （`AntiVirusProduct` 实测），它们会扫描刚写出的 `.exe` 样本；`writeFile`
+ * 返回、`inspectFile` 里的句柄也已 `close()`，但扫描器的句柄仍在，`rmdir`
+ * 于是报目录非空。Linux/macOS 上删掉被打开的文件只是 unlink，看不到这个问题，
+ * 所以这条只在 Windows 上出现，且只在杀软参与时出现。
+ *
+ * `maxRetries` / `retryDelay` 正是 `fs.rm` 为这种情况准备的：Node 会对
+ * `ENOTEMPTY` / `EBUSY` / `EPERM` 退避重试。删不掉也不是测试失败的理由——
+ * 临时目录留在 `%TEMP%` 里无害，而一个假红会让人去查根本没坏的产品代码。
+ */
 afterEach(async () => {
   for (const dir of tempDirs.splice(0)) {
-    await rm(dir, { recursive: true, force: true });
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
 
