@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { availableModelEntries, connectionSummary } from "../../desktop/renderer/settings-models.js";
+import {
+  availableModelEntries,
+  carriedFromModel,
+  connectionSummary,
+  contextWindowChoices,
+  contextWindowForSave,
+  CONTEXT_WINDOW_CHOICES,
+  modelEntryForSave,
+  modelRowState,
+  shortWindow,
+} from "../../desktop/renderer/settings-models.js";
 
 describe("availableModelEntries", () => {
   it("丢掉非字符串、空白与首尾空格", () => {
@@ -79,5 +89,164 @@ describe("connectionSummary", () => {
 
   it("未知 locale 退回英文", () => {
     expect(connectionSummary("fr", { modelCount: 2 })).toBe("Connected · 2 models available");
+  });
+});
+
+/**
+ * The page's round trip, without a DOM.
+ *
+ * `modelRowState` is what `addModelRow` calls to seed a row, and
+ * `modelEntryForSave` is what `read()` calls to build the object it sends.
+ * Chaining the two runs the same code the browser runs; only the `<select>`
+ * element between them is missing, and it holds nothing but the string this
+ * test passes as `selectValue`.
+ */
+const labels = {
+  defaultLabel: "Default (128K)",
+  customLabel: (n, short) => `Custom (${n} / ${short})`,
+};
+
+describe("contextWindowChoices", () => {
+  it("默认档在最前，其后是六个档位", () => {
+    const { options, selected } = contextWindowChoices(undefined, labels);
+    expect(selected).toBe("");
+    expect(options.map((option) => option.value)).toEqual([
+      "",
+      "32768",
+      "65536",
+      "131072",
+      "200000",
+      "262144",
+      "1000000",
+    ]);
+    expect(options[0].label).toBe("Default (128K)");
+    expect(options[1].label).toBe("32K");
+    expect(options[6].label).toBe("1M");
+  });
+
+  it("已在档位里的值被选中", () => {
+    expect(contextWindowChoices(200000, labels).selected).toBe("200000");
+    // 恰好等于默认值也算「已选」，不另加自定义档：128000 是 128K 那一档。
+    const at128k = contextWindowChoices(131072, labels);
+    expect(at128k.selected).toBe("131072");
+    expect(at128k.options).toHaveLength(7);
+  });
+
+  it("不在档位里的值单独加一档并选中，不会被静默改写", () => {
+    const { options, selected } = contextWindowChoices(300000, labels);
+    expect(selected).toBe("300000");
+    expect(options).toHaveLength(8);
+    const custom = options[options.length - 1];
+    expect(custom).toEqual({ value: "300000", label: "Custom (300000 / 300K)" });
+  });
+
+  it("非正整数当作没有值：选默认，不加自定义档", () => {
+    for (const bad of [0, -1, 1.5, Number.NaN, "300000", null]) {
+      const { options, selected } = contextWindowChoices(bad, labels);
+      expect(selected).toBe("");
+      expect(options).toHaveLength(7);
+    }
+  });
+});
+
+describe("shortWindow", () => {
+  it("千与百万各自成单位，能整除时不带小数", () => {
+    expect(shortWindow(300000)).toBe("300K");
+    expect(shortWindow(1500000)).toBe("1.5M");
+    expect(shortWindow(1000000)).toBe("1M");
+    expect(shortWindow(999)).toBe("999");
+  });
+});
+
+describe("contextWindowForSave", () => {
+  it("空值表示「不写这个字段」", () => {
+    expect(contextWindowForSave("")).toBeUndefined();
+    expect(contextWindowForSave(undefined)).toBeUndefined();
+    expect(contextWindowForSave(null)).toBeUndefined();
+  });
+
+  it("数字与数字字符串都写成数字", () => {
+    expect(contextWindowForSave("300000")).toBe(300000);
+    expect(contextWindowForSave("1")).toBe(1);
+  });
+
+  it("不是正整数的一律不写，而不是写 NaN", () => {
+    expect(contextWindowForSave("abc")).toBeUndefined();
+    expect(contextWindowForSave("0")).toBeUndefined();
+    expect(contextWindowForSave("1.5")).toBeUndefined();
+    expect(contextWindowForSave("-1")).toBeUndefined();
+  });
+});
+
+describe("modelEntryForSave", () => {
+  it("默认档把键删掉，而不是写成 undefined 或 128000", () => {
+    const entry = modelEntryForSave({ maxOutput: 4096 }, "");
+    expect(Object.hasOwn(entry, "contextWindow")).toBe(false);
+    expect(entry).toEqual({ maxOutput: 4096 });
+  });
+
+  it("选具体档位写数字", () => {
+    expect(modelEntryForSave({}, "65536")).toEqual({ contextWindow: 65536 });
+  });
+
+  it("不改动传进来的 carried", () => {
+    const carried = { contextWindow: 300000, maxOutput: 4096 };
+    modelEntryForSave(carried, "");
+    expect(carried).toEqual({ contextWindow: 300000, maxOutput: 4096 });
+  });
+});
+
+describe("上下文窗口往返", () => {
+  it("文件里的 300000 经过建行与保存仍是 300000", () => {
+    const saved = { contextWindow: 300000, maxOutput: 8192 };
+    const row = modelRowState(saved, labels);
+    expect(row.select.selected).toBe("300000");
+    expect(Object.hasOwn(row.carried, "contextWindow")).toBe(false);
+    expect(row.carried).toEqual({ maxOutput: 8192 });
+
+    const written = modelEntryForSave(row.carried, row.select.selected);
+    expect(written.contextWindow).toBe(300000);
+    expect(written.maxOutput).toBe(8192);
+    expect(written).toEqual(saved);
+  });
+
+  it("走真实入口链路也保留 300000：carriedFromModel → modelRowState → modelEntryForSave", () => {
+    // `entryFrom` in settings.js does exactly this before handing a row to
+    // `addModelRow`, and `addModelRow` hands that row to `modelRowState`.
+    const providersFileModel = { contextWindow: 300000, maxOutput: 8192, supportsReasoning: true };
+    const carried = carriedFromModel(providersFileModel);
+    const row = modelRowState(carried, labels);
+    expect(row.select.selected).toBe("300000");
+    const written = modelEntryForSave(row.carried, row.select.selected);
+    expect(written).toEqual(providersFileModel);
+  });
+
+  it("文件里本来没有这个字段的模型，往返后仍然没有", () => {
+    const saved = { maxOutput: 8192, supportsReasoning: true };
+    const row = modelRowState(saved, labels);
+    expect(row.select.selected).toBe("");
+    const written = modelEntryForSave(row.carried, row.select.selected);
+    expect(Object.hasOwn(written, "contextWindow")).toBe(false);
+    expect(written).toEqual(saved);
+  });
+
+  it("档位里的值往返不变", () => {
+    for (const choice of CONTEXT_WINDOW_CHOICES) {
+      const saved = { contextWindow: choice.value };
+      const row = modelRowState(saved, labels);
+      expect(modelEntryForSave(row.carried, row.select.selected)).toEqual(saved);
+    }
+  });
+
+  it("用户主动换档才丢弃自定义值", () => {
+    const row = modelRowState({ contextWindow: 300000 }, labels);
+    expect(modelEntryForSave(row.carried, "65536")).toEqual({ contextWindow: 65536 });
+    expect(modelEntryForSave(row.carried, "")).toEqual({});
+  });
+
+  it("carriedFromModel 丢掉 undefined，但保留 0 以外的假值判断不误伤 false", () => {
+    expect(carriedFromModel({})).toEqual({});
+    expect(carriedFromModel({ supportsReasoning: false })).toEqual({ supportsReasoning: false });
+    expect(carriedFromModel(undefined)).toEqual({});
   });
 });

@@ -8,7 +8,13 @@
  */
 
 import { settingsStrings } from "./settings-i18n.js";
-import { availableModelEntries, connectionSummary } from "./settings-models.js";
+import {
+  availableModelEntries,
+  carriedFromModel,
+  connectionSummary,
+  modelEntryForSave,
+  modelRowState,
+} from "./settings-models.js";
 import { iconEl, setIcon } from "./icons.js";
 import { normalizeTranscriptView } from "./thinking-view.js";
 
@@ -1160,6 +1166,11 @@ function buildConnectionPage() {
    * so saving does not erase a value the user set in an editor — the form not
    * displaying a field must not mean the file loses it (R3).
    *
+   * `contextWindow` is copied here so the row has it to seed its select;
+   * `modelRowState` then pulls it out of `carried`, because the select is that
+   * key's edit surface and `modelEntryForSave` is what writes it back or omits
+   * it.
+   *
    * `extra` holds the provider-level keys the schema allows but this page does
    * not edit (`requestTimeoutMs`, `maxResponseBytes`, `pricePerMillion`); they
    * are carried through for the same reason.
@@ -1175,20 +1186,7 @@ function buildConnectionPage() {
     apiKeyEnv: typeof provider?.apiKeyEnv === "string" ? provider.apiKeyEnv : "",
     models: Object.entries(provider?.models ?? {}).map(([id, model]) => ({
       id,
-      carried: {
-        ...(model?.contextWindow !== undefined ? { contextWindow: model.contextWindow } : {}),
-        ...(model?.maxOutput !== undefined ? { maxOutput: model.maxOutput } : {}),
-        // Reasoning support is a fact about the model that this form does not
-        // edit, so it has to survive a save. Leaving it out meant one click on
-        // 保存 silently erased it from providers.json — and with it every
-        // effort level the composer was offering a moment earlier.
-        ...(model?.supportsReasoning !== undefined
-          ? { supportsReasoning: model.supportsReasoning }
-          : {}),
-        ...(model?.reasoningEffort !== undefined
-          ? { reasoningEffort: model.reasoningEffort }
-          : {}),
-      },
+      carried: carriedFromModel(model),
     })),
     extra: {
       ...(provider?.requestTimeoutMs !== undefined ? { requestTimeoutMs: provider.requestTimeoutMs } : {}),
@@ -1321,8 +1319,9 @@ function buildConnectionPage() {
     };
 
     const modelList = el("div", "mcp-list");
-    /** One row: a name and Remove. `carried` rides along untouched so a save
-     *  does not drop the counters this page no longer asks for. */
+    /** One row: a name, a context-window select, and Remove. `carried` rides
+     *  along untouched so a save does not drop the counters this page does not
+     *  edit (`maxOutput`, `supportsReasoning`, `reasoningEffort`). */
     const modelHandles = [];
     /**
      * Refill the header's model line from the live rows.
@@ -1339,12 +1338,30 @@ function buildConnectionPage() {
       modelSummary.classList.toggle("empty", names.length === 0);
     };
     const addModelRow = (model) => {
-      const row = el("div", "rules-row");
+      // `.model-row` on top of `.rules-row`: the latter carries the frame
+      // (border, padding, gap), while the former divides the free width
+      // between the id and the two fixed-size controls beside it.
+      const row = el("div", "rules-row model-row");
       const idInput = sText({ value: model.id, placeholder: "model-name", mono: true });
       idInput.setAttribute("aria-label", s.connModelName);
       // The row is the header's data source, so it has to say when it changes.
       // A row removed below takes its listener with it.
       idInput.addEventListener("input", refreshModelSummary);
+      // `modelRowState` splits what the file holds into the keys this row does
+      // not edit and the select's options; a value already in the file that no
+      // size covers gets an option of its own, selected, so the first save
+      // cannot rewrite it (R3).
+      const rowState = modelRowState(model.carried, {
+        defaultLabel: s.connContextWindowDefault,
+        customLabel: s.connContextWindowCustom,
+      });
+      const windowSelect = sSelect({
+        value: rowState.select.selected,
+        options: rowState.select.options,
+        onChange: () => {},
+      });
+      windowSelect.setAttribute("aria-label", s.connContextWindow);
+      windowSelect.title = s.connContextWindowDesc;
       const remove = sButton(
         s.remove,
         () => {
@@ -1356,9 +1373,12 @@ function buildConnectionPage() {
         },
         { quiet: true, danger: true },
       );
-      const handle = { row, idInput, carried: { ...(model.carried ?? {}) } };
+      // `rowState.carried` has no `contextWindow`: the select is that key's
+      // only owner from here on. Save folds the two back together with
+      // `modelEntryForSave`, which never reads a stale copy.
+      const handle = { row, idInput, windowSelect, carried: rowState.carried };
       modelHandles.push(handle);
-      row.append(idInput, remove);
+      row.append(idInput, windowSelect, remove);
       modelList.appendChild(row);
       refreshModelSummary();
       return handle;
@@ -1776,10 +1796,12 @@ function buildConnectionPage() {
         // either half would make `provider/model` point somewhere else.
         if (id.includes("/")) return { problem: s.connModelSlash, field: handle.idInput };
         if (Object.hasOwn(models, id)) return { problem: s.connModelDuplicate, field: handle.idInput };
-        // The counters are not on this form; whatever the file already had for
-        // this model travels with it unchanged. A new row carries nothing and
-        // the kernel fills in its own estimate.
-        models[id] = { ...handle.carried };
+        // The counters other than the context window are not on this form;
+        // whatever the file already had for this model travels with it
+        // unchanged. The context window comes from the row's select: "default"
+        // removes the key (so `DEFAULT_CONTEXT_WINDOW` applies and follows any
+        // future change to it), a number writes that number.
+        models[id] = modelEntryForSave(handle.carried, handle.windowSelect.value);
       }
 
       // Keys are trimmed the same way the kernel trims them

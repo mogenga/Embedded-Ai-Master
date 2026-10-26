@@ -112,6 +112,19 @@ describe("readProviders", () => {
     });
   });
 
+  /**
+   * 设置页的上下文窗口下拉里有「默认」一档，它把键整个省略而不写 128000。
+   * 这一条钉住那个形状是合法的、而且读回来仍是「没写」——若 schema 开始要求
+   * 这个字段，下拉的默认档会在下一次读盘时失败，在这里先响。
+   */
+  it("省略 contextWindow 的模型条目合法，且读回来不补默认值", () => {
+    const home = makeHome();
+    const file = { openai: { ...OPENAI_PROVIDER, models: { m: { maxOutput: 4096 } } } };
+    writeJson(path.join(home, "providers.json"), file);
+
+    expect(readProviders(home).providers).toEqual(file);
+  });
+
   it("坏 JSON 抛 config_unreadable 并指明文件", () => {
     const home = makeHome();
     writeFileSync(path.join(home, "providers.json"), "{bad", "utf8");

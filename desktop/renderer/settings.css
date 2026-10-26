@@ -1446,6 +1446,34 @@
   color: var(--text-secondary);
 }
 
+/* A model row: name, context window, Remove.
+   `.rules-row` is `display:flex` already; what it lacks is a width policy for
+   three children. The name takes the slack (and truncates in its own input),
+   the select sizes to the widest option it actually carries — the labels run
+   from `32K` to `Custom (300000 / 300K)`, and a fixed width would clip the
+   long one — and the Remove button keeps its intrinsic width.
+   Two declarations from the generic field rules have to be undone here:
+   `.setting-input`'s 150px `min-width` and `.page-wide`'s `width: 100%`; with
+   either one in force the row overflows instead of shrinking the name. These
+   selectors tie with `.page-wide .setting-select` on specificity, so they win
+   on source order alone — they must stay below it in this file. */
+.model-row .setting-input {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+
+.model-row .setting-select {
+  flex: 0 1 auto;
+  width: auto;
+  min-width: 0;
+  max-width: 60%;
+}
+
+.model-row .btn {
+  flex: 0 0 auto;
+}
+
 .rules-empty {
   font-size: var(--text-sm);
   color: var(--text-faint);
