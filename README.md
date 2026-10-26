@@ -45,6 +45,80 @@ Windows x64 安装包在 [Releases](https://github.com/mogenga/Embedded-Ai-Maste
 - 前端：纯 ES 模块（无框架、无打包器、无构建步骤），由 Electron 承载
 - 实时通道：NDJSON over stdio（桌面宿主 ⇄ 渲染器）
 
+## Agent 主循环
+
+内核是一台 **Query 生成器循环**（`src/loop/query.ts`，646 行）：一次会话的执行体本身是一个 `async function*`，向消费者流式吐事件。
+
+```ts
+async function* query(session, input, cfg) {
+  await session.append(userEvent(input));            // 先落日志：model-visible 必须已 logged
+  let turn = 0;
+  while (true) {
+    assertBreakers(cfg, ++turn, session.costUsed);   // 熔断：maxTurns / maxCostUsd
+    const resp = await provider.complete(session.context(), signal);
+    await session.append(assistantEvent(resp));
+    yield* emit(resp);                               // 流式吐给 UI / headless
+    const calls = collectToolUses(resp);
+    if (calls.length === 0) return finish(session);  // 终止：模型不再调工具
+    for await (const r of toolSystem.executeBatch(calls, signal))
+      await session.append(toolResultEvent(r));
+    if (contextOverBudget(session)) { await compaction.run(session); continue; }  // 续跑点 A
+    if (resp.truncatedByMaxTokens) continue;                                     // 续跑点 B
+  }
+}
+```
+
+四个设计取舍：
+
+| 决策 | 做法 | 为什么 |
+|---|---|---|
+| **状态机即循环** | `while (true)` 直到模型无工具调用；没有独立状态机类，turn 状态由循环变量 + 会话日志承载 | 日志即真相：进程崩了重放日志就能恢复，不用序列化一个状态机 |
+| **续跑点只有 2 个** | 上下文超限 → 压缩后 continue；输出被 `max_output_tokens` 截断 → continue 让模型续写 | Claude Code 有 7 个，其中 5 个依赖 Anthropic 服务端特性（cache_edits 等），OpenAI 兼容协议下不存在 |
+| **取消一条线贯穿** | `AbortController` 在循环入口创建，贯穿模型请求、工具执行、MCP 子进程 | 嵌入式串口是长读，用户取消必须**立刻**打断，不能等超时 |
+| **批内只读并行** | 模型一次声明的多个 `tool_use` 为一批；批内只读工具并行、含写工具串行（判据是工具的 `readOnly` 标注） | 母本的读写分区 + 流式投机执行是给 60+ 工具设计的，我们内置 12 个 + MCP，收益不抵复杂度 |
+
+同一条循环喂给三种形态，差别只在事件流的消费者：**交互式 REPL**、**headless 夜批**（`src/demo/`）、**桌面工作台**（NDJSON over stdio）。这就是「一次诊断的日志能被原样回放」的结构基础。
+
+细节见 `docs/p0-kernel-design.md` §1。
+
+## Agentic Search 实验结论
+
+**问题**：本地故障库检索该用向量 RAG，还是让 agent 自己多轮 grep？
+
+2026-10-21 跑了一轮对照实验，四方案、80 条自建查询、单标注者（完整报告见 `experiments/rag-vs-agentic-search/docs/experiment-report.md`）：
+
+| 方案 | Recall@2 | Hit@1 | MRR | P50 | P95 | 失败率 |
+|---|---|---|---|---|---|---|
+| **B Agentic search**（多轮 grep + 读） | **0.925** | **0.875** | **0.907** | 65.0 s | 101.5 s | 2.5% |
+| A 向量 RAG | 0.800 | 0.725 | 0.796 | 106 ms | 136 ms | 0% |
+| C′ BM25 + grep | 0.800 | 0.625 | 0.730 | **0.6 ms** | **1.1 ms** | 0% |
+| C 现状基线 | 0.450 | 0.350 | 0.400 | 1.7 ms | 87 ms | 15% |
+
+![四方案检索质量对比](experiments/rag-vs-agentic-search/results/diagnostic/c-diag/figures/fig4_schemes_quality.png)
+
+![四方案延迟对比（对数轴）](experiments/rag-vs-agentic-search/results/diagnostic/c-diag/figures/fig5_schemes_latency.png)
+
+两张图由 `experiments/rag-vs-agentic-search/scripts/plot_scheme_comparison.py` 从 `results/scored/main/overall.csv` 直接生成，不手录数字。
+
+三条结论，都已落进产品：
+
+1. **维持无 RAG**——不引入向量召回层。理由比原计划更强：不是「A 没赢稀疏方案」（A 与 C′ 完全打平，差值 0.0pp），而是 **agentic 检索显著优于向量检索**（B 比 A 高 12.5pp，p_adj = 0.039）。
+2. **KB 渐进加载走 C′（BM25 + grep）**，C 保留为兜底。C′ 比 C 高 35.0pp（p_adj = 9.9e−07），且 0.6 ms 能进交互链路。
+3. **B 只能做夜批**（P95 101.5 秒，每条约 1.9 万输入 token），**C′ 是唯一的交互链路方案**。这不是妥协——两者服务不同场景：用户等着的对话框用 C′，离线批量诊断用 B。
+
+| | 交互链路 | 夜批 / 离线 |
+|---|---|---|
+| **选谁** | C′ BM25 + grep | B Agentic search |
+| **延迟** | P95 1.1 ms | P95 101.5 s |
+| **Recall@2** | 0.800 | 0.925 |
+| **适合** | 用户在等答案 | 有一整晚把 80 条跑完 |
+
+**这不是「谁更好」的问题，是两个不同的点**：C′ 在 1 毫秒内拿到 0.8 的召回，B 用 100 秒换到 0.925。交互链路里 100 秒等于不可用，批处理里 1 毫秒的优点没有意义。所以产品里两条都在——`kb_lookup` 首跳用 C′，夜批诊断用 B。
+
+**B 的优势不来自评测集与语料同源**——已用覆盖率分层排除：低覆盖层 +18.8pp、高覆盖层 +23.5pp，相关系数 −0.018；而对照组 C′ 呈现典型的词频红利形态（低覆盖层 −12.5pp）。
+
+> **这是探索性结果，不是确认性结论。** 预注册未冻结哈希，`score --confirmatory` 拒绝执行；样本 80 条（原设计 274 条），单标注者、无一致性系数。**方向已关闭，决策点 #2 未关闭**——剩余缺口见 `docs/rag-vs-agentic-search-todo.md` §7.4。
+
 ## 快速开始
 
 ```bash
@@ -85,7 +159,7 @@ src/                 内核（平台层，不含领域逻辑）
 ├── corpus/          语料 OTA：manifest 验签、快照、更新、首次种子化
 ├── demo/            headless CLI 入口
 ├── events/          会话日志跟随（LogTailEventSource）
-├── loop/            事件类型、熔断、query 主循环
+├── loop/            query 主循环（生成器）、事件类型、熔断、流式写入
 ├── mcp/             MCP stdio 客户端：配置合并、生命周期、工具适配
 ├── model/           OpenAI 兼容适配器、重试、token 估算、服务探测
 ├── permissions/     规则匹配、预设、审批 gate、审计
@@ -525,6 +599,7 @@ npm --prefix desktop run dist             # 前置装配 + electron-builder
 | `docs/m2-roadmap.md` | M2 任务分期与决策记录 |
 | `docs/deferred-issues.md` | 已知问题与升级条件（D-xxx，改代码前先查） |
 | `docs/harness-comparison.md` / `framework-architecture-inventory.md` | 横向调研与框架能力清单 |
-| `docs/rag-vs-agentic-search-todo.md` | 检索层对照实验的待办与判据 |
+| `docs/rag-vs-agentic-search-todo.md` | 检索层对照实验的判据与实测结论（§7 是结果） |
+| `experiments/rag-vs-agentic-search/` | 该实验的完整资产：报告、评测脚本、查询集、跑批脚本 |
 | `docs/superpowers/specs/` `plans/` | 各阶段的实现设计与计划 |
 | `dev-notes/` | 按阶段增量追记的过程留痕 |
