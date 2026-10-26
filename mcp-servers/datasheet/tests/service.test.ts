@@ -216,7 +216,15 @@ describe('search (extractor injected)', () => {
 })
 
 describe('search (real pdftotext)', () => {
-  it.skipIf(!hasExtractor)('finds the register page in a generated text PDF', async () => {
+  /**
+   * 这一组会 spawn 真实的 `pdftotext`，而 vitest 的默认超时是 5 秒。机器空闲时
+   * 一次提取约 0.5 秒；满载时（2026-10-26 实测：同时跑 electron-builder 打包）
+   * 会超过 5 秒，于是报 `Test timed out in 5000ms`——测的是外部进程的调度，
+   * 不是本模块的逻辑。给足余量。
+   */
+  const EXTRACTOR_TIMEOUT_MS = 30_000;
+
+  it.skipIf(!hasExtractor)('finds the register page in a generated text PDF', { timeout: EXTRACTOR_TIMEOUT_MS }, async () => {
     writePdf('rm.pdf', '%PDF-1.4')
     const file = path.join(root, 'rm.pdf')
     const { makeTextPdf } = await import('./fixtures.js')
@@ -231,7 +239,7 @@ describe('search (real pdftotext)', () => {
     expect(result.hits[0].excerpt).toContain('USB_BCDR')
   })
 
-  it.skipIf(!hasExtractor)('reports a scanned PDF as no-text-layer, then uses the cache', async () => {
+  it.skipIf(!hasExtractor)('reports a scanned PDF as no-text-layer, then uses the cache', { timeout: EXTRACTOR_TIMEOUT_MS }, async () => {
     const { makeImageOnlyPdf } = await import('./fixtures.js')
     writePdf('scan.pdf', '%PDF-1.4')
     writeFileSync(path.join(root, 'scan.pdf'), makeImageOnlyPdf())

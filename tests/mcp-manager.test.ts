@@ -150,13 +150,32 @@ describe("McpManager 连接与工具发现", () => {
     await waitFor(() => !isAlive(pid), 3_000);
   }, 30_000);
 
-  it("connectAll 并行连接多个 server", async () => {
+  /**
+   * 并行连接：判据是**两次 connected 的时间差**，但延迟放大到 2000ms。
+   *
+   * 历史：这条最初用 `START_DELAY_MS: 300` + 阈值 300ms，2026-10-26 在满载下
+   * （同时跑 electron-builder 打包）五次全量里红三次。差值这个量是「两次子
+   * 进程启动耗时之差」，没有上界；想靠调阈值让它稳，等于在赌负载。
+   *
+   * 试过换成「总耗时 < 450ms」——**那次改动是错的**：实测 679ms，而两次
+   * connected 明明只差几十毫秒。`connectAll` 除了两个 300ms 的延迟，还要做
+   * 工具加载与状态收敛，这些**与是否并行无关**，混进总耗时就是噪声。
+   *
+   * 正确做法是保留差值判据、**把信号放大**：延迟拉到 2000ms 后，串行的下界
+   * 就是 2000ms，而并行时两个 connected 仍然几乎同时。此时阈值放在 1500ms，
+   * 距并行实测值有 1.5 秒余量，距串行下界有 500ms 余量——负载再怎么抖，
+   * 也不会把一个实际并行的事件序列推过 1500ms 的差。
+   *
+   * 代价：这条用例从约 0.7 秒变成约 2.2 秒。用一个可以忽略的墙钟开销换一条
+   * 不再随负载变红的用例，值得。
+   */
+  it("connectAll 并行连接多个 server", { timeout: 30_000 }, async () => {
     const connectedAt: number[] = [];
     const manager = track(
       new McpManager(
         [
-          config("slow-a", { env: { START_DELAY_MS: "300" } }),
-          config("slow-b", { env: { START_DELAY_MS: "300" } }),
+          config("slow-a", { env: { START_DELAY_MS: "2000" } }),
+          config("slow-b", { env: { START_DELAY_MS: "2000" } }),
         ],
         {
           logger: (event) => {
@@ -171,8 +190,8 @@ describe("McpManager 连接与工具发现", () => {
     await manager.connectAll();
 
     expect(connectedAt).toHaveLength(2);
-    // 串行时两个 connected 至少相隔 START_DELAY_MS（300ms）；300ms 阈值保留区分度并降低 CI 抖动。
-    expect(Math.abs(connectedAt[0] - connectedAt[1])).toBeLessThan(300);
+    // 串行下界 = 2000ms（两次延迟之和）；阈值 1500ms 距并行实测有 1.5s 余量。
+    expect(Math.abs(connectedAt[0] - connectedAt[1])).toBeLessThan(1500);
   });
 
   it("close 与 connect 并发时不产生 connected 事件并回收子进程", async () => {

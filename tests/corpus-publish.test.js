@@ -274,18 +274,31 @@ describe("publishCorpus", () => {
 });
 
 describe.skipIf(!HAS_DIST)("corpus-publish CLI（子进程）", () => {
+  /**
+   * 本组的每个用例都要 `execFile(node, ...)` 起一个子进程，而 vitest 的默认
+   * 超时是 **5 秒**。机器空闲时一次 spawn 约 1–2 秒（要加载 `dist/` 与 zod），
+   * 够用；但机器满载时（实测：同时跑 `npm --prefix desktop run dist` 打包，
+   * CPU 打满 + 杀软扫描产物）会翻倍，于是「--version 0 / 非整数」那条循环跑
+   * **三次**的用例稳定超时：
+   *
+   *   Error: Test timed out in 5000ms.
+   *
+   * 这不是产品变慢，是默认超时按「不 spawn 子进程」的用例定的。
+   */
+  const CLI_TIMEOUT_MS = 30_000;
+
   beforeEach(() => {
     // 让「跳过」有明确理由可查：dist 缺失时 vitest 的 skipIf 会整体跳过本组。
     if (!HAS_DIST) console.warn("dist 缺失，跳过 CLI 子进程用例：请先 npm run build 与 npm run build:mcp");
   });
 
-  it("缺参数 → 非 0 退出并打印用法", async () => {
+  it("缺参数 → 非 0 退出并打印用法", { timeout: CLI_TIMEOUT_MS }, async () => {
     const result = await runCli([]);
     expect(result.code).not.toBe(0);
     expect(result.stderr).toContain("用法");
   });
 
-  it("--version 0 / 非整数 → 非 0 退出", async () => {
+  it("--version 0 / 非整数 → 非 0 退出", { timeout: CLI_TIMEOUT_MS }, async () => {
     const corpusDir = await makeCorpus();
     const keyPath = await writeKey();
     const outDir = await tempDir("corpus-publish-out-");
@@ -298,7 +311,7 @@ describe.skipIf(!HAS_DIST)("corpus-publish CLI（子进程）", () => {
     }
   });
 
-  it("私钥路径不存在 → 非 0 退出、stderr 有原因", async () => {
+  it("私钥路径不存在 → 非 0 退出、stderr 有原因", { timeout: CLI_TIMEOUT_MS }, async () => {
     const corpusDir = await makeCorpus();
     const outDir = await tempDir("corpus-publish-out-");
     const missingKey = path.join(os.tmpdir(), "corpus-publish-no-such.key");
@@ -309,7 +322,7 @@ describe.skipIf(!HAS_DIST)("corpus-publish CLI（子进程）", () => {
     expect(result.stderr).toContain("私钥文件不存在");
   });
 
-  it("成功发布时私钥内容不出现在 stdout/stderr，且清单验签通过", async () => {
+  it("成功发布时私钥内容不出现在 stdout/stderr，且清单验签通过", { timeout: CLI_TIMEOUT_MS }, async () => {
     const corpusDir = await makeCorpus();
     const keyPath = await writeKey();
     const outDir = await tempDir("corpus-publish-out-");
@@ -341,7 +354,7 @@ describe.skipIf(!HAS_DIST)("corpus-publish CLI（子进程）", () => {
     expect(result.stdout).toContain("https://bucket.example/");
   });
 
-  it("私钥不可解析 → 非 0 退出且不回显内容", async () => {
+  it("私钥不可解析 → 非 0 退出且不回显内容", { timeout: CLI_TIMEOUT_MS }, async () => {
     const corpusDir = await makeCorpus();
     const outDir = await tempDir("corpus-publish-out-");
     const dir = await tempDir("corpus-publish-badkey-");

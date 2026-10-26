@@ -83,15 +83,31 @@ afterEach(async () => {
 });
 
 
+/**
+ * 删临时目录，对 Windows 上的三种瞬时失败都重试。
+ *
+ * 原先只重试 `ENOTEMPTY`。2026-10-26 在满载下（同时跑 electron-builder 打包）
+ * 实测到另一种：
+ *
+ *   Error: EBUSY: resource busy or locked, rmdir 'C:\...\Temp\integration-test-XXXX'
+ *
+ * 本机装了 Kaspersky + 火绒 + Defender，扫描器会短暂持有刚写出的会话日志与
+ * MCP 子进程产物的句柄；`rm` 撞上就报 `EBUSY`，而不是目录非空。两者都是
+ * 「再等一下就好」，没有理由只接一种。
+ *
+ * `EPERM` 同理（Windows 上删除被映射/占用的目录会给它）。重试仍失败则抛出——
+ * 清理失败不能静默，但也不该在第一种错误上就判测试失败。
+ */
 async function removeTempDir(dir: string): Promise<void> {
+  const RETRIABLE = new Set(["ENOTEMPTY", "EBUSY", "EPERM"]);
   for (let attempt = 0; ; attempt += 1) {
     try {
       await rm(dir, { recursive: true, force: true });
       return;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOTEMPTY" || attempt >= 4) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      if (code === undefined || !RETRIABLE.has(code) || attempt >= 8) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
 }
