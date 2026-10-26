@@ -5916,17 +5916,12 @@ document.addEventListener("keydown", (event) => {
       setMode(mode);
       api.send({ cmd: "setMode", mode });
     }
-  } else if (key === "d" && event.shiftKey) {
-    // No diff pane in this build; the shortcut stays bound so it does not
-    // fall through to whatever the next branch would have done.
-    event.preventDefault();
-  } else if (key === "e" && event.shiftKey) {
-    // The Board pane was deleted (2026-10-26) and this binding opened it.
-    // Swallowed rather than removed: without this branch Ctrl+Shift+E would
-    // fall into the plain-`e` effort cycle below, which is a different action
-    // than the one the key used to have.
-    event.preventDefault();
   } else if (key === "e") {
+    // Ctrl+Shift+E lands here too: the branch that used to swallow it with
+    // `event.shiftKey` is gone (2026-10-26), so Shift+E now cycles thinking
+    // effort exactly like plain E. That is deliberate — the key it used to
+    // mean had no pane behind it, and an accepted shortcut that does the
+    // effort cycle beats one that does nothing while the sheet lists neither.
     event.preventDefault();
     // Silent when the model has no levels: the control is hidden, and sending
     // anyway would earn one warning per keypress for a setting the user cannot
@@ -5941,9 +5936,6 @@ document.addEventListener("keydown", (event) => {
   } else if (key === "\\") {
     event.preventDefault();
     closeWorkbench();
-  } else if (key === "`") {
-    event.preventDefault();
-    openWorkbench("terminal");
   }
 });
 
@@ -7201,6 +7193,27 @@ $("settings-button").addEventListener("click", () => openSettings());
 
 /* ---------- shortcuts sheet ---------- */
 
+/**
+ * The keyboard sheet.
+ *
+ * Every row here is a key the renderer actually acts on; a row without a
+ * branch behind it is a lie, and R3 covers the sheet as much as it covers a
+ * tool result.
+ *
+ * 2026-10-26 removed three rows. Ctrl+Shift+D and Ctrl+` did nothing at all —
+ * the first was an empty `preventDefault()`, the second called
+ * `openWorkbench("terminal")`, which returns immediately because `terminal` is
+ * not in `SUPPORTED_PANES`. Their branches went with them, per the user's
+ * "delete the bindings too". Ctrl+Shift+E had a branch that swallowed the key
+ * so it would not fall through to plain Ctrl+E; that branch is gone as well,
+ * so the two keys now do the same thing (cycle thinking effort) — a deliberate
+ * consequence, stated in the handler below.
+ *
+ * The three mode rows were also wrong: they named modes this build does not
+ * have (Ask / Auto / Plan), while `MODES` is diagnose, read-only,
+ * workspace-write and danger-full-access. Ctrl+4 was bound but unlisted, so
+ * the sheet now carries all four real modes.
+ */
 function openShortcuts() {
   const mod = api.platform === "darwin" ? "⌘" : "Ctrl";
   const rows = [
@@ -7211,13 +7224,11 @@ function openShortcuts() {
     [t.shortcutShortcuts, `${mod}+/`],
     [t.shortcutToggleSidebar, `${mod}+B`],
     [t.shortcutStop, "Esc"],
-    [t.shortcutChanges, `${mod}+Shift+D`],
-    [t.shortcutFiles, `${mod}+Shift+E`],
-    [t.shortcutTerminal, `${mod}+\``],
     [t.shortcutClosePane, `${mod}+\\`],
-    [t.shortcutModeAsk, `${mod}+1`],
-    [t.shortcutModeAuto, `${mod}+2`],
-    [t.shortcutModePlan, `${mod}+3`],
+    [t.modeDiagnose, `${mod}+1`],
+    [t.modeReadOnly, `${mod}+2`],
+    [t.modeWorkspaceWrite, `${mod}+3`],
+    [t.modeDangerFullAccess, `${mod}+4`],
     [t.shortcutEffort, `${mod}+E`],
   ];
   const grid = $("shortcut-grid");

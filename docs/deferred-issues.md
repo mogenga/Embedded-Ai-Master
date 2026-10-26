@@ -1561,12 +1561,14 @@
 - **修复建议**: 二选一——①删掉 `getBoardState` 的四处调用与 Board 页签的常驻，把面板改成由 `device_status` 事件驱动（工具行点击时打开）；②给 host 与 bridge 补 `getBoardState`，如实回 `{ probe: "unknown", serial: "unknown" }`（`GET /api/device` 已经这么做了，`src/server/api.ts:884`）。按 R3 应选 ①：没有扫描器就不要画一个需要扫描器才能填的面板。
 - **状态**: 未解决（已登记）。**2026-10-22 补充**：`bridge.js` 已删除，「两端都没有 handler」现在只剩桌面宿主一端的缺口（`getBoardState` 仍无 handler）；修复建议 ② 里提到的 `GET /api/device` 也已随 HTTP 层删除，若选 ② 只能让宿主直接回 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }`。
 
+### D-192 · 快捷键表列的三条键与实现不符，另有一条键每次都触发一次如实拒绝
+
 - **发现**: 2026-10-22（同上）。
 - **现象**: 快捷键弹窗（`app.js:6666-6668`）列了 `Ctrl+Shift+D`（Changes）、`Ctrl+Shift+E`（Files）、`Ctrl+\``（Terminal），实际行为分别是：前者绑定了但什么都不做（只剩一个空的 `preventDefault()`）；后者打开的是 **board**；`` Ctrl+` `` 调 `openWorkbench("terminal")`，而 `SUPPORTED_PANES = {board, file, files, artifact}`（`app.js:3424`）不含 terminal，函数第一行就 return。另有 `Ctrl+E`（`effort`）每次发 `setEffort`，两端都如实回一条 warn（`setEffort` 是有意的拒绝实现），于是每按一次多一条警告。
 - **影响**: 快捷键表是「可发现性」的唯一来源，列出的键按下去没反应，比不列更糟（R3 的同一类问题：界面承诺了一件不会发生的事）。
 - **触发升级条件**: 用户反馈快捷键无反应；或无障碍/快捷键审查。
 - **修复建议**: 从快捷键表删掉三条（或改成实际可用的键）；`Ctrl+E` 在 `effortChoices.levels` 为空时不发命令也不弹警告（控件已经隐藏，快捷键应同样沉默）；`Ctrl+\`` 改为 `closeWorkbench` 的别名或直接删除。
-- **状态**: **部分解决（2026-10-22 第十七轮）**。`Ctrl+E` 一项已按本条自己的修复建议处理：`effortChoices.levels` 为空时不发命令、不弹警告，控件与快捷键一起沉默；等级非空时 `setEffort` 已真正生效（见 D-169 的第十七轮补注），不再每按一次多一条警告。三条快捷键（`Ctrl+Shift+D` / `Ctrl+Shift+E` / `Ctrl+\``）与实现不符的部分未动，仍是未解决。
+- **状态**: **已解决（2026-10-26）**。原文记录 `Ctrl+E` 一项已在 2026-10-22 第十七轮按本条自己的修复建议处理（`effortChoices.levels` 为空时不发命令、不弹警告；等级非空时 `setEffort` 真正生效，见 D-169 的第十七轮补注）。**2026-10-26 按用户「连绑定一起删」的决定处理余下三条**：快捷键面板删掉 `Ctrl+Shift+D` / `Ctrl+Shift+E` / `` Ctrl+` `` 三行，`keydown` 里对应的三个分支（一个空 `preventDefault()`、一个只为不让按键落进 `Ctrl+E` 的 `preventDefault()`、一个 `` openWorkbench("terminal") ``）一并删除；六个 `shortcut*` i18n 键（改动面板 / 文件面板 / 终端面板 / 三种旧模式名）中英各删一份，`grep` 确认全仓无引用。`Ctrl+\`` 的 `closeWorkbench` 绑定保留（它是真实功能，与 `` Ctrl+` `` 不是同一个键）。同时修正了本条未提的另一处谎：面板把 `Ctrl+1/2/3` 标成 Ask/Auto/Plan 三个本构建不存在的模式，实际 `MODES` 是 diagnose/read-only/workspace-write/danger-full-access，已改为四条按真实模式命名、并补上此前有绑定但未列出的 `Ctrl+4`。**已知后果（用户事先接受）**：`Ctrl+Shift+E` 删除后落进 `key === "e"` 分支，行为与 `Ctrl+E` 相同（切换思考强度）；代码里留了注释说明这是有意的。`` Ctrl+` `` 删除后无任何分支接住（已 grep 确认全文无 `key === "\`"`）。
 
 ### D-196 · `todos` / `ask_user` / `thinking_start` / `tool_delta` / `assistant_discard` 五个事件渲染器都有 handler，全链路没有生产者（`todos`、`thinking_*` 已解决）
 
