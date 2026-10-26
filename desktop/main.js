@@ -318,10 +318,19 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
-    // 关窗即退出前先请 host 走 shutdown：里面会关串口、停后台作业。上一轮
-    // 事故的孤儿实例就是这里直接 quit，host（和它攥着的 COM 口）没收到任何
-    // 通知，任务栏图标没了进程还在，串口被占到手动杀进程为止。
-    stopHost();
+    // 这里**不**停宿主：`stopHost` 是 `startWindow` 的内部函数，模块作用域
+    // 够不着它。0.1.1 在这里直接调用，于是关窗时抛
+    // `ReferenceError: stopHost is not defined`，后面的 `app.quit()` 从未被
+    // 安排——主进程无窗口挂着不退，单实例锁又让再次启动静默退出，用户只能
+    // 去任务管理器杀进程。
+    //
+    // 宿主不需要这里再停一次：每个窗口自己的 `closed` 处理器已经写过
+    // `shutdown` 并关掉 stdin（见 startWindow 末尾）。实测 Electron 的触发
+    // 顺序是 `win.close()` → `window:closed` → `app:window-all-closed`，所以
+    // 走到这里时宿主的停机流程已经启动。这个处理器只负责退出。
+    //
+    // 300ms 是给已经发出的 shutdown 写入与 stdin 关闭留一个事件循环，不是
+    // 留给宿主处理完——`stopHost` 里另有一个 500ms 的硬杀兜底。
     setTimeout(() => app.quit(), 300);
   }
 });
