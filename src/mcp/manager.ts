@@ -95,7 +95,10 @@ const DEFAULT_ENV_ALLOWLIST = [
   "LC_ALL",
   "TERM",
 ];
-const CLIENT_INFO = { name: "embedded-ai-master", version: "0.1.0" } as const;
+// MCP `initialize` 里报给对端的客户端身份，MCP server 会把它写进自己的日志。
+// 版本号与 desktop/package.json 的发布版本保持一致——它不改协议行为，只影响对端
+// 日志里「哪个版本的客户端连上来了」这一条，写旧了会让人按错误的版本排查。
+const CLIENT_INFO = { name: "embedded-ai-master", version: "0.1.1" } as const;
 
 function messageOf(error: unknown): string {
   if (error instanceof Error) {

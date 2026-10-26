@@ -21,7 +21,7 @@
 | Releases | **`v0.1.0` 已发布**（3 个资产，匿名可下载） | 发布后实测 HTTP 206 |
 | `desktop/package.json` 的 `build.publish` | 已配置 GitHub provider | `npx electron-builder --win --x64 --dir` 退出 0，schema 接受 |
 | `gh` CLI | **已安装且已登录**，但**不在 `PATH` 里** | 版本 2.103.2，路径 `C:\Program Files\GitHub CLI\gh.exe`；`gh auth status` 退出 0，账号 `mogenga` |
-| `electron-updater` | **已写进 `desktop/package.json`（`^6.8.11`），需用户执行 `npm --prefix desktop install`** | 依赖声明在；`node_modules` 里尚未落地（安装由用户执行） |
+| `electron-updater` | **已安装（6.8.11）** | 声明在 `desktop/package.json`（`^6.8.11`），`desktop/node_modules/electron-updater/package.json` 实测为该版本 |
 | 应用内自动更新 | **已接入**（`desktop/updater.js` + 主进程 IPC + 关于页） | 见 §12 |
 | 签名 | 配置就位，**从未真实签过** | 本机无证书，见 `docs/code-signing.md` §7 |
 | 图标 | 已配置 `build/icon.ico` | `desktop/package.json` 的 `win.icon` |
