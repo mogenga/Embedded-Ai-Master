@@ -26,6 +26,7 @@
     "files": [
       "main.js",
       "updater.js",
+      "close-behavior.js",
       "preload.cjs",
       "host/**/*",
       "renderer/**/*",

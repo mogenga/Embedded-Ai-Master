@@ -46,5 +46,13 @@ contextBridge.exposeInMainWorld("prometheus", {
   updateCheck: () => ipcRenderer.invoke("update-check"),
   updateDownload: () => ipcRenderer.invoke("update-download"),
   updateInstall: () => ipcRenderer.invoke("update-install"),
+  // What the window's close button does. The value lives in the main process
+  // (`window-behavior.json` under userData), not in `$HARNESS_HOME`: the host
+  // is a separate process that does not own window lifetime, and its
+  // `saveSettings` accepts only `locale`. `setCloseBehavior` is validated
+  // there — an unknown string comes back `{saved: false, error}` rather than
+  // being written.
+  closeBehavior: () => ipcRenderer.invoke("get-close-behavior"),
+  setCloseBehavior: (behavior) => ipcRenderer.invoke("set-close-behavior", behavior),
   platform: process.platform,
 });

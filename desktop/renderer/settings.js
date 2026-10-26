@@ -88,6 +88,16 @@ const MAX_PATTERN_LENGTH = 200;
 /** Newest settings payload from the host; controls read from here on refill. */
 state.settings = null;
 state.settingsTab = "general";
+/**
+ * What the window's close button does, as the main process last reported it.
+ *
+ * `null` means "not asked yet" (the General page requests it when it builds).
+ * The value is not a renderer preference and not a host setting: it lives in
+ * `window-behavior.json` under `userData`, owned by `desktop/main.js`.
+ */
+state.closeBehavior = null;
+/** Why the last read or write of the close behaviour was refused; "" = none. */
+state.closeBehaviorError = "";
 state.usageRange = 30;
 state.usageSummary = null;
 state.mcpServers = [];
@@ -670,7 +680,91 @@ function buildGeneralPage() {
       }),
     ]),
   );
+
+  // 保存失败不是「一条普通说明」：用 danger 色，和技能页的问题行同一口径。
+  const closeError = el("p", "setting-note pack-problem", "");
+  closeError.id = "setting-close-behavior-error";
+  closeError.hidden = state.closeBehaviorError === "";
+  closeError.textContent = state.closeBehaviorError ?? "";
+  state.renderCloseBehaviorError = (message) => {
+    // The page may have been rebuilt before the main process answered; a node
+    // that is no longer on screen has nothing to report into.
+    if (!closeError.isConnected) return;
+    closeError.textContent = message;
+    closeError.hidden = message === "";
+  };
+
+  pane.appendChild(
+    sGroup(s.groupClose, [
+      sRow({
+        id: "setting-close-behavior",
+        label: s.closeBehavior,
+        desc: s.closeBehaviorDesc,
+        control: buildCloseBehaviorSelect(),
+      }),
+      closeError,
+    ]),
+  );
   return pane;
+}
+
+/**
+ * The close-behaviour select, filled from the main process.
+ *
+ * Not an `applyPref` toggle: this value is not a renderer preference (it is not
+ * in `localStorage`) and not a host setting either — the main process owns it,
+ * because it decides what the window does, and the host may not even be
+ * running.
+ *
+ * The select starts on the last known answer and asks for the current one once
+ * the row is built. A choice only sticks if the main process reports
+ * `saved: true`; a refused one puts the control back and names the reason, so
+ * the page never shows a value that would not survive the next launch (R3).
+ */
+function buildCloseBehaviorSelect() {
+  const s = S();
+  /** Surfaced on the page; the IPC answer's own words first. */
+  const report = (message) => state.renderCloseBehaviorError?.(message ?? "");
+  /** A read that arrives after the user has already chosen must not win. */
+  let userChose = false;
+
+  const select = sSelect({
+    id: "setting-close-behavior",
+    value: state.closeBehavior ?? "tray",
+    options: [
+      { value: "tray", label: s.closeBehaviorTray },
+      { value: "quit", label: s.closeBehaviorQuit },
+    ],
+    onChange: (value) => {
+      userChose = true;
+      if (typeof api.setCloseBehavior !== "function") return;
+      void api.setCloseBehavior(value).then((result) => {
+        // A rebuilt page replaced this node while the answer was in flight.
+        if (!select.isConnected) return;
+        if (result?.saved === true) {
+          state.closeBehavior = result.behavior;
+          state.closeBehaviorError = "";
+          report("");
+          return;
+        }
+        select.value = state.closeBehavior ?? "tray";
+        state.closeBehaviorError = result?.error ?? s.closeBehaviorSaveFailed;
+        report(state.closeBehaviorError);
+      });
+    },
+  });
+  if (typeof api.closeBehavior === "function") {
+    void api.closeBehavior().then((answer) => {
+      if (!select.isConnected || !answer || userChose) return;
+      state.closeBehavior = answer.behavior;
+      // A file that had to be ignored is worth one line: the page would
+      // otherwise show the fallback without saying the stored choice was lost.
+      state.closeBehaviorError = answer.source === "invalid" ? (answer.reason ?? "") : "";
+      select.value = answer.behavior;
+      report(state.closeBehaviorError);
+    });
+  }
+  return select;
 }
 
 function buildAppearancePage() {

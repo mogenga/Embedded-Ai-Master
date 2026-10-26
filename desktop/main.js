@@ -8,12 +8,32 @@
  * its scroll position.
  */
 
-import { app, BrowserWindow, dialog, ipcMain, Notification, shell } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  nativeImage,
+  Notification,
+  screen,
+  shell,
+  Tray,
+} from "electron";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import {
+  TRAY_PRODUCT_NAME,
+  readCloseBehavior,
+  shouldHideOnClose,
+  trayFailureText,
+  trayHintText,
+  trayMenuTemplate,
+  writeCloseBehavior,
+} from "./close-behavior.js";
 import { createUpdater } from "./updater.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -80,6 +100,214 @@ ipcMain.handle("update-check", () => updater().check());
 ipcMain.handle("update-download", () => updater().download());
 ipcMain.handle("update-install", () => updater().install());
 
+/* ---------- close behaviour and the system tray ---------- */
+
+/**
+ * True from `before-quit` until the process ends.
+ *
+ * Without this flag the window's own `close` handler would swallow every real
+ * quit: `app.quit()` (the tray menu, `quitAndInstall()`) asks each window to
+ * close *after* `before-quit`, so a tray-mode window would hide itself instead
+ * of closing and the app would never exit. The flag is the only thing that
+ * tells "the user clicked X" apart from "the app is going down".
+ */
+let isQuitting = false;
+
+/**
+ * What the close button does, as last read from disk or written by Settings.
+ *
+ * Kept in memory rather than re-read on every close: the value only changes
+ * through `set-close-behavior`, which updates this copy, and a synchronous
+ * disk read on every X click would put an IO error between the user and a
+ * decision that has a perfectly good default.
+ */
+let closeBehavior = "tray";
+
+/** The tray icon, or null before `whenReady` and after `will-quit`. */
+let tray = null;
+
+/** The first-hide hint is once per process, not once per window. */
+let trayHintShown = false;
+
+function userDataDir() {
+  return app.getPath("userData");
+}
+
+/**
+ * Locale for text that is drawn by the OS (tray menu, notification).
+ *
+ * `app.getLocale()` rather than the renderer's language setting: the tray is
+ * built before any page loads, and `localStorage` is not readable from the
+ * main process. The two can disagree if the user picked a language that is
+ * not the system one; the tray still speaks the system's, which is what a
+ * tray that is drawn by the OS should do.
+ */
+function trayLocale() {
+  return String(app.getLocale() ?? "").toLowerCase().startsWith("zh") ? "zh" : "en";
+}
+
+/**
+ * The tray image, picked by DPI rather than downscaled.
+ *
+ * `desktop/build/icon.ico` is not usable here: `build/` is not in `build.files`,
+ * so it does not exist inside the asar. The two PNGs under `renderer/assets/`
+ * are the ico's own 16 px and 32 px frames exported losslessly, and they ship
+ * with `renderer/**\/*`. Resizing the 128 px product mark instead would blur its
+ * thin lines and disagree with the taskbar icon.
+ *
+ * An empty image is a tray the user cannot see, so a failure is reported
+ * (R3) rather than passed off as a working tray.
+ */
+function trayIcon() {
+  const scaleFactor = screen.getPrimaryDisplay()?.scaleFactor ?? 1;
+  const file = join(here, "renderer", "assets", scaleFactor >= 1.5 ? "tray-32.png" : "tray-16.png");
+  const image = nativeImage.createFromPath(file);
+  if (image.isEmpty()) {
+    console.warn(
+      `[tray] 托盘图标加载失败：${file}（文件不存在或不是有效图片）。` +
+        "托盘图标会是空白，菜单仍可用。",
+    );
+    return nativeImage.createEmpty();
+  }
+  return image;
+}
+
+/** Show the window, recreating it when every window has already closed. */
+function showMainWindow() {
+  const existing = BrowserWindow.getAllWindows()[0];
+  if (existing === undefined) {
+    startWindow();
+    return;
+  }
+  if (existing.isMinimized()) existing.restore();
+  existing.show();
+  existing.focus();
+}
+
+/** Rebuild the context menu from the current behaviour. */
+function refreshTrayMenu() {
+  if (tray === null) return;
+  try {
+    tray.setContextMenu(
+      Menu.buildFromTemplate(
+        trayMenuTemplate({
+          behavior: closeBehavior,
+          locale: trayLocale(),
+          onShow: () => showMainWindow(),
+          onQuit: () => app.quit(),
+        }),
+      ),
+    );
+  } catch {
+    // The tray can be gone already during quit; a stale menu there is not a
+    // failure worth surfacing.
+  }
+}
+
+/**
+ * Create the tray. Called for packaged and development runs alike: a tray that
+ * only appears in installers is a difference that shows up as "works on my
+ * machine" when someone debugs the close button.
+ *
+ * `close` calls this too, and a throw there would be an uncaught exception in
+ * the main process — the same shape as the 0.1.1 `stopHost` bug. So a failure
+ * is reported and returns `null`; the window still hides, and the next close
+ * tries again.
+ */
+function ensureTray() {
+  if (tray !== null) return tray;
+  try {
+    tray = new Tray(trayIcon());
+    tray.setToolTip(TRAY_PRODUCT_NAME);
+    // On Windows a left click does not open the context menu on its own; the
+    // expected gesture for "bring it back" is a click on the icon.
+    tray.on("click", () => showMainWindow());
+    refreshTrayMenu();
+  } catch (error) {
+    tray = null;
+    console.warn(
+      `[tray] 托盘创建失败：${error instanceof Error ? error.message : String(error)}。` +
+        "窗口仍会隐藏，但托盘图标不可用；退出请用任务管理器或重启应用。",
+    );
+  }
+  return tray;
+}
+
+/** One notification; a failure to show it is logged, never thrown. */
+function notify({ title, body }, failureLabel) {
+  if (!Notification.isSupported()) return;
+  try {
+    new Notification({ title, body }).show();
+  } catch (error) {
+    console.warn(`[tray] ${failureLabel}：${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** The "it went to the tray" notification, shown once per process. */
+function showTrayHintOnce() {
+  if (trayHintShown) return;
+  trayHintShown = true;
+  notify(trayHintText(trayLocale()), "首次最小化提示发送失败");
+}
+
+/** Say why the window stayed open when the tray could not be created. */
+function warnTrayFailure() {
+  notify(trayFailureText(trayLocale()), "托盘失败提示发送失败");
+  // Also on stderr: a Windows notification can be swallowed by Focus Assist,
+  // and this is the one message that explains why close no longer works.
+  console.warn("[tray] 托盘不可用，关闭窗口不会隐藏，也不会退出应用。");
+}
+
+/** Load the persisted behaviour, warn once when the file was bad, sync the tray. */
+function loadCloseBehavior() {
+  const result = readCloseBehavior({ userDataDir: userDataDir() });
+  closeBehavior = result.behavior;
+  if (result.source === "invalid") {
+    // Not a startup failure: the fallback is the safer answer, and the user
+    // needs to know why their choice was not applied.
+    console.warn(`[close-behavior] ${result.reason ?? "配置无效"}，已回落 "${closeBehavior}"`);
+  }
+  refreshTrayMenu();
+  return result;
+}
+
+// Both handlers are global: registered once, outside `startWindow`, like the
+// updater's. The renderer is not trusted with this value — an out-of-range
+// behaviour is refused by `writeCloseBehavior` and nothing is written.
+ipcMain.handle("get-close-behavior", () => {
+  const result = loadCloseBehavior();
+  return {
+    behavior: result.behavior,
+    source: result.source,
+    ...(result.reason === undefined ? {} : { reason: result.reason }),
+  };
+});
+
+ipcMain.handle("set-close-behavior", async (_event, behavior) => {
+  const result = await writeCloseBehavior({ userDataDir: userDataDir(), behavior });
+  if (result.saved) {
+    closeBehavior = result.behavior;
+    refreshTrayMenu();
+  }
+  return result;
+});
+
+app.on("before-quit", () => {
+  isQuitting = true;
+});
+
+// Windows keeps a destroyed process's tray icon until hover if it is not
+// removed explicitly; `will-quit` is the last point where the object is alive.
+app.on("will-quit", () => {
+  if (tray === null) return;
+  try {
+    tray.destroy();
+  } catch {
+    /* already gone */
+  }
+  tray = null;
+});
+
 function startWindow(options = {}) {
   const win = new BrowserWindow({
     ...(options.bounds ? options.bounds : { width: 1360, height: 880 }),
@@ -108,6 +336,32 @@ function startWindow(options = {}) {
 
   win.once("ready-to-show", () => win.show());
   win.loadFile(RENDERER);
+
+  /**
+   * Tray mode: X hides the window instead of closing it.
+   *
+   * `preventDefault()` is what keeps the host alive: with it, `closed` never
+   * fires, so the window's own stopper (below) does not run the host down and
+   * `window-all-closed` is never reached. `isQuitting` comes first because a
+   * real quit — the tray menu, `quitAndInstall()` — also closes this window;
+   * hiding it there would swallow the quit.
+   *
+   * The decision itself is the pure `shouldHideOnClose`; this handler only
+   * applies it.
+   */
+  win.on("close", (event) => {
+    if (!shouldHideOnClose({ behavior: closeBehavior, isQuitting })) return;
+    event.preventDefault();
+    // Hiding without a tray would leave no window and no icon to bring it
+    // back — and the single-instance lock makes a relaunch exit silently. So
+    // a tray that cannot be created keeps the window open and says why.
+    if (ensureTray() === null) {
+      warnTrayFailure();
+      return;
+    }
+    win.hide();
+    showTrayHintOnce();
+  });
 
   const sendWindowState = () => {
     if (!win.isDestroyed()) win.webContents.send("window-state", { maximized: win.isMaximized() });
@@ -301,6 +555,12 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 app.on("second-instance", () => {
+  // Deliberately the original shape rather than `showMainWindow()`: in
+  // `quit` mode there are moments (after `closed`, before the 300 ms
+  // `app.quit()`) when recreating a window would be undone by the pending
+  // quit. In tray mode the window still exists — hidden — so this branch
+  // reveals it, which is the "second launch brings it back" behaviour users
+  // expect.
   const win = BrowserWindow.getAllWindows()[0];
   if (!win) return;
   if (win.isMinimized()) win.restore();
@@ -313,10 +573,25 @@ app.whenReady().then(() => {
   // Windows 任务栏归属：不设 AppUserModelId 时窗口可能被归进
   // electron.exe 的分组，图标与通知都跟着错。
   if (process.platform === "win32") app.setAppUserModelId("com.embedded-ai.master");
+  // Read before the first window exists: its `close` handler reads the value
+  // synchronously, so a window created before the read would apply the default
+  // to its first close even when the file says `quit`.
+  loadCloseBehavior();
+  // Always, packaged or not: a tray that only exists in installers makes the
+  // close button behave differently in the two forms, which is exactly the
+  // class of bug this feature is prone to. `quit` mode ships one too, so
+  // "show the window" is available after a hide from an earlier run.
+  ensureTray();
   startWindow();
 });
 
 app.on("window-all-closed", () => {
+  // In tray mode the X button hides the window, so no `closed` event fires and
+  // this handler is not reached at all — the host and the tray keep running.
+  // It is reached in `quit` mode (unchanged behaviour) and, in tray mode, when
+  // a window is destroyed without going through `close` (a renderer crash);
+  // quitting then is the honest outcome, since a tray with no window and an
+  // uncertain host is not a state to keep hiding in.
   if (process.platform !== "darwin") {
     // 这里**不**停宿主：`stopHost` 是 `startWindow` 的内部函数，模块作用域
     // 够不着它。0.1.1 在这里直接调用，于是关窗时抛

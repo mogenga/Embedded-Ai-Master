@@ -112,6 +112,13 @@ export const settingsStrings = {
 
     groupLanguage: "Language",
     groupStartup: "Starting point",
+    groupClose: "Closing the window",
+    closeBehavior: "When the window is closed",
+    closeBehaviorDesc:
+      "Minimize to tray keeps background work running: the agent host, serial ports, and running jobs stay alive until you quit from the tray. Quit stops the host first (closes serial ports and ends background jobs) and then exits.",
+    closeBehaviorTray: "Minimize to the system tray",
+    closeBehaviorQuit: "Quit the app",
+    closeBehaviorSaveFailed: "The choice was not saved; the previous setting is still in effect.",
     groupTheme: "Theme",
     groupText: "Text",
     groupInterface: "Interface",
@@ -587,6 +594,13 @@ export const settingsStrings = {
 
     groupLanguage: "语言",
     groupStartup: "起始状态",
+    groupClose: "关闭窗口",
+    closeBehavior: "关闭窗口时",
+    closeBehaviorDesc:
+      "最小化到托盘时后台任务继续跑：宿主、串口与正在执行的任务都会保留，直到你在托盘里选择退出。退出应用会先停宿主（关串口、停后台作业）再结束进程。",
+    closeBehaviorTray: "最小化到托盘",
+    closeBehaviorQuit: "退出应用",
+    closeBehaviorSaveFailed: "设置未保存，仍按原来的行为。",
     groupTheme: "主题",
     groupText: "文字",
     groupInterface: "界面",
