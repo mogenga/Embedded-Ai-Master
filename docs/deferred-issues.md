@@ -2201,10 +2201,46 @@
 - **影响范围**: 0.1.1 有这个缺陷，0.1.0 没有（那时 `window-all-closed` 直接 `app.quit()`）。
 - **状态**: 已解决（2026-10-26）。修复在 0.1.2 之前需要用户手动杀一次挂住的进程。
 
+### D-221 · 内核没有「内置系统提示词」，但界面与注释都说有；填了它就续不了旧会话
+
+- **现象**: 默认新会话发给模型的请求里**一条 `system` 消息都没有**，`messages` 直接从 `user` 开始。实测（`dist/` 真实请求体抓取）：
+
+  ```json
+  { "model": "...", "messages": [{ "role": "user", "content": "hi" }],
+    "max_tokens": ..., "stream": true, "stream_options": {...}, "tools": [ ...12 项... ] }
+  ```
+
+  模型收到的**全部**指令就是那 12 条工具 `description`（合计 795 字符），加上用户自己敲的那句话。没有「你是…」「工作目录是…」「优先读文件而不是猜」这类任何一条。`grep -rn 'You are\|你是一个' src/` 只命中两处：`settings-i18n.js` 的占位符与一句话介绍，都不是提示词。git 历史里从未有过默认提示词（`git log --all -S "DEFAULT_SYSTEM_PROMPT"` 为空）。
+
+- **与三处文字描述矛盾**:
+  1. `src/server/runner.ts:47` — `/** Replaces the built-in system prompt for this run. */`。「Replaces」的前提是有个被替换的东西，但没有。
+  2. `desktop/renderer/settings-i18n.js:305` — 设置页「行为」页写着 `behaviorSystemPromptDesc`：**「会加在每段新对话的最前面，排在内置指令之前。留空使用默认提示词。」** 两句话都不成立：既没有「内置指令」可排在前面，也没有「默认提示词」可用。
+  3. `src/config/app-config.ts:40` — `/** 系统提示词；"" 表示用内核默认提示词。 */`。`""` 在宿主侧被翻译成「不发这个字段」（`host.js:788`），内核于是不追加任何 `system` 事件——不是「用默认」，是「什么都没有」。
+
+- **第二个缺陷：填了 `systemPrompt` 之后**老**会话全部续不上**。已复现（`dist/` 直接调用 `runSession`）：先建一个没 system 事件的会话，再 `resume: true` + `systemPrompt: "你是调试助手"` →
+
+  ```
+  system_prompt_mismatch | Cannot add a system prompt to a non-empty session without a system event
+  ```
+
+  这是 `src/index.ts:372` 的**有意设计**（会话日志里没有 system 事件时不许凭空补一条，否则同一份日志的两次投影会得到不同的模型输入）。问题不在内核规则，在**用户的可达路径**：设置页那个输入框一填，宿主每次 `runner.start` 都带 `systemPrompt`（`host.js:788`），于是所有历史会话都撞这条规则，而报错经 `host.js:1698` 变成一条 `发送失败：Cannot add a system prompt…` 的英文技术错误。用户不会从这句话里读出「先把旧会话清掉」或者「这个设置只对新会话生效」。
+
+- **影响**: 模型在没有角色约束的情况下工作，`todo_write` 的「先列计划」、`read` 优先于 `shell cat`、`kb_read` 确认后才断言（D-200 那类）全靠工具描述里那几句话自己劝。诊断质量的上限被这一段缺失直接压住，而界面上看不出缺了什么东西。
+
+- **为什么本轮不修**: 「内置提示词写什么」是产品决定，不是缺陷修复。分节组装（基础 / persona / 环境信息 / 工具说明）在决策点 #8 里还开着（`docs/framework-architecture-inventory.md`），凭空补一段文本会绕过那个决策。而且写进内核就意味着**每一份现有会话日志的 `system` 事件都对不上**，全部触发上面那条 `system_prompt_mismatch`——迁移方案得先定。
+
+- **修复建议**（按代价从低到高）:
+  1. **先改三处文字**（零风险）：`runner.ts` 的注释改成「sets the system prompt for this run; the kernel ships none」；设置页 `behaviorSystemPromptDesc` 改成「只对新会话生效；留空则不发系统提示词」；`app-config.ts` 的注释同步。这一步不动行为，只把已有的谎撤掉（R3）。
+  2. **给 `system_prompt_mismatch` 一条人能读的出路**：宿主识别这个 code，把「旧会话没有系统提示词，无法在续聊时补上；请新建会话，或把这个设置清空」显示出来，而不是把英文原文塞进 `发送失败：`。
+  3. **内置提示词本身**走决策点 #8：分节组装 + persona 注入 + 冲突消解，并在写进内核时定好老会话的迁移（最省事的做法是把内置段记为**投影期注入**而非日志事件——`build.ts` 在处理 `effectiveSummary` 时已经有「不进日志、投影时插入」的先例，走同一条路就绕开了 `system_prompt_mismatch`）。
+
+- **状态**: 未修。**这是当前 Agent 行为的上限所在**——它解释了为什么模型有时要人喊着才去 `read` 原文、为什么多步任务不会主动列计划。
+
 ## 变更记录
 
 | 日期 | 变更 |
 |---|---|
+| 2026-11-01 | 追问「当前主 Agent 的提示词是什么」时核实：**内核根本没有内置系统提示词**。抓取 `dist/` 真实请求体，`messages` 只有一条 `user`，模型能看到的全部指令是 12 条工具 `description`（795 字符）；`git log --all -S "DEFAULT_SYSTEM_PROMPT"` 为空，历史上从未有过。而三处文字都说有：`server/runner.ts:47` 的「Replaces the built-in system prompt」、设置页「行为」页的「排在内置指令之前。留空使用默认提示词」、`config/app-config.ts:40` 的「"" 表示用内核默认提示词」。同时复现第二个缺陷：设置页一填 `systemPrompt`，所有**无 system 事件的历史会话**续聊全部抛 `system_prompt_mismatch`，界面显示英文原文 `发送失败：Cannot add a system prompt to a non-empty session without a system event`。录入 **D-221**（含三级修复建议：先撤三处谎 → 给 mismatch 一条人能读的出路 → 内置提示词走决策点 #8 的分节组装并按投影期注入规避迁移） |
 | 2026-10-26 | 关窗必崩（用户实测：Electron 弹 `ReferenceError: stopHost is not defined`）：`app.on("window-all-closed")` 在模块作用域调了 `startWindow` 的内部函数 `stopHost`，抛错后 `app.quit()` 从未被安排——主进程无窗口挂着不退，单实例锁又让再次启动静默退出。根因是 `8b98790` 那行从写下起就不可能工作；没被测出来是因为 `main.js` 是纯 JS、不在 `tsconfig` include 里，也没有任何测试加载它。修复：删掉那句 `stopHost()`（窗口自己的 `closed` 处理器已经停过宿主），只留 `setTimeout(() => app.quit(), 300)`。用一次性 Electron 探针实测事件顺序为 `win.close() → window:closed → app:window-all-closed → app:quit`，证明不需要在这里重复停宿主。新增 `tests/desktop/main-scope.test.js`（7 条）做静态作用域检查，把 `stopHost()` 加回去会立刻变红。录入 D-220。 |
 | 2026-10-25 | 思考块逐段折叠（用户实测：「这思考过程怎么只是思考了一会儿，而且展不开」，随后纠正方向：「这个思考过程应该是可隐藏可展开的，像常规AI开发工具那样，而不是用户设置」）：①**根因两条**——(a) 思考块没有任何点击处理（全文件无 `thinking.*addEventListener`），折叠壳点不开；(b) `:root[data-view="normal"] .thinking-text { display: none }` 让常规视图下正文永不显示，于是只剩一行死标签。回放路径（`session_loaded` 的 `role: "thinking"` 分支）同样没有展开入口。②**改法**——`app.js` 新增 `thinkingBlockHtml`（唯一一份 markup：`<div class="thinking" data-expanded>` + `<div class="thinking-head">` + `<button class="thinking-toggle" aria-expanded>` + `<div class="thinking-text">`）与 `setThinkingExpanded` / `bindThinkingToggle`；直播路径（`startThinking` / `endThinking`）与回放路径共用。折叠态用 `max-height: 0; overflow: hidden` 而非 `display: none` / `visibility: hidden`——后两者让元素不可聚焦（见 `.session-group-remove` 的注释与本次 CDP 断言）。③**状态**——存节点属性 `data-expanded`（另用 `data-user-toggled` 区分「读者点过」），不进 `state`、不进 localStorage：每块独立，展开第 2 块不影响第 1 块（实测 `["true","true","false",…]`），重开会话默认全折叠。④**流式语义**——`.streaming` 下块默认展开且不设 320px 上限（看着它想）；结束时未被点过的块自动收成一行，读者在流式期间点过的块保持其选择（`thinkingExpandedOnEnd`，实现里过一次自动折叠不许撤销一次点击）。空思考段结束时整块移除，不留一行「思考中…」（诚实：回合已结束还显示进行中就是假状态）。⑤**视图设置收窄**——`data-view` 不再控制思考正文；只剩 `verbose` 有真实行为（工具输出到达即展开）。设置页从三档改为「工具输出：折叠 / 展开」，`normalizeTranscriptView`（新文件 `desktop/renderer/thinking-view.js`，纯函数）把 `thinking` 与未知值收敛成 `normal`；顺带修掉一个既有缺陷——`state.transcriptView` 原先只在设置页改动时写入，启动不恢复，所以存过的 `verbose` 在启动后不生效直到重选一次（现于 boot 的 `view` 步骤写入）。⑥**问题③核实**——用户怀疑「思考块出现在工具行之后」是插入点错误。实测（真实会话 `715f0aba` 的 DOM + 日志 seq 对照）证明是**错觉**：`thinking` 与 `tool-group` 严格按日志顺序交错（seq 18-19 思考 → 20 工具调用 → 26-27 结果 → 29 思考 → 39-40 …），live 路径同样正确（`thinking` → `assistant` → `tool-group`）；截图里的「思考行下面是上一个工具的结果」是**视觉归因**问题——折叠态的思考行与紧随其后的 `tool-group` 之间没有分界线，读者会把下一组的工具行读成上一组思考的从属。`protocol.js` 的 `THINKING_INTERRUPTING_TYPES` **未改**（本来就是对的）。⑦**验证**——真实窗口 CDP：折叠态 `offsetHeight 0` / `display: block` / `maxHeight 0px`、点击后 `aria-expanded true` + `maxHeight 320px` + 长文本 `clientHeight 320 / scrollHeight 800` 内滚、`focus()` 后 `document.activeElement === button`、Enter 与 Space 都能切换（用同页对照按钮排除 CDP 不派发 `char` 事件的假阴性）、展开第 2 块时第 1 块保持原状。新增 `tests/desktop/thinking-view.test.js`（3 个 describe / 12 条），`D-218` 第 3 条标为已解决。 |
 | 2026-10-25 | 思考过程外显（用户「思考过程外显」）：三层接通，**与本条 D-196 原先「删掉 thinking_start handler」的建议相反**。①内核产出——`src/model/openai.ts` 新增 `reasoningTextOf`（`reasoning_content` 优先，其次 `reasoning`，非字符串一律忽略）与可选回调 `onReasoningDelta`，流式与一次性两条路径都读；②内核落盘——新增 `thinking_delta` 会话事件（只有一种类型，无 start/end），`persistence.ts` 白名单登记，`src/loop/assistant-delta.ts` 的 writer 扩成**双通道单队列**（推理与正文按到达顺序交错，相邻同通道片段合并，60ms/400 字符批量参数不变），`query.ts` 把 `onReasoningDelta` 接到同一个 writer；③**上下文隔离**——`buildMessages` 显式跳过 `thinking_delta`，适配器重试守卫把推理算作「已交付」（否则超时重试会把同一段思考写两遍，反向验证：去掉守卫后请求数 1→4）；④宿主投影——`desktop/renderer/protocol.js` 把 `thinking_delta` 合成 `thinking_start`/`thinking_text`/`thinking_end`，只带状态的事件不打断段落（`usage` 帧在流中途到达是常态）；`sessionEventsToMessages` 把相邻片段合并成 `role: "thinking"` 行，**重开会话不再丢曾经的思考**；⑤渲染层——`app.js` 只加 `role === "thinking"` 的回放分支（`case "thinking_*"` 三个 handler 零改动），`styles.css` 给已结束的思考段加 320px 上限内滚（与 `.tool-output` 同一口径），常规视图仍收成一行。`D-196` 第二项标为已解决，`ask_user` / `tool_delta` / `assistant_discard` 仍未动；**新增 D-218**（只有部分网关返回推理、`reasoning_details` 不认、无逐段折叠控件、未流式网关不逐字显示）。 |
