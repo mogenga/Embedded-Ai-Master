@@ -3232,6 +3232,109 @@ mark.find-hit.current {
   padding: 0 28px 16px;
 }
 
+/* ---------- plan strip (above the composer) ----------
+   The transcript card is where a plan is read, but it scrolls away exactly when
+   a long run makes the plan worth watching. The strip is the same list, kept
+   beside the input: one line until the reader opens it, so it costs no height
+   while they type and still answers "which step is it on" at a glance. */
+
+.plan-strip {
+  max-width: var(--column-width);
+  margin: 0 auto 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.plan-strip-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 12px;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  text-align: left;
+}
+
+.plan-strip-head:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.plan-strip-glyph {
+  width: 13px;
+  height: 13px;
+  color: var(--text-faint);
+}
+
+.plan-strip-label {
+  flex: 0 0 auto;
+  letter-spacing: 0.02em;
+}
+
+/* The count is the one always-readable number: it says how far along without
+   the reader parsing the step name. Tabular figures keep it from jittering as
+   1/7 becomes 10/12. */
+.plan-strip-count {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+/* The running step is the elastic part: it takes whatever room is left and
+   ellipsises rather than pushing the count or the chevron off the row. */
+.plan-strip-current {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.plan-strip.open .plan-strip-current {
+  color: var(--text-secondary);
+}
+
+.plan-strip-chevron {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  opacity: 0.7;
+  transform: rotate(-90deg);
+  transition: transform 160ms var(--ease);
+}
+
+.plan-strip.open .plan-strip-chevron {
+  transform: none;
+}
+
+/* Folded, the list is zero-height and clipped — the same mechanics as the
+   thinking block, and for the same reason: `display: none` would drop the rows
+   from the accessibility tree and out of find-in-page, and nothing here needs
+   rebuilding on toggle. Capped and scrolled when open: a twenty-step plan must
+   not push the composer off screen. */
+.plan-strip-items {
+  max-height: 0;
+  overflow: hidden;
+  padding: 0 12px;
+}
+
+.plan-strip.open .plan-strip-items {
+  max-height: 190px;
+  overflow-y: auto;
+  padding-bottom: 8px;
+}
+
+.plan-strip-items .plan-item {
+  font-size: var(--text-sm);
+  padding: 2px 0;
+}
+
 .pending-choices {
   display: flex;
   gap: 6px;
@@ -5492,6 +5595,11 @@ mark.find-hit.current {
   .composer-region {
     padding-left: 12px;
     padding-right: 12px;
+  }
+  /* The strip is inside the composer region's gutters, matching how the
+     approval bar and the composer already inset themselves. */
+  .plan-strip {
+    margin-bottom: 6px;
   }
   .composer-bar {
     gap: 6px;

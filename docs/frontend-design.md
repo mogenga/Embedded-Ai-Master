@@ -447,6 +447,14 @@ prometheus.expandedProjects  collapsedProjects
 ### 7.6 Composer 输入栏
 
 - 单框结构：输入框与所有控件在同一 frame 内（v1.4 的"上下文 / 工具集 / 快捷键 / 发送"四件套已改）。
+- **计划条（2026-11-01）**：`#plan-strip`，`composer-region` 的第一个子元素，排在审批条**之前**（审批条说的是「等你回答」，必须紧贴输入框）。
+  - 它是转录里计划卡的**第二个视图**，不是第二个事实源：两处都由 `renderPlan(items)` 用同一份 `items` 重画，`paintPlanRows` 是唯一的行渲染实现。计划被清空（`todos: []`）时两张一起消失；`session_loaded` 不带 `todos` 时也显式清掉，否则上一个会话的计划会挂在新会话的输入框上。
+  - 折叠态一行 35px：图标 + `计划` + `2/5` + 当前步 + chevron。当前步取**第一条 `in_progress`**；没有在跑的退回第一条未完成；全部完成时 `index === -1`，显示 `全部步骤已完成`。取「第一条未完成」而不是「第一条 `in_progress` 找不到就留空」，是因为模型写计划时常常整份都是 `pending`，那正是读者最想知道下一步干嘛的时刻。
+  - 计数用 tabular-nums（`1/7` 变 `10/12` 不抖），当前步 `flex: 1 1 auto` + ellipsis — 撑长文本的是它，不是计数和 chevron（实测 30 倍长标题下 `headOverflowsX: false`、`currentOverflows: true`）。
+  - 展开态 `max-height: 190px; overflow-y: auto`：二十步的计划不能把输入框顶出屏幕。折叠用 `max-height: 0; overflow: hidden`（与思考块同口径），不用 `display: none`——后者会让行掉出无障碍树与页面内查找。
+  - 无障碍：真 `<button>` + `aria-expanded` + `aria-controls`，列表折叠时 `aria-hidden="true"`。`title` 由 `setPlanStripTitle()` 按开合状态写 `planToggle` / `planCollapse`，**不挂 `data-i18n-title`**——写死一条会在另一个状态下变成假承诺（R3）。
+  - 派生文字（计数、当前步、`title`）没有 `data-i18n` 可扫，`applyLocale` 末尾用 `planItems` 显式重画一次；同一处也补写转录卡标题（见下条）。
+  - **顺带修掉的既有缺陷**：转录里计划卡的标题 `计划` 是建卡片时拼进 HTML 的字符串、没有 `data-i18n`，切语言后卡标题不跟着变（计划条已写 `Plan` 而卡片还是 `计划`）。`applyLocale` 现在直接改 `planCard.querySelector(".plan-title").textContent = t.plan`。
 - 控件行：模式选择器、模型选择器、用量胶囊（`#usage-meter`）。
 - **模式选择器 = 内核四个权限预设**：`diagnose` / `read-only` / `workspace-write` / `danger-full-access`（`app.js:1452`）。默认 `diagnose`。
 - 用量胶囊点击弹出 `usage-popover`：按输入 / 缓存 / 输出分段的色条 + 分类明细 + 本会话合计。

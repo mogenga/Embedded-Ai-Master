@@ -116,6 +116,13 @@ export const dictionaries = {
     toolEvidence: "Output counts as evidence",
     hide: "hide",
     plan: "Plan",
+    /* The strip above the composer. Its header names the plan, how far along it
+       is, and the step it is on; `planComplete` replaces the step once none is
+       left, so a finished plan does not read as "about to start". */
+    planToggle: "Show the full plan",
+    planCollapse: "Collapse the plan",
+    planComplete: "all steps done",
+    planNext: "starting",
     tools: "Tools",
     tabFiles: "Files",
     tabChanges: "Changes",
@@ -560,6 +567,10 @@ export const dictionaries = {
     toolEvidence: "输出可作为证据",
     hide: "收起",
     plan: "计划",
+    planToggle: "展开完整计划",
+    planCollapse: "收起计划",
+    planComplete: "全部步骤已完成",
+    planNext: "即将开始",
     tools: "工具",
     tabFiles: "文件",
     tabChanges: "改动",

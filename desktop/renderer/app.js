@@ -5,6 +5,7 @@ import { contextReport, expandSkill, mergeCommands, parseSlashText } from "./com
 import { escapeHtml, renderMarkdown, IncrementalRenderer } from "./markdown.js";
 import { createSettings } from "./settings.js";
 import { icon, setIcon } from "./icons.js";
+import { planSummary } from "./plan-summary.js";
 import { nextThinkingExpanded, normalizeTranscriptView, thinkingExpandedOnEnd } from "./thinking-view.js";
 
 /** Saved preferences are restored here; the host gets them on init. */
@@ -32,6 +33,11 @@ const contextLabel = $("context-label");
 const pendingPermission = $("pending-permission");
 const pendingQuestion = $("pending-question");
 const sessionList = $("session-list");
+const planStrip = $("plan-strip");
+const planStripToggle = $("plan-strip-toggle");
+const planStripCount = $("plan-strip-count");
+const planStripCurrent = $("plan-strip-current");
+const planStripList = $("plan-strip-items");
 
 const transcriptScroll = $("transcript-scroll");
 const workbench = $("workbench");
@@ -262,6 +268,16 @@ function applyLocale(locale, { announce = false } = {}) {
   // name — the fallback is then the right answer.
   if (state.models.length > 0) renderModels(state.models, state.model, state.modelsSource, state.modelsError);
   else modelPicker.title = t.refreshModels;
+  // The strip's label comes from `data-i18n` and was just swept; its count and
+  // step line are derived text with no attribute to sweep, so repaint the
+  // whole strip from the list it already holds.
+  if (planItems.length > 0) renderPlanStrip(planItems);
+  // The transcript card's title was written into its HTML once, when the card
+  // was created, and carries no `data-i18n` — so a language switch left the
+  // one heading in the middle of the transcript in the old language while
+  // every label around it changed.
+  const planTitle = planCard?.querySelector(".plan-title");
+  if (planTitle) planTitle.textContent = t.plan;
   // The session list is built from `t` when it renders, so a language change
   // has to rebuild it. An empty workspace still draws a row (its folder and a
   // "no conversations yet" hint), which means "sessions exist" is no longer the
@@ -1028,6 +1044,10 @@ function renderPlan(items) {
   if (!items || items.length === 0) {
     if (host) host.remove();
     planCard = null;
+    // The strip is a view of this same list; a cleared plan clears both. It
+    // has to go through here rather than being left behind, or the composer
+    // would keep advertising a plan nobody can see.
+    renderPlanStrip([]);
     return;
   }
   if (!host || !host.isConnected) {
@@ -1043,6 +1063,23 @@ function renderPlan(items) {
     else transcript.appendChild(host);
   }
   const list = host.querySelector(".plan-items");
+  paintPlanRows(list, items);
+  // Only follow the plan if the reader was already at the bottom; otherwise
+  // the update would scroll them away from what they were reading.
+  if (wasPinned) pane.scrollTop = pane.scrollHeight;
+  renderPlanStrip(items);
+}
+
+/**
+ * Paint plan rows in place.
+ *
+ * Shared by the transcript's card and the strip above the composer: both show
+ * the same list, and a second implementation of "what a finished row looks
+ * like" would eventually disagree with the first. Rows are reused by index so
+ * a status change does not rebuild the list (which would steal focus on a
+ * button inside it, if one is ever added).
+ */
+function paintPlanRows(list, items) {
   const existing = [...list.children];
   items.forEach((item, index) => {
     let row = existing[index];
@@ -1065,10 +1102,76 @@ function renderPlan(items) {
     if (label.textContent !== text) label.textContent = text;
   });
   for (const stale of existing.slice(items.length)) stale.remove();
-  // Only follow the plan if the reader was already at the bottom; otherwise
-  // the update would scroll them away from what they were reading.
-  if (wasPinned) pane.scrollTop = pane.scrollHeight;
 }
+
+/**
+ * The plan restated above the composer.
+ *
+ * The transcript card scrolls away exactly when a long run makes the plan worth
+ * watching: by the time a five-step diagnostic reaches step three, the card is
+ * several screens up. This strip stays next to the input and carries what a
+ * glance needs — how far along, and which step the plan is on — with the full
+ * list one click away.
+ *
+ * It is a *second view of the same list*, never a second source: every update
+ * comes through `renderPlan`, which repaints both from the same `items`. A
+ * plan the model clears hides the strip with the card.
+ */
+/** The last list drawn, so a language switch can repaint the derived labels. */
+let planItems = [];
+
+function renderPlanStrip(items) {
+  if (!planStrip) return;
+  const summary = planSummary(items);
+  planItems = summary === null ? [] : items;
+  if (summary === null) {
+    planStrip.hidden = true;
+    // A closed plan must not reopen already expanded when the next one starts
+    // with a fresh list: the reader did not ask for that one.
+    setPlanStripOpen(false);
+    planStripList.replaceChildren();
+    return;
+  }
+  planStrip.hidden = false;
+  planStripCount.textContent = `${summary.done}/${summary.total}`;
+  // `index === -1` means every step is done; saying "all steps done" is the
+  // honest header then, since there is no current step to name.
+  planStripCurrent.textContent =
+    summary.index === -1 ? t.planComplete : summary.current || t.planNext;
+  paintPlanRows(planStripList, items);
+  setPlanStripTitle();
+}
+
+/**
+ * The header's tooltip, in the language and direction of the moment.
+ *
+ * Set from code rather than left to `data-i18n-title` because it depends on
+ * whether the list is open: a tooltip that says "show the full plan" over a
+ * button that would fold it is a control claiming something it will not do.
+ * Called again on every locale change, since `t` is what changed.
+ */
+function setPlanStripTitle() {
+  if (!planStrip) return;
+  const open = planStrip.classList.contains("open");
+  planStripToggle.title = open ? t.planCollapse : t.planToggle;
+}
+
+function setPlanStripOpen(open) {
+  if (!planStrip) return;
+  planStrip.classList.toggle("open", open);
+  planStripToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  // Same mechanics as the thinking block: the list stays in the DOM and is
+  // clipped to zero height, so nothing has to be rebuilt on toggle.
+  planStripList.setAttribute("aria-hidden", open ? "false" : "true");
+  setPlanStripTitle();
+}
+
+// Guarded although the markup carries the button: a renderer loaded against an
+// older `index.html` (a half-applied update) would otherwise throw at module
+// load and take the whole transcript down with it.
+planStripToggle?.addEventListener("click", () => {
+  setPlanStripOpen(!planStrip.classList.contains("open"));
+});
 
 /* ---------- state ---------- */
 
@@ -3659,6 +3762,11 @@ function handleEvent(message) {
       // that removal.
       if (Array.isArray(message.todos) && message.todos.length > 0) {
         renderPlan(message.todos);
+      } else {
+        // The strip above the composer draws the same list. The transcript's
+        // card was removed a few lines above; leaving the strip alone would
+        // keep the previous session's plan hanging over the new one's input.
+        renderPlanStrip([]);
       }
       if (message.cwd) {
         state.cwd = message.cwd;

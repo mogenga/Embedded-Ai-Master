@@ -202,6 +202,30 @@
             </main>
 
             <section class="composer-region" id="composer-region">
+              <!-- The same plan the transcript card draws, kept in view while
+                   that card scrolls away. One line until opened: the header
+                   carries how far along the plan is and which step is running,
+                   which is what a reader glancing up from the input needs;
+                   clicking it opens the full list. It sits above the approval
+                   bar so a prompt that is waiting on the operator stays next to
+                   the box it is about. -->
+              <div class="plan-strip" id="plan-strip" hidden>
+                <button
+                  type="button"
+                  class="plan-strip-head"
+                  id="plan-strip-toggle"
+                  aria-expanded="false"
+                  aria-controls="plan-strip-items"
+                >
+                  <svg class="icon plan-strip-glyph" aria-hidden="true"><use href="#i-list-check"></use></svg>
+                  <span class="plan-strip-label" data-i18n="plan">Plan</span>
+                  <span class="plan-strip-count" id="plan-strip-count"></span>
+                  <span class="plan-strip-current" id="plan-strip-current"></span>
+                  <svg class="icon plan-strip-chevron" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
+                </button>
+                <div class="plan-strip-items" id="plan-strip-items" aria-hidden="true"></div>
+              </div>
+
               <div class="pending-permission" id="pending-permission" hidden>
                 <div class="pending-body">
                   <div class="pending-question" id="pending-question"></div>

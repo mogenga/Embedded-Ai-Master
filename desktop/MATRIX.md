@@ -89,7 +89,7 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 | `status{usage_missing\|device_status_invalid\|permissions_project_config_skipped}` | `notice` |
 | `interrupted` | `notice{warn}` + `run_end` |
 | `compaction` | `compacted`（microcompact / summary）/ `notice`（failed）。**`no_progress` 与 `no summarizable content` 降级为 dim 提示而不是 warn 失败**：`/compact` 现在一律执行（不再看阈值），小会话上必然撞到这两种「没什么可压」，把它们印成「压缩失败」是误报 |
-| `todos` | `todos{items:[{content,status}]}`（`todo_write` 工具写的计划；渲染器画计划卡并在执行中原地打勾）。`status` 非法时该行按 `pending` 保留文字，坏项丢弃；空数组表示「清空计划」，渲染器据此移除卡片。`session_loaded` 额外带 `todos`（取最后一条 `todos` 事件），否则重开会话时计划卡会消失 |
+| `todos` | `todos{items:[{content,status}]}`（`todo_write` 工具写的计划；渲染器画计划卡并在执行中原地打勾）。`status` 非法时该行按 `pending` 保留文字，坏项丢弃；空数组表示「清空计划」，渲染器据此移除卡片。**同一条 `items` 也画在输入框上方的计划条**（`#plan-strip`，折叠态一行：计数 + 当前步，点击展开完整列表）——两处共用 `paintPlanRows`，不是两份状态。`session_loaded` 额外带 `todos`（取最后一条 `todos` 事件），否则重开会话时计划卡会消失 |
 | `background_result` | `notice{dim\|warn}`（后台终端作业结束）。退出码 0 用 dim，非零/被信号结束/超时用 warn；输出被截断时同一行同时给出**总字节数与保留字节数**——只报保留量会让人把一段尾巴当成全部输出（R3）。**写进会话日志而不是临时提示**：这类作业按定义比它所属的回合同长，十分钟的构建结束后用户可能已经重开窗口，只有日志能让那次结果留到下次。宿主用 1s 的泵轮询内核的完成队列，经 `resumeSession` 取锁后 append，再关掉句柄——与 `/compact` 取锁的方式一致 |
 | `system` / `user` / `checkpoint` / `tool_call` | 不产出（用户消息在提交时已回显） || 未知类型 | `notice{warn}`（R3，不静默） |
 
