@@ -161,6 +161,6 @@ GET <base>/latest.json
 
 ## 9. 待实测（不能凭记忆断言）
 
-1. **asar 内 `import()` ESM** —— 已绕开而不是验证：`dist/` 走 `extraResources` 放在 `resources/` 里，不在 asar 内。2026-10-25 用模拟布局端到端跑通了宿主启动（`hello` → `ready`）与随包语料物化（`kb.current` 就位、`fileCount: 107`），但那是在真实文件系统上，不是真实 NSIS 产物。
-2. **junction 在 NSIS 安装到 `%LOCALAPPDATA%` 后的创建与访问权限** —— 仍未实测。已知的是：junction 不需要开发者模式（不同于 symlink），且 `rm({recursive:true})` 删链接不删目标（两者本机实测过，见 §3）。
-3. **真实安装包从未产出** —— 配置已就位（`desktop/package.json` 的 `build` 段，经 electron-builder 26.15.3 的 `scheme.json` 校验），但 `desktop/node_modules` 里没有 `serialport`（它装在仓库根，靠 hoisting 解析），且打包机上没有 MSVC 工具链。见 D-208。
+1. **asar 内 `import()` ESM** —— 已绕开而不是验证：`dist/` 走 `extraResources` 放在 `resources/` 里，不在 asar 内。2026-10-25 用模拟布局端到端跑通了宿主启动（`hello` → `ready`）与随包语料物化（`kb.current` 就位、`fileCount: 107`），但那是在真实文件系统上，不是真实 NSIS 产物。**2026-11-03**：真实安装包在干净机器上安装通过（D-208 关闭），这条「已绕开」的结论在真实形态下没有被推翻。
+2. **junction 在 NSIS 安装到 `%LOCALAPPDATA%` 后的创建与访问权限** —— **仍未单独断言**。2026-11-03 的干净机器安装若是走完首次启动，`kb/current` 就在该权限下被创建过；但没有一条用例专门验证「普通用户（非管理员）在 `%LOCALAPPDATA%` 下创建 junction」这一环。已知的是：junction 不需要开发者模式（不同于 symlink），且 `rm({recursive:true})` 删链接不删目标（两者本机实测过，见 §3）。
+3. ~~**真实安装包从未产出**~~ —— **2026-11-03 关闭**：用户报告 v0.1.5 的 NSIS 安装包在干净机器上安装通过。首次启动的语料物化与随包 `corpus.json` 读取都在同一条启动路径上，但没有单独的断言记录。见 D-208（已解决）。

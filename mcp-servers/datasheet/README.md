@@ -24,16 +24,17 @@ winget install oschwartz10612.Poppler
 
 | 工具 | 作用 | 关键返回值 |
 |---|---|---|
-| `datasheet_search(query, limit?)` | 整短语、大小写不敏感检索；每份文件报首个命中页 | `found` / `hits[{path,page,excerpt}]` / `skipped[{path,reason}]` / `extractor` |
+| `datasheet_search(query, limit?)` | BM25 + 整短语加成的混合排序、大小写不敏感；每份文件报最高分的一页 | `found` / `hits[{path,page,excerpt,score}]` / `skipped[{path,reason}]` / `extractor` |
 | `datasheet_read(path, page, pageEnd?)` | 按相对路径 + 1-based 页码读整页文本 | `pages[{page,text}]` / `total` / `truncated` |
-| `datasheet_registers(query?)` | 结构化寄存器表查询（未实现，规划中） | 恒 `not_available` 显式错误，不伪造 |
+| `datasheet_registers({query}` 或 `{path, page?}`) | 结构化寄存器表（启发式提取） | `found` / `tables[{path,name,peripheral?,offset?,resetValue?,bits[{name,msb,lsb,desc?}],sourcePage,confidence}]` |
 | `datasheet_status()` | 检索根 / 提取器 / 缓存统计 | `root` / `extractor` / `cacheDir` / `cacheEntries` / `fileCount` / `scanTruncated` |
 
 - `datasheet_search`：limit 缺省 12、上限 50；文件遍历预算 200 个 PDF（`scanTruncated` 时 fileCount 是下界）；excerpt 取命中点前 120 / 后 200 字符。无命中必须如实告知，不得编造页码或内容。
 - `datasheet_read`：path 相对检索根（`datasheet_search` 返回的 path 原样可用），拒绝绝对路径与 `..` 越界（`path_denied`）；单次至多 50 页、累计至多 512KiB，超出 `truncated: true`；页码越界返回 `page_out_of_range` 并附 `total`。页文本来自 `pdftotext -layout`，保留列对齐。
+- `datasheet_registers`：`query` 与 `path` **必须二选一**（两者都给或都不给都是 `invalid_argument`）。`query` 按寄存器名全库大小写不敏感包含匹配（`usb` 命中 `USB_CNTR`），默认最多 10 张表；`path`（可带 `page`）只读指名文件。表由启发式从 `-layout` 页文本提取，**低置信度的表在提取阶段就被丢弃**（宁缺毋滥），每张表带 `sourcePage`。位域描述可能被表格换行拆断——**引用位定义或复位值前必须用 `datasheet_read` 读 `sourcePage` 原页核对**；同一寄存器名可能命中多份手册（同名不同芯片），以 `path + sourcePage` 区分。
 - `datasheet_status`：提取器缺失时附 `installHint`，本身不报错（如实报告状态是它的本职）。
 
-错误码（`isError: true` 的结构化返回）：`invalid_argument` / `path_denied` / `not_found` / `file_too_large` / `extractor_missing` / `no_text_layer` / `extract_failed` / `page_out_of_range` / `page_range_too_large` / `not_available`。
+错误码（`isError: true` 的结构化返回）：`invalid_argument` / `path_denied` / `not_found` / `file_too_large` / `extractor_missing` / `no_text_layer` / `extract_failed` / `page_out_of_range` / `page_range_too_large` / `empty_query` / `internal_error`。
 
 ## 环境变量与缓存
 
@@ -97,6 +98,16 @@ npm run datasheet:regression -- --update-baseline  # 检索改动后重标基线
 |---|---|---|---|
 | PDF 解析 | `pdftotext -layout` | MinerU(+VLM) / pdfjs-dist | 同 A；扫描件如实报无文本层 |
 | 检索 | 子串匹配，页级 excerpt | BM25(FTS5)/向量+RRF | BM25 + 短语加成混合排序，回归门禁护栏 |
-| 结构化 | 无 | 寄存器表启发式 → JSON | 规划中（启发式、无 LLM） |
-| 工具面 | `embed_datasheet` 单工具 | 3–5 工具 | 4 工具（registers 未实现先报 not_available） |
+| 结构化 | 无 | 寄存器表启发式 → JSON | **已实现**：三项版式启发式 + 置信度门槛（`registers.ts`，无 LLM） |
+| 工具面 | `embed_datasheet` 单工具 | 3–5 工具 | 4 工具（`search` / `read` / `registers` / `status`） |
 | 缓存 | `.prometheus/datasheets/` | 各自私有 | `.datasheet-mcp/`，策略同 A |
+
+## 与 todolist 的偏差（不静默改设计）
+
+- **D6 的「registers 先返回 `not_available`」已被 D15 转正取代**：阶段 C 与
+  交付同轮完成，`datasheet_registers` 现在是可用工具。`not_available` 这个
+  错误码**不再产生**，也不再出现在错误码表里。
+- `verify_register_write` 不做（D16 spike 结论）：`-layout` 文本里位域描述
+  行只覆盖 1/1143 的 Reserved 位，缺这一原料就无法判定「写 reserved 位」，
+  补齐需要列对齐解析——按 todolist §3「spike 不过就放弃」执行。见
+  `docs/datasheet-mcp.md` §5。

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "preset": "readonly-demo",
+  "preset": "diagnose",
   "rules": [
     {
       "tool": "mcp__datasheet__datasheet_search",
@@ -20,7 +20,7 @@
     {
       "tool": "mcp__datasheet__datasheet_registers",
       "action": "allow",
-      "reason": "只读结构化查询(当前未实现,恒返回 not_available)"
+      "reason": "只读结构化查询:启发式提取的寄存器表,引用前仍需 datasheet_read 核对原页"
     }
   ]
 }

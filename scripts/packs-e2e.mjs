@@ -6,7 +6,13 @@
  * Mirrors `scripts/probe-e2e.mjs`: a standalone node script that drives the
  * compiled kernel modules (`dist/packs/*`) against a throwaway root, prints a
  * one-line JSON verdict, and exits non-zero on any broken invariant. The pack
- * defaults to Ninja (~300 KB download); override with `PACKS_E2E_PACK=<id>`.
+ * defaults to pyOCD (the smallest entry in the catalog, ~35 MiB); override
+ * with `PACKS_E2E_PACK=<id>`.
+ *
+ * The default used to be Ninja. `f03473b` removed that catalog entry (and
+ * OpenOCD / RISC-V / probe-rs / esptool) when the product narrowed to the
+ * Keil5 chain, which left this script failing with "no such pack" on every
+ * run until the default was pointed at an entry that still exists.
  *
  * The install here is a real download over the network — this script is an
  * acceptance run, not part of `npm test` (which stays offline).
@@ -42,6 +48,33 @@ const useRealRoot = process.env.PACKS_E2E_REAL_ROOT === "1";
 const e2eRoot = useRealRoot ? undefined : mkdtempSync(path.join(tmpdir(), "eam-packs-e2e-"));
 if (e2eRoot) process.env.HARNESS_TOOLCHAIN_HOME = e2eRoot;
 
+/**
+ * Remove the throwaway root on **every** exit path, not just the happy one.
+ *
+ * `fail()` calls `process.exit()`, which skips everything below it — so the
+ * single `rmSync` that used to sit at the bottom of this file left a full temp
+ * directory behind whenever a check failed or the run was killed. (实测：一次
+ * 中断在 `tmp\txn-*\archive-0.zip` 上留下 1.7 MB，另有两个 0 字节残留目录。)
+ * `mkdtempSync` gave us this directory and nothing else writes into it, so
+ * deleting it is always safe.
+ */
+function cleanup() {
+  if (e2eRoot === undefined) return;
+  try {
+    rmSync(e2eRoot, { recursive: true, force: true, maxRetries: 3 });
+  } catch {
+    // A locked file on Windows must not turn a failed check into a confusing
+    // EBUSY — the verdict was already printed.
+  }
+}
+process.on("exit", cleanup);
+for (const [signal, code] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  process.on(signal, () => {
+    cleanup();
+    process.exit(code);
+  });
+}
+
 const { installPack } = await import(pathToFileURL(path.join(PACKS_DIR, "install.js")));
 const { catalogEntry, toInstallEntry } = await import(pathToFileURL(path.join(PACKS_DIR, "catalog.js")));
 const { packBinDirs, removePack } = await import(pathToFileURL(path.join(PACKS_DIR, "registry.js")));
@@ -67,7 +100,7 @@ function run(program, args) {
   });
 }
 
-const wanted = process.env.PACKS_E2E_PACK?.trim() || "ninja-1.13.2-win32-x64";
+const wanted = process.env.PACKS_E2E_PACK?.trim() || "pyocd-0.46.0-win32-x64";
 const entry = catalogEntry(wanted);
 if (!entry) {
   const { catalogFor } = await import(pathToFileURL(path.join(PACKS_DIR, "catalog.js")));
@@ -137,6 +170,4 @@ const verdict = {
 };
 console.log(JSON.stringify(verdict));
 
-if (!useRealRoot) {
-  rmSync(e2eRoot, { recursive: true, force: true });
-}
+// The root is removed by `cleanup()` on exit — including every `fail()` path.

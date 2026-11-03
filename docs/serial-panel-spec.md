@@ -2,6 +2,8 @@
 
 日期：2026-10-23。目标：右侧工作台内嵌一个功能完善的串口助手，**人能看、agent 也能读**。
 
+> **2026-11-03 状态说明（读本文前先看这条）**：本文是 **2026-10-23 一期的调研与决策记录**，其中「方案 B：PowerShell 数据泵、零 npm 依赖」是当时的选择，**已于 2026-10-24 被弃用**（`3530fac`）。现实现是**方案 A：宿主进程内直接用 `serialport` 13**（见 `desktop/host/serial-bridge.js` 文件头注释与 `dev-notes/M3-串口面板.md`）：PS 泵在实机上被杀软间歇击杀、UTF-8 分块乱码、二进制不安全、孤儿进程攥口四类问题击穿。文中描述的宿主命令集与「不共口、镜像 ring.json」的架构仍然成立，只有「后端是什么」这一层变了；agent 侧的 `embed_serial` 临时捕获仍用 PowerShell 泵（MCP server 进程不能引内核的原生依赖）。
+
 ## 一、现状盘点（全部实测）
 
 ### 渲染层：UI 是现成的，90% 不用写
@@ -59,7 +61,9 @@ agent（MCP）
 | **A. node-serialport**（`npm --prefix desktop install serialport`，用户执行） | 事件驱动、原生性能、端口枚举成熟 | 需要一次依赖安装（AGENTS 禁令：命令只能输出给用户）；native 模块要匹配 Electron ABI（`electron-rebuild` 或用 prebuilt） |
 | **B. PowerShell .NET SerialPort 数据泵**（零依赖） | 本机实测可用（调试时反复用它开 COM7）；无 ABI 问题 | 子进程 JSON-over-stdio 泵要自己写；速率上限低（实测 ~KB/s 级够用）；Windows-only（本项目 Windows 一等公民，可接受） |
 
-**建议：一期 B（零依赖立即能用），二期补 A 作为可选加速。** B 的实现是 ~150 行的 `serial-bridge.js`：spawn `powershell -NoProfile -Command <泵脚本>`，泵脚本用 .NET `SerialPort` 事件把收到的字节按行写 stdout（NDJSON），host 读 stdout → 环形缓冲（500 行）→ 推 `serial_lines`；发送则 host → stdin → 泵写串口。
+**当时的建议：一期 B（零依赖立即能用），二期补 A 作为可选加速。B 的实现是 ~150 行的 `serial-bridge.js`：spawn `powershell -NoProfile -Command <泵脚本>`，泵脚本用 .NET `SerialPort` 事件把收到的字节按行写 stdout（NDJSON），host 读 stdout → 环形缓冲（500 行）→ 推 `serial_lines`；发送则 host → stdin → 泵写串口。**
+
+**事后结论（2026-10-24，`3530fac`）**：上面的顺序被反过来了——一期就换成了方案 A。B 在实机上被四类问题击穿：杀软间歇击杀 PS 子进程、UTF-8 多字节字符跨 read 边界被截断、二进制不安全、宿主死后孤儿泵攥住 COM 口（最后一条后来靠父 PID 看门狗缓解，但仍不足以救回这条路）。方案 A 的「native 模块要匹配 Electron ABI」在 `serialport` 13 的 prebuild 下没有成为问题（打包时打进 `app.asar.unpacked`）。
 
 ### "agent 直接读取"：双通道设计
 
@@ -69,7 +73,7 @@ agent（MCP）
 - **agent 主动打开的口**（面板没开时）：MCP 工具自己开、自己读、报完即关，面板通过 `serial_state` 事件看到「agent 正在使用 COM7」。
 - 冲突规则：两边同时要同一个口 → 后到者收到明确错误（"面板正在使用 COM7；读取面板缓冲请用 serial_read 不带 port 参数"）。
 
-`embed_serial` 动作面（挂在 cubeide server 或独立 serial server，倾向前者——它已是"三件套+周边"的口袋）：
+`embed_serial` 动作面（**最终落在独立的 `serial` server**，2026-10-25 从 cubeide 拆出：串口是平台级能力，绑在厂商后端上等于没装 CubeIDE 的机器就管不了串口）：
 
 ```
 { action: "read",  maxLines?: number, since?: number }  → 面板缓冲尾部（evidence）
@@ -82,12 +86,17 @@ agent（MCP）
 
 | 命令 | 行为 |
 |---|---|
-| `serialOpen {port, baud}` | 起 bridge、开缓冲、回 `serial_snapshot` |
-| `serialStatus` | 回 `serial_state` |
-| `serialClear` | 清缓冲、广播 `serial_cleared` |
-| `serialClose`（渲染层隐含） | 收泵、回 `serial_state` |
-| `serialWrite {data}`（app.js 已有 send） | 经泵写串口 |
-| `listSerialPorts`（新增） | 渲染层 `fillSerialControls()` 的端口下拉需要它 |
+| `serialOpen {port, baud, encoding?}` | 开缓冲、回 `serial_snapshot` |
+| `serialStatus {port?}` | 回 `serial_snapshot`（带 ring 尾部，否则切 tab 回来会清屏） |
+| `serialClear {port?}` | 清缓冲、广播 `serial_cleared` |
+| `serialClose` | 关全部打开的口、回 `serial_state` |
+| `serialWrite {port?, data, hex?}` | 写串口；`hex` 走原始字节 |
+| `serialLine {port?, line, value}` | **DTR/RTS** 手动控制（板子复位手势） |
+| `serialBaud {port?, baud}` | 运行中改波特率，不断链路 |
+| `serialEncoding {encoding}` | 运行中切换文本编码（utf-8 / gbk） |
+| `listSerialPorts` | 渲染层 `fillSerialControls()` 的端口下拉需要它 |
+
+> 上表是**最终实现**的命令集（2026-11-03 按 `desktop/host/host.js` 校正）；本文一期只规划了前六项，DTR/RTS、热切波特率与编码是后续轮次加的。
 
 ### 渲染层改动清单（极小）
 
