@@ -169,6 +169,26 @@ inspect / validate / commit`；下载阶段附带 `received` / `total` 字节数
   生成参数摘要（`digestParams`），对任何暴露 `installPack {id}` 形状的
   工具天然生效——无需 packs 侧做任何事，本条为确认而非新增。
 
+## 目录（当前 4 条 Windows x64）
+
+`src/packs/catalog.ts` 的 `CATALOG` 是唯一目录。当前条目：
+
+| id | 名称 | 版本 | provides | 下载体积 |
+|---|---|---|---:|---:|
+| `arm-gnu-15.3.rel2-win32-x64` | Arm GNU Toolchain | 15.3.rel2 | `gcc-arm` | 289,240,072 B（约 276 MiB） |
+| `xpack-arm-none-eabi-gcc-14.2.1-1.1-win32-x64` | Arm GNU Toolchain（xPack） | 14.2.1-1.1 | `gcc-arm` | 323,368,593 B（约 308 MiB） |
+| `cmake-4.2.3-win32-x64` | CMake | 4.2.3 | `cmake` | 50,391,842 B（约 48 MiB） |
+| `pyocd-0.46.0-win32-x64` | pyOCD | 0.46.0 | `pyocd` | 37,011,537 B（约 35 MiB） |
+
+迁移时是 9 条；**2026-10-26 收敛到 Keil 链路（`f03473b`）时移除了 5 条**：
+OpenOCD、RISC-V GNU、Ninja、probe-rs、esptool。移除动作只删了条目，保留
+条目的 URL / SHA-256 原值未动。
+
+条目是**对已下载并哈希过的制品的承诺**，不是对「上游有这个工具」的陈述：
+新增一条必须带实测的 `sha256` 与 `downloadBytes`，`catalogFor` 会过滤掉
+没有哈希的条目（Tools 页用 `includeUnverified: true` 把这类条目列出来并标
+`installable:false`，而不是静默隐藏）。
+
 ## 范围
 
 只发 Windows（`win32`，x64）。其它平台解析出不同的根目录、机器本身也能
@@ -180,8 +200,18 @@ inspect / validate / commit`；下载阶段附带 `received` / `total` 字节数
 
 - `npm test`：`src/packs/packs.test.ts`（68 例：A 侧 41 例断言语义不变 +
   B 侧真实路径补充）。
-- `npm run packs:e2e`：装（默认 Ninja，~300 KB 真实下载）→ 验证可执行 →
-  卸载 → 无残留。验收动作用脚本，不是 CI 的一部分（默认测试不触网）。
+- `npm run packs:e2e`：装 → 验证可执行 → 卸载 → 无残留。验收动作用脚本，
+  不是 CI 的一部分（默认测试不触网）。
+
+  默认条目是 **pyOCD**（目录里最小的可装条目，约 35 MiB）；换成别的条目用
+  `PACKS_E2E_PACK=<id>`：
+
+  ```bash
+  PACKS_E2E_PACK=cmake-4.2.3-win32-x64 npm run packs:e2e
+  ```
+
+  （2026-11-03 修正：默认值曾是 `ninja-1.13.2-win32-x64`，而该条目已随
+  `f03473b` 移除，脚本因此每次都以「目录里没有」退出 1。）
 - **代理环境**：Node 的内置 `fetch` 默认不读 `HTTP_PROXY`/`HTTPS_PROXY`。
   出网需走代理的机器（如 clash）上跑 e2e 或真实安装，用 Node 24 的环境
   变量开关（零代码改动）：
@@ -205,6 +235,6 @@ inspect / validate / commit`；下载阶段附带 `received` / `total` 字节数
 | `packBinDirs` 消费方 | `src/embedded/toolEnv.ts`（静态 import） | `mcp-servers/keil/toolEnv.ts`（server 启动时从 `dist/packs` 注入） | B 的分层红线（keil 构建不能 import 内核 src/） |
 | 代码位置 | `src/packs/`（与 embedded 同层） | `src/packs/`（平台层；领域代码不进 src/ 的红线靠注入绕开） | packs 是多 server 共用基础设施 |
 | 探测顺序 | `PROMETHEUS_TOOLCHAINS` → packs → 安装根 → PATH | packs → PATH（+ Keil 注册表例外） | `PROMETHEUS_TOOLCHAINS` 对应物与全量安装根扫描属 Phase 3 |
-| 目录条目 | 9 条 Windows x64 | 同 9 条，哈希/URL 原值不动 | 哈希钉死，重算只会引入错误 |
+| 目录条目 | 9 条 Windows x64 | 迁移时同 9 条；2026-10-26 收敛到 Keil 链路后剩 4 条（移出 OpenOCD / RISC-V / Ninja / probe-rs / esptool）。留下的条目哈希/URL 原值不动 | 哈希钉死，重算只会引入错误；产品范围收窄只删条目 |
 | 离线安装入口 | host 命令 + UI | host 命令 + UI（settings.js 既有离线安装段） | 协议形状以 settings.js 为准 |
 | 测试 | node:test，41 例 | vitest，68 例（含真实 tar / 注入 fetch / 真实可执行验证） | B 的测试栈与覆盖率文化 |

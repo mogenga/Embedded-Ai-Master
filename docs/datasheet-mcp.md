@@ -16,7 +16,7 @@
 |---|---|---|---|
 | `datasheet_search` | `{query, limit?}` | BM25 + 整短语加成的混合排序检索 | `found` / `hits[{path,page,excerpt,score}]` / `skipped[]` / `extractor` |
 | `datasheet_read` | `{path, page, pageEnd?}` | 整页文本（≤50 页、≤512KiB） | `pages[{page,text}]` / `total` / `truncated` |
-| `datasheet_registers` | `{query}` 或 `{path, page?}` | 结构化寄存器表（启发式提取） | `tables[{name,peripheral?,offset?,resetValue?,bits[],sourcePage,confidence}]` |
+| `datasheet_registers` | `{query}` 或 `{path, page?}` | 结构化寄存器表（启发式提取） | `found` / `tables[{path,name,peripheral?,offset?,resetValue?,bits[],sourcePage,confidence}]` |
 | `datasheet_status` | `{}` | 提取器/缓存/文件统计 | `root` / `extractor` / `cacheDir` / `cacheEntries` / `fileCount` / `scanTruncated` |
 
 错误码：`invalid_argument` / `path_denied` / `not_found` / `file_too_large` / `extractor_missing` / `no_text_layer` / `extract_failed` / `page_out_of_range` / `page_range_too_large` / `empty_query`。
@@ -105,4 +105,6 @@
 
 ## 10. 测试
 
-95 例（pdf 5 / cache 7 / bm25 10 / service 31 / registers 18 / tools 24），行覆盖 93.65%。fixture PDF 由 `tests/fixtures.ts` 手写生成（最小合法 PDF，文本层 + 纯图两形态）；真实提取用例在有 pdftotext 的机器跑、无提取器机器 skip；真实语料回归（RM0008/RM0090）缺语料 skip。
+**95 例（94 通过 / 1 跳过）**，2026-11-03 实测 `npx vitest run mcp-servers/datasheet`：pdf 5 / cache 7 / bm25 10 / service 31 / registers 18 / tools 18 / regression-gate 5 / regression 1（缺语料时整组 skip）。行覆盖 93.65%（2026-10-24 实测值，本次未重跑覆盖率）。
+
+fixture PDF 由 `tests/fixtures.ts` 手写生成（最小合法 PDF，文本层 + 纯图两形态）；真实提取用例在有 pdftotext 的机器跑、无提取器机器 skip；真实语料回归（RM0008/RM0090）缺语料 skip。
