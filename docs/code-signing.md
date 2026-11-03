@@ -498,7 +498,7 @@ Windows SDK 自带。本机装了多个版本：
 ## 11. 相关条目
 
 - `docs/deferred-issues.md` **D-211**：签名配置就位但从未验证过真实签名（本机无证书）。**2026-10-25 已补**：自签名实验跑通了真实签名链路，并修掉了会让构建直接失败的 `signingHashAlgorithms` 默认值问题。
-- `docs/deferred-issues.md` **D-208**：真实安装包从未产出。
+- `docs/deferred-issues.md` **D-208**：真实安装包从未产出（**2026-11-03 已解决**：v0.1.5 安装包在干净机器上安装验证通过；该验证走的是**未签名**产物，签名本身仍由 D-211 跟踪）。
 - `docs/deferred-issues.md` **D-217**：未签名期间 `electron-updater` 不做签名校验（`publisherName == null` 时视为通过）。
 - `scripts/verify-signature.mjs`、`tests/verify-signature.test.ts`：签名检查脚本与其测试。
 - `scripts/sign-preflight.mjs`、`tests/sign-preflight.test.ts`：打包前的「能不能签」检查与其测试（49 条，纯函数 + 注入数据，不读证书存储、不触网）。
