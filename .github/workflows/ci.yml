@@ -1,0 +1,51 @@
+name: CI
+
+# 默认测试不触网，所以这里只跑离线的那一套。
+# live 测试由 HARNESS_COMPAT_LIVE=1 显式开启，需要真实网关，CI 里不跑。
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# 同一个分支的旧运行自动取消：PR 连续推送时不必为每个中间态排队。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    name: typecheck + build + test (offline)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install root dependencies
+        run: npm ci
+
+      # 桌面宿主测试把仓库根的 dist/ 与 dist-mcp/ 当作「内核已编译」的证据：
+      # 缺了它们，宿主里的技能/语料/探针用例会整组 skip（见
+      # tests/desktop/host.test.js 的 DIST_BUILT 系列常量）。先构建，跳过就
+      # 会变成静默的覆盖下降。
+      - name: Build kernel and domain MCP servers
+        run: npm run build && npm run build:mcp
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # npm test 不触网；语料与查询集是本地资产（不入库），相关回归组会自动
+      # skip，这是设计好的行为，不是失败。
+      - name: Test (offline)
+        run: npm test
+
+  # lint 目前等同 tsc --noEmit（D-006），所以没有独立 job —— 跑两遍不会
+  # 多提供任何信息。等 D-006 关闭、接上真正的静态检查后再加。

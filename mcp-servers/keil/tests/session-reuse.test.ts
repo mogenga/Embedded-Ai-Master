@@ -2,7 +2,13 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { openKeilSession, registerSessionForTest, resetSessionsForTest, sessionKey } from "../keilSession.js";
+import {
+  openKeilSession,
+  registerSessionForTest,
+  resetSessionsForTest,
+  sessionKey,
+  setUv4PathForTest,
+} from "../keilSession.js";
 import type { KeilSession } from "../keilSession.js";
 
 /**
@@ -29,6 +35,11 @@ function fakeSession(overrides: Partial<KeilSession> = {}): KeilSession {
 
 beforeEach(() => {
   resetSessionsForTest();
+  // Pretend MDK is installed: `openKeilSession` checks for UV4 *before* the
+  // session table, so without this every case short-circuits to "MDK is not
+  // installed" on a machine that has no Keil (CI). These cases are about the
+  // reuse guards, and the override is what lets them reach those guards.
+  setUv4PathForTest("C:/fake-keil/UV4/UV4.exe");
   dir = mkdtempSync(join(tmpdir(), "keil-reuse-"));
   projectPath = join(dir, "demo.uvprojx");
   writeFileSync(projectPath, "<Project/>", "utf8");
@@ -36,6 +47,7 @@ beforeEach(() => {
 
 afterEach(() => {
   resetSessionsForTest();
+  setUv4PathForTest(undefined);
   rmSync(dir, { recursive: true, force: true });
 });
 

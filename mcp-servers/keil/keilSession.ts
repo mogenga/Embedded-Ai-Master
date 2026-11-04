@@ -200,9 +200,27 @@ export async function flushProjectSessions(project: string): Promise<number> {
   return closed;
 }
 
+/**
+ * Test seam: force what `uv4Path()` answers, or `null` for "no installation".
+ *
+ * `openKeilSession` checks for UV4 **before** it looks at the session table, so
+ * on a machine without Keil every reuse-guard case returned "MDK is not
+ * installed" and never reached the guard it was written to exercise. Locally
+ * that went unnoticed because the dev box has MDK; CI has none, and the four
+ * guard tests failed there. This seam lets those tests say "pretend UV4 exists"
+ * without pretending anything about a real install.
+ *
+ * `undefined` restores detection. Kept next to `registerSessionForTest` on
+ * purpose: both exist only to make the offline tests hermetic.
+ */
+let uv4Override: string | null | undefined;
+export function setUv4PathForTest(value: string | null | undefined): void {
+  uv4Override = value;
+}
+
 /** Where UV4.exe is, if Keil is installed. */
 export async function uv4Path(): Promise<string | null> {
-  return findUv4();
+  return uv4Override === undefined ? findUv4() : uv4Override;
 }
 
 /** The project file for a workspace, when it is a Keil project. */
