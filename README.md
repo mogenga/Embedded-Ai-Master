@@ -850,4 +850,4 @@ npm --prefix desktop run dist             # 前置装配 + 打包
 | [`dev-notes/`](dev-notes/) | 按阶段增量追记的过程留痕 |
 
 > [!NOTE]
-> [`docs/cubeide-headless.md`](docs/cubeide-headless.md) 等三份文档仍在仓库里，但描述的是**已移除**的后端，只作历史留档。
+> 已移除的 CubeIDE / ESP-IDF / Arduino 三套后端的接入指南已于 2026-11-04 删除。它们的实现与取舍仍在 `docs/deferred-issues.md` 的变更记录里，需要追溯时可从那里的提交哈希找回。
