@@ -28,7 +28,7 @@ sha256 清单**挡不住**这种攻击：能写桶的人同时改文件和清单
 - 打包时由 `desktop/package.json` 的 `extraResources` 把它原样拷成 `resources/corpus.json`。**同一个文件服务两种形态**，不存在「构建时注入」这一步。
 - `config/corpus.local.json` —— 已被 gitignore，**没有代码读它**，此后只是本机备忘。留着不冲突（`$HARNESS_HOME` 仍优先），但不要再以为它是生效的那份。
 
-`config/corpus.example.json` 只有占位符，其 `updateBaseUrl`（`https://example.invalid/`）与假 PEM **都能通过 `validateCorpusConfig` 的结构校验**——`.invalid` 是合法域名形状、PEM 也含 BEGIN/END 标记。若把模板当真实配置用，症状不是「未配置」而是「检查失败：DNS 解析失败」，把配置错误伪装成网络问题（见 D-207）。复制模板时两个值都要替换。
+`config/corpus.example.json` 只有占位符，其 `updateBaseUrl`（`https://example.invalid/`）与假 PEM **都能通过 `validateCorpusConfig` 的结构校验**——`.invalid` 是合法域名形状、PEM 也含 BEGIN/END 标记。若把模板当真实配置用，症状不是「未配置」而是「检查失败：DNS 解析失败」，把配置错误伪装成网络问题（见 D-194）。复制模板时两个值都要替换。
 
 ### 格式
 

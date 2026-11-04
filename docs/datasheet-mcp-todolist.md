@@ -1,6 +1,6 @@
 # 数据手册 MCP Server 移植 Todolist(Prometheus → Embedded-Ai-Master)
 
-> 状态:待执行。目标:把 A(`Prometheus/src/embedded/datasheet.ts`,197 行)的 PDF 手册检索能力按 B 的架构原则重做成独立 MCP server `mcp-servers/datasheet/`。
+> 状态:**已完成**（2026-10-24，D1–D20 全部有结论；其中 D16 经 spike 评估后按 todolist §3「不过就放弃」处理，见该条）。目标:把 A(`Prometheus/src/embedded/datasheet.ts`,197 行)的 PDF 手册检索能力按 B 的架构原则重做成独立 MCP server `mcp-servers/datasheet/`。
 > 方法:逐行读 A 实现 + 调研业界三个同类方案([hungnguyen1503/datasheet-mcp](https://github.com/hungnguyen1503/datasheet-mcp)、[atillab1/embedded-ai-workspace/datasheet-mcp](https://github.com/atillab1/embedded-ai-workspace/tree/main/datasheet-mcp)、[flaco-source/mcp-docs](https://github.com/flaco-source/mcp-docs))定差距。
 
 ## 0. 三方对照:我们站在哪里
@@ -38,39 +38,39 @@ mcp-servers/datasheet/
 
 ### 阶段 A:基础检索(对齐 A 的能力,1:1 重写成 B 形态)
 
-- [ ] **D1** `pdf.ts`:`findPdfExtractor()`(探测 `pdftotext -v`,ENOENT→null)+ `extract()`(`-layout`、120s 超时、64MiB buffer)。照抄 A 的注释要点:`-v` 恒非零退出码,信号是"可执行文件是否运行"。
-- [ ] **D2** `cache.ts`:页数组 JSON 缓存。键 = sha1(绝对路径)前 16 位;stamp = `mtimeMs:size`;`empty: true` 标记无文本层。写失败静默(缓存丢失只损时间不损正确性)。
-- [ ] **D3** `service.ts` `listDatasheets()`:递归 ≤6 层、≤200 文件、>80MiB 跳过、跳 `.` 与 `node_modules`。返回 `{path, pages?, skipped?}` 元数据,不提取——列目录不应触发 30 秒的提取。
-- [ ] **D4** `service.ts` `search()`:大小写不敏感整短语匹配,每页至多一 hit,excerpt 前后 120/200 字符,limit 缺省 12。`skipped[]` 带原因:提取器缺(附 winget 安装命令)/文件过大/无文本层(扫描件)。**这是 A 诚实性设计的核心,原样保留**。
-- [ ] **D5** `service.ts` `readPages()`:按 path+页范围返回整页文本(A 没有的,业界全部有——检索命中后读上下文是刚需;单次 ≤50 页、≤512KiB 截断,对齐 B 的输出限额惯例)。
-- [ ] **D6** `tools.ts` 四工具:
+- [x] **D1** `pdf.ts`:`findPdfExtractor()`(探测 `pdftotext -v`,ENOENT→null)+ `extract()`(`-layout`、120s 超时、64MiB buffer)。照抄 A 的注释要点:`-v` 恒非零退出码,信号是"可执行文件是否运行"。
+- [x] **D2** `cache.ts`:页数组 JSON 缓存。键 = sha1(绝对路径)前 16 位;stamp = `mtimeMs:size`;`empty: true` 标记无文本层。写失败静默(缓存丢失只损时间不损正确性)。
+- [x] **D3** `service.ts` `listDatasheets()`:递归 ≤6 层、≤200 文件、>80MiB 跳过、跳 `.` 与 `node_modules`。返回 `{path, pages?, skipped?}` 元数据,不提取——列目录不应触发 30 秒的提取。
+- [x] **D4** `service.ts` `search()`:大小写不敏感整短语匹配,每页至多一 hit,excerpt 前后 120/200 字符,limit 缺省 12。`skipped[]` 带原因:提取器缺(附 winget 安装命令)/文件过大/无文本层(扫描件)。**这是 A 诚实性设计的核心,原样保留**。
+- [x] **D5** `service.ts` `readPages()`:按 path+页范围返回整页文本(A 没有的,业界全部有——检索命中后读上下文是刚需;单次 ≤50 页、≤512KiB 截断,对齐 B 的输出限额惯例)。
+- [x] **D6** `tools.ts` 四工具:
   - `datasheet_search {query, limit?}`(只读)
   - `datasheet_read {path, page, pageEnd?}`(只读)
   - `datasheet_status`(只读,Phase B 预留返回提取器/缓存统计)
   - `datasheet_registers`(Phase C 实现,先注册返回 `not_available` 明确错误——**不伪造**)
-- [ ] **D7** `server.ts`:照 kb/server.ts 骨架注册四工具 + `isEntryPoint` + stdio transport。
-- [ ] **D8** 测试:pdf 探测(假 PATH)/缓存 stamp 失效/empty 标记/search 的 skipped 理由/excerpt 边界/readPages 截断与越界。fixture PDF 手工生成一份文本层 PDF + 一份纯图 PDF 入 `tests/fixtures/`(不入库的生成脚本写在 tests 内 setUp 里跑 pdftotext 反向生成,确保 CI 可跑)。
-- [ ] **D9** README.md(照 kb/README.md 风格:定位、安装 pdftotext 的两种途径、工具表、诚实边界)+ `permissions.example.json`(全部只读,demo 用)。
+- [x] **D7** `server.ts`:照 kb/server.ts 骨架注册四工具 + `isEntryPoint` + stdio transport。
+- [x] **D8** 测试:pdf 探测(假 PATH)/缓存 stamp 失效/empty 标记/search 的 skipped 理由/excerpt 边界/readPages 截断与越界。fixture PDF 手工生成一份文本层 PDF + 一份纯图 PDF 入 `tests/fixtures/`(不入库的生成脚本写在 tests 内 setUp 里跑 pdftotext 反向生成,确保 CI 可跑)。
+- [x] **D9** README.md(照 kb/README.md 风格:定位、安装 pdftotext 的两种途径、工具表、诚实边界)+ `permissions.example.json`(全部只读,demo 用)。
 
 ### 阶段 B:检索质量升级(BM25,对齐 kb 的既有路线)
 
-- [ ] **D10** `service.ts` 检索升级为 BM25:页级 token 化(小写、按非字母数字切分、可停用词表为零起步)。**不引第三方依赖**——B 零依赖现状,~80 行手写 BM25,kb/index.yaml 的打分函数同款风格。
-- [ ] **D11** 术语映射:查询先做领域同义词展开(`alternate function`↔`AF`、`reset value`↔`复位值`)。放 `service.ts` 常量表,20–40 条起步。
-- [ ] **D12** 回归门禁:照 `mcp-servers/kb/regression-gate.ts` 模式建 `regression-gate.ts` + 基线 JSON + `npm run datasheet:regression` 脚本。语料用 1–2 份公开 ST 参考手册(RM0008/RM0090,许可允许再分发则入库,否则 gitignore + 下载脚本)+ 50 条金查询(寄存器名/位域名/章节标题)+ 25 条负例(不存在的寄存器)。基线指标:R@2 ≥ 0.5 起步(业界向量方案在 0.6–0.8,B 的朴素方案先立门槛再爬坡)。
-- [ ] **D13** 混合排序:BM25 分 + 子串命中加成(整短语命中应稳赢分词命中)。RRF 融合是业界标配,但两条信号足够,不引重排模型。
+- [x] **D10** `service.ts` 检索升级为 BM25:页级 token 化(小写、按非字母数字切分、可停用词表为零起步)。**不引第三方依赖**——B 零依赖现状,~80 行手写 BM25,kb/index.yaml 的打分函数同款风格。
+- [x] **D11** 术语映射:查询先做领域同义词展开(`alternate function`↔`AF`、`reset value`↔`复位值`)。放 `service.ts` 常量表,20–40 条起步。
+- [x] **D12** 回归门禁:照 `mcp-servers/kb/regression-gate.ts` 模式建 `regression-gate.ts` + 基线 JSON + `npm run datasheet:regression` 脚本。语料用 1–2 份公开 ST 参考手册(RM0008/RM0090,许可允许再分发则入库,否则 gitignore + 下载脚本)+ 50 条金查询(寄存器名/位域名/章节标题)+ 25 条负例(不存在的寄存器)。基线指标:R@2 ≥ 0.5 起步(业界向量方案在 0.6–0.8,B 的朴素方案先立门槛再爬坡)。
+- [x] **D13** 混合排序:BM25 分 + 子串命中加成(整短语命中应稳赢分词命中)。RRF 融合是业界标配,但两条信号足够,不引重排模型。
 
 ### 阶段 C:结构化提取(启发式,无 LLM——atillab1 管线②的路数)
 
-- [ ] **D14** `registers.ts`:页文本中识别寄存器表(ST 格式:`0xOffset` 列 + 寄存器名列 + 位域表 `bits [msb:lsb]`)。启发式正则 + 列对齐启发,输出 `{peripheral?, name, offset?, resetValue?, bits: [{name, msb, lsb, desc?}]}`。**只有解析置信度高才产出**,低于阈值宁缺毋滥(A 的 identifyGate 哲学)。
-- [ ] **D15** `datasheet_registers` 工具转正:按 `{query}`(寄存器名模糊匹配)或 `{path, page}`(指名页)返回结构化结果 + 来源页。复用 D4 检索定位候选页。
-- [ ] **D16** `verify_register_write` 评估(业界亮点,可选):输入 C 代码片段,对照提取出的寄存器表检查 reserved 位写 1/魔数偏移/整字覆盖。**先做可行性 spike 再决定是否立项**——启发式解析的假阳性会直接误导用户,若 D14 置信度不够就不做。
+- [x] **D14** `registers.ts`:页文本中识别寄存器表(ST 格式:`0xOffset` 列 + 寄存器名列 + 位域表 `bits [msb:lsb]`)。启发式正则 + 列对齐启发,输出 `{peripheral?, name, offset?, resetValue?, bits: [{name, msb, lsb, desc?}]}`。**只有解析置信度高才产出**,低于阈值宁缺毋滥(A 的 identifyGate 哲学)。
+- [x] **D15** `datasheet_registers` 工具转正:按 `{query}`(寄存器名模糊匹配)或 `{path, page}`(指名页)返回结构化结果 + 来源页。复用 D4 检索定位候选页。
+- [ ] **D16** `verify_register_write` 评估(业界亮点,可选):输入 C 代码片段,对照提取出的寄存器表检查 reserved 位写 1/魔数偏移/整字覆盖。**先做可行性 spike 再决定是否立项**——启发式解析的假阳性会直接误导用户,若 D14 置信度不够就不做。**→ spike 结论：不做**，理由见文末 §6。
 
 ### 阶段 D:接线
 
-- [ ] **D17** `docs/datasheet-mcp.md` 设计文档(定位/工具表/缓存策略/诚实边界/与 A 及业界方案的差异表,含本文件的对照表)。
-- [ ] **D18** mcp.json 预设模板:写进 README 的 `{ "mcpServers": { "datasheet": { "command": "node", "args": ["dist-mcp/datasheet/server.js"] } } }` 示例;若 keil/cubeide 的预设模板机制有集中注册点,同步加。
-- [ ] **D19** 测试补齐到 85% 覆盖率;`npm run typecheck` + `npm run build:mcp` 过;`npm test` 全绿。
-- [ ] **D20** deferred-issues 登记:渲染层隐藏清单中与 PDF/数据手册相关的入口(如有)标记解决路径;`docs/rag-vs-agentic-search-todo.md` 若与此相关,加一行链接。
+- [x] **D17** `docs/datasheet-mcp.md` 设计文档(定位/工具表/缓存策略/诚实边界/与 A 及业界方案的差异表,含本文件的对照表)。
+- [x] **D18** mcp.json 预设模板:写进 README 的 `{ "mcpServers": { "datasheet": { "command": "node", "args": ["dist-mcp/datasheet/server.js"] } } }` 示例;若 keil/cubeide 的预设模板机制有集中注册点,同步加。
+- [x] **D19** 测试补齐到 85% 覆盖率;`npm run typecheck` + `npm run build:mcp` 过;`npm test` 全绿。
+- [x] **D20** deferred-issues 登记:渲染层隐藏清单中与 PDF/数据手册相关的入口(如有)标记解决路径;`docs/rag-vs-agentic-search-todo.md` 若与此相关,加一行链接。
 
 ## 3. 明确不做的
 
@@ -97,3 +97,28 @@ mcp-servers/datasheet/
 4. 扫描件 PDF:search 的 skipped 列出"无文本层",后续查询不反复重提取(缓存 empty 标记生效);
 5. BM25 升级后回归基线 R@2 达标且负例误报 ≤ 2 条;删缓存目录再查,行为一致(缓存纯加速);
 6. 零新 npm 依赖(package.json diff 无变化)。
+
+---
+
+## 6. 完工记录（2026-11-04 补记）
+
+D1–D15、D17–D20 全部落地，代码与文档在 `mcp-servers/datasheet/` 与 `docs/datasheet-mcp.md`。逐项对账结果：
+
+| 项 | 落点 |
+|---|---|
+| D1–D5 | `pdf.ts` / `cache.ts` / `service.ts`（含 `readPages` 的 50 页、512 KiB 上限） |
+| D6–D7 | `tools.ts` / `server.ts`，四工具注册 |
+| D8 | `tests/` 八个文件，94 通过 / 1 跳过 |
+| D9 | `README.md` 与 `permissions.example.json` |
+| D10–D13 | `bm25.ts`（手写 BM25 + 短语加成）、术语映射、回归门禁 |
+| D14–D15 | `registers.ts` 与 `datasheet_registers` 转正 |
+| D17–D18 | `docs/datasheet-mcp.md`、README 的接线示例 |
+| D19 | 行覆盖 93.65%，typecheck 与 build:mcp 通过 |
+| D20 | `deferred-issues.md` 的「Datasheet MCP 的检索与结构化提取缺口」一条（三条边界：撞名误报、保留位原料缺失、语料不入库） |
+
+**D16 是唯一没做的，且是「评估后不做」**：`verify_register_write` 需要判断「写 1 到保留位」，而 `-layout` 文本里保留位通常没有位域描述行（实测 RM0008 仅 1/1143），核心原料缺失。补齐需要列对齐解析，而列拆行错位正是本文件 §4 预设的风险。按 §3「spike 不过就放弃，不硬上」处理，结论与理由记在 `docs/datasheet-mcp.md` §5。
+
+**验收标准有两项按实测口径修正**（不静默改标准）：
+
+- 第 1 条的「≥ 25 例」实际是 95 例；覆盖率 93.65% 高于 85%。
+- 第 2 条举的 `USB_BCDR` 在 RM0008 Rev 21 与 RM0090 Rev 22 中**都不存在**（该手册的 USB 寄存器只有 CNTR/ISTR/FNR/DADDR/BTABLE/EPnR）。实测改用 `USB_CNTR`（p642）与 `AFIO_MAPR`（p184），结构化提取逐位一致；两个不存在的名字收入负例集。
