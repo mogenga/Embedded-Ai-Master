@@ -11,6 +11,7 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
+    "check:js": "node scripts/check-js-syntax.mjs",
     "coverage": "vitest run --coverage",
     "build": "tsc -p tsconfig.build.json",
     "build:mcp": "tsc -p tsconfig.mcp.json",
