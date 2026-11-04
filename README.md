@@ -241,6 +241,7 @@ npm run test:mcp      # 领域 MCP server 测试
 npm run coverage      # 覆盖率（lines 阈值 85%）
 npm run typecheck     # tsc --noEmit
 npm run lint          # 目前等同 tsc --noEmit（D-006）
+npm run check:js      # 对 desktop/ 与 scripts/ 每个 JS 跑 node --check
 npm run build         # 内核 → dist/
 npm run build:mcp     # 领域 MCP → dist-mcp/
 
@@ -638,6 +639,7 @@ npm --prefix desktop run dist             # 前置装配 + electron-builder
 - **Keil**：`UVSOCK` 的偏移、状态码、14 条「不支持」与整片擦除的结论都来自 **MDK 5.43a + STM32F429 真机实测**（不是推测）。但这条链路没有像 `probe:e2e` 那样的可复跑端到端脚本，真机回归目前靠人工。
 - KB 语料/查询集不入库导致 CI 无法运行回归（D-158）；datasheet 语料同理。
 - **渲染层只测纯函数**：vitest 无 DOM 环境，有测试的是 `protocol.js`、`markdown.js`、`settings-models.js`、`commands.js`、`plan-summary.js`、`thinking-view.js` 与宿主侧几个纯模块；`app.js` 与 `settings.js` 顶层依赖 `localStorage`/DOM、零导出，因此**所有界面改动仍需手动验收**。
+- **`app.js` / `settings.js` 不在 tsc 里**（`tsconfig.json` 不 include `desktop/`，`allowJs` 也未开启）。`npm run check:js` 用 `node --check` 补上**语法**这一层，但类型与作用域仍然无人检查——`main.js` 的 `stopHost` 事故（D-220）就是这一类，后来靠 `tests/desktop/main-scope.test.js` 的静态解析专门兜住。CI 每次跑 `check:js` 与覆盖率阈值（`lines ≥ 85%`）。
 
 ## 已知限制
 
