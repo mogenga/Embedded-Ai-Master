@@ -119,7 +119,10 @@ describe("setCurrent / readCurrentVersion", () => {
     const layout = await seedSnapshots(makeHome(), [1, 2]);
     const resolved = await setCurrent(layout, 2);
     expect(await readCurrentVersion(layout)).toBe(2);
-    expect(resolved).toBe(path.join(layout.snapshotsDir, "v2"));
+    // `setCurrent` answers with the resolved realpath, and on Windows a temp
+    // dir handed out as `RUNNER~1` expands to its long form — compare through
+    // the same canonicaliser rather than against the raw string.
+    expect(resolved).toBe(await realpath(path.join(layout.snapshotsDir, "v2")));
   });
 
   it("重复调用切到另一版本后可读（覆盖既有 junction）", async () => {

@@ -3,11 +3,11 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
-  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -97,7 +97,7 @@ describe("listDirectory", () => {
 
     const result = await listDirectory(home, root);
 
-    expect(result.path).toBe(realpathSync(root));
+    expect(result.path).toBe(await realpath(root));
     expect(result.truncated).toBe(false);
     expect(result.entries.map((entry) => [entry.type, entry.name])).toEqual([
       ["dir", "Sub1"],
@@ -108,7 +108,7 @@ describe("listDirectory", () => {
     ]);
     for (const entry of result.entries) {
       expect(path.isAbsolute(entry.path)).toBe(true);
-      expect(path.dirname(entry.path)).toBe(realpathSync(root));
+      expect(path.dirname(entry.path)).toBe(await realpath(root));
     }
   });
 
@@ -250,7 +250,7 @@ describe("searchFilesByName", () => {
     expect(match?.relative).toBe("src/server/files-api.ts");
     expect(match?.name).toBe("files-api.ts");
     expect(path.isAbsolute(match?.path ?? "")).toBe(true);
-    expect(match?.path).toBe(path.join(realpathSync(root), "src", "server", "files-api.ts"));
+    expect(match?.path).toBe(path.join(await realpath(root), "src", "server", "files-api.ts"));
     // POSIX separators on every platform: the renderer splits on "/".
     expect(match?.relative.includes("\\")).toBe(false);
   });
@@ -374,10 +374,10 @@ describe("registerWorkspaceRoot", () => {
     );
 
     const registered = await registerWorkspaceRoot(workspace);
-    expect(registered).toBe(realpathSync(workspace));
+    expect(registered).toBe(await realpath(workspace));
 
     const listing = await listDirectory(home, workspace);
-    expect(listing.path).toBe(realpathSync(workspace));
+    expect(listing.path).toBe(await realpath(workspace));
     expect(listing.entries).toEqual([
       expect.objectContaining({ name: "main.c", type: "file" }),
     ]);

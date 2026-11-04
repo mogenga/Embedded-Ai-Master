@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -682,7 +682,7 @@ describe("desktop host", () => {
     // The kernel records the run's cwd as the session's workdir; if the host
     // did not pass it, the run would have happened in the host's own folder
     // and the sidebar would group the session under the wrong project.
-    expect(header.workdir).toBe(path.resolve(workspace));
+    expect(header.workdir).toBe(await realpath(path.resolve(workspace)));
   }, HOST_TIMEOUT_MS);
 
   it("loadSession 回放历史消息并设置游标", async () => {
@@ -827,6 +827,8 @@ describe("desktop host", () => {
     expect(loaded).toBeDefined();
     expect(loaded.cwd).toBe(gone);
     // But the host does not point itself at a directory that is not there.
+    // `init` only path.resolve()s its cwd — it does not expand an 8.3 short
+    // temp path (`RUNNER~1`), so the raw resolved value is what it holds.
     expect(events.filter((event) => event.type === "state").at(-1).cwd).toBe(path.resolve(home));
   }, HOST_TIMEOUT_MS);
 
@@ -925,9 +927,11 @@ describe("desktop host", () => {
       ],
       { until: (all) => all.some((event) => event.type === "sessions") },
     );
-    const notice = events.filter((event) => event.type === "notice").at(-1);
+    const notice = events
+      .filter((event) => event.type === "notice" && event.text.includes("模型配置未保存"))
+      .at(-1);
+    expect(notice).toBeDefined();
     expect(notice.level).toBe("warn");
-    expect(notice.text).toContain("模型配置未保存");
     // Writing an invalid object over a working file would leave the user with
     // no model at all and no way back through the UI.
     expect(await readFile(path.join(home, "providers.json"), "utf8")).toBe(before);
@@ -1131,9 +1135,12 @@ describe("desktop host", () => {
       [{ cmd: "init", cwd: home }, { cmd: "exportSession" }],
       { until: (all) => all.some((event) => event.type === "notice") },
     );
-    const notice = events.filter((event) => event.type === "notice").at(-1);
+    // 按内容挑而不是取最后一条：首次启动的种子化通知与命令回包没有先后保证。
+    const notice = events
+      .filter((event) => event.type === "notice" && event.text.includes("没有可导出"))
+      .at(-1);
+    expect(notice).toBeDefined();
     expect(notice.level).toBe("warn");
-    expect(notice.text).toContain("没有可导出");
     expect(events.some((event) => event.type === "export_ready")).toBe(false);
   }, HOST_TIMEOUT_MS);
 
@@ -1209,7 +1216,7 @@ describe("desktop host", () => {
     expect(types.indexOf("file")).toBeGreaterThan(types.lastIndexOf("dir"));
     expect(tree.nodes.find((node) => node.name === "src")).toStrictEqual({
       name: "src",
-      path: path.join(home, "src"),
+      path: path.join(await realpath(home), "src"),
       type: "dir",
     });
   }, HOST_TIMEOUT_MS);
@@ -1281,7 +1288,7 @@ describe("desktop host", () => {
     const state = events.filter((event) => event.type === "state").at(-1);
     // The registered folder is also where the next session runs: the workspace
     // and the cwd must not be two different places.
-    expect(state.cwd).toBe(path.resolve(workspace));
+    expect(state.cwd).toBe(await realpath(path.resolve(workspace)));
 
     const tree = events.filter((event) => event.type === "tree").at(-1);
     expect(tree.nodes).toEqual(
@@ -1303,13 +1310,15 @@ describe("desktop host", () => {
       ],
       { until: (all) => all.some((event) => event.type === "sessions") },
     );
-    const notice = events.filter((event) => event.type === "notice").at(-1);
+    const notice = events
+      .filter((event) => event.type === "notice" && event.text.includes("工作区切换失败"))
+      .at(-1);
+    expect(notice).toBeDefined();
     expect(notice.level).toBe("warn");
-    expect(notice.text).toContain("工作区切换失败");
     // Only the boot state: a refused switch must not move the topbar.
     const states = events.filter((event) => event.type === "state");
     expect(states).toHaveLength(1);
-    expect(states[0].cwd).toBe(path.resolve(home));
+    expect(states[0].cwd).toBe(path.resolve(home));  // `init` does not expand short paths
   }, HOST_TIMEOUT_MS);
 
   it("listSessions 的 includeArchived:false 过滤掉归档会话", async () => {
@@ -1936,7 +1945,13 @@ describe("desktop host", () => {
       ],
       { until: (all) => all.some((event) => event.type === "sessions") },
     );
-    const notice = events.filter((event) => event.type === "notice").at(-1);
+    // 按内容挑，不取"最后一条"：首次启动的种子化也会发一条 dim notice
+    // （「已接入嵌入式工具：…」），它与 setEffort 无先后保证——在 CI 上
+    // 磁盘更慢，它就落在 warn 之后，取 `.at(-1)` 会误判成 dim（实测）。
+    const notice = events
+      .filter((event) => event.type === "notice" && event.text.includes("supportsReasoning"))
+      .at(-1);
+    expect(notice).toBeDefined();
     expect(notice.level).toBe("warn");
     // 拒绝必须点名模型与原因，用户才知道去 providers.json 改哪一行（R3）。
     expect(notice.text).toContain("gw/flash");
@@ -2007,13 +2022,15 @@ describe("desktop host", () => {
 
   it.runIf(KB_MODULE_BUILT)("getKb 的根不存在时保留候选并说明，而不是回空知识库", async () => {
     const home = await tempHome();
-    const missing = path.join(tmpdir(), `eam-host-kb-missing-${Date.now()}`);
+    // `tmpdir()` may hand back the 8.3 short form on Windows (`RUNNER~1`); the
+    // leaf does not exist, so canonicalise the *base* and append the name.
+    const missing = path.join(await realpath(tmpdir()), `eam-host-kb-missing-${Date.now()}`);
     const events = await runHost(home, [{ cmd: "init", cwd: home }, { cmd: "getKb" }], {
       env: { KB_ROOT: missing },
       until: (all) => all.some((event) => event.type === "kb"),
     });
     const event = events.find((entry) => entry.type === "kb");
-    expect(event.kb.root).toBe(path.resolve(missing));
+    expect(event.kb.root).toBe(path.resolve(missing));  // `missing` is already canonical
     expect(event.kb.source).toBe("env");
     expect(event.kb.note).toContain("目录不存在");
     expect(event.kb.tree).toStrictEqual([]);
