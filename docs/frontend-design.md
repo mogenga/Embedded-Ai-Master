@@ -561,7 +561,7 @@ prometheus.workbenchWidth  workbenchPane
 - **卡片头**：厂商图标 + **显示名称**（第一行，`--text-base`/600）+ `服务名 · 厂商`（第二行，`--text-xs`/`--text-faint`）；右侧是**三个状态徽章**（见下）。折叠态的 `aria-label` = `展开 / 收起 <显示名称> — <徽章文字…>`，徽章不是只有视觉的信号。
 - **厂商下拉的行为变了**：不再按「服务名 = 厂商 id」反查（`providerPickerOptions(vendorId)` 现在只收归属），**同一厂商的选项不再置灰**——同名冲突已由后缀解决，置灰反而挡住了本任务要的用法。选中厂商只写归属与（可替换时的）地址。
 - **标签写入的错误不吞**：localStorage 写失败（被禁用/写满）时，文件照常保存，但页面顶部出现一行说明「服务已保存、显示名称没存下，重启后会回落到服务名」（`connMetaWriteFailed`）。
-- **不受影响的部分**：`baseUrl` 的替换规则（空着或仍是某个预设地址才替换）、`presetFillFor`、「推荐模型」chip（现在按**归属**而不是名字取模型名）都与上一版一致。
+- **不受影响的部分**：`baseUrl` 的替换规则（空着或仍是某个预设地址才替换）、`presetFillFor` 都与上一版一致。（「推荐模型」chip 已于 2026-11-05 第三轮删除，模型名改为在线获取，见下。）
 
 **卡片信息层级（2026-11-05 第二轮重构）**
 
@@ -581,7 +581,22 @@ prometheus.workbenchWidth  workbenchPane
 - **徽章宽度优先于标题**：`.conn-card-badges` 是 `flex: 0 0 auto`（最多 60% 宽），超长显示名称由标题自己省略。徽章被裁成 `…` 等于状态没说。
 - **搜索**：查询时折叠的卡片正文临时展开、`<details>` 临时打开（`searchOpenedBodies` 记下是搜索打开的），清空搜索后只把这些收回，用户自己开/关的状态不动。
 
-**测试连接的结果**仍在卡片正文最上方（`aria-live="polite"`）：失败是一行 warn 色文字，成功是 `.conn-test-result` 区块（状态 + 延迟 + 可点击加入的模型 chip）。这两块本轮未改结构，仅因正文字段重排而在视觉上跟着移动。
+**模型列表改为在线获取（2026-11-05 第三轮）**
+
+模型区的主路径是「在线获取」，静态预设模型名已全部移除：
+
+- **删掉的东西**：`provider-presets.js` 每家预设的 `models` 数组、`presetModelSuggestions()`、`settings.js` 的「推荐模型」chip 行（`suggestionRow` / `drawSuggestions`）、`.preset-models*` 样式，以及 i18n 的 `connSuggestedModels` / `connTestAvailableModels` / `connTestModelsCount`。
+- **「在线获取」按钮**在「模型」标题行右侧（`.conn-models-head`），走**现有的** `testProvider` 宿主命令（不新增命令、不改内核/宿主）。点击才请求，默认态不自动拉取——五家厂商的 `/models` 实测返回 401，自动请求会把失败画到一张工作正常的卡上。
+- **结果落在模型区自己的 `aria-live` 块**里，位于模型行之上：
+  - 成功 → `.conn-test-result`，标题「已获取 N 个模型」+ 延迟 + `.conn-model-chip`（已在卡片里的画成「已添加」禁用态，一次点击填入空行或追加行）；
+  - `ok` 但无 `models` → 一行「端点可达，但没能列出模型。」（`connTestOkNoModels`），不画空区块；
+  - 失败 → 四类分类词（地址不可用 / 连不上端点 / 密钥被拒绝 / 端点返回错误）+ 内核原话；`unauthorized` / `http_error` 再加一句「不少网关根本不提供 `/models`，这只说明列表取不到」，避免用户去改一个没问题的配置。
+- **「测试连接」保留**，但成功时只留一行「连接正常 · N ms」，**不再重复画 chip 列表**——那份归模型区。它回答「能不能用」，与「能列出哪些」是两个问题。
+- **串行化**：两个按钮共用一张卡的一个请求槽。宿主的 `provider_test` 只按 `baseUrl` 匹配等待者，无法区分是哪个请求；同卡并发会把答案串到先注册的那一个。所以一个在飞时两个按钮都禁用，未点的那只带 `title` 说明原因（`connProbeBusy`）。这是协议限制，不是选择。
+- **换厂商 / 改地址**会清空模型区结果（旧端点的回答不能留在新端点的卡上，在飞的请求一并取消）。
+- **纯逻辑**抽在 `settings.js` 的 `providerProbePayload(kind, target)` 与 `probeAnswer(message)`，测试在 `tests/desktop/settings-probe.test.js`。`kind === "list"` 的请求**不带 `model`**：`probeProvider` 在 `/models` 失败且有模型名时会退一步发最小 chat 请求，那回答的是「能不能说上话」，拿它当模型列表就是撒谎（R3）。
+
+**测试连接的结果**仍在卡片正文最上方（`aria-live="polite"`）：失败是 `.conn-test-result` 区块（分类词 + 内核原话），成功是一行 `.setting-note`「连接正常 · N ms」。模型 chip 列表已从这里搬到模型区（见上）。
 
 **厂商选择器（2026-11-04 起，行为于 2026-11-05 调整）**：每张服务卡片内的**第一行**，自绘下拉（`sProviderPicker`，WAI-ARIA combobox + listbox）。
 
