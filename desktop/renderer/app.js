@@ -6,6 +6,9 @@ import { escapeHtml, renderMarkdown, IncrementalRenderer } from "./markdown.js";
 import { createSettings } from "./settings.js";
 import { icon, setIcon } from "./icons.js";
 import { planSummary } from "./plan-summary.js";
+import { providerMark } from "./provider-presets.js";
+import { providerRailRows, readProviderMeta } from "./provider-meta.js";
+import { VENDOR_MARKS } from "./vendor-marks.js";
 import { nextThinkingExpanded, normalizeTranscriptView, thinkingExpandedOnEnd } from "./thinking-view.js";
 
 /** Saved preferences are restored here; the host gets them on init. */
@@ -29,7 +32,6 @@ const effortControl = $("effort-control");
 const modelPicker = $("model-picker");
 const modelMenu = $("model-menu");
 const modelLabel = $("model-label");
-const contextLabel = $("context-label");
 const pendingPermission = $("pending-permission");
 const pendingQuestion = $("pending-question");
 const sessionList = $("session-list");
@@ -46,7 +48,7 @@ const workbenchMeta = $("workbench-meta");
 const diffFilelist = $("diff-filelist");
 const diffRoot = $("diff-root");
 const fileRoot = $("file-root");
-const fileTree = $("pane-tree");
+const fileTree = $("tree-list");
 const changesList = $("changes-list");
 const changesSummary = $("changes-summary");
 const checkpointList = $("checkpoint-list");
@@ -95,7 +97,6 @@ const state = {
   selectedFile: null,
   /** Pending "the preview never arrived" timeout; cleared on the reply. */
   fileLoadTimer: null,
-  tree: [],
   cwd: "",
   /**
    * Occupancy of the current transcript, or null when nothing measured it.
@@ -128,6 +129,13 @@ const state = {
   // default and the only pane the strip can start on.
   pane: "serial",
   git: null,
+  /**
+   * Which provider the model panel's rail currently shows. A view filter over
+   * the model list, not a selection: it resets to the provider of the model in
+   * use whenever that name is no longer in the list (a `models` event, an
+   * endpoint switch), so the panel never opens onto an empty column.
+   */
+  modelRailProvider: null,
   artifacts: [],
   selectedArtifact: null,
   /**
@@ -1856,14 +1864,9 @@ function applyContext(context) {
     // Strings are rejected rather than coerced — a coerced `"40"` would look
     // like a measurement the kernel never sent.
     state.context = null;
-    contextLabel.textContent = "";
-    contextLabel.hidden = true;
+    renderContextFigure();
     return;
   }
-  // The window cannot be more than full. The kernel already clamps to 100,
-  // so this only guards against a malformed sender; it never turns a real
-  // under-100 figure into anything else.
-  const shown = Math.min(100, Math.round(percent));
   state.context = {
     // A missing token count stays unknown rather than becoming 0: the
     // percentage is what was measured, and the count is not implied by it.
@@ -1874,16 +1877,14 @@ function applyContext(context) {
       ? { window: context.window }
       : {}),
   };
-  // The chip is one glance wide, so it rounds; the popover keeps the
-  // kernel's one-decimal figure. Unhiding here is what makes the reading
-  // visible at all — the markup ships it hidden (R3: no measurement yet).
-  contextLabel.textContent = `${shown}%`;
-  contextLabel.hidden = false;
+  // The tab is one glance wide, so it rounds; the popover keeps the kernel's
+  // one-decimal figure. Both are fed from `state.context`, never from each
+  // other, so they cannot drift.
+  renderContextFigure();
   // The window is what turns the percentage into "how much is left"; the
   // model picker knows it too, but the kernel's figure wins when it sends one.
   if (state.context.window && state.context.window !== state.contextWindow) {
     state.contextWindow = state.context.window;
-    renderContextLength();
   }
 }
 
@@ -1963,19 +1964,48 @@ function formatCost(usd) {
 }
 
 /**
- * The model's window next to its name, e.g. "1M" — the figure the popover
- * explains. Kept to one glance-sized number: the exact window is in the
- * popover, where there is room for it.
+ * Bring the status tab's context figure in line with what has been measured.
+ *
+ * The tab shows the occupancy **share**, not the window's size: a reader
+ * glancing at it asks "how full is it", and the size is a property of the
+ * model that belongs in the popover beside the tokens it measures. Before any
+ * measurement the figure is an em dash — the same "unknown" the popover uses,
+ * so the two never disagree about what is known (R3).
  */
-function renderContextLength() {
-  const node = $("context-length");
-  if (!node) return;
-  const window = Number(state.contextWindow) || 0;
-  if (!window) {
-    node.textContent = "";
-    return;
+function renderContextFigure() {
+  const label = $("context-label");
+  const measured = state.context !== null && typeof state.context?.percent === "number";
+  if (label) {
+    label.textContent = measured ? `${Math.min(100, Math.round(state.context.percent))}%` : "—";
+    // Tabular figures: the label is a fixed-width slot, and a proportional
+    // "9%" → "10%" reflows the tab by a pixel every time it ticks over.
+    label.classList.toggle("unknown", !measured);
   }
-  node.textContent = window >= 1_000_000 ? `${Math.round(window / 1_000_000)}M` : formatTokens(window);
+  renderContextRing(measured ? state.context.percent : null);
+}
+
+/**
+ * The ring around the context figure.
+ *
+ * Its dash offset is the measured share of the window. Two states are not a
+ * percentage and must not be drawn as one (R3): no measurement yet leaves the
+ * ring as a plain track — **not** a full circle. An unstyled `<circle>` has no
+ * dash array, which paints the whole circumference: that read as "100 % used"
+ * from the first frame until the first `context` event arrived. Setting the
+ * array explicitly here makes the empty state honest.
+ *
+ * The transform rotation puts the arc's start at twelve o'clock.
+ */
+const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * 6;
+
+function renderContextRing(percent) {
+  const ring = $("context-ring");
+  if (!ring) return;
+  const measured = typeof percent === "number" && Number.isFinite(percent);
+  const share = measured ? Math.min(100, Math.max(0, percent)) / 100 : 0;
+  ring.style.strokeDasharray = String(CONTEXT_RING_CIRCUMFERENCE);
+  ring.style.strokeDashoffset = String(CONTEXT_RING_CIRCUMFERENCE * (1 - share));
+  ring.classList.toggle("empty", !measured);
 }
 
 /** Fill the usage popover from state. Harmless while it is closed. */
@@ -2268,6 +2298,24 @@ function renderEffortMenu() {
  *  costs more (a row, a tab stop) than it saves. */
 const MODEL_FILTER_THRESHOLD = 8;
 
+/**
+ * Display names and vendor attribution, read fresh from localStorage.
+ *
+ * The settings page writes them on Save; this panel only reads. Reading on
+ * every draw (rather than caching) is what makes a renamed service show up the
+ * next time the panel opens, and a storage that cannot be reached degrades to
+ * "nothing stored" — the service name is the honest fallback.
+ */
+function providerMeta() {
+  let storage = null;
+  try {
+    storage = typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    storage = null;
+  }
+  return readProviderMeta(storage);
+}
+
 /** The part of a `provider/model` reference the picker calls the model. */
 function modelNameOf(model) {
   if (model.name) return model.name;
@@ -2315,9 +2363,10 @@ function renderModels(models, current, source, error) {
     modelLabel.removeAttribute("data-i18n");
     modelPicker.classList.remove("unavailable");
     // The meter is a share of the model's real context, not a placeholder.
+    // Only the stored window changes here: the figure on the tab is the
+    // measured share, and switching models does not un-measure the transcript.
     const active = state.models.find((model) => model.id === current);
     if (active && Number.isFinite(active.contextLength)) state.contextWindow = active.contextLength;
-    renderContextLength();
   } else {
     // Nothing to show: the label must still leave the loading state, or the
     // chip spins forever on a misconfigured endpoint. The key goes *on* here
@@ -2341,6 +2390,18 @@ function modelGroups() {
     groups.get(provider).push(model);
   }
   return [...groups].map(([provider, models]) => ({ provider, models }));
+}
+
+/**
+ * The rail's rows: one per configured service (one card, one API key), with
+ * the display name and vendor the settings page stored for it.
+ *
+ * A service is the grouping unit, not the vendor: two DeepSeek keys hold
+ * different credentials and different model lists, so merging them under one
+ * vendor row would hide which key a model comes from.
+ */
+function modelRailRows() {
+  return providerRailRows(modelGroups(), providerMeta());
 }
 
 /** Current filter text; empty when the field is not on screen. */
@@ -2471,26 +2532,39 @@ function renderModelMenu() {
   // One provider is not a grouping, it is a label above every row saying the
   // same thing; the chip already names where the model came from.
   const groups = modelGroups();
+  // The rail's rows carry what the groups cannot: a human label and a vendor
+  // icon for each service. Read once per draw so the list and the rail come
+  // from the same snapshot of localStorage.
+  const railRows = modelRailRows();
   const showGroups = groups.length > 1;
+  // Which provider the right-hand list is showing. The rail is a view filter,
+  // not a selection: switching providers must not switch models, so this is
+  // renderer-local state, reset to the model in use whenever none is set.
+  if (showGroups && !groups.some((group) => group.provider === state.modelRailProvider)) {
+    state.modelRailProvider = providerOf(state.model ?? "");
+  }
+  const shownGroups = showGroups
+    ? groups.filter((group) => group.provider === state.modelRailProvider)
+    : groups;
+  const shownRail = railRows.find((row) => row.id === state.modelRailProvider);
   let shown = 0;
-  for (const group of groups) {
+  for (const group of shownGroups) {
     const matches = filter
       ? group.models.filter((model) => `${model.id} ${modelNameOf(model)}`.toLowerCase().includes(filter))
       : group.models;
     if (matches.length === 0) continue;
     // A `role="group"` with a label, not a heading: a listbox may not contain
-    // arbitrary text, and this is exactly what group labelling is for. The
-    // visible caption is hidden from assistive tech so the provider is not
-    // announced twice for every row.
+    // arbitrary text, and this is exactly what group labelling is for. When
+    // the rail is on screen it already names the provider, so no visible
+    // caption is drawn here — but the label stays for assistive tech, which
+    // does not see the rail as a group heading either.
     const section = document.createElement("div");
     if (showGroups) {
       section.setAttribute("role", "group");
-      section.setAttribute("aria-label", group.provider);
-      const caption = document.createElement("div");
-      caption.className = "model-group-label";
-      caption.setAttribute("aria-hidden", "true");
-      caption.textContent = group.provider;
-      section.appendChild(caption);
+      section.setAttribute(
+        "aria-label",
+        railRows.find((row) => row.id === group.provider)?.displayName ?? group.provider,
+      );
     }
     for (const model of matches) {
       shown += 1;
@@ -2505,7 +2579,13 @@ function renderModelMenu() {
     empty.textContent = t.modelsNoMatch;
     list.appendChild(empty);
   }
-  modelMenu.appendChild(list);
+
+  // The panel is a row of two columns: an optional provider rail, then a body
+  // that holds the header (title or filter), the list, and the refresh row.
+  // The rail is left out entirely when there is one provider — see
+  // `showGroups` above — so the panel collapses to the single column it was.
+  const body = document.createElement("div");
+  body.className = "model-body";
 
   if (filterable) {
     const field = document.createElement("input");
@@ -2525,12 +2605,23 @@ function renderModelMenu() {
     // `renderModelMenu` re-focuses the rebuilt field itself (it remembers
     // `hadFocus`); doing it here as well would fight that on every keystroke.
     field.addEventListener("input", () => renderModelMenu());
-    // Above the list on screen, after it in the DOM: the field must own the
-    // focus, and a combobox is expected before the list it controls.
-    modelMenu.insertBefore(field, list);
+    // Above the list on screen: a combobox is expected before the list it
+    // controls, and the caret is at the top of the panel.
+    body.appendChild(field);
+  } else if (showGroups) {
+    // The rail replaced the per-row group captions, so the header names what
+    // the right column is showing rather than leaving the column anonymous.
+    // The display name is the label; the service key is the tooltip, so the
+    // `service/model` reference is never lost.
+    const head = document.createElement("div");
+    head.className = "model-head";
+    head.textContent = shownRail?.displayName ?? state.modelRailProvider;
+    if (shownRail && shownRail.id !== shownRail.displayName) head.title = shownRail.id;
+    body.appendChild(head);
   }
 
-  modelMenu.appendChild(buildModelFooter());
+  body.append(list, buildModelFooter());
+  modelMenu.append(...(showGroups ? [buildProviderRail(railRows), body] : [body]));
 
   // Put the highlight back where it was. `previous` survives the rebuild only
   // as a model id, so a filtered-out row correctly leaves nothing highlighted
@@ -2547,6 +2638,125 @@ function renderModelMenu() {
       modelListbox()?.focus();
     }
   }
+}
+
+/**
+ * The provider rail: one row per configured service (one card, one API key).
+ *
+ * Each row is the vendor's mark and the service's display name. The vendor
+ * glyph tells "which company", the name tells "which key" — two DeepSeek keys
+ * share the glyph and are told apart by the label the settings page stored.
+ * A vendor with no mark (a custom or hand-written service) gets the same
+ * two-letter monogram the rail has always used; nothing is invented (R3).
+ *
+ * It is a `tablist` over the model list, not a second listbox: picking a
+ * service narrows what the list shows, it does not choose a model. Arrow
+ * Up/Down stay with the model list; Arrow Left/Right and Home/End move here,
+ * which is why this is a real tab control rather than a column of buttons.
+ */
+function buildProviderRail(rows) {
+  const rail = document.createElement("div");
+  rail.className = "model-rail";
+  rail.setAttribute("role", "tablist");
+  rail.setAttribute("aria-orientation", "vertical");
+  rail.setAttribute("aria-label", t.modelProvidersLabel);
+  for (const row of rows) {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "model-rail-mark";
+    tab.dataset.provider = row.id;
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(row.id === state.modelRailProvider));
+    tab.tabIndex = row.id === state.modelRailProvider ? 0 : -1;
+    tab.append(modelRailMark(row), modelRailLabel(row));
+    // The row is an icon plus a label; the tab's accessible name is the whole
+    // of what it means, and the service key stays reachable when the label
+    // differs from it.
+    tab.setAttribute("aria-label", row.id === row.displayName ? row.displayName : `${row.displayName} (${row.id})`);
+    tab.title = row.id === row.displayName ? row.displayName : `${row.displayName} · ${row.id}`;
+    // A click leaves focus on the list rather than the row: the reason to
+    // click a provider is to pick one of its models, and the arrow keys have
+    // to keep working for that.
+    tab.addEventListener("click", () => selectModelRailProvider(row.id, { focusRail: false }));
+    rail.appendChild(tab);
+  }
+  return rail;
+}
+
+/** The vendor glyph, or the monogram for a service with no known vendor. */
+function modelRailMark(row) {
+  const mark = row.vendor ? VENDOR_MARKS[row.vendor] : undefined;
+  if (!mark) {
+    const fallback = document.createElement("span");
+    fallback.className = "model-rail-monogram";
+    fallback.setAttribute("aria-hidden", "true");
+    fallback.textContent = providerMark(row.id);
+    return fallback;
+  }
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "model-rail-glyph");
+  svg.setAttribute("viewBox", mark.viewBox);
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const path of mark.paths) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    node.setAttribute("d", path);
+    svg.appendChild(node);
+  }
+  return svg;
+}
+
+function modelRailLabel(row) {
+  const label = document.createElement("span");
+  label.className = "model-rail-label";
+  label.textContent = row.displayName;
+  return label;
+}
+
+/**
+ * Switch which provider the list shows. The chosen model does not change.
+ *
+ * The rebuild replaces the rail, so focus has to land somewhere live: on the
+ * newly selected mark when the user was working in the rail, and back on the
+ * list (or the filter) when the switch came from a click on a mark — a click
+ * that leaves focus nowhere would strand the keyboard user in the panel.
+ */
+function selectModelRailProvider(provider, { focusRail = true } = {}) {
+  if (state.modelRailProvider === provider) return;
+  state.modelRailProvider = provider;
+  renderModelMenu();
+  if (focusRail) {
+    modelMenu.querySelector(`.model-rail-mark[data-provider="${CSS.escape(provider)}"]`)?.focus();
+    return;
+  }
+  const field = modelMenu.querySelector(".model-filter-input");
+  if (field) {
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+    return;
+  }
+  modelListbox()?.focus();
+  focusModelMenuSelection();
+}
+
+/** Move the rail selection by `step`, clamped the same way the list is. */
+function moveModelRailProvider(step) {
+  const tabs = [...modelMenu.querySelectorAll(".model-rail-mark")];
+  if (tabs.length === 0) return;
+  const at = tabs.findIndex((tab) => tab.dataset.provider === state.modelRailProvider);
+  // Clamped, not wrapped: the list order is the config file's order, and
+  // running off the end back to the first provider reads as a jump, not a step.
+  const next = Math.min(tabs.length - 1, Math.max(0, (at < 0 ? 0 : at) + step));
+  const provider = tabs[next]?.dataset.provider;
+  if (provider === undefined) return;
+  if (provider === state.modelRailProvider) {
+    tabs[next].focus();
+    return;
+  }
+  // Remember where focus was: a rebuild rejects a detached node, so the
+  // caller's "was I on the rail" answer has to be read now.
+  const fromRail = Boolean(document.activeElement?.closest?.(".model-rail"));
+  selectModelRailProvider(provider, { focusRail: fromRail || !modelFocusHolder() });
 }
 
 function buildModelOption(model) {
@@ -2645,11 +2855,58 @@ function closeModelMenu({ restoreFocus = false } = {}) {
  */
 function handleModelMenuKey(event) {
   if (modelMenu.hidden) return false;
+  const key = event.key;
+  // The provider rail is a tablist, so the keys that move around it are the
+  // rail's own: Left/Right step, Home/End jump. They are handled before the
+  // focus check below because a click on a rail mark moves focus to that mark,
+  // which is not the list's focus holder — the list must not swallow the key.
+  const onRail = Boolean(document.activeElement?.closest?.(".model-rail"));
+  if (onRail) {
+    if (key === "ArrowLeft" || key === "ArrowRight") {
+      event.preventDefault();
+      moveModelRailProvider(key === "ArrowRight" ? 1 : -1);
+      return true;
+    }
+    if (key === "Home" || key === "End") {
+      event.preventDefault();
+      moveModelRailProvider(key === "Home" ? -Infinity : Infinity);
+      return true;
+    }
+    if (key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeModelMenu({ restoreFocus: true });
+      return true;
+    }
+    if (key === "ArrowDown" || key === "Enter") {
+      // Stepping into the list from the rail is the expected continuation of
+      // "I picked a provider, now pick a model".
+      event.preventDefault();
+      modelListbox()?.focus();
+      focusModelMenuSelection();
+      return true;
+    }
+    // Anything else belongs to whatever has focus (the rail is not a text
+    // field today, so this is only a guard against swallowing a stray key).
+    return false;
+  }
   // Only act on keys aimed at this menu. A global listener would otherwise
   // swallow arrows typed into the composer while the menu happens to be open.
   const holder = modelFocusHolder();
   if (!holder || !(holder === document.activeElement || holder.contains(document.activeElement))) return false;
-  const key = event.key;
+  // While the rail is on screen, Left/Right move between providers, which is
+  // the same gesture the rail itself offers; Up/Down keep moving the highlight.
+  // Not while the filter field has focus: there Left/Right are the caret.
+  if (
+    (key === "ArrowLeft" || key === "ArrowRight") &&
+    !holder.classList.contains("model-filter-input") &&
+    modelMenu.querySelector(".model-rail")
+  ) {
+    event.preventDefault();
+    moveModelRailProvider(key === "ArrowRight" ? 1 : -1);
+    return true;
+  }
+
   if (key === "ArrowDown" || key === "ArrowUp") {
     event.preventDefault();
     moveModelHighlight(key === "ArrowDown" ? 1 : -1);
@@ -2911,19 +3168,14 @@ function handleEvent(message) {
       break;
 
     case "tree": {
-      const target = pendingTreeTarget ?? fileTree;
-      pendingTreeTarget = null;
-      target.innerHTML = "";
-      const nodes = message.nodes ?? [];
-      // An empty reply ends the "loading" state either way. It is not worded
-      // as "this folder is empty": the host answers a refusal with a warning
-      // notice and then an empty tree, so an empty reply can mean "empty" or
-      // "not allowed to read it", and the notice above it says which.
-      if (nodes.length === 0) {
-        target.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeEmpty)}</div>`;
-        break;
-      }
-      for (const node of nodes) target.appendChild(treeRow(node));
+      // Replies come back in the order the requests were sent (the host runs
+      // its command queue serially), so the oldest entry owns this one. The
+      // root request that repainted the pane nulls the older targets: it has
+      // already replaced their DOM, and the listing that arrives for them
+      // belongs to a tree nobody is looking at.
+      const request = treeRequests.shift();
+      if (request === undefined || request.target === null) break;
+      renderTree(request.target, message.nodes ?? [], { truncated: message.truncated === true });
       break;
     }
 
@@ -3880,6 +4132,10 @@ function handleEvent(message) {
     case "host_exit":
       setBusy(false);
       setStatus("statusHostStopped");
+      // Nothing will answer the outstanding `getTree`s. Keeping their slots
+      // would make the first reply after a restart land under a folder that
+      // was expanded in the previous host.
+      treeRequests.length = 0;
       addNode(
         `<div class="notice error">${escapeHtml(t.hostStopped)} ` +
           `<button class="link-button" id="host-retry">${escapeHtml(t.hostRestart)}</button></div>`,
@@ -3953,30 +4209,144 @@ const SUPPORTED_PANES = new Set(["file", "files", "artifact", "serial"]);
  * whatever the host's process happened to have as its cwd — it gets refused.
  * With no workspace open there is nothing to ask for, so the pane says so
  * instead of leaving an empty list that looks like an empty folder.
+ *
+ * Requests waiting for a `tree` reply, oldest first.
+ *
+ * The host runs commands one at a time in arrival order, and `getTree` is
+ * awaited on that queue, so reply order matches send order. Keeping the whole
+ * queue — instead of one `pendingTreeTarget` — is what lets two folder
+ * expansions be in flight at once: the old single slot let the second click
+ * overwrite the target, so each listing landed under the other row (or the
+ * first reply painted a child folder over the root).
  */
+const treeRequests = [];
+
+/** Directories the reader left open, restored when their level is painted. */
+const TREE_EXPANDED_KEY = "prometheus.treeExpanded";
+/** Cap on remembered paths: a deep tree must not grow localStorage forever. */
+const MAX_TREE_EXPANDED = 200;
+/** Depth guard for the restore walk; deeper levels are scrolled, not opened. */
+const MAX_TREE_DEPTH = 16;
+
+function readTreeExpanded() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(TREE_EXPANDED_KEY) || "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === "string") : []);
+  } catch {
+    // A hand-edited or truncated value means "nothing remembered", not a
+    // thrown error before the first paint.
+    return new Set();
+  }
+}
+
+const treeExpanded = readTreeExpanded();
+
+function rememberTreeExpanded(path, expanded) {
+  if (expanded) treeExpanded.add(path);
+  else treeExpanded.delete(path);
+  while (treeExpanded.size > MAX_TREE_EXPANDED) {
+    // Insertion order is the age order: drop the path remembered longest ago.
+    treeExpanded.delete(treeExpanded.values().next().value);
+  }
+  localStorage.setItem(TREE_EXPANDED_KEY, JSON.stringify([...treeExpanded]));
+}
+
+/** The head above the tree: which folder it is rooted at, and a re-read. */
+function renderTreeHead(root) {
+  const label = $("tree-root");
+  const refresh = $("tree-refresh");
+  if (!label) return;
+  if (root === "") {
+    // `data-i18n` so a language switch while the pane sits empty retranslates
+    // this one word through the same pass as the static text.
+    label.dataset.i18n = "workspace";
+    label.textContent = t.workspace;
+    label.removeAttribute("title");
+  } else {
+    const parts = root.split(/[\\/]/).filter(Boolean);
+    label.textContent = parts.length > 0 ? parts[parts.length - 1] : root;
+    label.title = root;
+    delete label.dataset.i18n;
+  }
+  if (refresh) refresh.disabled = root === "";
+}
+
 function requestTree(path) {
   const root = typeof path === "string" ? path.trim() : "";
+  // The pane's own root, also remembered as "what the tree is showing" so a
+  // workspace change (a `state` event with a new cwd) is noticed and re-read
+  // instead of painting a tree of the previous folder under the new name.
   state.treePath = root;
-  // A root request owns the next reply. Without this an expansion that never
-  // answered (the host replies to a refusal with an empty tree, but a dropped
-  // request leaves it set) would capture the root's answer into one row.
-  pendingTreeTarget = null;
+  // A root request repaints everything below it. Listings still in flight
+  // keep their queue slot (so later replies stay aligned) but lose their
+  // target: their contents are obsolete, and painting one would drop a child
+  // folder's listing on top of the new root.
+  for (const pending of treeRequests) pending.target = null;
+  renderTreeHead(root);
   if (root === "") {
     fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeNoWorkspace)}</div>`;
     return;
   }
   fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeLoading)}</div>`;
+  treeRequests.push({ target: fileTree, path: root });
   api.send({ cmd: "getTree", path: root });
 }
 
-function openWorkbench(pane) {
+/**
+ * Path of the file the File pane is showing, matched against the rows.
+ *
+ * The marker survives a pane switch because it describes what the File tab
+ * holds, not what was clicked last in this visit. A path that is no longer in
+ * the list simply matches no row.
+ */
+let activeTreePath = "";
+
+function markTreeSelection(path) {
+  activeTreePath = path;
+  for (const row of fileTree.querySelectorAll(".tree-row")) {
+    const active = row.dataset.path === path;
+    row.classList.toggle("active", active);
+    if (active) row.setAttribute("aria-current", "true");
+    else row.removeAttribute("aria-current");
+  }
+}
+
+/**
+ * Which pane the workbench was on last time it was open.
+ *
+ * Only the file-browsing panes are restored: the entry that opens the panel
+ * without naming a pane is the menu's "Browse workspace files", so coming back
+ * to the file that was being read (pane `file`) is the same promise kept, while
+ * coming back to the serial monitor would answer a different question than the
+ * one that was clicked. Every explicit open (a tab, a tool row) still wins.
+ */
+const WORKBENCH_PANE_KEY = "prometheus.workbenchPane";
+
+function lastWorkbenchPane() {
+  const saved = localStorage.getItem(WORKBENCH_PANE_KEY);
+  // The File tab is only meaningful while it still holds a file. After a
+  // restart the key survives but `fileRoot` is empty, so the menu lands on
+  // the tree instead of on a blank pane with no way back to the list.
+  if (saved === "file" && state.selectedFile) return "file";
+  return "files";
+}
+
+function openWorkbench(pane, { opener = null } = {}) {
   if (pane !== undefined && !SUPPORTED_PANES.has(pane)) {
     // A tool row for a diff or the terminal used to open the pane it belonged
     // to. Those backends are not mounted, so the row stays a row instead of
     // opening an empty inspector.
     return;
   }
-  state.pane = pane ?? state.pane;
+  // Remember what opened the panel before the pane switch moves anything: a
+  // close should put the focus back where the reader left it. Callers whose
+  // control is gone by then (a menu row) name the button themselves.
+  if (workbench.hidden) {
+    const active = document.activeElement;
+    workbenchOpener =
+      opener ?? (active instanceof HTMLElement && active !== document.body ? active : null);
+  }
+  state.pane = pane ?? lastWorkbenchPane();
   // Use the attribute directly: a stale hidden="false" still matches
   // [hidden]{display:none} and would keep the pane invisible.
   workbench.removeAttribute("hidden");
@@ -3987,12 +4357,7 @@ function openWorkbench(pane) {
   if (activeTab) activeTab.hidden = false;
   state.workbenchOpen = true;
   localStorage.setItem("prometheus.workbench", "1");
-  // `prometheus.pane` is not written any more. It was read at boot to restore
-  // the last pane, but launch force-closes the workbench (see the bottom of
-  // this file) and every open goes through this function with an explicit
-  // pane, so the key had no reader left once the default stopped being
-  // restored. Same rule as `prometheus.lastSession`: do not keep a write
-  // nothing reads.
+  localStorage.setItem(WORKBENCH_PANE_KEY, state.pane);
   workbenchTabs.querySelectorAll("button").forEach((button) => {
     const active = button.dataset.pane === state.pane;
     button.classList.toggle("active", active);
@@ -4031,7 +4396,16 @@ function openWorkbench(pane) {
   $("browser-root").hidden = !showBrowser;
   $("serial-root").hidden = !showSerial;
   if (showDiff) renderDiff();
-  if (showFiles) requestTree(state.cwd);
+  // Re-read only a tree that is not already showing this workspace's rows.
+  // Coming back to the Files tab used to re-fetch the root and repaint it
+  // from scratch, throwing away the scroll position for a listing that had
+  // not changed; the head's refresh button is the deliberate way to re-read.
+  // A pane holding a note instead of rows (a refusal, a missing workspace, an
+  // empty folder) still re-asks: those are exactly the states that can change
+  // or recover between visits.
+  if (showFiles && (state.treePath !== (state.cwd ?? "") || fileTree.querySelector(".tree-row") === null)) {
+    requestTree(state.cwd);
+  }
   if (showHistory) api.send({ cmd: "getCheckpoints" });
   if (showArtifact) api.send({ cmd: "getArtifacts" });
   if (showTerminal) {
@@ -4047,12 +4421,36 @@ function openWorkbench(pane) {
   if (!showBrowser) void api.browserClose?.();
 }
 
-function closeWorkbench() {
+/**
+ * The control that opened the panel, so closing it can put the focus back.
+ *
+ * Keyboard users lose their place when a panel they opened from the overflow
+ * menu closes onto nothing: the menu row is gone by then (it closes on click),
+ * so the button that revealed the menu is where the focus belongs. Explicit
+ * in-pane actions (a tool row, a tab click) record themselves instead.
+ */
+let workbenchOpener = null;
+
+function closeWorkbench({ restoreFocus = true } = {}) {
+  const wasOpen = workbench.hidden === false;
+  // Whether the focus is about to be dropped along with the panel. A shortcut
+  // that closes the panel while the caret sits in the composer must not pull
+  // the caret back to the button that opened it an hour ago.
+  const focusInside =
+    document.activeElement instanceof HTMLElement &&
+    (workbench.contains(document.activeElement) || document.activeElement === document.body);
   workbench.setAttribute("hidden", "");
   state.workbenchOpen = false;
   localStorage.setItem("prometheus.workbench", "0");
   // The page view floats above the window, so it must be removed explicitly.
   void api.browserClose?.();
+  const opener = workbenchOpener;
+  workbenchOpener = null;
+  if (!restoreFocus || !wasOpen || !focusInside) return;
+  // A menu row is gone from view by the time the panel closes (the menu shuts
+  // on click), so "still focusable" is checked now rather than at open time.
+  const visible = opener?.isConnected && opener.getClientRects().length > 0;
+  (visible ? opener : $("more-button"))?.focus?.();
 }
 
 /* ---------- terminal pane ---------- */
@@ -4894,7 +5292,9 @@ function sendComments() {
   renderCommentsBar();
   autoSize();
   input.focus();
-  if (!workbench.hidden) closeWorkbench();
+  // The focus already moved to the composer: handing it back to the opener
+  // would take it off the input the user is about to type in.
+  if (!workbench.hidden) closeWorkbench({ restoreFocus: false });
 }
 
 function renderCommentsBar() {
@@ -5072,54 +5472,132 @@ function renderCheckpoints() {
   }
 }
 
-function renderTree() {
-  fileTree.innerHTML = "";
-  const nodes = state.tree ?? [];
-  if (nodes.length === 0) {
-    // The pane is only drawn when something asks for it; a blank list with no
-    // text reads as "still loading" forever.
-    const reason = state.treePath ? t.treeEmpty : t.treeNoWorkspace;
-    fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(reason)}</div>`;
-    return;
-  }
-  for (const node of nodes) fileTree.appendChild(treeRow(node));
+/** A one-line note in the tree, indented to line up with the names. */
+function treeNote(text) {
+  const note = document.createElement("div");
+  note.className = "sidebar-empty tree-note";
+  note.textContent = text;
+  return note;
 }
 
-function treeRow(node) {
+/**
+ * Paint one level of the tree.
+ *
+ * The pane's root and every folder's `.tree-children` go through here, so an
+ * empty folder, a truncated listing and a loading folder are worded the same
+ * at every depth. The target is the element the matching `tree` reply fills.
+ */
+function renderTree(target, nodes, { truncated = false } = {}) {
+  target.innerHTML = "";
+  const depth = Number(target.dataset.depth ?? 0);
+  // The level's own indent: rows write their own (they have a depth), but the
+  // notes this function adds have none and still have to line up with the
+  // names around them.
+  target.style.setProperty("--tree-indent", `${Math.min(depth, 8) * 12 + 4}px`);
+  if (nodes.length === 0) {
+    target.appendChild(treeNote(t.treeEmpty));
+    return;
+  }
+  for (const node of nodes) target.appendChild(treeRow(node, depth));
+  if (truncated) target.appendChild(treeNote(t.treeTruncated(nodes.length)));
+  // Reopen the branches the reader left open. Restoring is a click's worth of
+  // work: this creates the child level and asks for its listing, and the reply
+  // lands in the container created here because it joined the queue after the
+  // level that is being painted. The depth guard stops a remembered deep path
+  // from opening the whole chain on every repaint; past it the level is one
+  // click away.
+  for (const node of nodes) {
+    if (depth >= MAX_TREE_DEPTH) break;
+    if (node.type !== "dir" || !treeExpanded.has(node.path)) continue;
+    const row = [...target.children].find((child) => child.dataset?.path === node.path);
+    if (row) expandTreeRow(row, node);
+  }
+  markTreeSelection(activeTreePath);
+}
+
+/**
+ * Open one folder row: create its child level and request the listing, or
+ * reveal the level that already exists.
+ */
+function expandTreeRow(row, node) {
+  const existing = row.nextElementSibling;
+  if (existing && existing.classList.contains("tree-children")) {
+    existing.hidden = false;
+    row.setAttribute("aria-expanded", "true");
+    setIcon(row.querySelector(".twisty svg"), "chevron-down");
+    return existing;
+  }
+  const container = document.createElement("div");
+  container.className = "tree-children";
+  const depth = Number(row.dataset.depth ?? 0) + 1;
+  container.dataset.depth = String(depth);
+  // The container carries the level's indent so its loading/empty note lines
+  // up with the names below it; each row still writes its own.
+  container.style.setProperty("--tree-indent", `${Math.min(depth, 8) * 12 + 4}px`);
+  // Without this an expanded folder whose listing is still on its way is a
+  // blank gap under the row, which reads as an empty folder.
+  container.appendChild(treeNote(t.treeLoading));
+  row.after(container);
+  row.setAttribute("aria-expanded", "true");
+  setIcon(row.querySelector(".twisty svg"), "chevron-down");
+  // Recorded before the request goes out, so a reply cannot land elsewhere.
+  treeRequests.push({ target: container, path: node.path });
+  api.send({ cmd: "getTree", path: node.path });
+  return container;
+}
+
+function collapseTreeRow(row) {
+  const existing = row.nextElementSibling;
+  if (!existing || !existing.classList.contains("tree-children")) return;
+  existing.hidden = true;
+  row.setAttribute("aria-expanded", "false");
+  setIcon(row.querySelector(".twisty svg"), "chevron-right");
+}
+
+/**
+ * One row of the tree.
+ *
+ * Folders and files are told apart by shape, not only by colour: a folder
+ * glyph versus a file glyph, a chevron that only folders have, and a heavier
+ * name for folders. The indentation stops growing after eight levels — a deep
+ * tree would otherwise push names out of a 320 px pane — while the depth still
+ * reaches the row as `data-depth` and the full path stays in the tooltip.
+ */
+function treeRow(node, depth = 0) {
+  const isDir = node.type === "dir";
   const row = document.createElement("button");
-  row.className = "tree-row";
+  row.className = `tree-row ${isDir ? "is-dir" : "is-file"}`;
+  row.dataset.path = node.path;
+  row.dataset.depth = String(depth);
+  row.style.setProperty("--tree-indent", `${Math.min(depth, 8) * 12 + 4}px`);
   row.innerHTML =
-    `<span class="twisty">${node.type === "dir" ? icon("chevron-right") : ""}</span>` +
+    `<span class="twisty">${isDir ? icon("chevron-right") : ""}</span>` +
+    `<span class="tree-icon">${icon(isDir ? "folder" : "file")}</span>` +
     `<span class="tree-name">${escapeHtml(node.name)}</span>`;
   row.title = node.path;
+  if (isDir) row.setAttribute("aria-expanded", "false");
   row.addEventListener("click", () => {
-    if (node.type === "file") {
+    if (!isDir) {
       openFile(node.path);
       return;
     }
     const existing = row.nextElementSibling;
-    if (existing && existing.classList.contains("tree-children")) {
-      existing.hidden = !existing.hidden;
-      setIcon(row.querySelector(".twisty svg"), existing.hidden ? "chevron-right" : "chevron-down");
+    if (existing && existing.classList.contains("tree-children") && !existing.hidden) {
+      collapseTreeRow(row);
+      rememberTreeExpanded(node.path, false);
       return;
     }
-    const container = document.createElement("div");
-    container.className = "tree-children";
-    row.after(container);
-    setIcon(row.querySelector(".twisty svg"), "chevron-down");
-    // The target is recorded before the request goes out, so a reply that
-    // arrives while the row is still being built cannot land in the root of
-    // the tree instead of under it.
-    pendingTreeTarget = container;
-    api.send({ cmd: "getTree", path: node.path });
+    expandTreeRow(row, node);
+    rememberTreeExpanded(node.path, true);
   });
   return row;
 }
 
-let pendingTreeTarget = null;
-
 function openFile(path) {
   state.selectedFile = path;
+  // The tree marks the row when it repaints; do it now as well so a row clicked
+  // in the list is marked before the File pane's reply arrives.
+  markTreeSelection(path);
   openWorkbench("file");
   fileRoot.innerHTML = `<div class="diff-empty">…</div>`;
   // The failure path is a notice, which the transcript shows — but the pane
@@ -5214,7 +5692,7 @@ $("browser-use").addEventListener("click", async () => {
   input.value = input.value.trim() ? `${input.value}\n\n${text}` : text;
   autoSize();
   input.focus();
-  closeWorkbench();
+  closeWorkbench({ restoreFocus: false });
 });
 
 window.addEventListener("resize", scheduleBrowserBounds);
@@ -5951,6 +6429,20 @@ stopButton.addEventListener("click", () => {
   input.focus();
 });
 
+/**
+ * True when the focus sits in a field where Escape may mean something else.
+ *
+ * Used by the window-level Escape chain: closing a panel out from under a
+ * caret would be a surprise, and the fields that take Escape themselves (the
+ * command palette, the mention popup, the model filter) already stop the
+ * event before it gets here.
+ */
+function isTextEntry(node) {
+  if (!(node instanceof HTMLElement)) return false;
+  const tag = node.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || node.isContentEditable;
+}
+
 // The model menu's own keys (arrows, Home/End, Enter, Escape, Tab) are handled
 // first: it is the innermost open surface, and Escape must dismiss it before
 // any outer handler decides the key means something else.
@@ -5983,6 +6475,18 @@ document.addEventListener("keydown", (event) => {
     }
     if (!pendingPermission.hidden) {
       answerPermission("no");
+      return;
+    }
+    // The workbench is the last *surface* before the fallback. It sits after
+    // the menus and dialogs because those are floating panels drawn over it,
+    // and before "abort the turn" because closing a panel is the smaller
+    // action. A text field is the exception: the shortcut sheet promises
+    // Escape means "stop the current turn", and the composer holds the caret
+    // for most of a session — taking the key there to close a side panel
+    // would break that promise mid-run. Escape inside a field therefore
+    // belongs to the field.
+    if (!workbench.hidden && !isTextEntry(document.activeElement)) {
+      closeWorkbench();
       return;
     }
     if (state.busy) api.send({ cmd: "abort" });
@@ -7174,6 +7678,7 @@ function renderTopbarLocation() {
   const name = parts.length > 0 ? parts[parts.length - 1] : "";
   $("topbar-cwd-name").textContent = name || t.appName;
   $("topbar-cwd").title = cwd || t.appName;
+  renderStatusTab(name);
   // The sidebar's folder button is an icon: the current folder is a row in the
   // list below it (the active workspace), so repeating the name here would
   // restore the second "workspace" concept the two-level list removed. The
@@ -7185,10 +7690,32 @@ function renderTopbarLocation() {
     cwd ? `${t.changeFolderTitle}: ${cwd}` : t.workspaceChoose,
   );
   $("sidebar-workspace").classList.toggle("empty", name === "");
+}
+
+/**
+ * The tab along the composer's top edge: where this turn happens, and how
+ * much of the window it has already used.
+ *
+ * The branch segment is a latent slot. No host in this build reports a git
+ * status (`state.git` is always null and `desktop/MATRIX.md` records git as
+ * hidden), so the segment stays hidden — but the predicate is the same one
+ * the top bar used, so a host that starts sending `git_status` fills it in
+ * without another edit here. It is not faked, and nothing is printed in its
+ * place (R3).
+ *
+ * The context figure and the cwd are always rendered: the tab is the only
+ * entry to the usage popover, and hiding it before the first measurement
+ * would take that entry away exactly when a new session most wants it.
+ */
+function renderStatusTab(folderName) {
   const branch = state.git?.available ? state.git.branch : "";
-  const branchNode = $("topbar-cwd-branch");
-  branchNode.hidden = !branch;
-  branchNode.textContent = branch ?? "";
+  const branchNode = $("status-tab-branch");
+  if (branchNode) {
+    branchNode.hidden = !branch;
+    branchNode.textContent = branch ?? "";
+  }
+  const cwdNode = $("status-tab-cwd");
+  if (cwdNode) cwdNode.textContent = folderName || t.appName;
 }
 
 function renderChangesBadge() {
@@ -7225,6 +7752,13 @@ workbenchTabs.querySelectorAll("button").forEach((button) => {
 });
 
 $("close-workbench").addEventListener("click", closeWorkbench);
+
+// Re-read the tree from its root. `requestTree` drops the older listings and
+// `renderTree` replays the folders that were open, so a refresh after an
+// external change (a new file, a deleted folder) keeps the reader's place.
+$("tree-refresh").addEventListener("click", () => {
+  if (state.cwd) requestTree(state.cwd);
+});
 
 $("diff-scope").querySelectorAll("button").forEach((button) => {
   button.addEventListener("click", () => {
@@ -7442,8 +7976,8 @@ topbarMenu.addEventListener("click", (event) => {
   setTopbarMenu(false);
   if (row.id === "menu-export") api.send({ cmd: "exportSession" });
   else if (row.id === "menu-shortcuts") openShortcuts();
-  else if (row.id === "menu-browse-files") openWorkbench("files");
-  else if (row.id === "menu-open-serial") openWorkbench("serial");
+  else if (row.id === "menu-browse-files") openWorkbench(undefined, { opener: $("more-button") });
+  else if (row.id === "menu-open-serial") openWorkbench("serial", { opener: $("more-button") });
   else if (row.id === "menu-clear") clearConversation();
 });
 

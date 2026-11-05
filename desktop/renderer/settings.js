@@ -15,6 +15,21 @@ import {
   modelEntryForSave,
   modelRowState,
 } from "./settings-models.js";
+import {
+  isAutoProviderName,
+  nextProviderName,
+  presetById,
+  presetFillFor,
+  presetModelSuggestions,
+  providerPickerOptions,
+} from "./provider-presets.js";
+import {
+  duplicateDisplayName,
+  providerIdentity,
+  readProviderMeta,
+  writeProviderMeta,
+} from "./provider-meta.js";
+import { VENDOR_MARKS } from "./vendor-marks.js";
 import { iconEl, setIcon } from "./icons.js";
 import { normalizeTranscriptView } from "./thinking-view.js";
 
@@ -67,7 +82,13 @@ export function createSettings(deps) {
 
 /** Kernel defaults, mirrored so the form has something to compare against
  *  before the host answers (`src/config/app-config.ts`). `maxTurns: null` is
- *  the kernel's "no cap": a message may take as many model calls as it needs. */
+ *  the kernel's "no cap": a message may take as many model calls as it needs.
+ *
+ *  The three limits lost their controls on 2026-11-05; the keys stay because
+ *  `saveRun` writes `run.json` whole. The values in a save come from
+ *  `state.runLimits` (the file, as the host last read it), so editing the
+ *  system prompt carries an existing limit through unchanged instead of
+ *  dropping it back to the default. */
 const DEFAULT_RUN_LIMITS = {
   maxTurns: null,
   maxCostUsd: null,
@@ -162,6 +183,13 @@ let connectionEditSeq = 0;
 let connectionSavedSeq = -1;
 /** A save is in flight; the next settings payload is its answer. */
 let connectionSavePending = false;
+/**
+ * 显示名称没能写进 localStorage（存储被禁用或写满）。
+ *
+ * 它在下次构建页面时显示一次：文件已经保存、标签没保存，这两件事必须分开说
+ * （R3），否则用户会以为重启后还能看到同一个标签。
+ */
+let providerMetaWriteFailed = false;
 /** The last save was accepted — shown until the draft is edited again. */
 let connectionShowSaved = false;
 /** Raised by `openSetup`; cleared when the user leaves the page. */
@@ -318,6 +346,22 @@ function handleProviderTest(message) {
 
 const S = () => settingsStrings[state.locale] ?? settingsStrings.en;
 
+/**
+ * 渲染层的 localStorage，取不到时返回 null。
+ *
+ * 显示名称与厂商归属存在这里（内核 schema 会剥掉未知键），而设置页在没有
+ * `window` 的环境里也必须能构建——取不到就给 `provider-meta.js` 一个 null，
+ * 它自己会退化成「什么都没存」。
+ */
+function providerMetaStorage() {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    // localStorage 的 getter 本身就可能抛（隐私模式、被禁用）。
+    return null;
+  }
+}
+
 /** Rail glyphs, named from the shared sprite so the rail and the toolbar
  *  speak the same visual language. */
 const SETTINGS_ICON_NAMES = {
@@ -418,6 +462,272 @@ function sSelect({ id, value, options, onChange, disabled = false }) {
   select.disabled = disabled;
   select.addEventListener("change", () => onChange(select.value));
   return select;
+}
+
+/**
+ * One vendor glyph, inline on the shared 24×24 grid.
+ *
+ * `vendor-marks.js` holds filled path data, while the sprite in `icons.js`
+ * holds stroked 1.75 glyphs — so a mark is built here rather than reached for
+ * with `<use>`, and `.vendor-mark` restores `fill: currentColor` that the
+ * global `svg` rule would otherwise turn off. `id` with no mark (the custom
+ * choice) draws the pencil instead of a vendor logo: a neutral placeholder,
+ * not an invented brand (R3).
+ */
+function vendorMarkEl(id) {
+  const mark = id ? VENDOR_MARKS[id] : undefined;
+  if (!mark) return iconEl("edit", "vendor-mark vendor-mark-neutral");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "vendor-mark");
+  svg.setAttribute("viewBox", mark.viewBox);
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const path of mark.paths) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    node.setAttribute("d", path);
+    svg.appendChild(node);
+  }
+  return svg;
+}
+
+/**
+ * The vertical bounds of the scrolling pane `node` is painted inside, or the
+ * window's when there is no such ancestor (a test fixture, or a future place
+ * outside Settings). This menu is `position: absolute` inside the scroll
+ * container, so the pane — not the viewport — is what clips it.
+ */
+function settingsPanesBounds(node) {
+  const panes = node.closest(".settings-panes");
+  if (!panes) return { top: 0, bottom: window.innerHeight };
+  const box = panes.getBoundingClientRect();
+  return { top: box.top, bottom: box.bottom };
+}
+
+/**
+ * 厂商选择器：带图标的自绘下拉。
+ *
+ * 原生 `<select>` 的每一行只能是文本，放不下厂商图标，所以这里是
+ * WAI-ARIA 1.2 的「按钮 + listbox 弹出层」combobox：焦点始终在触发器上，
+ * 高亮行走 `aria-activedescendant` 指认。只有一个焦点来源，Escape / 方向键 /
+ * 回车就不必在两个控件之间倒手。
+ *
+ * `setValue` 只改显示，不回调 `onChange`：调用方改了归属要同步触发器，但那次
+ * 同步不是一次新的选择。
+ *
+ * `getOptions` 每次展开时现算，缓存一份就会给出过期的菜单。
+ */
+function sProviderPicker({ id, value, getOptions, onChange, labels }) {
+  let current = value ?? null;
+  let open = false;
+  /** Rendered rows, in visual order (preset rows, then the custom row). */
+  let rows = [];
+
+  const control = el("div", "provider-picker-control");
+  const button = el("button", "provider-picker");
+  button.type = "button";
+  button.id = id;
+  button.setAttribute("role", "combobox");
+  button.setAttribute("aria-haspopup", "listbox");
+  button.setAttribute("aria-expanded", "false");
+  button.setAttribute("aria-controls", `${id}-menu`);
+  const menu = el("div", "provider-menu");
+  menu.id = `${id}-menu`;
+  menu.setAttribute("role", "listbox");
+  menu.setAttribute("aria-label", labels.menu);
+  menu.hidden = true;
+
+  const renderTrigger = () => {
+    const preset = current ? presetById(current) : undefined;
+    button.textContent = "";
+    button.append(
+      vendorMarkEl(preset?.id),
+      el("span", "provider-picker-name", preset ? preset.label : labels.custom),
+      iconEl("chevron-down", "provider-picker-caret"),
+    );
+  };
+
+  const setHighlight = (row) => {
+    for (const other of rows) other.removeAttribute("data-highlight");
+    button.removeAttribute("aria-activedescendant");
+    if (!row) return;
+    row.dataset.highlight = "1";
+    button.setAttribute("aria-activedescendant", row.id);
+    row.scrollIntoView({ block: "nearest" });
+  };
+
+  /** Move the highlight by `step`, clamped — the list is not a ring. */
+  const moveHighlight = (step) => {
+    const list = rows;
+    if (list.length === 0) return;
+    const at = list.findIndex((row) => row.dataset.highlight === "1");
+    const next = at < 0 ? (step > 0 ? 0 : list.length - 1) : Math.min(list.length - 1, Math.max(0, at + step));
+    setHighlight(list[next]);
+  };
+
+  const closeMenu = ({ restoreFocus = false } = {}) => {
+    if (!open) return;
+    open = false;
+    menu.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+    button.removeAttribute("aria-activedescendant");
+    document.removeEventListener("pointerdown", onDocPointerDown, true);
+    if (restoreFocus) focusTrigger();
+  };
+
+  /** Focus the trigger without scrolling the settings pane back to the top.
+   *  A plain `.focus()` scrolls the trigger into view, and inside a tall
+   *  scrolling pane that yanks the page when the menu closes. */
+  const focusTrigger = () => button.focus({ preventScroll: true });
+
+  /** A click anywhere else closes the menu; so does the card being rebuilt
+   *  out from under it (a detached control would otherwise keep the document
+   *  listener alive for the rest of the session). */
+  function onDocPointerDown(event) {
+    if (!control.isConnected || !control.contains(event.target)) closeMenu({ restoreFocus: false });
+  }
+
+  /**
+   * `source` is `"pointer"` or `"keyboard"`. The caller uses it to decide
+   * where focus goes next: a click on a menu row can reasonably hand the
+   * caret to the field the choice filled in, while a keyboard user is still
+   * driving this control and must stay on it (WAI-ARIA's combobox pattern).
+   */
+  const choose = (row, { source = "pointer" } = {}) => {
+    if (!row || row.disabled) return;
+    const next = row.dataset.custom === "1" ? null : row.dataset.preset;
+    closeMenu({ restoreFocus: true });
+    onChange(next, { source });
+  };
+
+  const buildRows = () => {
+    const view = getOptions();
+    menu.textContent = "";
+    rows = [];
+    const addRow = ({ optionId, presetId, label, selected, custom }) => {
+      const row = el("button", "provider-option");
+      row.type = "button";
+      row.id = `${id}-opt-${optionId}`;
+      row.tabIndex = -1;
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", selected ? "true" : "false");
+      if (custom) row.dataset.custom = "1";
+      else row.dataset.preset = presetId;
+      row.append(vendorMarkEl(custom ? null : presetId), el("span", "provider-option-name", label));
+      if (selected) row.appendChild(iconEl("check", "provider-option-check"));
+      row.addEventListener("click", () => choose(row, { source: "pointer" }));
+      menu.appendChild(row);
+      rows.push(row);
+    };
+    for (const option of view.options) {
+      addRow({
+        optionId: option.id,
+        presetId: option.id,
+        label: option.label,
+        selected: option.selected,
+        custom: false,
+      });
+    }
+    const separator = el("div", "provider-menu-sep");
+    separator.setAttribute("role", "presentation");
+    menu.appendChild(separator);
+    addRow({
+      optionId: "custom",
+      presetId: "",
+      label: labels.custom,
+      selected: view.custom,
+      custom: true,
+    });
+  };
+
+  const openMenu = () => {
+    if (open) return;
+    buildRows();
+    if (rows.length === 0) return;
+    open = true;
+    menu.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    // The pane scrolls and clips, so a menu that only ever opened downwards
+    // would lose its last rows on a card near the bottom edge — and the
+    // custom row, which is last, is the one a user is most likely to want.
+    // Open toward the roomier side and cap the height to what that side has;
+    // with neither side big enough the menu scrolls inside its own box rather
+    // than overrunning the panel. The bounds are the scrolling pane's own
+    // edges, not the window's: the pane is what clips this absolutely
+    // positioned menu, so a window-based estimate would call "plenty of room"
+    // on a card that is actually at the pane's edge.
+    const trigger = button.getBoundingClientRect();
+    const { top: clipTop, bottom: clipBottom } = settingsPanesBounds(button);
+    const gap = 6 + 10; // menu offset from the trigger, plus breathing room
+    const spaceBelow = clipBottom - trigger.bottom - gap;
+    const spaceAbove = trigger.top - clipTop - gap;
+    const wanted = Math.min(320, rows.length * 36 + 16);
+    const opensUp = spaceBelow < wanted && spaceAbove > spaceBelow;
+    menu.classList.toggle("opens-up", opensUp);
+    const room = Math.floor(opensUp ? spaceAbove : spaceBelow);
+    // Clear the inline cap when there is enough room, so the stylesheet's
+    // 320px is the only number in play in the ordinary case.
+    menu.style.maxHeight = room < wanted ? `${Math.max(120, room)}px` : "";
+    const selectedRow = rows.find((row) => row.getAttribute("aria-selected") === "true");
+    setHighlight(selectedRow ?? rows[0]);
+    document.addEventListener("pointerdown", onDocPointerDown, true);
+  };
+
+  // A click on the trigger toggles; Enter and Space arrive here the same way
+  // when the menu is closed, because a real <button> does that for us.
+  button.addEventListener("click", () => {
+    if (open) closeMenu({ restoreFocus: false });
+    else openMenu();
+  });
+
+  button.addEventListener("keydown", (event) => {
+    const key = event.key;
+    if (key === "Escape") {
+      if (!open) return;
+      // The settings page is a modal <dialog>: an Escape that reached the
+      // document would close the whole page and throw away the draft. This
+      // menu is the innermost open surface, so it takes the key.
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu({ restoreFocus: true });
+      return;
+    }
+    if (key === "ArrowDown" || key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) {
+        openMenu();
+        return;
+      }
+      moveHighlight(key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if ((key === "Home" || key === "End") && open) {
+      event.preventDefault();
+      if (rows.length > 0) setHighlight(key === "Home" ? rows[0] : rows[rows.length - 1]);
+      return;
+    }
+    if ((key === "Enter" || key === " ") && open) {
+      // Prevented so the button's native activation does not fire a second
+      // click on keyup and snap the menu shut again.
+      event.preventDefault();
+      choose(rows.find((row) => row.dataset.highlight === "1"), { source: "keyboard" });
+      return;
+    }
+    if (key === "Tab" && open) closeMenu({ restoreFocus: false });
+  });
+
+  control.append(button, menu);
+  renderTrigger();
+
+  return {
+    node: control,
+    controlId: id,
+    /** Follow the card's own state (the name field) without firing onChange. */
+    setValue: (next) => {
+      current = next ?? null;
+      renderTrigger();
+    },
+    close: () => closeMenu({ restoreFocus: false }),
+  };
 }
 
 function sToggle({ id, checked, onChange, disabled = false }) {
@@ -1095,6 +1405,14 @@ function buildConnectionPage() {
   emptyCard.appendChild(el("h3", "", s.connEmptyTitle));
   emptyCard.appendChild(el("p", "", s.connEmptyBody));
 
+  // `providers.json` was written but the display names could not be stored:
+  // the services saved, their labels did not, and only a visible line says so
+  // (R3 — a silently dropped field is a save that lied).
+  if (providerMetaWriteFailed) {
+    pane.appendChild(el("p", "setting-note pack-problem", s.connMetaWriteFailed));
+    providerMetaWriteFailed = false;
+  }
+
   // "Saved" is a success colour, so it gets its own node: painting "unsaved"
   // green would say the opposite of what it means.
   const savedNote = el("span", "setting-inline-status", connectionShowSaved ? s.saved : "");
@@ -1133,13 +1451,21 @@ function buildConnectionPage() {
     }
   };
 
+  /**
+   * 显示名称与厂商归属，按服务名索引，来自渲染层 localStorage。
+   *
+   * `providers.json` 的 schema 会剥掉未知键，所以这两样不进文件（见
+   * `provider-meta.js`）。页面重建时重读一次：别的窗口或上一次会话写下的
+   * 标签要能跟上。
+   */
+  const storage = providerMetaStorage();
+  let meta = readProviderMeta(storage);
+  // Only the write path replaces it (after a successful write, so the page's
+  // own state is what was stored); every read goes through the variable.
+
   /** The first free default name; `provider1` unless that one is taken. */
-  const nextName = () => {
-    const taken = new Set(cards.map((card) => card.nameInput.value.trim()));
-    let index = 1;
-    while (taken.has(`provider${index}`)) index += 1;
-    return `provider${index}`;
-  };
+  const nextName = () =>
+    nextProviderName(cards.map((card) => card.nameInput.value.trim()), null);
 
   // The only protocol the kernel has (`ProviderConfigSchema` in
   // src/config/providers.ts). A new entry carries it so the card states what
@@ -1175,8 +1501,17 @@ function buildConnectionPage() {
    * not edit (`requestTimeoutMs`, `maxResponseBytes`, `pricePerMillion`); they
    * are carried through for the same reason.
    */
-  const entryFrom = (name, provider) => ({
+  const entryFrom = (name, provider) => {
+    // Both come from localStorage (`provider-meta.js`), never from the file.
+    // `providerIdentity` falls back to the service name for services
+    // configured before this field existed; a `null` vendor means Custom.
+    // A display name equal to the service name is stored as "" so the field
+    // shows its placeholder rather than a second copy of the same string.
+    const identity = providerIdentity(meta, name);
+    return {
     name,
+    displayName: identity.displayName === name ? "" : identity.displayName,
+    vendor: identity.vendor,
     protocol: typeof provider?.protocol === "string" ? provider.protocol : DEFAULT_PROTOCOL,
     baseUrl: typeof provider?.baseUrl === "string" ? provider.baseUrl : "",
     // The key lives in the file in clear text (`ProviderConfigSchema.apiKey`).
@@ -1193,7 +1528,17 @@ function buildConnectionPage() {
       ...(provider?.maxResponseBytes !== undefined ? { maxResponseBytes: provider.maxResponseBytes } : {}),
       ...(provider?.pricePerMillion !== undefined ? { pricePerMillion: provider.pricePerMillion } : {}),
     },
-  });
+    };
+  };
+
+  /**
+   * What a new card starts as: an empty custom service.
+   *
+   * The vendor is Custom until the picker says otherwise — the page does not
+   * guess a vendor from anything (R3), and a new card has no evidence either
+   * way.
+   */
+  const newEntry = () => ({ ...blankEntry(), displayName: "", vendor: null });
 
   /** One card. Values are read from the live inputs at save time, so adding or
    *  removing a card never has to re-read the DOM first. */
@@ -1205,6 +1550,10 @@ function buildConnectionPage() {
      *  the trimmed name and the set has to agree with the file. */
     let expanded = connectionExpanded.has(entry.name.trim());
     let lastName = entry.name.trim();
+    /** 这张卡此刻选中的厂商归属（预设 id 或 null = 自定义）。它不再从服务名
+     *  反查：同一个厂商可以有多张卡，名字是名字、厂商是厂商。首次进入时用
+     *  `provider-meta.js` 的判定（有存过的归属就用它，没有才从名字兼容旧数据）。 */
+    let vendor = entry.vendor ?? null;
 
     const head = el("div", "settings-card-head");
     // A real button, so Enter and Space work without a key handler and
@@ -1212,15 +1561,27 @@ function buildConnectionPage() {
     const toggle = el("button", "settings-card-toggle");
     toggle.type = "button";
     const chevron = iconEl("chevron-right", "settings-card-chevron");
-    const title = el("span", "settings-card-name", entry.name || s.connNewProvider);
+    // The header answers "which key is this?": the display name first, then a
+    // muted second line with the service name and vendor. Two cards of the
+    // same vendor are told apart by the display name, and the service name is
+    // what the file (and every `service/model` reference) actually uses.
+    const titleBox = el("span", "settings-card-title");
+    const title = el("span", "settings-card-name", "");
+    const subtitle = el("span", "settings-card-sub", "");
+    titleBox.append(title, subtitle);
     // What the service offers, readable without opening it: the point of a
     // collapsed card is that a page of services stays scannable. Nothing else
     // goes here — the endpoint and the keys are what collapsing is meant to
     // put away.
     const modelSummary = el("span", "settings-card-summary", "");
-    toggle.append(chevron, title, modelSummary);
+    const headMark = el("span", "settings-card-mark");
+    toggle.append(chevron, headMark, titleBox, modelSummary);
+    /** This card's own ordinal, fixed at build time. Naming the picker's DOM
+     *  ids from it keeps them unique even after a rename — `connectionCardSeq`
+     *  is bumped by the next card, so reading it later would drift. */
+    const cardSeq = connectionCardSeq++;
     const body = el("div", "settings-form-card-body");
-    body.id = `settings-card-body-${connectionCardSeq++}`;
+    body.id = `settings-card-body-${cardSeq}`;
     toggle.setAttribute("aria-controls", body.id);
     // The test button and Remove go here; the button is built below, once the
     // result area it talks to exists. They sit outside the toggle so a click
@@ -1229,21 +1590,114 @@ function buildConnectionPage() {
     head.append(toggle, headActions);
 
     const nameInput = sText({ value: entry.name, placeholder: "provider1", mono: true });
+    const baseUrlInput = sText({
+      value: entry.baseUrl,
+      placeholder: "https://api.example.com/v1",
+      mono: true,
+    });
+    /**
+     * 人看的标签。默认等于服务名，改它就只是改标签——文件里的键仍是服务名。
+     *
+     * 它不在 `providers.json` 里（内核 schema 会剥掉），由 `save()` 写进
+     * localStorage。空着等于「没设」：页面上显示服务名，不是编一个名字。
+     */
+    const displayNameInput = sText({
+      value: entry.displayName ?? "",
+      placeholder: entry.name || "",
+    });
+    displayNameInput.addEventListener("input", drawCardHeader);
+
+    /** Redraw the header from the live inputs. Called on every keystroke of
+     *  the display name and the service name — both change what it says. */
+    function drawCardHeader() {
+      const serviceName = nameInput.value.trim();
+      const displayName = displayNameInput.value.trim();
+      const preset = vendor === null ? undefined : presetById(vendor);
+      title.textContent =
+        displayName !== ""
+          ? displayName
+          : serviceName !== ""
+            ? serviceName
+            : s.connNewProvider;
+      // 第二行：服务名 + 厂商。服务名为空的新卡没有「键」可报，就只剩厂商。
+      const vendorLabel = preset ? preset.label : s.connProviderCustomShort;
+      subtitle.textContent = [serviceName, vendorLabel].filter(Boolean).join(" · ");
+      headMark.textContent = "";
+      headMark.appendChild(vendorMarkEl(preset?.id));
+      drawToggleLabel();
+    }
+
+    /**
+     * 卡片第一行的厂商选择器。
+     *
+     * 选中哪一家是这张卡自己的状态（`vendor`），不与服务名绑定——同一个厂商
+     * 可以有任意多张卡。选一家预设时：
+     * - 归属记为这家；
+     * - 服务名只在它是页面自己生成的时候跟着换（`isAutoProviderName`：空、
+     *   上一家厂商的 id 或它的 `-N`、`providerN`），换出来的名字在撞名时自动
+     *   加后缀；手写的 `my-gateway` 不动——改厂商不等于改服务名；
+     * - 地址交给 `presetFillFor`：只在空着或仍是某个预设地址时才换，用户手填
+     *   的网关不被覆盖；
+     * - 「推荐模型」chip 行按新厂商重画。
+     */
+    const providerPicker = sProviderPicker({
+      id: `provider-picker-${cardSeq}`,
+      value: vendor,
+      labels: {
+        menu: s.connProvider,
+        custom: s.connProviderCustom,
+      },
+      getOptions: () => providerPickerOptions(vendor),
+      onChange: (presetId, { source }) => {
+        const previousVendor = vendor;
+        vendor = presetId;
+        providerPicker.setValue(vendor);
+        const fill = presetFillFor(presetId === null ? null : presetById(presetId), {
+          baseUrl: baseUrlInput.value,
+        });
+        if (fill !== null) {
+          const serviceName = nameInput.value.trim();
+          // A name this page would have generated itself — empty, a preset id,
+          // or a generated suffix (`deepseek-2`, `provider1`) — follows the new
+          // vendor, with a suffix when that vendor is already taken. A
+          // hand-written name (`my-gateway`, `deepseek-home`) is left alone:
+          // renaming a configured service is not what changing the vendor is
+          // asking for.
+          const otherNames = () =>
+            cards
+              .filter((card) => card.nameInput !== nameInput)
+              .map((card) => card.nameInput.value);
+          if (isAutoProviderName(serviceName, previousVendor)) {
+            const nextNameValue = nextProviderName(otherNames(), fill.name);
+            if (nextNameValue !== nameInput.value) {
+              nameInput.value = nextNameValue;
+              nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+          }
+          baseUrlInput.value = fill.baseUrl;
+        }
+        drawCardHeader();
+        drawSuggestions();
+        // 鼠标选完，焦点落在密钥栏：名字与地址刚刚替用户填好，下一步就是贴
+        // key。键盘选完则留在触发器上——用户还在操作这个控件，焦点被抢走就
+        // 等于把键盘流打断了。
+        if (source === "pointer") apiKeyInput.focus();
+        markDirty();
+      },
+    });
+
     nameInput.addEventListener("input", () => {
       const name = nameInput.value.trim();
-      title.textContent = name || s.connNewProvider;
-      drawToggleLabel();
+      // The placeholder shows the default: leaving the display name blank is
+      // exactly "call it whatever the service is called".
+      displayNameInput.placeholder = name;
+      drawCardHeader();
       // The expansion is filed by name, and this field is what changes it:
       // without the move, the next rebuild would reopen nothing.
       if (name !== lastName) {
         if (expanded) renameExpansion(lastName, name);
         lastName = name;
       }
-    });
-    const baseUrlInput = sText({
-      value: entry.baseUrl,
-      placeholder: "https://api.example.com/v1",
-      mono: true,
     });
     const apiKeyEnvInput = sText({
       value: entry.apiKeyEnv,
@@ -1313,7 +1767,15 @@ function buildConnectionPage() {
       input.style.flex = "1 1 auto";
       input.style.minWidth = "0";
       line.appendChild(input);
-      if (button) line.appendChild(button);
+      if (button) {
+        // A one-word button ("Show" / 显示) must not borrow the line's height:
+        // in a flex row it stretches to the tallest item and, with the type
+        // ramp up a step, a 2-character label wrapped onto two lines. It keeps
+        // its own single-line box and its own width.
+        button.style.flex = "0 0 auto";
+        button.style.whiteSpace = "nowrap";
+        line.appendChild(button);
+      }
       cell.append(line, warning);
       return cell;
     };
@@ -1323,6 +1785,9 @@ function buildConnectionPage() {
      *  along untouched so a save does not drop the counters this page does not
      *  edit (`maxOutput`, `supportsReasoning`, `reasoningEffort`). */
     const modelHandles = [];
+    /** 「推荐模型」行；在模型组之后构建（它要用这里的 `addModelRow`），
+     *  行本身的点击与重画由 `drawSuggestions` 驱动。 */
+    let drawSuggestions = () => {};
     /**
      * Refill the header's model line from the live rows.
      *
@@ -1336,6 +1801,8 @@ function buildConnectionPage() {
       modelSummary.textContent =
         names.length > 0 ? names.join(" · ") : s.connNoModelsYet;
       modelSummary.classList.toggle("empty", names.length === 0);
+      // 已加过的名字要从建议里让位，否则点一下就是一条重复行。
+      drawSuggestions();
     };
     const addModelRow = (model) => {
       // `.model-row` on top of `.rules-row`: the latter carries the frame
@@ -1407,6 +1874,61 @@ function buildConnectionPage() {
       modelFoot,
     );
 
+    /**
+     * 「推荐模型」：预设带的模型名，点一下才进卡片。
+     *
+     * 为什么不直接预填进模型行：官方文档里的模型名会随版本退役，写进文件
+     * 就是一条可能失效的断言。chip 把「服务商这么说」和「我确认要这个」
+     * 分开，文件里只留后者。
+     *
+     * 整行在两种情况下消失：预设没有模型名（OpenAI：文档站不可达，没核实
+     * 过），或者全部都已在卡片里。前者是「我们没说」，后者是「这一行已经
+     * 没有可点的东西」——两种情况都不该留一个空标题。
+     */
+    const suggestionRow = el("div", "preset-models");
+    suggestionRow.hidden = true;
+    drawSuggestions = () => {
+      // The vendor is what says which documented names apply — not the
+      // service name, which may be `deepseek-2` or a hand-written key.
+      const pending = presetModelSuggestions(
+        vendor === null ? [] : (presetById(vendor)?.models ?? []),
+        modelHandles.map((handle) => handle.idInput.value),
+      );
+      suggestionRow.textContent = "";
+      suggestionRow.hidden = pending.length === 0;
+      if (pending.length === 0) return;
+      suggestionRow.appendChild(el("span", "preset-models-label", s.connSuggestedModels));
+      for (const name of pending) {
+        const chip = el("button", "preset-model-chip");
+        chip.type = "button";
+        chip.title = s.connTestAddModel;
+        chip.setAttribute("aria-label", `${name} — ${s.connTestAddModel}`);
+        chip.append(iconEl("plus", "preset-model-chip-icon"), el("span", "", name));
+        chip.addEventListener("click", () => {
+          // A blank row is an invitation to type, not a model the user wanted:
+          // fill the first one instead of appending, or a fresh card would end
+          // up with an empty row beside the one just added — and Save refuses
+          // a row without a name. Only add a row when every row already names
+          // a model.
+          const blank = modelHandles.find((handle) => handle.idInput.value.trim() === "");
+          if (blank) {
+            blank.idInput.value = name;
+            blank.idInput.dispatchEvent(new Event("input", { bubbles: true }));
+          } else {
+            addModelRow({ id: name, carried: {} });
+          }
+          markDirty();
+          // 这一行因为这个点击少一个 chip；加完重画，全部加完时整行收起。
+          drawSuggestions();
+        });
+        suggestionRow.appendChild(chip);
+      }
+    };
+    // 厂商一变，预设就跟着变；选回「自定义」时整行缩回去——那正是用户放弃
+    // 预设、准备手填的时刻。模型行增删也要重画，否则已加过的名字会留在建议
+    // 里，点一下就是一条重复行。
+    drawSuggestions();
+
     // A rejected value has to say so where the field is, not in a notice that
     // scrolls away from the control at fault.
     const problem = el("p", "setting-note pack-problem", "");
@@ -1442,9 +1964,23 @@ function buildConnectionPage() {
     // it, so the answer lands where the click happened instead of below every
     // field in the form. `problem`, the body's other note, stays at the foot —
     // it belongs to Save, which is at the foot too.
+    // The provider picker leads the form: it is the one row that can fill in
+    // the two below it, so it has to be read before them. The protocol chip
+    // sits just above the models group instead of at the top — it describes
+    // how the endpoint is spoken to, which is a fact about the card as a
+    // whole rather than the first decision in it.
     body.append(
       testResult,
-      protocolLine,
+      // `id` names the trigger, not the wrapper: the label has to point at the
+      // thing a click focuses.
+      sRow({
+        id: providerPicker.controlId,
+        label: s.connProvider,
+        desc: s.connProviderDesc,
+        control: providerPicker.node,
+      }),
+      // 显示名称在服务名之上：它是人先看到、也先用来区分两张同厂商卡的那一行。
+      sRow({ label: s.connDisplayName, desc: s.connDisplayNameDesc, control: displayNameInput }),
       sRow({ label: s.name, desc: s.connNameDesc, control: nameInput }),
       sRow({ label: s.baseUrl, desc: s.baseUrlDesc, control: baseUrlInput }),
       sRow({
@@ -1457,7 +1993,9 @@ function buildConnectionPage() {
         desc: s.connApiKeyEnvDesc,
         control: fieldCell(apiKeyEnvInput, null, envWarning),
       }),
+      protocolLine,
       modelsGroup,
+      suggestionRow,
       problem,
     );
     node.append(head, body);
@@ -1470,7 +2008,10 @@ function buildConnectionPage() {
      * Without the name, every card on the page announces the same word.
      */
     const drawToggleLabel = () => {
-      const name = nameInput.value.trim() || title.textContent;
+      // The header's own text, not the service name: a card is announced by
+      // whatever it is called on screen, which with two keys of one vendor is
+      // the display name, not the generated file key.
+      const name = title.textContent || s.connNewProvider;
       toggle.setAttribute("aria-label", (expanded ? s.connCollapseNamed : s.connExpandNamed).replace("{name}", name));
     };
 
@@ -1484,6 +2025,10 @@ function buildConnectionPage() {
     const setExpanded = (open, { remember = true } = {}) => {
       expanded = open;
       body.hidden = !open;
+      // A menu that is open when the card closes would keep its document
+      // listener and reopen with the card, in a state the user never asked
+      // for. Closing is the same thing collapsing does to every other field.
+      if (!open) providerPicker.close();
       toggle.setAttribute("aria-expanded", open ? "true" : "false");
       setIcon(chevron, open ? "chevron-down" : "chevron-right");
       drawToggleLabel();
@@ -1497,6 +2042,7 @@ function buildConnectionPage() {
     };
     toggle.addEventListener("click", () => setExpanded(!expanded));
     setExpanded(expanded, { remember: false });
+    drawCardHeader();
     refreshModelSummary();
 
     /** Re-run both warnings against what is in the fields right now. */
@@ -1812,6 +2358,11 @@ function buildConnectionPage() {
       const apiKeyEnv = apiKeyEnvInput.value.trim();
       return {
         name,
+        // 这两项不进 `value`（写的是 `providers.json`），由 `save()` 交给
+        // localStorage。空白显示名称是「没设」，写进 meta 反而是给未来留一个
+        // 会遮住服务名的旧标签。
+        displayName: displayNameInput.value.trim(),
+        vendor,
         value: {
           protocol: entry.protocol,
           baseUrl,
@@ -1828,7 +2379,10 @@ function buildConnectionPage() {
     return {
       node,
       nameInput,
+      displayNameInput,
       baseUrlInput,
+      // 供应商选择器里选完一家后，名字与地址已替用户填好，下一步就是贴 key。
+      apiKeyInput,
       read,
       clearProblem: () => {
         problem.hidden = true;
@@ -1864,6 +2418,7 @@ function buildConnectionPage() {
     // the user chooses, and `__proto__` as a provider name must be a key, not
     // a prototype assignment that drops the provider.
     const next = Object.create(null);
+    const read = [];
     for (const card of cards) {
       const result = card.read();
       if (result.problem !== undefined) {
@@ -1875,6 +2430,43 @@ function buildConnectionPage() {
         return;
       }
       next[result.name] = result.value;
+      read.push({ card, ...result });
+    }
+    // 两个卡都叫「DeepSeek 工作」，在面板左栏里就是两行一模一样的字——这正是
+    // 显示名称要解决的事。比较在 `provider-meta.js` 里（trim + 忽略大小写，
+    // 空显示名称按服务名算），第二个出问题的卡就地报错并聚焦。
+    const duplicate = duplicateDisplayName(
+      read.map((item) => ({ name: item.name, displayName: item.displayName })),
+    );
+    if (duplicate !== null) {
+      const offender = read[duplicate.index].card;
+      offender.showProblem(
+        s.connDisplayNameDuplicate.replace("{name}", duplicate.displayName),
+        offender.displayNameInput,
+      );
+      return;
+    }
+    // 标签不写进 `providers.json`（内核 schema 会剥掉），所以它们在这里、由
+    // 页面上这些卡重新拼一整份写回 localStorage：这也是删掉的服务留下孤儿
+    // 条目的清除点。
+    //
+    // 写在本机、不等宿主回包：写入失败时页面会明说这一半没存下，而不是让
+    // 文件保存成功、标签悄悄消失（R3）。宿主拒绝保存时多出来的标签是孤儿
+    // ——`provider-meta.js` 只按文件里的服务名查，孤儿永远不显示，下一次保存
+    // 会把它清掉。
+    const nextMeta = Object.create(null);
+    for (const item of read) {
+      const entryMeta = {
+        ...(item.displayName !== "" ? { displayName: item.displayName } : {}),
+        vendor: item.vendor,
+      };
+      if (Object.keys(entryMeta).length > 0) nextMeta[item.name] = entryMeta;
+    }
+    if (writeProviderMeta(storage, nextMeta)) {
+      meta = readProviderMeta(storage);
+      providerMetaWriteFailed = false;
+    } else {
+      providerMetaWriteFailed = true;
     }
     // The draft stays dirty until the host answers with a fresh snapshot; a
     // save that fails sends a notice and no snapshot, so the draft survives.
@@ -1897,7 +2489,7 @@ function buildConnectionPage() {
     sButton(
       s.connAddProvider,
       () => {
-        const card = addCard(blankEntry());
+        const card = addCard(newEntry());
         // A new card has nothing to read in a header — no endpoint, no models —
         // so it opens, ready to be filled in.
         card.expand();
@@ -2172,120 +2764,54 @@ function buildBehaviorPage() {
   rulesGroup.appendChild(foot);
   pane.appendChild(rulesGroup);
 
-  /* ---------- run limits ---------- */
+  /* ---------- system prompt: not editable here ----------
+   *
+   * Removed on the user's instruction (2026-11-05). The field wrote
+   * `run.json`'s `systemPrompt`, which the kernel prepends to every turn; a
+   * free-text box over it let the operator overwrite the rules the agent runs
+   * under. The kernel still reads that key — a file edited by hand keeps
+   * working — the renderer simply no longer offers a way to change it.
+   *
+   * Same honesty rule as the removed limits below: a value that is actually in
+   * force is named rather than hidden, so nobody is surprised by a prompt they
+   * did not know was there.
+   */
+  const customPrompt = typeof run.systemPrompt === "string" ? run.systemPrompt.trim() : "";
+  if (customPrompt !== "" && !configProblem) {
+    pane.appendChild(
+      sHint(
+        s.behaviorSystemPromptNote
+          .replace("{path}", state.configPaths?.run ?? "run.json"),
+      ),
+    );
+  }
 
-  // Each numeric limit is positive-or-empty; empty means "no limit" and is
-  // sent as null, which the host passes to the kernel as "unset".
-  const positiveOrNull = (value) => {
-    const text = String(value).trim();
-    if (text === "") return { value: null };
-    const parsed = Number(text);
-    if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
-    return { value: parsed };
-  };
-
-  const runRefusal = refusal();
-  const promptArea = document.createElement("textarea");
-  promptArea.className = "setting-textarea";
-  promptArea.id = "setting-system-prompt";
-  promptArea.rows = 6;
-  promptArea.spellcheck = false;
-  promptArea.placeholder = s.behaviorSystemPromptPlaceholder;
-  promptArea.value = run.systemPrompt ?? "";
-  // Text commits on blur, like every other text control in this dialog: a save
-  // per keystroke would rewrite run.json while the sentence is still forming.
-  promptArea.addEventListener("change", () => saveRun({ systemPrompt: promptArea.value }));
-
-  const maxTurnsInput = sText({
-    id: "setting-max-turns",
-    type: "number",
-    min: 1,
-    step: 1,
-    value: run.maxTurns ?? "",
-    // An optional cap, not a required one: empty is the kernel's "no limit",
-    // said out loud so a blank field does not read as an unfinished setting.
-    placeholder: s.behaviorUnlimited,
-    onChange: (value) => {
-      const text = String(value).trim();
-      // Empty is a real value here — the absence of a cap — and it is sent as
-      // null, the shape the kernel reads as "unset".
-      if (text === "") {
-        saveRun({ maxTurns: null });
-        return;
-      }
-      const parsed = Number(text);
-      // The kernel stops the loop *before* turn one when this is 0, so a zero
-      // here reads as "the agent does nothing" rather than "unlimited".
-      if (!Number.isInteger(parsed) || parsed <= 0) {
-        runRefusal.show(s.behaviorMaxTurnsInvalid, maxTurnsInput, run.maxTurns ?? "");
-        return;
-      }
-      saveRun({ maxTurns: parsed });
-    },
-  });
-  const maxCostInput = sText({
-    id: "setting-max-cost",
-    type: "number",
-    min: 0,
-    step: 0.01,
-    value: run.maxCostUsd ?? "",
-    placeholder: s.behaviorUnlimited,
-    onChange: (value) => {
-      const parsed = positiveOrNull(value);
-      if (parsed === undefined) {
-        runRefusal.show(s.behaviorMaxCostInvalid, maxCostInput, run.maxCostUsd ?? "");
-        return;
-      }
-      saveRun({ maxCostUsd: parsed.value });
-    },
-  });
-  const runTimeoutInput = sText({
-    id: "setting-run-timeout",
-    type: "number",
-    min: 1,
-    step: 1000,
-    value: run.timeoutMs ?? "",
-    placeholder: s.behaviorUnlimited,
-    onChange: (value) => {
-      const parsed = positiveOrNull(value);
-      if (parsed === undefined) {
-        runRefusal.show(s.behaviorRunTimeoutInvalid, runTimeoutInput, run.timeoutMs ?? "");
-        return;
-      }
-      saveRun({ timeoutMs: parsed.value });
-    },
-  });
-
-  pane.appendChild(
-    sGroup(s.groupRunLimits, [
-      sRow({
-        id: "setting-max-turns",
-        label: s.behaviorMaxTurns,
-        desc: s.behaviorMaxTurnsDesc,
-        control: maxTurnsInput,
-      }),
-      sRow({
-        id: "setting-max-cost",
-        label: s.behaviorMaxCost,
-        desc: s.behaviorMaxCostDesc,
-        control: maxCostInput,
-      }),
-      sRow({
-        id: "setting-run-timeout",
-        label: s.behaviorRunTimeout,
-        desc: s.behaviorRunTimeoutDesc,
-        control: runTimeoutInput,
-      }),
-      sRow({
-        id: "setting-system-prompt",
-        label: s.behaviorSystemPrompt,
-        desc: s.behaviorSystemPromptDesc,
-        control: promptArea,
-        wide: true,
-      }),
-      runRefusal.node,
-    ]),
-  );
+  // The three limits lost their controls (2026-11-05), but a value already in
+  // `run.json` keeps capping the run. Only a set limit is worth a sentence: an
+  // all-null file is the default, and a permanent note about nothing would be
+  // noise. Naming the values that are actually in force is the honest half of
+  // "we removed the UI" (R3) — a silent cap is one the operator cannot see.
+  //
+  // Skipped when the files could not be read: the copy above says so, and
+  // numbers taken from a mirror of a file nobody just read are not "in force".
+  const setLimits = [
+    ["maxTurns", run.maxTurns],
+    ["maxCostUsd", run.maxCostUsd],
+    ["timeoutMs", run.timeoutMs],
+  ].filter(([, value]) => typeof value === "number" && Number.isFinite(value));
+  if (setLimits.length > 0 && !configProblem) {
+    const limitsText = setLimits.map(([name, value]) => `${name} = ${value}`).join(", ");
+    // `run.json` is the name the kernel uses; a host that could not read the
+    // files sends no path, and naming the file is still more useful than
+    // dropping the sentence.
+    pane.appendChild(
+      sHint(
+        s.behaviorRunLimitsNote
+          .replace("{limits}", limitsText)
+          .replace("{path}", state.configPaths?.run ?? "run.json"),
+      ),
+    );
+  }
 
   return pane;
 }

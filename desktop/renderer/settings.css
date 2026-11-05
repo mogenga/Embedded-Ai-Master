@@ -608,6 +608,26 @@
   margin-top: 10px;
 }
 
+/* These buttons borrow `.chip-button` from styles.css, which is now a
+   chrome-less label for the composer (no border, no fill until hover). Here
+   the button is the only thing to click in an otherwise empty page, so it has
+   to look like a control at rest: the chip's shape, but with the settings
+   page's own field border and surface. */
+.settings-empty-actions .chip-button {
+  padding: 5px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  font-family: var(--sans);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.settings-empty-actions .chip-button:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 .settings-empty-card {
   padding: 22px 2px 8px;
 }
@@ -947,14 +967,47 @@
   color: var(--text-secondary);
 }
 
+/* The header's text block: display name on top, service name + vendor under
+   it. Two cards of one vendor are told apart by the top line, and the muted
+   line is what the file and every `service/model` reference actually use. */
+.settings-card-title {
+  /* Grows into whatever the model summary leaves, so two cards of the same
+     vendor are told apart by a label that does not ellipsise at the first
+     character. At 180px the name at least reads as a word rather than as
+     dots; the summary shrinks to a truncated tail first. */
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  gap: 1px;
+}
+
 .settings-card-name {
-  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: var(--text-base);
   font-weight: 600;
+}
+
+.settings-card-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+/* The vendor glyph beside the title. Same 16px box as the picker's mark, so
+   the header and the first field of the card read as one column. */
+.settings-card-mark {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
 }
 
 /* The one thing a collapsed card is for: the summary line. It takes the
@@ -1837,4 +1890,237 @@
   margin-top: 10px;
   display: flex;
   justify-content: flex-end;
+}
+
+/* ---------- provider picker (inside a service card) ----------
+   Replaces the row of "quick add" tiles that used to sit above the cards.
+   The same choice now lives where it applies — the first row of the card it
+   fills in — so a page of services has one list, not a list plus a launcher.
+
+   The control is a custom listbox rather than a native <select>: every row
+   has to carry a vendor glyph, and a native option can only hold text. It is
+   styled to the same height, radius and border as `.setting-select` beside
+   it, because it is the same kind of control and a second, taller look would
+   read as a different class of field. */
+.provider-picker-control {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  /* A vendor name is two words at most; a full-width field would stretch the
+     popover to the card's 500-odd pixels and leave each row mostly empty.
+     The cap is the menu's width too, since the menu is anchored to this box. */
+  max-width: 320px;
+}
+
+.provider-picker {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+  /* `.setting-select`'s box, in one place: 5px/9px padding, 1px
+     --border-strong, --radius-sm, --text-sm, accent on focus. The brief
+     described this border pair as `--border` / `--border-strong`, but those
+     are not what the selects and inputs beside it use — a lighter resting
+     border here would make the one new control the odd one out, which is the
+     opposite of "same set". */
+  padding: 5px 9px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--text);
+  font-size: var(--text-sm);
+  text-align: left;
+  transition: border-color var(--fast) var(--ease);
+}
+
+.provider-picker:hover {
+  border-color: var(--border-strong);
+  background: var(--surface);
+}
+
+.provider-picker:focus-visible,
+.provider-picker[aria-expanded="true"] {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.provider-picker-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-picker-caret {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  color: var(--text-faint);
+  transition: transform var(--fast) var(--ease);
+}
+
+.provider-picker[aria-expanded="true"] .provider-picker-caret {
+  transform: rotate(180deg);
+}
+
+/* Both the trigger row and the menu rows use this box: one glyph, then the
+   name immediately after it — the arrangement the user asked for, and the
+   reason the mark is inline with the text rather than on its own tile. */
+.vendor-mark {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  /* The global `svg` rule at the top of styles.css sets `fill: none` for the
+     stroke sprite; these marks are filled shapes, so they take the ink of
+     whatever row they sit in. */
+  fill: currentColor;
+  stroke: none;
+  color: var(--text-secondary);
+}
+
+/* The placeholder for "custom": a glyph from the stroke sprite, which needs
+   the stroke settings back. It stays muted — a neutral mark, not a brand. */
+.vendor-mark-neutral {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--text-faint);
+}
+
+.provider-menu {
+  position: absolute;
+  z-index: 30;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-popover);
+  animation: slide-up 120ms ease-out;
+}
+
+/* Near the bottom of the window the menu opens upward instead of pushing its
+   last rows — the custom option among them — off screen. Same rule the model
+   and mode menus follow, applied only when the room below is too small. */
+.provider-menu.opens-up {
+  top: auto;
+  bottom: calc(100% + 6px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .provider-menu {
+    animation: none;
+  }
+}
+
+.provider-option {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  /* Same row rhythm as `.mode-option`: 7px/10px, --radius-sm. */
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  text-align: left;
+}
+
+.provider-option:hover:not(:disabled),
+.provider-option[data-highlight="1"] {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+/* The keyboard's position, visible without a pointer. Same idiom as the
+   model menu: an inset outline, so it never competes with the selected row's
+   check mark. */
+.provider-option[data-highlight="1"] {
+  outline: 1px solid var(--border-strong);
+  outline-offset: -1px;
+}
+
+/* The selected row is a neutral surface plus a check, never an accent fill:
+   the same rule the model panel follows, so "selected" reads the same in
+   both menus. */
+.provider-option[aria-selected="true"] {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.provider-option[aria-selected="true"] .vendor-mark {
+  color: var(--text);
+}
+
+.provider-option-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-option-check {
+  flex: 0 0 auto;
+  width: 13px;
+  height: 13px;
+  color: var(--accent);
+}
+
+.provider-menu-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--border);
+}
+
+/* ---------- suggested models (inside a service card) ----------
+   The names the vendor documents, offered rather than written: the file only
+   gets a model the user clicked. The row disappears when nothing is left to
+   offer, so a card never ends with a heading over an empty line. */
+.preset-models {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 0 2px;
+}
+
+.preset-models-label {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  margin-right: 2px;
+}
+
+.preset-model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+  transition: border-color var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+
+.preset-model-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.preset-model-chip-icon {
+  width: 11px;
+  height: 11px;
+  color: var(--accent);
 }
