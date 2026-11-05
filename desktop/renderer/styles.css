@@ -81,7 +81,18 @@
   --normal: 170ms;
 
   --mono: "SF Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
-  --sans: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  /* No `Inter`. It was never installed on this machine — measured with a
+     canvas, `"Inter"` and a deliberately invented family name produce the
+     identical width (114.3308), which is the bare `sans-serif` fallback, while
+     `"Segoe UI Variable Text"` measures 114.9766. The declaration was a dead
+     first step, and worse than dead: on a machine that *did* have Inter the
+     app would change typeface entirely. A Windows-first desktop tool should
+     not have its typography depend on which fonts the user happens to own.
+     Segoe UI Variable is Windows 11's system UI face, which is the right
+     default for a product surface. `--mono` keeps its stack: SF Mono and
+     Cascadia Code are the expected fallbacks there, and a missing entry only
+     falls through to the next name rather than changing the design. */
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
   --shadow-composer: 0 10px 34px rgba(0, 0, 0, 0.42);
   --shadow-popover: 0 14px 40px rgba(0, 0, 0, 0.5);
   /* The sidebar width. `--sidebar-user-width` is written by the resize handle
@@ -215,6 +226,73 @@ body {
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+  /* The parts of the page the design does not draw still carry it. Text
+     selection, the caret, the native checkbox tick and every scrollbar below
+     are browser defaults in a system blue that belongs to no theme; left
+     alone they are the clearest signal that this is a page, not a product. */
+  caret-color: var(--accent);
+  accent-color: var(--accent);
+}
+
+/* A 32 % accent wash is strong enough to read as a selection on every theme
+   and light enough that `--text` keeps its contrast on all four (measured
+   against the washed background: 9.45 dark / 11.11 light / 11.94 contrast /
+   11.83 light-contrast). Selecting with `--accent` itself would have forced
+   white type on a field that sits at roughly 2.8:1 in dark. */
+::selection {
+  background: color-mix(in srgb, var(--accent) 32%, var(--bg));
+  color: var(--text);
+}
+
+/* One scrollbar for the whole window. It used to be two hand-copied rules
+   (`.session-list`, `.transcript`) and Chromium's light default everywhere
+   else, so the settings panes, the model rail, the command palette and the
+   serial monitor each showed a different bar — and every one of them was the
+   OS light one on a dark theme. The thumb is `--border`, a step quieter than
+   `--border-strong`, because a scrollbar is structure, not a control; hover
+   is where it becomes reachable. The 3px transparent border is what keeps the
+   thumb off the track edges: without it the bar reads as a solid stripe.
+   `.workbench-tabs` keeps its own `display: none` — that row is a tab strip
+   that scrolls sideways, and a bar under it would be noise. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: var(--radius-sm);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Links are markdown's business — `.markdown a` was never written, so every
+   one of them painted Chromium's `rgb(0, 0, 238)`: 2.4:1 on the dark canvas,
+   and off-palette on all four themes. `--accent-text` is the token that exists
+   for accent-coloured *text* (the accent itself is a fill and dips under 4.5
+   on every theme as type). Underlines sit 3px below the baseline so
+   descenders stay legible in Chinese and Latin both; the app's other
+   underlined affordance, `.link-button`, uses the same 3px. */
+a {
+  color: var(--accent-text);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--text);
 }
 
 button {
@@ -1166,16 +1244,6 @@ body.resizing-workbench * {
   color: var(--text);
 }
 
-.session-list::-webkit-scrollbar {
-  width: 8px;
-}
-
-.session-list::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: var(--radius-sm);
-  border: 2px solid var(--sidebar);
-}
-
 /* Task state, as a dot the eye can catch while scanning the list. */
 /* The markers before a title sit in a lane that is already inside the
    conversation's indent, so the title starts on the workspace name's left edge
@@ -1476,8 +1544,14 @@ body.resizing-workbench * {
   color: var(--text-secondary);
 }
 
+/* `.session-group:focus-visible` never matched a child button: focus lands on
+   the button itself, so the group div is not `:focus-visible` at all and the
+   `+` vanished the instant a keyboard user tabbed onto it. `:focus-within`
+   is the condition that actually holds while one of the group's descendants
+   has focus — the same one `.session-group-remove` and `.session-more`
+   already use. */
 .session-group:hover .session-group-add,
-.session-group:focus-visible .session-group-add {
+.session-group:focus-within .session-group-add {
   display: grid;
 }
 
@@ -1989,7 +2063,7 @@ body.resizing-workbench * {
    many tool calls have finished, and how much text has streamed. */
 .turn-progress {
   max-width: var(--column-width);
-  margin: 0 auto 22px;
+  margin: 0 auto 16px;
   padding: 0 28px;
   display: flex;
   align-items: center;
@@ -2129,16 +2203,6 @@ mark.find-hit.current {
 }
 
 
-.transcript::-webkit-scrollbar {
-  width: 10px;
-}
-
-.transcript::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: var(--radius-sm);
-  border: 3px solid var(--bg);
-}
-
 /* Conversation width and body size are user preferences (Settings > Appearance).
    The column and every fixed-width block move together so a wide window does
    not leave tool output stranded in a narrow strip. */
@@ -2163,7 +2227,7 @@ mark.find-hit.current {
 
 .turn {
   max-width: var(--column-width);
-  margin: 0 auto 22px;
+  margin: 0 auto 24px;
   padding: 0 28px;
 }
 
@@ -2208,7 +2272,7 @@ mark.find-hit.current {
   align-items: center;
   gap: 12px;
   max-width: var(--column-width);
-  margin: 4px auto 24px;
+  margin: 16px auto 24px;
   padding: 0 28px;
   font-size: var(--text-sm);
   color: var(--text-faint);
@@ -2254,7 +2318,7 @@ mark.find-hit.current {
 }
 
 .turn.assistant.after-tools {
-  margin-top: 14px;
+  margin-top: 16px;
 }
 
 .markdown p {
@@ -2270,7 +2334,7 @@ mark.find-hit.current {
 .markdown h3 {
   font-size: var(--text-md);
   font-weight: 600;
-  margin: 20px 0 8px;
+  margin: 24px 0 8px;
   letter-spacing: -0.01em;
 }
 
@@ -2282,12 +2346,30 @@ mark.find-hit.current {
 
 .markdown ul,
 .markdown ol {
-  margin: 0 0 12px;
+  margin: 0 0 16px;
   padding-left: 22px;
 }
 
+/* The marker is the browser's glyph and takes the item's own colour; at body
+   weight in `--text` it reads as loud as the words it introduces. It steps
+   back to `--text-faint`, which still clears AA on every theme against `--bg`
+   (measured 5.35 dark / 5.02 light / 8.83 contrast / 9.59 light-contrast) — a
+   bullet is punctuation, not content. The 2px left padding is the optical gap
+   between the glyph and the first character, which otherwise touch. */
 .markdown li {
-  margin: 3px 0;
+  margin: 4px 0;
+  padding-left: 2px;
+}
+
+.markdown li::marker {
+  color: var(--text-faint);
+}
+
+/* A nested list is a continuation of its parent item, not a new paragraph:
+   the 16px block gap would separate it from the line it explains. */
+.markdown li > ul,
+.markdown li > ol {
+  margin: 4px 0 0;
 }
 
 .markdown code {
@@ -2300,7 +2382,7 @@ mark.find-hit.current {
 }
 
 .markdown pre {
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -2340,8 +2422,13 @@ mark.find-hit.current {
   font-size: var(--text-sm);
 }
 
+/* A quote is a block, not a paragraph: it takes the block step (16px, like a
+   list, a table or a code block) rather than the 12px paragraph rhythm, so a
+   quote, a list and a table all breathe at the same interval. The left rule is
+   the quotation mark here, not a callout tint — it is `--border-strong`, stays
+   inside 2px, and the brief names the quote's edge as one to keep. */
 .markdown blockquote {
-  margin: 0 0 12px;
+  margin: 0 0 16px;
   padding-left: 14px;
   border-left: 2px solid var(--border-strong);
   color: var(--text-secondary);
@@ -2359,7 +2446,7 @@ mark.find-hit.current {
    zero-dependency renderer — so the block reads as a formula through voice
    alone: centred, serif, a touch larger, with source line breaks preserved. */
 .markdown .math {
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   padding: 10px 16px;
   font-family: Georgia, "Times New Roman", serif;
   font-size: var(--text-md);
@@ -2373,7 +2460,7 @@ mark.find-hit.current {
    zero-dependency renderer — so the block reads as a formula through voice
    alone: centred, serif, a touch larger, with source line breaks preserved. */
 .markdown .math {
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   padding: 10px 16px;
   font-family: Georgia, "Times New Roman", serif;
   font-size: var(--text-md);
@@ -2385,7 +2472,7 @@ mark.find-hit.current {
 
 .markdown table {
   border-collapse: collapse;
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   font-size: var(--text-base);
 }
 
@@ -2457,7 +2544,11 @@ mark.find-hit.current {
  * ran — truncating it would hide the one thing the row exists to say. */
 .tool-group {
   max-width: var(--column-width);
-  margin: 22px auto;
+  /* 24px on both sides, the same block interval `.turn` uses: a tool group is
+     a conversation block, and everything inside it (rows at 3+1+3) stays far
+     tighter, so "turns > tool rows" is carried by the interior spacing rather
+     than by giving the group a smaller outer gap. */
+  margin: 24px auto;
   padding: 0 28px;
   display: grid;
   grid-template-columns: 16px minmax(14ch, max-content) minmax(0, 1fr) 18px;
@@ -2724,17 +2815,17 @@ mark.find-hit.current {
  * folded.
  *
  * Spacing: this is a paragraph of the conversation, not a caption on the
- * block below it, so it takes the transcript's own block interval (the 22px
+ * block below it, so it takes the transcript's block interval (the 24px
  * `.turn` uses) on *both* sides. It used to carry only a 10px bottom margin,
  * and because adjacent vertical margins collapse to the larger one, the gap
- * above/below a block came out as 22px above and 10px below — the narrow side
+ * above/below a block came out 22px above and 10px below — the narrow side
  * being the tool group it happened to precede. That is what made a folded
  * thought read as the tool group's title rather than as the model's own
  * paragraph: it was attached to what followed. With equal margins a reasoning
  * block is equidistant from whatever is next, whichever kind of block it is. */
 .thinking {
   max-width: var(--column-width);
-  margin: 22px auto;
+  margin: 24px auto;
   padding: 0 28px;
   font-size: var(--text-sm);
   color: var(--text-faint);
@@ -2830,7 +2921,7 @@ mark.find-hit.current {
 
 .plan {
   max-width: var(--column-width);
-  margin: 0 auto 18px;
+  margin: 0 auto 24px;
   padding: 0 28px;
 }
 
@@ -3024,17 +3115,53 @@ mark.find-hit.current {
   color: var(--warn);
 }
 
-/* A recovered goal is a notice with rows, not a sentence: each row is one
-   session and one action, and the same tokens as every other notice. */
-/* First-run checklist: a notice with rows, in the same voice as recovery. */
-.notice.setup {
-  border-left: 2px solid var(--accent);
-  padding-left: 12px;
+/* First-run checklist and a recovered goal: two notices that carry rows, not
+   a sentence. Each row is one item and one action, in the same tokens as every
+   other notice.
+ *
+ * Both used to be marked by a 2px accent/warn rule on the left edge — the
+ * category default for a callout, and the one habit the direction brief names
+ * outright. The marker is now the heading: the notice takes a neutral
+ * `--surface` card with a hairline border, and the semantic colour is spent on
+ * a 6px dot in front of the title. A shape plus a title is what says "setup"
+ * or "recovered" — the tint alone would not survive a monochrome screenshot,
+ * the contrast theme, or a colour-blind reader. */
+.notice.setup,
+.notice.recovery {
+  margin-top: 4px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
 }
 
-.setup-head {
-  color: var(--text-secondary);
+/* The card's own title, carrying the state as the same 6px dot the rest of
+   the interface uses for "this is happening" (`.thinking-head`,
+   `.session-state`, `.turn-progress`). The label is `--text` because it is
+   the card's heading; the hue lives on the dot alone. */
+.setup-head,
+.recovery-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 8px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.setup-head::before,
+.recovery-head::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.recovery-head::before {
+  background: var(--warn);
 }
 
 .setup-row {
@@ -3058,22 +3185,16 @@ mark.find-hit.current {
 .setup-hint {
   margin: 6px 0 0;
   padding: 6px 8px;
-  background: var(--surface);
+  /* The card itself is `--surface` now, so the command block needs the raised
+     step and a hairline to stay a separate object — on `--surface` it merged
+     into the card and the `copy this` affordance disappeared. */
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-family: var(--mono);
   font-size: var(--text-xs);
   color: var(--text-secondary);
   white-space: pre-wrap;
-}
-
-.notice.recovery {
-  border-left: 2px solid var(--warn);
-  padding-left: 12px;
-}
-
-.recovery-head {
-  color: var(--text-secondary);
-  margin-bottom: 6px;
 }
 
 .recovery-row {
@@ -3118,9 +3239,60 @@ mark.find-hit.current {
 
 /* ---------- empty state ---------- */
 
+/* The slot is the chat column's own band, directly above the composer card.
+ * The empty state used to live inside `#transcript-scroll` with `margin: 8vh
+ * auto 0`, which left it floating near the top of the scroll area with a few
+ * hundred pixels of nothing between it and the input it introduces. Moving it
+ * out of the scroll box makes it a sibling of `.composer-region`, so it stands
+ * on the card's edge at every width and does not scroll away.
+ *
+ * `[hidden]` must zero the padding, not just the box: leaving `padding: 0 16px
+ * 12px` on a hidden slot would draw an empty band above the composer the
+ * moment the first turn appears.
+ *
+ * The `12px` bottom pad is the slot's only gap to the composer (the card owns
+ * its own top margin-free layout), and it keeps the empty block from touching
+ * the card's rounded top edge. The 16px top pad is the "leads the card"
+ * interval from the shared scale. */
+.empty-slot {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  /* Centred in the band between the top bar and the composer, which lands
+     the introduction slightly above the window's own centre — the reading
+     position a first-run screen wants, rather than pinned just above the
+     input at the very bottom of the column. */
+  justify-content: center;
+  padding: 24px 16px 12px;
+}
+
+.empty-slot[hidden] {
+  display: none;
+}
+
+/* While the empty state is showing the transcript has nothing to say, so it
+   stops growing and hands the whole band to the introduction. Without this
+   the two `flex: 1` siblings split the space evenly and the block settles in
+   the lower half, which is where it was before. `:has()` keeps this pure CSS:
+   the moment a turn arrives the slot is hidden and the transcript takes the
+   column back. */
+.chat-column:has(.empty-slot:not([hidden])) .transcript {
+  flex: 0 0 auto;
+  min-height: 0;
+  /* An empty transcript is pure gutter — 32px of top padding and 16px of
+     bottom padding around nothing. Dropping it lets the introduction centre
+     in the real chat band instead of in whatever is left after a hidden
+     scroll box has taken its share. */
+  padding-block: 0;
+  overflow: visible;
+}
+
+.empty-slot .empty-state {
+  margin: 0 auto;
+}
+
 .empty-state {
   max-width: 620px;
-  margin: 8vh auto 0;
   padding: 0 28px;
   text-align: center;
 }
@@ -3133,7 +3305,10 @@ mark.find-hit.current {
 .empty-mark {
   width: 76px;
   height: 76px;
-  margin-bottom: 22px;
+  /* 24px is the "above a heading" step: the mark is the block's lead and the
+     h1 is the heading, so the space between them belongs to the heading's
+     top side and takes the larger of the two scale steps. */
+  margin-bottom: 24px;
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
@@ -3149,7 +3324,10 @@ mark.find-hit.current {
 .empty-state p {
   color: var(--text-secondary);
   font-size: var(--text-base);
-  margin: 0 auto 26px;
+  /* 24px below the paragraph is the gap to the setup button — the block's one
+     action — so it matches the lead-in above the heading rather than the 26px
+     that sat outside the scale. */
+  margin: 0 auto 24px;
   max-width: 46ch;
 }
 
@@ -4221,15 +4399,19 @@ mark.find-hit.current {
   gap: 6px;
 }
 
+/* A note the operator pinned to a diff line. The accent used to run down its
+   left edge; it is now a full hairline box at `--radius-sm`, with the line
+   number in mono as the locator. A box reads as an annotation *beside* the
+   diff rather than as another hunk of it. */
 .line-comment {
   display: flex;
   align-items: baseline;
   gap: 8px;
   margin: 4px 10px;
   padding: 6px 9px;
-  border-left: 2px solid var(--accent);
+  border: 1px solid var(--border);
   background: var(--surface);
-  border-radius: 0 6px 6px 0;
+  border-radius: var(--radius-sm);
   font-size: var(--text-sm);
   color: var(--text-secondary);
 }
@@ -4263,22 +4445,32 @@ mark.find-hit.current {
 
 /* ---------- sub-agent group ---------- */
 
+/* A child agent's group. It used to be a surface with a state-coloured left
+   rule; the rule is gone and the state now rides the glyph that already leads
+   the header (`corner-down-right`, tinted per state below) plus the count on
+   the right, which reads "3" while running and the finished/failed word after.
+   The card is a hairline box so it separates from the transcript without a
+   colour bar doing the separating. */
 .subagent {
   max-width: var(--column-width);
-  margin: 2px auto 10px;
-  padding: 8px 12px 9px 14px;
-  border-left: 2px solid var(--border-strong);
+  margin: 4px auto 12px;
+  padding: 8px 12px 9px;
+  border: 1px solid var(--border);
   background: var(--surface);
-  border-radius: 0 8px 8px 0;
+  border-radius: var(--radius-sm);
   font-size: var(--text-sm);
 }
 
-.subagent.running {
-  border-left-color: var(--accent);
+/* State is not carried by the tint alone: the count slot holds a running
+   number while the child works and the word "done" / "failed" once it ends
+   (`subagent_end`), so the text tells the state even in monochrome. The glyph
+   tint is the second, redundant cue. */
+.subagent.running .subagent-glyph {
+  color: var(--accent);
 }
 
-.subagent.failed {
-  border-left-color: var(--danger);
+.subagent.failed .subagent-glyph {
+  color: var(--danger);
 }
 
 .subagent-head {
@@ -4408,19 +4600,17 @@ mark.find-hit.current {
   stroke-width: 1.8;
 }
 
-/* A result that arrived on its own, after the turn that started it. */
+/* A result that arrived on its own, after the turn that started it. Same
+   callout rule as `.notice.setup`: the state is the head's icon plus its
+   word, not a coloured edge — `.background-head .icon` already carries the
+   accent (danger when failed) and the state line says it in text. */
 .background-report {
   max-width: var(--column-width);
-  margin: 2px auto 14px;
+  margin: 4px auto 16px;
   padding: 12px 14px;
   border: 1px solid var(--border);
-  border-left: 2px solid var(--accent);
   border-radius: var(--radius-sm);
   background: var(--surface);
-}
-
-.background-report.failed {
-  border-left-color: var(--danger);
 }
 
 .background-head {
@@ -5537,11 +5727,18 @@ mark.find-hit.current {
   background: none;
   padding: 0;
   margin-left: 6px;
-  color: var(--accent);
+  /* The one underlined affordance that is a button, not an `<a>`. It takes
+     the same offset as a link (see the global `a` rule) so a notice that
+     wraps a sentence and a trailing `link-button` does not show two different
+     underline heights on one line. `--accent-text` rather than `--accent`:
+     this button sits on `--surface` inside a notice, where `--accent` measures
+     4.21:1 in the light theme — under AA for body text — while
+     `--accent-text` measures 6.87:1 there. */
+  color: var(--accent-text);
   font: inherit;
   cursor: pointer;
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-underline-offset: 3px;
   white-space: nowrap;
 }
 
