@@ -145,8 +145,9 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 | 滚动到底部 | `button#scroll-bottom` | `index.html:208` |
 | 输入区 | `section#composer-region` | `index.html:213` |
 | 审批条 | `div#pending-permission` | `index.html:214` |
-| 输入框 | `div.composer` | `index.html:233` |
-| 用量弹层 | `div#usage-popover` | `index.html:332` |
+| 输入框 | `div.composer` | `index.html` |
+| 状态页签 | `div#composer-status-tab`（含 `#usage-meter` 触发点） | `index.html` |
+| 用量弹层 | `div#usage-popover`（在状态页签内） | `index.html` |
 | 工作台 | `section#workbench` | `index.html:357` |
 | 设置页 | `dialog#settings-dialog` | `index.html:513` |
 | 命令面板 | `div#command-palette` | `index.html:544` |
@@ -270,8 +271,17 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 ```
 
 - 数据、地址、寄存器、日志、路径、计数一律等宽。
-- 字号阶：`--text-xs: 11px` / `--text-sm: 12px` / `--text-base: 13px` / `--text-md: 14px` / `--text-lg: 17px` / `--text-xl: 22px`，**全部乘 `--ui-scale`**。
-- `--font-scale`（0.9 / 1 / 1.12）单独缩放转录正文，不影响界面 chrome。
+- 字号阶（**2026-11-04 整条上调一档**，用户反馈「默认 100% 字号有点小」）：`--text-xs: 12px` / `--text-sm: 13px` / `--text-base: 14px` / `--text-md: 15px` / `--text-lg: 18px` / `--text-xl: 24px`。前五档**乘 `--ui-scale`**；`--text-xl` 是展示字号（空态标题、用量三格），不缩放，与它原来 22px 的口径一致。
+  | 档位 | 旧值 | 新值 | 主要用途 |
+  |---|---|---|---|
+  | `--text-xs` | 11px | **12px** | 元信息：页签、卡片摘要、时间戳、chip 辅助字 |
+  | `--text-sm` | 12px | **13px** | 设置行说明、控件文字、侧栏会话标题、模型行 |
+  | `--text-base` | 13px | **14px** | 正文标签、设置页导航项、工具名 |
+  | `--text-md` | 14px | **15px** | body 默认（`body { font-size: var(--text-md) }`）、输入框正文 |
+  | `--text-lg` | 17px | **18px** | 页面标题、About 产品名 |
+  | `--text-xl` | 22px | **24px** | 空态标题、用量格数值 |
+- `--font-scale`（0.9 / 1 / 1.12）单独缩放转录正文，不影响界面 chrome；`--ui-scale`（0.9 / 1 / 1.1 / 1.25）的档位未动。
+- 原先是硬编码 `10px` 的两处（串口方向徽标 `.serial-badge`、串口行按钮 `.serial-line-btn`）已改为 `var(--text-xs)`，否则字号阶调大后它们是仅剩的「漏网最小字」。
 
 > `--sans` 优先 Inter，**没有中文回退族**（v1.4 写的是 PingFang SC / Noto Sans SC / Microsoft YaHei）。中文靠系统回退渲染。
 
@@ -281,11 +291,11 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 |---|---|
 | `--radius-sm` | 6px |
 | `--radius` | 10px |
-| `--radius-lg` | 14px |
+| `--radius-lg` | **20px**（2026-11-04 由 14px 上调） |
 | `--shadow-composer` | `0 10px 34px rgba(0,0,0,.42)` |
 | `--shadow-popover` | `0 14px 40px rgba(0,0,0,.5)` |
 
-圆角**只有三档**（源码注释：「three steps, no more」）。阴影只用于输入框与浮层，普通卡片靠 1px 边框分层。
+圆角**只有三档**（源码注释：「three steps, no more」）。`--radius-lg` 上调到 20px 是为了让输入卡片贴近参考稿的圆度；它同时作用于设置/快捷键对话框、命令面板、模型面板与用户气泡，这是该令牌「一档多用」的预期结果，**不是**新增第四档。发送按钮用 `border-radius: 999px` 画成圆形，那是形状而不是档位，不占令牌。阴影只用于输入框与浮层，普通卡片靠 1px 边框分层。
 
 ### 5.5 动效
 
@@ -346,7 +356,10 @@ prometheus.locale  theme  density  width  view  motion  uiScale  fontScale
 prometheus.codeFont  sidebarWidth  sidebarCollapsed
 prometheus.suggestions  updateCheck  setupDismissed  workbench  pane
 prometheus.expandedProjects  collapsedProjects
+prometheus.workbenchWidth  workbenchPane  treeExpanded
 ```
+
+> `prometheus.workbenchPane` 记住工作台最后停留的面板，`prometheus.treeExpanded` 记住文件树里展开过的目录（最多 200 条，超出按最久未用淘汰）。两者都只由渲染层读写，**不写 `providers.json` 或任何配置文件**。`prometheus.pane` 仍是死键（无读写方，见 §7.8）。
 
 > 键名前缀是 `prometheus.*`（**不是** v1.4 的 `eam-theme`；`eam-theme` 随 `src/ui/theme.ts` 删除）。
 
@@ -455,12 +468,35 @@ prometheus.expandedProjects  collapsedProjects
   - 无障碍：真 `<button>` + `aria-expanded` + `aria-controls`，列表折叠时 `aria-hidden="true"`。`title` 由 `setPlanStripTitle()` 按开合状态写 `planToggle` / `planCollapse`，**不挂 `data-i18n-title`**——写死一条会在另一个状态下变成假承诺（R3）。
   - 派生文字（计数、当前步、`title`）没有 `data-i18n` 可扫，`applyLocale` 末尾用 `planItems` 显式重画一次；同一处也补写转录卡标题（见下条）。
   - **顺带修掉的既有缺陷**：转录里计划卡的标题 `计划` 是建卡片时拼进 HTML 的字符串、没有 `data-i18n`，切语言后卡标题不跟着变（计划条已写 `Plan` 而卡片还是 `计划`）。`applyLocale` 现在直接改 `planCard.querySelector(".plan-title").textContent = t.plan`。
-- 控件行：模式选择器、模型选择器、用量胶囊（`#usage-meter`）。
+- **状态页签（2026-11-04，2026-11-05 收窄）**：`#composer-status-tab` 挂在输入卡片上沿，是 `.composer` 的兄弟节点，只在顶角带圆角、无下边框，视觉上与卡片连成一体。内容为「分支 · 目录名 · 上下文环与百分比」。
+  - **高度 25px**（30 → 28 → 25）：它是卡片的一行说明，不是第三条控件带；30px 时读起来像在和输入行、控件行抢位置。25px 仍容得下 12px 字号 / 19.2px 行高的 3px 上下边距，13px 圆环居中。
+  - **宽度比卡片左右各窄 28px**（`max-width: calc(var(--column-width) - 56px)`）：页签底边是平的，必须落在卡片圆角之外的直边上，否则两端会浮在曲线上。
+  - 它**不与计划条、审批条互斥**：页签始终可见，是上下文详情的唯一入口；运行中恰恰最想看一眼占用。
+  - **分支段是潜伏槽位**：判据仍是 `state.git?.available`，但本构建没有任何宿主上报 git 状态（`state.git` 恒为 null，`desktop/MATRIX.md` 记 git 为已隐藏），所以今天不显示。不伪造、不写「unknown」。接入条件见 `docs/page-optimization-todolist.md` T-01。
+  - 顶栏原来的 `#topbar-cwd-branch` 已删除——它从未亮过，是空壳不是功能。
+  - 上下文环由 `renderContextRing()` 用 `stroke-dashoffset` 画；未测量时只剩轨道，**不是**画满。
+- 控件行（2026-11-05 改布局）：模式选择器、模型选择器、推理档**与发送按钮同一行**，整行在卡片自己的底边上，**没有分隔线**。发送按钮从输入行内搬到这一行之后：
+  - 输入行只剩文本框，文本框 `min-height: 46px`（约两行），卡片静止态约 129px 高——比之前高，是刻意的：输入卡片是页面主表面，参考版式给提示词留了真实的呼吸空间。
+  - `.send-button` 36×36 圆形（原 32），`.stop-button` 同步 36 高、胶囊圆角；两者互斥显示，等高才不会让控件行看起来错位。
+  - 去掉 `composer-bar` 的 `border-top`：分隔线把一张卡劈成两个盒子，参考版式用一个面 + 间距区分输入与控件。
+  - **静止态无边框、无底色**（2026-11-04）：`.mode-picker` 与 `.chip-button`（模型、推理档）统一成同一套——静止时是纯文本 + chevron、`--text-secondary`，hover / `[aria-expanded="true"]` 才浮出 `--surface` 底并转 `--text`。三个带框的胶囊并排曾把控件行变成一面边框墙；padding / 圆角 / 行高都没动，所以静止与 hover 之间盒子不变、行不会跳。`chip-button` 不声明 border（裸 `button` 的 `border: none` 生效），与 `.mode-picker` 同盒模型。
 - **模式选择器 = 内核四个权限预设**：`diagnose` / `read-only` / `workspace-write` / `danger-full-access`（`app.js:1452`）。默认 `diagnose`。
-- 用量胶囊点击弹出 `usage-popover`：按输入 / 缓存 / 输出分段的色条 + 分类明细 + 本会话合计。
+- 状态页签里的上下文按钮点击弹出 `usage-popover`：按输入 / 缓存 / 输出分段的色条 + 分类明细 + 输入/缓存/输出三格 + 本会话合计 + 会话成本（仅在配置了价格时出现）+ 清零按钮。**弹层内容与重画前逐项一致**，只换了触发点与锚定位置（现在向上开在页签右缘）。
+- **推理档不进模型行**：它是「这一轮怎么跑」而非「选哪个模型」的属性，搬进模型面板会造成浮层套浮层、`Tab` 语义冲突，并使 `Ctrl+E` 失去常驻显示位置。决定与理由见 `docs/superpowers/specs/2026-11-04-page-optimization-design.md` §6.3。
+- **模型面板（2026-11-05 起按服务 / API Key 划分）**：412px 宽、`--radius-lg` 圆角、10px 内边距，左右两栏。
+  - **左栏服务栏**只在模型来自**多个服务**时出现（单服务时整条消失，面板回到单列），是 `role="tablist"`。每一项 = **一张服务卡 / 一个 API Key**，不按厂商合并：两个 DeepSeek Key 的模型清单与凭据都不同，合成一行就说不清某个模型用的是哪个 Key。
+    - 行内容 = 厂商图标（`vendor-marks.js` 的 `VENDOR_MARKS[row.vendor]`，16px、`fill: currentColor`）+ **显示名称**（`.model-rail-label`，最多两行，超长 `overflow-wrap: anywhere`）。没有已知厂商的服务回退到原来的两字母字标（`.model-rail-monogram`，`providerMark(row.id)` 现算），不编造图标。
+    - 行数据由 `provider-meta.js` 的 `providerRailRows(modelGroups(), meta)` 拼出：`id`（= 服务名，也是 `aria-label` 里括号中的那段）用于比对与 `data-provider`，`displayName` 与 `vendor` 来自渲染层 localStorage。**不改宿主、不改内核**——`models` 事件里没有厂商信息，`providerConfig`（`settings` 事件已带整份文件）与 localStorage 两样都在渲染层。
+    - 焦点行为：点击行 → 右栏换清单，焦点落到过滤框或模型列表；左右键在栏内移动并保持焦点在栏上；`ArrowDown`/`Enter` 从栏进入模型列表。
+  - **右栏**：表头（当前服务的**显示名称**，`title` 里是服务名，或模型数超过阈值时变成过滤框）→ 列表 → 固定的「刷新模型列表」。`aria-label` 同样用显示名称。
+  - **选中行**用中性 `--surface-hover` 底 + 勾，不用 accent 底：accent 只留给勾与焦点环，否则「键盘高亮」与「已选中」两种状态难以区分。
+  - 进场动效 150ms `fade + scale(0.95) + blur(2px)`，`prefers-reduced-motion` 下关闭。
+  - 键盘语义未变：`role="listbox"` / `role="option"` / `aria-selected` / `aria-activedescendant` / Arrow / Home / End / Enter / Tab / Escape 照旧；向左/右键只在面板有服务栏且焦点不在过滤框时切换服务。
+  - **显示名称每打开一次面板重读一次 localStorage**（不缓存）：设置页保存后下一次打开就变，不需要重载。
   > **上下文占用百分比自 2026-10-22 起可见**：内核早在 D-165 就随 `usage` 事件下发 `context{tokens,percent,window}`，但前端把 `#context-label` 写死成 `hidden` 且无人移除，百分比从未显示过。现在 `protocol.measuredContext()` 只在 `tokens` 与 `percent` 都是有限数时才认，否则 `null`（显式「未知」哨兵，**不是 0%**）；`updateMeter` 的三种输入各有语义——`undefined` 保留原值（`state` 事件只是换模式）、`null` 清除并隐藏、真实测量才显示。
   > **同日：D-195 修掉一个更要紧的问题。** `usage` 事件落盘时重新投影日志来测占用率，那一刻 assistant 已写、`tool_result` 未写，`buildMessages` 必然抛「工具批次未闭合」，被空 `catch` 吞掉——**每一条带工具调用的回合都没有占用率**（D-165 起即如此，而本仓库几乎每轮都在调工具）。现在测量移到**发请求之前**，量的是即将送出去的那份消息，这个数字也才真正表达它该表达的东西。
   > `contextBreakdown`（按类别拆分）同日起有生产者：`src/context/breakdown.ts` 的纯函数按 `systemPrompt` / `messages` / `toolResults` / `mcpTools` 分桶，各桶之和强制等于 `used`（等比缩放 + 余数补给最大桶），随同一条 `usage` 事件下发。分段条与图例不再是死代码。
+- **发送按钮是圆形**（`border-radius: 999px`，32×32，accent 实底、无描边）：它是控件行里唯一一个 accent 实心控件，圆角矩形读起来和旁边的胶囊是同一族。`#plus-control` 仍 `hidden`（附件与斜杠命令没有后端，R3），本轮不动它的形态。
 - 文本域高度 `Math.min(220, scrollHeight)`（`app.js:4454`），无内部滚动条。
 - 附件（图片）、`+` 菜单**均已隐藏**（无后端）。**语音输入（麦克风）已于 2026-10-22 整块删除**：按钮、`setupVoice`/`stopVoice`、录音动画、`voiceStart`/`voiceStop` 文案与 `#i-mic` 图标都不在了（Web Speech API 在 Electron 里通常不可用，留着一个永不出现的 `hidden` 空壳只是噪音）。
   > 图片粘贴/拖入的代码**仍在**（`addAttachment` / `renderAttachments`）且会画出缩略图，但 `submit()` 不读 `state.attachments`、内核 `ModelChatMessage.content` 也只是 `string`——所以图片在发送时被静默丢弃。这是 R3 缺口，登记为 **D-188**，不是「已支持」。
@@ -478,6 +514,20 @@ prometheus.expandedProjects  collapsedProjects
 ### 7.8 Workbench 工作台
 
 - 宽 420px（可拖 320–560），内部用 **tab 切换**，只有两个 tab：**板卡（board）** 与 **串口（serial）**。
+
+> **2026-11-05 文件面板（Files）**。上面两条关于 tab 数量与面板清单的描述仍是 v2.0 的历史记录；本轮只改**文件树 / 关闭**，其余面板的取舍以 `desktop/MATRIX.md` 与 §7.8 下方注释为准。
+>
+> - **结构**：`#pane-tree` 是一列——固定的 `.tree-head`（根目录名 + 刷新按钮）在上，`.tree-level#tree-list` 自己滚动。根目录名因此不会随列表滚走；刷新按钮在标记里带 `disabled`，只有 `requestTree` 拿到非空根目录才启用（没有可重读的根时它不该看起来能点），重读根目录并**按记忆重放展开状态**。
+> - **区分目录与文件**：三重信号——图标（`folder` / `file`）、箭头（只有目录有）、目录名 600 字重；选中项另有 `--accent-soft` 底 + 左侧 2px accent 内阴影（`box-shadow: inset`，不占布局）+ `aria-current="true"`。**不只靠颜色**。
+> - **缩进**：每一行自带 `--tree-indent`（深度 × 12px，封顶 8 层），不是嵌套容器——500 项目录仍是 500 个浅元素。超过 8 层的深度只体现在 `data-depth` 与 tooltip 里，不再继续右移，否则 320px 面板只剩名字的首字母。
+> - **长文件名**：`.tree-name` 单行省略号，完整路径在行 `title` 上；320px 面板实测无横向溢出。
+> - **空 / 加载 / 截断**：三者都用 `.tree-note`（`.sidebar-empty` 的变体），缩进与名称对齐。展开一个尚未答复的目录立刻显示「正在读取工作区…」，不是一块空白；宿主截断（>500 项）在列表末尾给出「只列出前 N 项」。
+> - **并发展开**：`treeRequests` 是**先进先出队列**，不再是单个 `pendingTreeTarget`。宿主的命令队列串行执行 `getTree`，回复顺序等于发送顺序，所以连点两个目录时各自的列表落在各自的行下。根请求会把队列里旧的目标清空（它们的内容已被重绘覆盖），但**保留槽位**以维持顺序。`host_exit` 清空整个队列。
+> - **展开记忆**：`prometheus.treeExpanded` 存展开过的目录绝对路径（上限 200，按插入序淘汰最旧的）。展开 / 收起立即写入；字体、语言切换不重绘树，所以不需要额外同步。重开面板、刷新、切走再切回都按它重放（深度上限 16，防止一次重绘打开整条深链）。
+> - **选中记忆**：`.tree-row.active` 由 `openFile` 设一次，之后由每次 `renderTree` 按路径重新标注；切到别的面板再回来仍然是那一行。
+> - **切 tab 不重复拉取**：`openWorkbench("files")` 只在根目录变了或列表为空时才 `getTree`，切走再切回保留滚动位置；主动重读用头部的刷新按钮。
+> - **面板记忆**：`prometheus.workbenchPane` 记住最后的面板，菜单「浏览工作区文件」不带参数打开时回到 **Files 或 File（且仍有打开的文件）**，其它面板一律回 Files——菜单问的是文件。
+> - **关闭路径**：`#close-workbench` 按钮、`Ctrl+\`、以及 **Esc**（见 §7.10 的优先级）。`Esc` 只在焦点**不在文本输入控件**里时关闭工作台；焦点原本在工作台内部时，关闭后还给打开它的控件。焦点仍在别处（例如光标在输入框）时 `Ctrl+\` 关面板不抢焦点。
 - 其余 7 个面板（files / diff / history / tasks / artifact / terminal / browser）的 DOM 仍在 `index.html:381-501`，但**不在 tab 条里**，`openWorkbench()` 对非支持面板直接 return（`app.js:2654`）。空 tab 是死路，不是占位。
 - 板卡面板消费 `board_state`（由内核 `device_status` 事件转换而来），`state.device` 原样透传，**内核与 UI 都不解释、不补全、不推断**。
 - 串口面板有端口 / 波特率选择、过滤、暂停、清空、导出、跟随开关。
@@ -497,11 +547,49 @@ prometheus.expandedProjects  collapsedProjects
 
 > Provider keys / MCP servers / skills / memory / instructions / hooks / packs / system 等页面的 builder 仍留在 `settings.js` 里但**未注册** —— 它们需要内核未暴露的写 API，列出来只会产生"保存按钮无效"的表单。恢复只需在 `settingsPages()` 加一行。
 
+> **上面这张表已过期**：`settingsPages()` 现在注册 9 页（`general` / `connection` / `appearance` / `behavior` / `mcp` / `skills` / `kb` / `tools` / `about`），本文件其他地方（§5.3、§7.6）按实际实现描述。修正这张表不在本次改动范围内，在此标明以免被当作事实源。
+
+**模型服务页（2026-11-05：同一厂商可配多个 Key，用显示名称区分）**
+
+一张卡片 = 一个服务 = 一个 API Key。`providers.json` 是以**服务名**为键的 map，所以同厂商的第二张卡必须换一个键；人看的那行名字则是另一个字段：
+
+| 字段 | 存哪 | 说明 |
+|---|---|---|
+| 服务名（`name`） | `providers.json` 的键 | 模型引用 `服务/模型` 的前半段；自动生成 |
+| 显示名称 | 渲染层 localStorage（`prometheus.providerMeta`，按服务名索引） | 只给人看；空 = 用服务名 |
+| 厂商归属 | 同上 | 预设 id，或 `null` = 用户选了「自定义」 |
+
+- **为什么不进文件**：`ProviderConfigSchema`（`src/config/providers.ts`）是 Zod `z.object`，默认 strip 未知键——写进去会被内核静默剥掉。本任务不改内核，所以两样都存 localStorage；键名记在 `provider-meta.js`（`PROVIDER_META_KEY`）。**服务器名仍是唯一事实源**，localStorage 只是标签。
+- **孤儿条目静默忽略**：文件被手改（服务删了/改名了）时，按服务名查不到就不再显示；下一次保存会按页面上的卡片重写整份 meta，孤儿在这次保存时消失。**删卡保存后其 meta 一并消失**（同一份重写覆盖），所以以后新建同名服务不会继承旧标签。
+- **显示名称不能重复**：保存时比较 trim 后、忽略大小写的标签（空标签按服务名算）；第二张冲突的卡就地报错并聚焦它的显示名称输入框（`duplicateDisplayName`）。
+- **服务名自动生成**（`nextProviderName`）：出厂厂商第一张用厂商 id（`deepseek`），之后 `deepseek-2`、`deepseek-3`；自定义用 `provider1`、`provider2`。换厂商时只有**页面自己生成的名字**跟着换（`isAutoProviderName`：空、当前厂商 id 或它的 `-N`、以及 `providerN`）；手写的 `my-gateway` 不动。
+- **卡片头**：厂商图标 + **显示名称**（第一行，`--text-base`/600）+ `服务名 · 厂商`（第二行，`--text-xs`/`--text-faint`）；模型摘要最多占 46% 宽，先让位给显示名称。折叠态的 `aria-label` 也用显示名称（`展开 / 收起 <显示名称>`）。展开后第一行是显示名称输入，其后才是服务名、地址。
+- **厂商下拉的行为变了**：不再按「服务名 = 厂商 id」反查（`providerPickerOptions(vendorId)` 现在只收归属），**同一厂商的选项不再置灰**——同名冲突已由后缀解决，置灰反而挡住了本任务要的用法。选中厂商只写归属与（可替换时的）地址。
+- **标签写入的错误不吞**：localStorage 写失败（被禁用/写满）时，文件照常保存，但页面顶部出现一行说明「服务已保存、显示名称没存下，重启后会回落到服务名」（`connMetaWriteFailed`）。
+- **不受影响的部分**：`baseUrl` 的替换规则（空着或仍是某个预设地址才替换）、`presetFillFor`、「推荐模型」chip（现在按**归属**而不是名字取模型名）都与上一版一致。
+
+**厂商选择器（2026-11-04 起，行为于 2026-11-05 调整）**：每张服务卡片内的**第一行**，自绘下拉（`sProviderPicker`，WAI-ARIA combobox + listbox）。
+
+- 收起态：厂商图标 + 名称（`--text-sm`、与 `.setting-select` 同高 32px、同圆角 `--radius-sm`、同边框 `--border-strong`）；归属为 `null` 时显示「自定义（手动填写）」+ 铅笔占位图标。
+- 展开态：浮层 `--surface-raised` + `--border` + `--radius` + `--shadow-popover`，行高与 `.mode-option` 一致（7px/10px padding），hover `--surface-hover`，选中行是中性面 + accent 勾（不用 accent 底，与模型面板同一约定）。最后一行是「自定义」，中间用 `--border` 分隔线。**所有行都可选**。
+- 图标来自 `desktop/renderer/vendor-marks.js` 的 `VENDOR_MARKS`（LobeHub icons，MIT，路径数据 24×24，`fill="currentColor"`），**不联网取图标**；未收录的 id 回退到中性铅笔而不是编一个形状。
+- 键盘：Enter / Space / ArrowDown 打开；ArrowUp/Down 移动高亮，Home/End 跳首尾；Enter / Space 选中；Esc 关闭且**阻止冒泡**（否则会关掉整个设置对话框、丢掉草稿），焦点回到触发器；Tab 关闭菜单但走正常 Tab 顺序。方向键与选中不抢焦点——焦点始终在触发器上，高亮走 `aria-activedescendant`。
+- 浮层按 `.settings-panes` 的上下边界决定朝向：下方够高就向下，否则若上方更高就翻到触发器上方；两侧都不够时按可用空间设 `max-height`，菜单在自身内部滚动而**不会溢出面板**。
+
+**行为页（2026-11-05）**：三组，从上到下是「权限」（预设 + 审批超时）、「已记住的决定」（规则列表 + 添加规则）、「系统提示」。
+
+- 「运行上限」整组（每条消息的轮数 / 花费上限 / 请求超时三个输入框及其校验、`saveRunLimits` 的调用点、两个互斥的 `refusal` 行）已删除。`run.json` 里的这三个字段**仍然生效**——内核与宿主照常读写它们。
+- 文件里**确实设了值**时，页面底部出现一行 `.setting-note`：「不在此页编辑 — maxTurns = 7, maxCostUsd = 1.25, timeoutMs = 45000。它们仍然生效，可在 `<run.json 路径>` 中修改。」三个都是 `null` 时**不显示**（默认态没有要说的话，一行关于"什么都没有"的常驻提示只是噪音）。路径取自 `state.configPaths.run`；宿主读不到配置文件时退回字面 `run.json`。
+- 系统提示仍是整行 textarea（`.setting-row.wide`），`change`（失焦）时提交；保存仍是 `saveRunLimits` 整份写 `run.json`，只是渲染层不再有第二个调用方。保存时三个上限字段从 `state.runLimits` 原样带回，**不会被重置成 `null`**。
+- `saveRunLimits` 命令本身保留，宿主 handler 未动；删掉 UI 后它只剩系统提示这一个调用方。
+
 ### 7.10 命令面板与快捷键
 
 - **Ctrl/Cmd+K** 打开命令面板（`paletteEntries()`，`app.js:4913`）。
 - **Ctrl/Cmd+F** 打开查找栏。
-- **Esc** 依次关闭：命令面板 → 查找栏 → 设置/快捷键对话框 → 顶栏菜单 → 模型菜单 → 审批条（**视为拒绝**）→ 中止运行。
+- **Esc** 依次关闭：命令面板 → 查找栏 → 设置/快捷键对话框 → 顶栏菜单 → 模型菜单 → 审批条（**视为拒绝**）→ 工作台（焦点不在输入框时）→ 中止运行。设置页内的厂商下拉是更内层的一面：它自己拦下 Escape（`stopPropagation`），关闭菜单而不关闭对话框。
+- **工作台的 Escape 排在审批条之后、中止之前**，理由见 §7.8。焦点在输入框 / textarea / select / contenteditable 里时**不关闭工作台**：快捷键表承诺 Esc 是「停止当前回合」，光标在输入区是常态。
+- 关闭工作台后焦点回到打开它的控件（菜单入口是 `#more-button`；工具行、面板内按钮这类还活着的控件回到它自己）。只有焦点原本在工作台内部、或已经掉到 `body` 时才归还——`Ctrl+\` 在光标位于输入框时关面板，不会把光标拽回顶栏。
 
 ### 7.11 空态与错误态
 
@@ -720,7 +808,7 @@ interface ToolAnnotations {
 - 状态不得只靠颜色：同时提供文字标签、图标或形状。
 - 输入框有可见标签或 `aria-label`；表单控件使用原生元素。
 - 支持系统减少动效偏好。
-- 最小字号 11px（`--text-xs`）且仅用于元信息。
+- 最小字号 12px（`--text-xs`，2026-11-04 由 11px 上调）且仅用于元信息。
 
 > **已知缺口**：多数图标按钮用 `title`（经 `data-i18n-title`）而非 `aria-label` 承载可访问名。`title` 在部分屏幕阅读器与触屏上不朗读，键盘用户需悬停才能看到。补 `aria-label` 时应与 i18n 键一起补。
 
@@ -809,7 +897,7 @@ interface ToolAnnotations {
 | 6 | 视觉验收无自动化守护 | —— | 旧 `scripts/verify-ui.mjs` 已随 `src/ui` 删除；按 §12 新清单重写 |
 | 7 | `vite` 是死依赖 | `package.json` devDependencies | 移除（`vitest` 自带所需版本） |
 | 8 | 阶段 4 交互层（回放 / 导出 / 设备控制）未落地 | `docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` §7-§9 | 该 spec 的 §7-§9 依赖已删除的 `src/ui`（12 文件、约 30 个导出符号），需按本前端重写；详见 D-166 |
-| 9 | ~~MCP / 权限规则 / 运行参数（systemPrompt、maxTurns、maxCostUsd、timeoutMs）无前端入口~~ **已修（2026-10-21）** | 内核 `src/config/app-config.ts` + 宿主命令 + `settings.js` | 设置页「MCP 服务器」与「行为」两页读写 `mcp.json` / `permissions.json` / `run.json`；运行上限由宿主从 `run.json` 读取后随每次 prompt 下发（原 `GET/PUT /api/config` 端点已随 HTTP 层删除） |
+| 9 | ~~MCP / 权限规则 / 运行参数（systemPrompt、maxTurns、maxCostUsd、timeoutMs）无前端入口~~ **已修（2026-10-21）** | 内核 `src/config/app-config.ts` + 宿主命令 + `settings.js` | 设置页「MCP 服务器」与「行为」两页读写 `mcp.json` / `permissions.json` / `run.json`；运行上限由宿主从 `run.json` 读取后随每次 prompt 下发（原 `GET/PUT /api/config` 端点已随 HTTP 层删除）。**2026-11-05 起「行为」页只编辑 `systemPrompt`，三个上限仍由内核读取生效、但不再有 UI 入口**（见 §7.9） |
 | 10 | 串口监视器已从工作台移除（工作台现有 Board / File / Artifact 三个 tab） | `index.html` 工作台 | `serialOpen`/`serialStatus`/`serialRead` 无宿主实现，内核只经 MCP 工具暴露串口；探针的串口状态在板卡面板「设备」段显示。恢复需要先给内核补串口命令 |
 
 ---

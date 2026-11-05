@@ -20,12 +20,12 @@
 | `loadSession` | 读整篇日志重建转录，并把**会话记录的工作目录采纳为当前 cwd**（`adoptSessionWorkdir`）：顶栏、文件树、`getFile` 边界三处一起跟随；目录已消失/不是目录/读不了时**不改 cwd** 并发 warn notice（「已不存在」与「无法访问」分开说） |
 | `listSessions` | 标题取首条 user 事件（缓存，最多扫 30 条）。支持 `includeArchived` / `cwd` / `limit`：归档行默认隐藏，`total` 是过滤后的总数（`slice` 前算），分页按 `updatedAt` 倒序稳定切片。`status` 筛选只认 `working` |
 | `getSettings` | UI 偏好 + 三份配置文件（`mcpServers` / `permissions` / `run`）及其路径，外加模型服务的两种形状：`providers`（选单用的扁平列表）与 `providerConfig`（`providers.json` 本身，设置页整份写回）。`providersError` 在文件读坏时给出原因，页面据此说明为什么表单是空的 |
-| `saveProviders` | 整份写 `providers.json`，直写后从磁盘重新 `loadProviders`（不信任入参）。模型引用失效时自动回退到首个可用引用并重建 runner |
+| `saveProviders` | 整份写 `providers.json`，直写后从磁盘重新 `loadProviders`（不信任入参）。模型引用失效时自动回退到首个可用引用并重建 runner。设置页每张服务卡片第一行的**厂商下拉**只是填表（`desktop/renderer/provider-presets.js` 的静态数据 + `vendor-marks.js` 的图标），走的仍是这条命令——没有第二套保存路径；旧的页顶七张「快速添加」卡片已删除。**显示名称与厂商归属不走这条命令**：内核 schema 会剥掉未知键，两者存在渲染层 localStorage（`desktop/renderer/provider-meta.js` 的 `prometheus.providerMeta`），`providers.json` 里只有服务名——因此宿主与内核都没有对应字段，模型面板的按服务分组也完全在渲染层完成 |
 | `testProvider` | 探测一个模型服务：调内核 `probeProvider`（`dist/model/probe.js`，缺失时回「未编译，请先 build」而不是崩宿主）。回 `provider_test{ok, baseUrl, models?, error?, code?, latencyMs?}`；`models` 拿不到时字段不存在。**不进命令队列**，探测可能占用 10s，不能把 abort 堵在后面 |
 | `saveMcpServer` | 合并同名项后整份写 `mcp.json` |
 | `removeMcpServer` | 按 name 删除 |
 | `savePermissions` | 整份写 `permissions.json`（`preset` / `approvalTimeoutMs` / `rules`） |
-| `saveRunLimits` | 整份写 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`），下一回合生效。`maxTurns: null` 表示**不限制轮数**（2026-10-22 起默认值就是 `null`，见 D-183 补充）；`0` / 负数 / 非整数仍会被拒绝——把笔误当「不限」会让用户以为上限生效了 |
+| `saveRunLimits` | 整份写 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`），下一回合生效。`maxTurns: null` 表示**不限制轮数**（2026-10-22 起默认值就是 `null`，见 D-183 补充）；`0` / 负数 / 非整数仍会被拒绝——把笔误当「不限」会让用户以为上限生效了。**2026-11-05 起渲染层只剩系统提示一个调用方**：行为页的「运行上限」三个控件已删，宿主 handler 保留；渲染层整份写回时把 `state.runLimits` 里的旧值原样带回，不重置 |
 | `sessionFlags` | 改名/置顶/归档，写旁挂 `meta.json`（header 校验会丢弃未知字段） |
 | `archiveSessions` | 批量归档 `{ids: string[]}`，回 `sessions_archived{archived, failed:[{id, reason}]}` 并推一份 `sessions`。侧栏「移除工作区」就是它：工作区是渲染层按 `cwd` 分组**派生**的概念，没有独立清单，所以「移除」只能是「归档其中的会话」——**不删任何文件，也不删项目文件夹**。收 **id 列表而不是 cwd**：分组键 `normalizeCwd` 归渲染层所有，宿主再算一遍就是同一事实的第二份定义。逐个处理，某个失败不回滚其余，失败项带原因如实回报（R3） |
 | `deleteSession` | 删除会话目录；锁被占用时 409。拒绝删除当前打开的会话 |
