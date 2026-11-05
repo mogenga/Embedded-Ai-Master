@@ -59,6 +59,7 @@ id_dsa
 id_dsa.*
 
 # 编辑器与操作系统
+.claude/
 .idea/
 .vscode/
 .DS_Store
