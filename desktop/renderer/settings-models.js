@@ -40,26 +40,42 @@ export function availableModelEntries(models, listedIds) {
 }
 
 /**
- * The status line of a successful test.
+ * Which kind of credential a service card holds, from what is typed into it.
  *
- * Three facts, each omitted rather than faked when it is not known:
- * - a latency that is not finite gets no segment (never "0 ms");
- * - a count of zero is a different sentence, not "0 models available" — the
- *   endpoint answered but listed nothing, and those are different outcomes;
- * - an unknown locale falls back to English, like the rest of the settings
- *   dictionary.
+ * - `direct`: a key in `apiKey`, which the kernel prefers when both are set;
+ * - `env`: only the NAME of an environment variable;
+ * - `missing`: neither.
+ *
+ * `env` is deliberately not called "configured": the renderer cannot read the
+ * app's environment, so whether that variable is set is unknown here. The
+ * header states which kind it is rather than implying the service is ready
+ * (R3). Values are trimmed the way `resolveProviderApiKey` trims them, so a
+ * whitespace-only field is not a credential.
  */
-export function connectionSummary(locale, { modelCount, latencyMs } = {}) {
+export function serviceKeyKind({ apiKey, apiKeyEnv } = {}) {
+  const direct = typeof apiKey === "string" ? apiKey.trim() : "";
+  if (direct !== "") return "direct";
+  const env = typeof apiKeyEnv === "string" ? apiKeyEnv.trim() : "";
+  return env !== "" ? "env" : "missing";
+}
+
+/**
+ * What a collapsed card's header states about one service.
+ *
+ * `modelCount` counts named rows only (a card always carries at least one
+ * blank row), and a non-finite count reads as zero rather than NaN. `noBaseUrl`
+ * is true only for an empty field after trimming: a URL that is present but
+ * malformed is a different fact, and save/test state it where the field is.
+ */
+export function serviceHeaderFacts({ apiKey, apiKeyEnv, baseUrl, modelCount } = {}) {
+  const key = serviceKeyKind({ apiKey, apiKeyEnv });
   const count = Number.isFinite(modelCount) ? Math.max(0, Math.trunc(modelCount)) : 0;
-  const zh = locale === "zh";
-  if (count === 0) {
-    return zh ? "端点可达，但没能列出模型" : "The endpoint answered, but it did not list any models.";
-  }
-  const head = zh
-    ? `连接正常 · ${count} 个模型可用`
-    : `Connected · ${count} ${count === 1 ? "model" : "models"} available`;
-  if (!Number.isFinite(latencyMs)) return head;
-  return `${head} · ${Math.round(latencyMs)} ms`;
+  return {
+    key,
+    envName: key === "env" ? String(apiKeyEnv).trim() : "",
+    modelCount: count,
+    noBaseUrl: (typeof baseUrl === "string" ? baseUrl : "").trim() === "",
+  };
 }
 
 /**

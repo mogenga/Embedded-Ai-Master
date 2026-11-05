@@ -6,6 +6,9 @@ import { escapeHtml, renderMarkdown, IncrementalRenderer } from "./markdown.js";
 import { createSettings } from "./settings.js";
 import { icon, setIcon } from "./icons.js";
 import { planSummary } from "./plan-summary.js";
+import { providerMark } from "./provider-presets.js";
+import { providerRailRows, readProviderMeta } from "./provider-meta.js";
+import { VENDOR_MARKS } from "./vendor-marks.js";
 import { nextThinkingExpanded, normalizeTranscriptView, thinkingExpandedOnEnd } from "./thinking-view.js";
 
 /** Saved preferences are restored here; the host gets them on init. */
@@ -18,7 +21,6 @@ const api = window.prometheus;
 
 const $ = (id) => document.getElementById(id);
 const transcript = $("transcript");
-const emptyState = $("empty-state");
 const input = $("input");
 const sendButton = $("send-button");
 const stopButton = $("stop-button");
@@ -29,7 +31,6 @@ const effortControl = $("effort-control");
 const modelPicker = $("model-picker");
 const modelMenu = $("model-menu");
 const modelLabel = $("model-label");
-const contextLabel = $("context-label");
 const pendingPermission = $("pending-permission");
 const pendingQuestion = $("pending-question");
 const sessionList = $("session-list");
@@ -39,14 +40,12 @@ const planStripCount = $("plan-strip-count");
 const planStripCurrent = $("plan-strip-current");
 const planStripList = $("plan-strip-items");
 
-const transcriptScroll = $("transcript-scroll");
 const workbench = $("workbench");
 const workbenchTabs = $("workbench-tabs");
 const workbenchMeta = $("workbench-meta");
 const diffFilelist = $("diff-filelist");
 const diffRoot = $("diff-root");
 const fileRoot = $("file-root");
-const fileTree = $("pane-tree");
 const changesList = $("changes-list");
 const changesSummary = $("changes-summary");
 const checkpointList = $("checkpoint-list");
@@ -57,8 +56,6 @@ const terminalPrompt = $("terminal-prompt");
 
 const state = {
   busy: false,
-  /** The next-turn suggestion currently offered; Tab accepts it. */
-  suggestion: "",
   goalRun: null,
   mode: "ask",
   effort: "auto",
@@ -95,7 +92,6 @@ const state = {
   selectedFile: null,
   /** Pending "the preview never arrived" timeout; cleared on the reply. */
   fileLoadTimer: null,
-  tree: [],
   cwd: "",
   /**
    * Occupancy of the current transcript, or null when nothing measured it.
@@ -128,6 +124,13 @@ const state = {
   // default and the only pane the strip can start on.
   pane: "serial",
   git: null,
+  /**
+   * Which provider the model panel's rail currently shows. A view filter over
+   * the model list, not a selection: it resets to the provider of the model in
+   * use whenever that name is no longer in the list (a `models` event, an
+   * endpoint switch), so the panel never opens onto an empty column.
+   */
+  modelRailProvider: null,
   artifacts: [],
   selectedArtifact: null,
   /**
@@ -154,8 +157,6 @@ const state = {
   mentionFiles: [],
   /** Sub-agent records for the Tasks pane. */
   subagents: [],
-  /** Absolute root the Files pane last asked for; "" means no workspace yet. */
-  treePath: "",
   pr: null,
   commands: [],
   /**
@@ -220,6 +221,53 @@ let t = getDict(state.locale);
  */
 let applySettingsLocale = () => {};
 
+/**
+ * Repaint the caption button that depends on the window's state, or nothing.
+ *
+ * The maximize/restore caption is the one control whose name is not a fixed
+ * dictionary entry: the same button is "Maximize" in one state and "Restore"
+ * in the other. The `[data-i18n-title]` sweep below would paint the resting
+ * name over a maximized window, so the live state has to be re-applied after
+ * it. Assigned once the window-controls block runs, long before any locale
+ * switch.
+ */
+let applyWindowState = () => {};
+
+/**
+ * Does this element carry a name of its own in visible text?
+ *
+ * A control that shows words is already named by them, and an `aria-label`
+ * would replace that name rather than complete it. A readout does not count:
+ * `—`, `0`, `1/2` are figures, not names, so an icon-only button that happens
+ * to print one still needs a label. `innerText` (not `textContent`) is the
+ * right read here — it skips the `[hidden]` badge inside the changes button,
+ * which `textContent` would have counted as the text "0".
+ */
+function hasVisibleName(node) {
+  return /\p{L}/u.test(node.innerText ?? "");
+}
+
+/**
+ * Paint an icon-only control's tooltip, and name it with the same string.
+ *
+ * Most of these strings come from `[data-i18n-title]` and are swept below, but
+ * a few change at runtime (a paused serial port, a maximized window, the
+ * current session filter), and those used to move the tooltip while leaving
+ * the accessible name behind on the old value. One helper keeps the two in
+ * step. `aria-labelledby` already names the element, and a `<label>` is named
+ * by the text it wraps; neither is touched.
+ */
+function setControlTitle(node, text) {
+  // A key with no entry in this dictionary leaves the element as it was: one
+  // language missing a string must not blank the tooltip in the other.
+  if (!node || typeof text !== "string") return;
+  node.title = text;
+  const named = node.hasAttribute("aria-labelledby") || (node.tagName === "LABEL" && hasVisibleName(node));
+  if (named) return;
+  if (String(text ?? "").trim() === "") node.removeAttribute("aria-label");
+  else if (!hasVisibleName(node)) node.setAttribute("aria-label", text);
+}
+
 function applyLocale(locale, { announce = false } = {}) {
   state.locale = locale;
   t = getDict(locale);
@@ -229,10 +277,7 @@ function applyLocale(locale, { announce = false } = {}) {
     const value = t[node.dataset.i18n];
     if (typeof value === "string") node.textContent = value;
   });
-  document.querySelectorAll("[data-i18n-title]").forEach((node) => {
-    const value = t[node.dataset.i18nTitle];
-    if (typeof value === "string") node.title = value;
-  });
+  document.querySelectorAll("[data-i18n-title]").forEach((node) => setControlTitle(node, t[node.dataset.i18nTitle]));
   document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
     const value = t[node.dataset.i18nPlaceholder];
     if (typeof value === "string") node.placeholder = value;
@@ -242,8 +287,8 @@ function applyLocale(locale, { announce = false } = {}) {
   $("terminal-restart").textContent = t.terminalRestart;
   const terminalTab = workbenchTabs.querySelector('[data-pane="terminal"]');
   if (terminalTab) terminalTab.textContent = t.paneTerminal;
-  sendButton.title = t.sendTitle;
-  stopButton.title = t.stopTitle;
+  setControlTitle(sendButton, state.busy ? t.queueSend : t.sendTitle);
+  setControlTitle(stopButton, t.stopTitle);
   // The sidebar workspace entry is written by renderTopbarLocation, and its
   // "no folder" text and tooltip are language-dependent, so redraw it here
   // after `t` has been swapped. This runs before the title assignment below
@@ -253,7 +298,9 @@ function applyLocale(locale, { announce = false } = {}) {
   $("refresh-sessions").title = t.refresh;
   const search = $("session-search");
   search.placeholder = t.searchSessions;
-  search.title = t.searchSessions;
+  // A placeholder is not a name: it disappears as soon as the field has
+  // content, and some screen readers skip it. The field gets a real label.
+  setControlTitle(search, t.searchSessions);
   $("find-input").placeholder = t.findPlaceholder;
   // No update control lives here: the About page builds its own button on
   // demand, and `#check-update` (looked up here for years) was never in the
@@ -299,6 +346,9 @@ function applyLocale(locale, { announce = false } = {}) {
     fillSerialControls();
     renderSerialStatus();
   }
+  // Last, after the sweep: this caption's name follows the window's state, and
+  // the sweep just painted the resting one.
+  applyWindowState();
   void announce;
 }
 
@@ -353,12 +403,36 @@ function setScrollButtonVisible(away) {
   button.classList.remove("entering", "leaving");
 }
 
+/**
+ * The slot the empty state lives in.
+ *
+ * The slot is hidden, not just the card: a hidden child still leaves the
+ * slot's own padding standing, which would keep an empty band above the
+ * composer long after the first turn.
+ */
+const emptySlot = $("empty-slot");
+
 function hideEmptyState() {
-  if (emptyState && !emptyState.hidden) emptyState.hidden = true;
+  if (emptySlot && !emptySlot.hidden) emptySlot.hidden = true;
 }
 
-function addNode(html) {
-  hideEmptyState();
+/**
+ * Draw the composer's introduction back for a session with no turns.
+ *
+ * The element is a sibling of the transcript, not a child, so it has to be
+ * toggled rather than re-appended: it is not conversation content and must not
+ * scroll away with it.
+ */
+function showEmptyState() {
+  if (emptySlot && emptySlot.hidden) emptySlot.hidden = false;
+}
+
+function addNode(html, { keepEmptyState = false } = {}) {
+  // A notice is the shell talking, not a turn: a startup notice used to hide
+  // the introduction on a conversation that was still empty, leaving the first
+  // screen with one dim line and no way in. Turns, tool rows and plans are
+  // conversation content and do retire it.
+  if (!keepEmptyState) hideEmptyState();
   const wrapper = document.createElement("div");
   wrapper.innerHTML = html;
   const node = wrapper.firstElementChild;
@@ -1023,7 +1097,7 @@ function endThinking() {
 function addNotice(level, text) {
   const cls = level === "warn" ? "warn" : level === "error" ? "error" : level === "dim" ? "dim" : "";
   if (!cls) return;
-  addNode(`<div class="notice ${cls}">${escapeHtml(text)}</div>`);
+  addNode(`<div class="notice ${cls}">${escapeHtml(text)}</div>`, { keepEmptyState: true });
 }
 
 /**
@@ -1175,41 +1249,6 @@ planStripToggle?.addEventListener("click", () => {
 
 /* ---------- state ---------- */
 
-/**
- * Suggest the next thing to ask, after a turn ends.
- *
- * Drawn from the turn that just finished rather than a generic list: "run the
- * tests" is only a good suggestion when the agent just said they pass. Three
- * shapes cover what a follow-up usually is — verify, explain, continue.
- */
-function suggestNextTurn() {
-  const suggestion = $("composer-suggestion");
-  if (!suggestion) return;
-  const text = summariseLastAssistant();
-  if (!text || localStorage.getItem("prometheus.suggestions") === "0") {
-    suggestion.hidden = true;
-    return;
-  }
-  const lower = text.toLowerCase();
-  let next = "";
-  if (/test/.test(lower) && !/pass(ed|ing)?/.test(lower)) next = t.suggestRunTests;
-  else if (/error|fail/.test(lower)) next = t.suggestFixErrors;
-  else if (/implemented|added|changed/.test(lower)) next = t.suggestReviewDiff;
-  if (!next) {
-    suggestion.hidden = true;
-    return;
-  }
-  state.suggestion = next;
-  suggestion.querySelector(".composer-suggestion-text").textContent = next;
-  suggestion.hidden = false;
-}
-
-function clearSuggestion() {
-  state.suggestion = "";
-  const suggestion = $("composer-suggestion");
-  if (suggestion) suggestion.hidden = true;
-}
-
 function setBusy(busy) {
   state.busy = busy;
   // A live region that announces every streamed token makes a screen reader
@@ -1234,7 +1273,7 @@ function setBusy(busy) {
   // the two ways to send disagreed. The button now queues as well, and says so.
   sendButton.disabled = false;
   sendButton.classList.toggle("queues", busy);
-  sendButton.title = busy ? t.queueSend : t.sendLabel;
+  setControlTitle(sendButton, busy ? t.queueSend : t.sendLabel);
   // Finishing a turn must not paint "ready" over a stopped host or a config
   // error that is still the actual state.
   if (busy) setStatus("statusWorking");
@@ -1350,11 +1389,11 @@ function runFind() {
     return;
   }
   const needle = query.toLowerCase();
-  const walker = document.createTreeWalker(transcriptScroll, NodeFilter.SHOW_TEXT, {
+  const walker = document.createTreeWalker(transcript, NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => {
       if (!node.nodeValue || !node.nodeValue.toLowerCase().includes(needle)) return NodeFilter.FILTER_REJECT;
       const parent = node.parentElement;
-      if (!parent || parent.closest(".find-bar, .empty-state, script, style")) return NodeFilter.FILTER_REJECT;
+      if (!parent || parent.closest(".find-bar, script, style")) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     },
   });
@@ -1856,14 +1895,9 @@ function applyContext(context) {
     // Strings are rejected rather than coerced — a coerced `"40"` would look
     // like a measurement the kernel never sent.
     state.context = null;
-    contextLabel.textContent = "";
-    contextLabel.hidden = true;
+    renderContextFigure();
     return;
   }
-  // The window cannot be more than full. The kernel already clamps to 100,
-  // so this only guards against a malformed sender; it never turns a real
-  // under-100 figure into anything else.
-  const shown = Math.min(100, Math.round(percent));
   state.context = {
     // A missing token count stays unknown rather than becoming 0: the
     // percentage is what was measured, and the count is not implied by it.
@@ -1874,16 +1908,14 @@ function applyContext(context) {
       ? { window: context.window }
       : {}),
   };
-  // The chip is one glance wide, so it rounds; the popover keeps the
-  // kernel's one-decimal figure. Unhiding here is what makes the reading
-  // visible at all — the markup ships it hidden (R3: no measurement yet).
-  contextLabel.textContent = `${shown}%`;
-  contextLabel.hidden = false;
+  // The tab is one glance wide, so it rounds; the popover keeps the kernel's
+  // one-decimal figure. Both are fed from `state.context`, never from each
+  // other, so they cannot drift.
+  renderContextFigure();
   // The window is what turns the percentage into "how much is left"; the
   // model picker knows it too, but the kernel's figure wins when it sends one.
   if (state.context.window && state.context.window !== state.contextWindow) {
     state.contextWindow = state.context.window;
-    renderContextLength();
   }
 }
 
@@ -1963,19 +1995,48 @@ function formatCost(usd) {
 }
 
 /**
- * The model's window next to its name, e.g. "1M" — the figure the popover
- * explains. Kept to one glance-sized number: the exact window is in the
- * popover, where there is room for it.
+ * Bring the status tab's context figure in line with what has been measured.
+ *
+ * The tab shows the occupancy **share**, not the window's size: a reader
+ * glancing at it asks "how full is it", and the size is a property of the
+ * model that belongs in the popover beside the tokens it measures. Before any
+ * measurement the figure is an em dash — the same "unknown" the popover uses,
+ * so the two never disagree about what is known (R3).
  */
-function renderContextLength() {
-  const node = $("context-length");
-  if (!node) return;
-  const window = Number(state.contextWindow) || 0;
-  if (!window) {
-    node.textContent = "";
-    return;
+function renderContextFigure() {
+  const label = $("context-label");
+  const measured = state.context !== null && typeof state.context?.percent === "number";
+  if (label) {
+    label.textContent = measured ? `${Math.min(100, Math.round(state.context.percent))}%` : "—";
+    // Tabular figures: the label is a fixed-width slot, and a proportional
+    // "9%" → "10%" reflows the tab by a pixel every time it ticks over.
+    label.classList.toggle("unknown", !measured);
   }
-  node.textContent = window >= 1_000_000 ? `${Math.round(window / 1_000_000)}M` : formatTokens(window);
+  renderContextRing(measured ? state.context.percent : null);
+}
+
+/**
+ * The ring around the context figure.
+ *
+ * Its dash offset is the measured share of the window. Two states are not a
+ * percentage and must not be drawn as one (R3): no measurement yet leaves the
+ * ring as a plain track — **not** a full circle. An unstyled `<circle>` has no
+ * dash array, which paints the whole circumference: that read as "100 % used"
+ * from the first frame until the first `context` event arrived. Setting the
+ * array explicitly here makes the empty state honest.
+ *
+ * The transform rotation puts the arc's start at twelve o'clock.
+ */
+const CONTEXT_RING_CIRCUMFERENCE = 2 * Math.PI * 6;
+
+function renderContextRing(percent) {
+  const ring = $("context-ring");
+  if (!ring) return;
+  const measured = typeof percent === "number" && Number.isFinite(percent);
+  const share = measured ? Math.min(100, Math.max(0, percent)) / 100 : 0;
+  ring.style.strokeDasharray = String(CONTEXT_RING_CIRCUMFERENCE);
+  ring.style.strokeDashoffset = String(CONTEXT_RING_CIRCUMFERENCE * (1 - share));
+  ring.classList.toggle("empty", !measured);
 }
 
 /** Fill the usage popover from state. Harmless while it is closed. */
@@ -2268,6 +2329,24 @@ function renderEffortMenu() {
  *  costs more (a row, a tab stop) than it saves. */
 const MODEL_FILTER_THRESHOLD = 8;
 
+/**
+ * Display names and vendor attribution, read fresh from localStorage.
+ *
+ * The settings page writes them on Save; this panel only reads. Reading on
+ * every draw (rather than caching) is what makes a renamed service show up the
+ * next time the panel opens, and a storage that cannot be reached degrades to
+ * "nothing stored" — the service name is the honest fallback.
+ */
+function providerMeta() {
+  let storage = null;
+  try {
+    storage = typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    storage = null;
+  }
+  return readProviderMeta(storage);
+}
+
 /** The part of a `provider/model` reference the picker calls the model. */
 function modelNameOf(model) {
   if (model.name) return model.name;
@@ -2315,9 +2394,10 @@ function renderModels(models, current, source, error) {
     modelLabel.removeAttribute("data-i18n");
     modelPicker.classList.remove("unavailable");
     // The meter is a share of the model's real context, not a placeholder.
+    // Only the stored window changes here: the figure on the tab is the
+    // measured share, and switching models does not un-measure the transcript.
     const active = state.models.find((model) => model.id === current);
     if (active && Number.isFinite(active.contextLength)) state.contextWindow = active.contextLength;
-    renderContextLength();
   } else {
     // Nothing to show: the label must still leave the loading state, or the
     // chip spins forever on a misconfigured endpoint. The key goes *on* here
@@ -2341,6 +2421,18 @@ function modelGroups() {
     groups.get(provider).push(model);
   }
   return [...groups].map(([provider, models]) => ({ provider, models }));
+}
+
+/**
+ * The rail's rows: one per configured service (one card, one API key), with
+ * the display name and vendor the settings page stored for it.
+ *
+ * A service is the grouping unit, not the vendor: two DeepSeek keys hold
+ * different credentials and different model lists, so merging them under one
+ * vendor row would hide which key a model comes from.
+ */
+function modelRailRows() {
+  return providerRailRows(modelGroups(), providerMeta());
 }
 
 /** Current filter text; empty when the field is not on screen. */
@@ -2471,26 +2563,39 @@ function renderModelMenu() {
   // One provider is not a grouping, it is a label above every row saying the
   // same thing; the chip already names where the model came from.
   const groups = modelGroups();
+  // The rail's rows carry what the groups cannot: a human label and a vendor
+  // icon for each service. Read once per draw so the list and the rail come
+  // from the same snapshot of localStorage.
+  const railRows = modelRailRows();
   const showGroups = groups.length > 1;
+  // Which provider the right-hand list is showing. The rail is a view filter,
+  // not a selection: switching providers must not switch models, so this is
+  // renderer-local state, reset to the model in use whenever none is set.
+  if (showGroups && !groups.some((group) => group.provider === state.modelRailProvider)) {
+    state.modelRailProvider = providerOf(state.model ?? "");
+  }
+  const shownGroups = showGroups
+    ? groups.filter((group) => group.provider === state.modelRailProvider)
+    : groups;
+  const shownRail = railRows.find((row) => row.id === state.modelRailProvider);
   let shown = 0;
-  for (const group of groups) {
+  for (const group of shownGroups) {
     const matches = filter
       ? group.models.filter((model) => `${model.id} ${modelNameOf(model)}`.toLowerCase().includes(filter))
       : group.models;
     if (matches.length === 0) continue;
     // A `role="group"` with a label, not a heading: a listbox may not contain
-    // arbitrary text, and this is exactly what group labelling is for. The
-    // visible caption is hidden from assistive tech so the provider is not
-    // announced twice for every row.
+    // arbitrary text, and this is exactly what group labelling is for. When
+    // the rail is on screen it already names the provider, so no visible
+    // caption is drawn here — but the label stays for assistive tech, which
+    // does not see the rail as a group heading either.
     const section = document.createElement("div");
     if (showGroups) {
       section.setAttribute("role", "group");
-      section.setAttribute("aria-label", group.provider);
-      const caption = document.createElement("div");
-      caption.className = "model-group-label";
-      caption.setAttribute("aria-hidden", "true");
-      caption.textContent = group.provider;
-      section.appendChild(caption);
+      section.setAttribute(
+        "aria-label",
+        railRows.find((row) => row.id === group.provider)?.displayName ?? group.provider,
+      );
     }
     for (const model of matches) {
       shown += 1;
@@ -2505,7 +2610,13 @@ function renderModelMenu() {
     empty.textContent = t.modelsNoMatch;
     list.appendChild(empty);
   }
-  modelMenu.appendChild(list);
+
+  // The panel is a row of two columns: an optional provider rail, then a body
+  // that holds the header (title or filter), the list, and the refresh row.
+  // The rail is left out entirely when there is one provider — see
+  // `showGroups` above — so the panel collapses to the single column it was.
+  const body = document.createElement("div");
+  body.className = "model-body";
 
   if (filterable) {
     const field = document.createElement("input");
@@ -2525,12 +2636,23 @@ function renderModelMenu() {
     // `renderModelMenu` re-focuses the rebuilt field itself (it remembers
     // `hadFocus`); doing it here as well would fight that on every keystroke.
     field.addEventListener("input", () => renderModelMenu());
-    // Above the list on screen, after it in the DOM: the field must own the
-    // focus, and a combobox is expected before the list it controls.
-    modelMenu.insertBefore(field, list);
+    // Above the list on screen: a combobox is expected before the list it
+    // controls, and the caret is at the top of the panel.
+    body.appendChild(field);
+  } else if (showGroups) {
+    // The rail replaced the per-row group captions, so the header names what
+    // the right column is showing rather than leaving the column anonymous.
+    // The display name is the label; the service key is the tooltip, so the
+    // `service/model` reference is never lost.
+    const head = document.createElement("div");
+    head.className = "model-head";
+    head.textContent = shownRail?.displayName ?? state.modelRailProvider;
+    if (shownRail && shownRail.id !== shownRail.displayName) head.title = shownRail.id;
+    body.appendChild(head);
   }
 
-  modelMenu.appendChild(buildModelFooter());
+  body.append(list, buildModelFooter());
+  modelMenu.append(...(showGroups ? [buildProviderRail(railRows), body] : [body]));
 
   // Put the highlight back where it was. `previous` survives the rebuild only
   // as a model id, so a filtered-out row correctly leaves nothing highlighted
@@ -2547,6 +2669,125 @@ function renderModelMenu() {
       modelListbox()?.focus();
     }
   }
+}
+
+/**
+ * The provider rail: one row per configured service (one card, one API key).
+ *
+ * Each row is the vendor's mark and the service's display name. The vendor
+ * glyph tells "which company", the name tells "which key" — two DeepSeek keys
+ * share the glyph and are told apart by the label the settings page stored.
+ * A vendor with no mark (a custom or hand-written service) gets the same
+ * two-letter monogram the rail has always used; nothing is invented (R3).
+ *
+ * It is a `tablist` over the model list, not a second listbox: picking a
+ * service narrows what the list shows, it does not choose a model. Arrow
+ * Up/Down stay with the model list; Arrow Left/Right and Home/End move here,
+ * which is why this is a real tab control rather than a column of buttons.
+ */
+function buildProviderRail(rows) {
+  const rail = document.createElement("div");
+  rail.className = "model-rail";
+  rail.setAttribute("role", "tablist");
+  rail.setAttribute("aria-orientation", "vertical");
+  rail.setAttribute("aria-label", t.modelProvidersLabel);
+  for (const row of rows) {
+    const tab = document.createElement("button");
+    tab.type = "button";
+    tab.className = "model-rail-mark";
+    tab.dataset.provider = row.id;
+    tab.setAttribute("role", "tab");
+    tab.setAttribute("aria-selected", String(row.id === state.modelRailProvider));
+    tab.tabIndex = row.id === state.modelRailProvider ? 0 : -1;
+    tab.append(modelRailMark(row), modelRailLabel(row));
+    // The row is an icon plus a label; the tab's accessible name is the whole
+    // of what it means, and the service key stays reachable when the label
+    // differs from it.
+    tab.setAttribute("aria-label", row.id === row.displayName ? row.displayName : `${row.displayName} (${row.id})`);
+    tab.title = row.id === row.displayName ? row.displayName : `${row.displayName} · ${row.id}`;
+    // A click leaves focus on the list rather than the row: the reason to
+    // click a provider is to pick one of its models, and the arrow keys have
+    // to keep working for that.
+    tab.addEventListener("click", () => selectModelRailProvider(row.id, { focusRail: false }));
+    rail.appendChild(tab);
+  }
+  return rail;
+}
+
+/** The vendor glyph, or the monogram for a service with no known vendor. */
+function modelRailMark(row) {
+  const mark = row.vendor ? VENDOR_MARKS[row.vendor] : undefined;
+  if (!mark) {
+    const fallback = document.createElement("span");
+    fallback.className = "model-rail-monogram";
+    fallback.setAttribute("aria-hidden", "true");
+    fallback.textContent = providerMark(row.id);
+    return fallback;
+  }
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "model-rail-glyph");
+  svg.setAttribute("viewBox", mark.viewBox);
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const path of mark.paths) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    node.setAttribute("d", path);
+    svg.appendChild(node);
+  }
+  return svg;
+}
+
+function modelRailLabel(row) {
+  const label = document.createElement("span");
+  label.className = "model-rail-label";
+  label.textContent = row.displayName;
+  return label;
+}
+
+/**
+ * Switch which provider the list shows. The chosen model does not change.
+ *
+ * The rebuild replaces the rail, so focus has to land somewhere live: on the
+ * newly selected mark when the user was working in the rail, and back on the
+ * list (or the filter) when the switch came from a click on a mark — a click
+ * that leaves focus nowhere would strand the keyboard user in the panel.
+ */
+function selectModelRailProvider(provider, { focusRail = true } = {}) {
+  if (state.modelRailProvider === provider) return;
+  state.modelRailProvider = provider;
+  renderModelMenu();
+  if (focusRail) {
+    modelMenu.querySelector(`.model-rail-mark[data-provider="${CSS.escape(provider)}"]`)?.focus();
+    return;
+  }
+  const field = modelMenu.querySelector(".model-filter-input");
+  if (field) {
+    field.focus();
+    field.setSelectionRange(field.value.length, field.value.length);
+    return;
+  }
+  modelListbox()?.focus();
+  focusModelMenuSelection();
+}
+
+/** Move the rail selection by `step`, clamped the same way the list is. */
+function moveModelRailProvider(step) {
+  const tabs = [...modelMenu.querySelectorAll(".model-rail-mark")];
+  if (tabs.length === 0) return;
+  const at = tabs.findIndex((tab) => tab.dataset.provider === state.modelRailProvider);
+  // Clamped, not wrapped: the list order is the config file's order, and
+  // running off the end back to the first provider reads as a jump, not a step.
+  const next = Math.min(tabs.length - 1, Math.max(0, (at < 0 ? 0 : at) + step));
+  const provider = tabs[next]?.dataset.provider;
+  if (provider === undefined) return;
+  if (provider === state.modelRailProvider) {
+    tabs[next].focus();
+    return;
+  }
+  // Remember where focus was: a rebuild rejects a detached node, so the
+  // caller's "was I on the rail" answer has to be read now.
+  const fromRail = Boolean(document.activeElement?.closest?.(".model-rail"));
+  selectModelRailProvider(provider, { focusRail: fromRail || !modelFocusHolder() });
 }
 
 function buildModelOption(model) {
@@ -2645,11 +2886,58 @@ function closeModelMenu({ restoreFocus = false } = {}) {
  */
 function handleModelMenuKey(event) {
   if (modelMenu.hidden) return false;
+  const key = event.key;
+  // The provider rail is a tablist, so the keys that move around it are the
+  // rail's own: Left/Right step, Home/End jump. They are handled before the
+  // focus check below because a click on a rail mark moves focus to that mark,
+  // which is not the list's focus holder — the list must not swallow the key.
+  const onRail = Boolean(document.activeElement?.closest?.(".model-rail"));
+  if (onRail) {
+    if (key === "ArrowLeft" || key === "ArrowRight") {
+      event.preventDefault();
+      moveModelRailProvider(key === "ArrowRight" ? 1 : -1);
+      return true;
+    }
+    if (key === "Home" || key === "End") {
+      event.preventDefault();
+      moveModelRailProvider(key === "Home" ? -Infinity : Infinity);
+      return true;
+    }
+    if (key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      closeModelMenu({ restoreFocus: true });
+      return true;
+    }
+    if (key === "ArrowDown" || key === "Enter") {
+      // Stepping into the list from the rail is the expected continuation of
+      // "I picked a provider, now pick a model".
+      event.preventDefault();
+      modelListbox()?.focus();
+      focusModelMenuSelection();
+      return true;
+    }
+    // Anything else belongs to whatever has focus (the rail is not a text
+    // field today, so this is only a guard against swallowing a stray key).
+    return false;
+  }
   // Only act on keys aimed at this menu. A global listener would otherwise
   // swallow arrows typed into the composer while the menu happens to be open.
   const holder = modelFocusHolder();
   if (!holder || !(holder === document.activeElement || holder.contains(document.activeElement))) return false;
-  const key = event.key;
+  // While the rail is on screen, Left/Right move between providers, which is
+  // the same gesture the rail itself offers; Up/Down keep moving the highlight.
+  // Not while the filter field has focus: there Left/Right are the caret.
+  if (
+    (key === "ArrowLeft" || key === "ArrowRight") &&
+    !holder.classList.contains("model-filter-input") &&
+    modelMenu.querySelector(".model-rail")
+  ) {
+    event.preventDefault();
+    moveModelRailProvider(key === "ArrowRight" ? 1 : -1);
+    return true;
+  }
+
   if (key === "ArrowDown" || key === "ArrowUp") {
     event.preventDefault();
     moveModelHighlight(key === "ArrowDown" ? 1 : -1);
@@ -2717,7 +3005,7 @@ function handleEvent(message) {
       if (state.needsSetup) {
         state.needsSetup = false;
         $("setup-button").hidden = true;
-        addNode(`<div class="notice dim">${escapeHtml(t.setupBody)}</div>`);
+        addNode(`<div class="notice dim">${escapeHtml(t.setupBody)}</div>`, { keepEmptyState: true });
       }
       break;
     }
@@ -2742,6 +3030,9 @@ function handleEvent(message) {
       addNode(
         `<div class="notice setup"><div class="setup-head">${escapeHtml(t.setupChecklistTitle)}</div>${rows}` +
           `<button class="link-button" id="setup-dismiss">${escapeHtml(t.setupChecklistDismiss)}</button></div>`,
+        // A checklist is the shell reporting on this machine, not a turn; the
+        // first screen keeps its introduction underneath it.
+        { keepEmptyState: true },
       );
       $("setup-dismiss")?.addEventListener("click", () => {
         localStorage.setItem("prometheus.setupDismissed", "1");
@@ -2781,12 +3072,6 @@ function handleEvent(message) {
       }
       state.cwd = message.cwd;
       renderTopbarLocation();
-      // A different workspace is a different tree. Only when the pane is on
-      // screen: asking at every state event would refetch the list each time
-      // a mode changes, and the reply would paint over a closed pane.
-      if (!workbench.hidden && state.pane === "files" && state.treePath !== (state.cwd ?? "")) {
-        requestTree(state.cwd);
-      }
       // A state event carries session-level totals: replace, never add. It
       // may also carry spend and occupancy (the host attaches them when it
       // opens a stored session). An event that omits either is the same
@@ -2909,23 +3194,6 @@ function handleEvent(message) {
       state.checkpointRedo = Boolean(message.redo);
       renderCheckpoints();
       break;
-
-    case "tree": {
-      const target = pendingTreeTarget ?? fileTree;
-      pendingTreeTarget = null;
-      target.innerHTML = "";
-      const nodes = message.nodes ?? [];
-      // An empty reply ends the "loading" state either way. It is not worded
-      // as "this folder is empty": the host answers a refusal with a warning
-      // notice and then an empty tree, so an empty reply can mean "empty" or
-      // "not allowed to read it", and the notice above it says which.
-      if (nodes.length === 0) {
-        target.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeEmpty)}</div>`;
-        break;
-      }
-      for (const node of nodes) target.appendChild(treeRow(node));
-      break;
-    }
 
     case "artifacts":
       state.artifacts = message.artifacts ?? [];
@@ -3125,9 +3393,9 @@ function handleEvent(message) {
       // leave a localStorage key written by a control that no longer exists.
       // `restartSession` left for the same reason: the launch no longer
       // restores a session, so the toggle would describe a behaviour that
-      // does not exist.
+      // does not exist. `suggestions` followed on 2026-11-05 with the feature
+      // itself: the next-turn hint is gone, so nothing reads that key.
       const map = {
-        suggestions: "suggestions",
         updateCheck: "updateCheck",
       };
       const key = map[message.key];
@@ -3207,7 +3475,6 @@ function handleEvent(message) {
 
     case "run_start":
       setBusy(true);
-      clearSuggestion();
       endThinking();
       // Keep typing possible while the turn runs; the message is queued.
       input.focus();
@@ -3657,7 +3924,6 @@ function handleEvent(message) {
       flushAssistant();
       endThinking();
       setBusy(false);
-      suggestNextTurn();
       // The host's `run_end` carries no occupancy — the turn's `usage` event
       // already delivered it. Passing `undefined` keeps that figure instead of
       // clearing a measurement the run just made.
@@ -3748,8 +4014,7 @@ function handleEvent(message) {
         }
       }
       if ((message.messages || []).length === 0) {
-        target.appendChild(emptyState);
-        emptyState.hidden = false;
+        showEmptyState();
       }
       // The plan is rebuilt from the session, not from the replayed messages:
       // `messages` only carries chat bubbles. Replayed after the messages so
@@ -3771,9 +4036,6 @@ function handleEvent(message) {
       if (message.cwd) {
         state.cwd = message.cwd;
         renderTopbarLocation();
-        // Absolute, like every other tree request: "." is resolved against the
-        // host process and refused by its boundary.
-        requestTree(state.cwd);
         api.send({ cmd: "listSessions", includeArchived: state.showArchived });
       }
       scrollToBottom(true);
@@ -3931,7 +4193,7 @@ function renderSubagents() {
   }
 }
 
-/* ---------- workbench: diff, file, tree, checkpoints ---------- */
+/* ---------- workbench: diff, file, checkpoints ---------- */
 
 /**
  * Panes with a backend in this kernel. Everything else is unreachable.
@@ -3939,44 +4201,42 @@ function renderSubagents() {
  * The serial monitor is host-backed since the PowerShell serial bridge
  * landed: `serialOpen`/`serialStatus`/… have real handlers, the events feed
  * the pane below, and the agent reads the same ring through `embed_serial`.
- *
- * `files` is the workspace tree: `getTree` is real in the host, and a
- * directory row expands through the same `getTree` the pane's root uses.
  */
-const SUPPORTED_PANES = new Set(["file", "files", "artifact", "serial"]);
+const SUPPORTED_PANES = new Set(["file", "artifact", "serial"]);
 
 /**
- * Fill the tree pane from `path`.
+ * Which pane the workbench was on last time it was open.
  *
- * An absolute path is required: the host decides access by comparing the
- * resolved path against the session workspace, and "." resolves against
- * whatever the host's process happened to have as its cwd — it gets refused.
- * With no workspace open there is nothing to ask for, so the pane says so
- * instead of leaving an empty list that looks like an empty folder.
+ * `files` is not a pane in this build: a profile that ran the version with
+ * the workspace tree can still hold it on disk, and restoring a pane that no
+ * longer exists would draw an empty panel. Everything that is not a File tab
+ * still holding a file falls back to the serial monitor, which always has a
+ * backend. Every explicit open (a tab, a tool row) still wins.
  */
-function requestTree(path) {
-  const root = typeof path === "string" ? path.trim() : "";
-  state.treePath = root;
-  // A root request owns the next reply. Without this an expansion that never
-  // answered (the host replies to a refusal with an empty tree, but a dropped
-  // request leaves it set) would capture the root's answer into one row.
-  pendingTreeTarget = null;
-  if (root === "") {
-    fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeNoWorkspace)}</div>`;
-    return;
-  }
-  fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeLoading)}</div>`;
-  api.send({ cmd: "getTree", path: root });
+const WORKBENCH_PANE_KEY = "prometheus.workbenchPane";
+
+function lastWorkbenchPane() {
+  const saved = localStorage.getItem(WORKBENCH_PANE_KEY);
+  if (saved === "file" && state.selectedFile) return "file";
+  return "serial";
 }
 
-function openWorkbench(pane) {
+function openWorkbench(pane, { opener = null } = {}) {
   if (pane !== undefined && !SUPPORTED_PANES.has(pane)) {
     // A tool row for a diff or the terminal used to open the pane it belonged
     // to. Those backends are not mounted, so the row stays a row instead of
     // opening an empty inspector.
     return;
   }
-  state.pane = pane ?? state.pane;
+  // Remember what opened the panel before the pane switch moves anything: a
+  // close should put the focus back where the reader left it. Callers whose
+  // control is gone by then (a menu row) name the button themselves.
+  if (workbench.hidden) {
+    const active = document.activeElement;
+    workbenchOpener =
+      opener ?? (active instanceof HTMLElement && active !== document.body ? active : null);
+  }
+  state.pane = pane ?? lastWorkbenchPane();
   // Use the attribute directly: a stale hidden="false" still matches
   // [hidden]{display:none} and would keep the pane invisible.
   workbench.removeAttribute("hidden");
@@ -3987,18 +4247,13 @@ function openWorkbench(pane) {
   if (activeTab) activeTab.hidden = false;
   state.workbenchOpen = true;
   localStorage.setItem("prometheus.workbench", "1");
-  // `prometheus.pane` is not written any more. It was read at boot to restore
-  // the last pane, but launch force-closes the workbench (see the bottom of
-  // this file) and every open goes through this function with an explicit
-  // pane, so the key had no reader left once the default stopped being
-  // restored. Same rule as `prometheus.lastSession`: do not keep a write
-  // nothing reads.
+  localStorage.setItem(WORKBENCH_PANE_KEY, state.pane);
   workbenchTabs.querySelectorAll("button").forEach((button) => {
     const active = button.dataset.pane === state.pane;
     button.classList.toggle("active", active);
     // A tab strip is one stop in the tab order, with arrows moving between
     // tabs: otherwise every pane button is a tab stop and keyboard users walk
-    // through eight of them to get past the strip.
+    // through all of them to get past the strip.
     button.setAttribute("aria-selected", String(active));
     button.tabIndex = active ? 0 : -1;
   });
@@ -4006,7 +4261,6 @@ function openWorkbench(pane) {
   const showTerminal = state.pane === "terminal";
   const showArtifact = state.pane === "artifact";
   const showBrowser = state.pane === "browser";
-  const showFiles = state.pane === "files";
   const showHistory = state.pane === "history";
   const showTasks = state.pane === "tasks";
   const showFile = state.pane === "file";
@@ -4021,7 +4275,6 @@ function openWorkbench(pane) {
   diffRoot.hidden = !showDiff;
   diffFilelist.hidden = !showDiff || state.changes.files.length === 0;
   $("diff-scope").hidden = !showDiff;
-  $("pane-tree").hidden = !showFiles;
   $("changes-list").hidden = !showDiff;
   $("history-root").hidden = !showHistory;
   $("artifact-list-pane").hidden = !showArtifact || Boolean(state.selectedArtifact);
@@ -4031,7 +4284,6 @@ function openWorkbench(pane) {
   $("browser-root").hidden = !showBrowser;
   $("serial-root").hidden = !showSerial;
   if (showDiff) renderDiff();
-  if (showFiles) requestTree(state.cwd);
   if (showHistory) api.send({ cmd: "getCheckpoints" });
   if (showArtifact) api.send({ cmd: "getArtifacts" });
   if (showTerminal) {
@@ -4047,12 +4299,36 @@ function openWorkbench(pane) {
   if (!showBrowser) void api.browserClose?.();
 }
 
-function closeWorkbench() {
+/**
+ * The control that opened the panel, so closing it can put the focus back.
+ *
+ * Keyboard users lose their place when a panel they opened from the overflow
+ * menu closes onto nothing: the menu row is gone by then (it closes on click),
+ * so the button that revealed the menu is where the focus belongs. Explicit
+ * in-pane actions (a tool row, a tab click) record themselves instead.
+ */
+let workbenchOpener = null;
+
+function closeWorkbench({ restoreFocus = true } = {}) {
+  const wasOpen = workbench.hidden === false;
+  // Whether the focus is about to be dropped along with the panel. A shortcut
+  // that closes the panel while the caret sits in the composer must not pull
+  // the caret back to the button that opened it an hour ago.
+  const focusInside =
+    document.activeElement instanceof HTMLElement &&
+    (workbench.contains(document.activeElement) || document.activeElement === document.body);
   workbench.setAttribute("hidden", "");
   state.workbenchOpen = false;
   localStorage.setItem("prometheus.workbench", "0");
   // The page view floats above the window, so it must be removed explicitly.
   void api.browserClose?.();
+  const opener = workbenchOpener;
+  workbenchOpener = null;
+  if (!restoreFocus || !wasOpen || !focusInside) return;
+  // A menu row is gone from view by the time the panel closes (the menu shuts
+  // on click), so "still focusable" is checked now rather than at open time.
+  const visible = opener?.isConnected && opener.getClientRects().length > 0;
+  (visible ? opener : $("more-button"))?.focus?.();
 }
 
 /* ---------- terminal pane ---------- */
@@ -4329,6 +4605,10 @@ function renderSerialStatus() {
   status.textContent = parts.join(" · ");
   $("serial-pause").disabled = !serial.open;
   setIcon($("serial-pause").querySelector("svg"), serial.paused ? "play" : "pause");
+  // The glyph is the only visible label, so the name has to say what the next
+  // click does — "Pause" painted over a play triangle names the button for the
+  // wrong state.
+  setControlTitle($("serial-pause"), serial.paused ? t.serialResume : t.serialPause);
   $("serial-follow").setAttribute("aria-pressed", String(serial.follow));
   // 发送按钮在串口未开时明确禁用，禁用原因放在 title 里——静默吞掉
   // 点击（点了没反应又不解释）违反禁用态要解释原因的规范。
@@ -4894,7 +5174,9 @@ function sendComments() {
   renderCommentsBar();
   autoSize();
   input.focus();
-  if (!workbench.hidden) closeWorkbench();
+  // The focus already moved to the composer: handing it back to the opener
+  // would take it off the input the user is about to type in.
+  if (!workbench.hidden) closeWorkbench({ restoreFocus: false });
 }
 
 function renderCommentsBar() {
@@ -5072,52 +5354,6 @@ function renderCheckpoints() {
   }
 }
 
-function renderTree() {
-  fileTree.innerHTML = "";
-  const nodes = state.tree ?? [];
-  if (nodes.length === 0) {
-    // The pane is only drawn when something asks for it; a blank list with no
-    // text reads as "still loading" forever.
-    const reason = state.treePath ? t.treeEmpty : t.treeNoWorkspace;
-    fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(reason)}</div>`;
-    return;
-  }
-  for (const node of nodes) fileTree.appendChild(treeRow(node));
-}
-
-function treeRow(node) {
-  const row = document.createElement("button");
-  row.className = "tree-row";
-  row.innerHTML =
-    `<span class="twisty">${node.type === "dir" ? icon("chevron-right") : ""}</span>` +
-    `<span class="tree-name">${escapeHtml(node.name)}</span>`;
-  row.title = node.path;
-  row.addEventListener("click", () => {
-    if (node.type === "file") {
-      openFile(node.path);
-      return;
-    }
-    const existing = row.nextElementSibling;
-    if (existing && existing.classList.contains("tree-children")) {
-      existing.hidden = !existing.hidden;
-      setIcon(row.querySelector(".twisty svg"), existing.hidden ? "chevron-right" : "chevron-down");
-      return;
-    }
-    const container = document.createElement("div");
-    container.className = "tree-children";
-    row.after(container);
-    setIcon(row.querySelector(".twisty svg"), "chevron-down");
-    // The target is recorded before the request goes out, so a reply that
-    // arrives while the row is still being built cannot land in the root of
-    // the tree instead of under it.
-    pendingTreeTarget = container;
-    api.send({ cmd: "getTree", path: node.path });
-  });
-  return row;
-}
-
-let pendingTreeTarget = null;
-
 function openFile(path) {
   state.selectedFile = path;
   openWorkbench("file");
@@ -5214,7 +5450,7 @@ $("browser-use").addEventListener("click", async () => {
   input.value = input.value.trim() ? `${input.value}\n\n${text}` : text;
   autoSize();
   input.focus();
-  closeWorkbench();
+  closeWorkbench({ restoreFocus: false });
 });
 
 window.addEventListener("resize", scheduleBrowserBounds);
@@ -5488,9 +5724,18 @@ function renderSessions(sessions) {
     count.className = "session-group-count";
     count.textContent = String(items.length);
     // New chat inside this project, without leaving the current conversation.
+    //
+    // Built after the locale sweep, so it names itself here; "+" is
+    // punctuation and cannot serve as a name. It stays a mouse affordance: the
+    // stylesheet only draws it on `:hover` / `.session-group:focus-visible`,
+    // and making it tabbable without a `:focus-within` rule would hide the
+    // control the moment it took focus, dropping focus to nowhere. The
+    // keyboard routes into a new conversation are `#new-session` and the
+    // workspace row's "new chat" button.
     const add = document.createElement("span");
     add.className = "session-group-add";
     add.title = t.newSessionIn(label);
+    add.setAttribute("aria-label", t.newSessionIn(label));
     add.textContent = "+";
     add.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -5614,7 +5859,11 @@ function renderSessions(sessions) {
       more.className = "session-more";
       more.setAttribute("role", "button");
       more.tabIndex = 0;
+      // Built after the locale sweep ran, so it has to name itself: nothing
+      // revisits this node to add the label. The glyph inside is `▁`-shaped
+      // and carries no letters, so it cannot stand in as the name.
       more.title = t.sessionMenu;
+      more.setAttribute("aria-label", t.sessionMenu);
       more.innerHTML = icon("more");
       more.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -5871,7 +6120,6 @@ function submit() {
 
 input.addEventListener("input", () => {
   autoSize();
-  if (input.value.trim()) clearSuggestion();
 });
 input.addEventListener("keydown", (event) => {
   if (!commandMenu.hidden && commandState) {
@@ -5931,14 +6179,6 @@ input.addEventListener("keydown", (event) => {
       return;
     }
   }
-  if (event.key === "Tab" && state.suggestion && !input.value.trim() && !event.shiftKey) {
-    event.preventDefault();
-    input.value = state.suggestion;
-    clearSuggestion();
-    autoSize();
-    input.focus();
-    return;
-  }
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     submit();
@@ -5950,6 +6190,20 @@ stopButton.addEventListener("click", () => {
   api.send({ cmd: "abort" });
   input.focus();
 });
+
+/**
+ * True when the focus sits in a field where Escape may mean something else.
+ *
+ * Used by the window-level Escape chain: closing a panel out from under a
+ * caret would be a surprise, and the fields that take Escape themselves (the
+ * command palette, the mention popup, the model filter) already stop the
+ * event before it gets here.
+ */
+function isTextEntry(node) {
+  if (!(node instanceof HTMLElement)) return false;
+  const tag = node.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || node.isContentEditable;
+}
 
 // The model menu's own keys (arrows, Home/End, Enter, Escape, Tab) are handled
 // first: it is the innermost open surface, and Escape must dismiss it before
@@ -5983,6 +6237,18 @@ document.addEventListener("keydown", (event) => {
     }
     if (!pendingPermission.hidden) {
       answerPermission("no");
+      return;
+    }
+    // The workbench is the last *surface* before the fallback. It sits after
+    // the menus and dialogs because those are floating panels drawn over it,
+    // and before "abort the turn" because closing a panel is the smaller
+    // action. A text field is the exception: the shortcut sheet promises
+    // Escape means "stop the current turn", and the composer holds the caret
+    // for most of a session — taking the key there to close a side panel
+    // would break that promise mid-run. Escape inside a field therefore
+    // belongs to the field.
+    if (!workbench.hidden && !isTextEntry(document.activeElement)) {
+      closeWorkbench();
       return;
     }
     if (state.busy) api.send({ cmd: "abort" });
@@ -6047,8 +6313,37 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+/**
+ * Did this click land on the model panel — asked **before** the click's own
+ * handler can rebuild the panel.
+ *
+ * Bubble-time geometry cannot answer that question: picking a provider (and
+ * refreshing the list) re-renders the menu, which replaces its children. The
+ * clicked button is then detached, so `event.target.closest("#model-menu")`
+ * is null by the time the document-level dismissal runs, and a click on the
+ * panel's own controls was indistinguishable from a click outside it — the
+ * panel closed the moment a vendor was chosen. The capture phase runs first,
+ * while the DOM the user clicked still exists.
+ */
+let modelMenuClickInside = false;
+document.addEventListener(
+  "click",
+  (event) => {
+    const target = event.target;
+    modelMenuClickInside = Boolean(
+      target?.closest?.("#model-menu") || target?.closest?.(".model-control"),
+    );
+  },
+  true,
+);
+
 document.addEventListener("click", (event) => {
-  if (!modelMenu.hidden && !event.target.closest(".model-control")) closeModelMenu();
+  if (modelMenu.hidden) return;
+  if (modelMenuClickInside) return;
+  // Belt and braces: a click synthesised without a capture pass (or one whose
+  // target is still attached) is still recognised by geometry.
+  if (event.target.closest?.(".model-control") || event.target.closest?.("#model-menu")) return;
+  closeModelMenu();
 });
 
 
@@ -6406,7 +6701,6 @@ $("palette-scrim").addEventListener("mousedown", closePalette);
 /* ---------- scroll-to-latest ---------- */
 
 transcript.addEventListener("scroll", updateScrollButton);
-transcriptScroll.addEventListener("scroll", updateScrollButton);
 $("scroll-bottom").addEventListener("click", () => scrollToBottom(true));
 
 /**
@@ -6754,9 +7048,9 @@ modelPicker.addEventListener("click", (event) => {
  * Register a local folder as the workspace root and switch to it.
  *
  * `setCwd` only moved the directory the next session would start in; it did
- * not register the folder as a workspace root, so every later `getTree` and
- * `getFile` under it was refused by the host's boundary check. `setWorkspace`
- * does both, which is why the top bar sends it instead.
+ * not register the folder as a workspace root, so every later `getFile` under
+ * it was refused by the host's boundary check. `setWorkspace` does both, which
+ * is why the top bar sends it instead.
  */
 function setWorkspace(path) {
   const dir = typeof path === "string" ? path.trim() : "";
@@ -6845,7 +7139,7 @@ function openSessionFilter(event) {
       state.sessionFilter = option.value;
       closeSessionMenu();
       trigger.setAttribute("aria-expanded", "false");
-      trigger.title = option.label;
+      setControlTitle(trigger, option.label);
       sendSessionList();
     });
     menu.appendChild(item);
@@ -6889,7 +7183,7 @@ $("session-filter").addEventListener("keydown", (event) => {
 $("toggle-archived").addEventListener("click", () => {
   state.showArchived = !state.showArchived;
   $("toggle-archived").classList.toggle("active", state.showArchived);
-  $("toggle-archived").title = state.showArchived ? t.hideArchived : t.showArchived;
+  setControlTitle($("toggle-archived"), state.showArchived ? t.hideArchived : t.showArchived);
   sendSessionList();
 });
 
@@ -7174,21 +7468,43 @@ function renderTopbarLocation() {
   const name = parts.length > 0 ? parts[parts.length - 1] : "";
   $("topbar-cwd-name").textContent = name || t.appName;
   $("topbar-cwd").title = cwd || t.appName;
+  renderStatusTab(name);
   // The sidebar's folder button is an icon: the current folder is a row in the
   // list below it (the active workspace), so repeating the name here would
   // restore the second "workspace" concept the two-level list removed. The
   // button still needs a name of its own for a screen reader, and it has to
   // say what the click does — the folder in the list says where you are.
-  $("sidebar-workspace").title = cwd ? `${t.changeFolderTitle}: ${cwd}` : t.workspaceChoose;
-  $("sidebar-workspace").setAttribute(
-    "aria-label",
-    cwd ? `${t.changeFolderTitle}: ${cwd}` : t.workspaceChoose,
-  );
+  // `setControlTitle` would skip this one: the button contains the folder
+  // glyph and no text, so it is icon-only and does get named — the path is
+  // the reason the name is built here rather than read off the dictionary.
+  setControlTitle($("sidebar-workspace"), cwd ? `${t.changeFolderTitle}: ${cwd}` : t.workspaceChoose);
   $("sidebar-workspace").classList.toggle("empty", name === "");
+}
+
+/**
+ * The tab along the composer's top edge: where this turn happens, and how
+ * much of the window it has already used.
+ *
+ * The branch segment is a latent slot. No host in this build reports a git
+ * status (`state.git` is always null and `desktop/MATRIX.md` records git as
+ * hidden), so the segment stays hidden — but the predicate is the same one
+ * the top bar used, so a host that starts sending `git_status` fills it in
+ * without another edit here. It is not faked, and nothing is printed in its
+ * place (R3).
+ *
+ * The context figure and the cwd are always rendered: the tab is the only
+ * entry to the usage popover, and hiding it before the first measurement
+ * would take that entry away exactly when a new session most wants it.
+ */
+function renderStatusTab(folderName) {
   const branch = state.git?.available ? state.git.branch : "";
-  const branchNode = $("topbar-cwd-branch");
-  branchNode.hidden = !branch;
-  branchNode.textContent = branch ?? "";
+  const branchNode = $("status-tab-branch");
+  if (branchNode) {
+    branchNode.hidden = !branch;
+    branchNode.textContent = branch ?? "";
+  }
+  const cwdNode = $("status-tab-cwd");
+  if (cwdNode) cwdNode.textContent = folderName || t.appName;
 }
 
 function renderChangesBadge() {
@@ -7198,7 +7514,7 @@ function renderChangesBadge() {
   badge.textContent = String(count);
   // A change landing mid-turn is worth a glance without opening the pane.
   badge.classList.toggle("live", state.busy && count > 0);
-  $("changes-button").title = count > 0 ? `${t.paneDiff} (${count})` : t.paneDiff;
+  setControlTitle($("changes-button"), count > 0 ? `${t.paneDiff} (${count})` : t.paneDiff);
 }
 
 $("changes-button").addEventListener("click", () => {
@@ -7216,9 +7532,17 @@ workbenchTabs.querySelectorAll("button").forEach((button) => {
   button.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
-    const tabs = [...workbenchTabs.querySelectorAll("button")];
-    const index = tabs.indexOf(button);
-    const next = tabs[(index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+    // Only tabs on screen: File and Artifact start `hidden` and are revealed
+    // by the action that opens them. Walking onto a hidden tab used to call
+    // `focus()` on a `display: none` button and then reveal it, so the
+    // selection moved to a pane the focus never followed — the strip showed
+    // File selected while the keyboard was still on Serial. With one visible
+    // tab the key does nothing.
+    const tabs = [...workbenchTabs.querySelectorAll("button")].filter((tab) => !tab.hidden);
+    if (tabs.length < 2) return;
+    const index = Math.max(0, tabs.indexOf(button));
+    const step = event.key === "ArrowRight" ? 1 : -1;
+    const next = tabs[(index + step + tabs.length) % tabs.length];
     next.focus();
     openWorkbench(next.dataset.pane);
   });
@@ -7248,9 +7572,13 @@ if (api.platform !== "darwin") {
   windowControls.querySelectorAll("[data-window]").forEach((button) => {
     button.addEventListener("click", () => api.windowControl(button.dataset.window));
   });
-  const applyWindowState = ({ maximized }) => {
-    document.documentElement.classList.toggle("window-maximized", Boolean(maximized));
-    $("window-maximize").title = maximized ? "Restore" : "Maximize";
+  let windowMaximized = false;
+  applyWindowState = ({ maximized } = {}) => {
+    if (typeof maximized === "boolean") windowMaximized = maximized;
+    document.documentElement.classList.toggle("window-maximized", windowMaximized);
+    // The caption buttons are icon-only, and this string used to be hardcoded
+    // English — the one place in the window bar that ignored the locale.
+    setControlTitle($("window-maximize"), windowMaximized ? t.restore : t.maximize);
   };
   api.onWindowState?.(applyWindowState);
   void api.windowState?.().then(applyWindowState);
@@ -7442,8 +7770,7 @@ topbarMenu.addEventListener("click", (event) => {
   setTopbarMenu(false);
   if (row.id === "menu-export") api.send({ cmd: "exportSession" });
   else if (row.id === "menu-shortcuts") openShortcuts();
-  else if (row.id === "menu-browse-files") openWorkbench("files");
-  else if (row.id === "menu-open-serial") openWorkbench("serial");
+  else if (row.id === "menu-open-serial") openWorkbench("serial", { opener: $("more-button") });
   else if (row.id === "menu-clear") clearConversation();
 });
 
@@ -7554,8 +7881,5 @@ if (state.workbenchOpen) {
   state.workbenchOpen = false;
   localStorage.setItem("prometheus.workbench", "0");
 }
-// No tree request here: the Files pane asks for its own root with an absolute
-// path when it is opened. A "." sent at boot was refused by the host boundary
-// and its empty reply would have painted over a tree the pane had loaded.
 api.send({ cmd: "setLocale", locale: state.locale });
 input.focus();

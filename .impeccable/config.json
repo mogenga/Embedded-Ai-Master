@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "cramped-padding",
+        "value": "*",
+        "files": [
+          "desktop/renderer/index.html"
+        ],
+        "createdAt": "2026-11-05T10:47:58.031Z",
+        "reason": "Claude Code (measured, not assumed): menu-segmented / diff-scope / serial-filter are the app's segmented controls — 29px wrapper, 2px inset, 23px pills with 2px 7-8px of their own padding. A segmented control's 2px inset is the convention (the pill fill IS the affordance); raising it to 8px would read as three separate buttons. All three predate this session (present in HEAD) and match the chip scale used across the app."
+      }
+    ]
+  }
+}

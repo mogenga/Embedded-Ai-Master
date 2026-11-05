@@ -79,7 +79,6 @@
           </button>
           <button class="topbar-cwd" id="topbar-cwd" data-i18n-title="changeFolderTitle">
             <span class="topbar-cwd-name" id="topbar-cwd-name">Embedded AI Master</span>
-            <span class="topbar-cwd-branch" id="topbar-cwd-branch" hidden></span>
           </button>
           <div class="titlebar-spacer"></div>
           <div class="titlebar-status">
@@ -121,13 +120,6 @@
             <button class="menu-row" id="menu-shortcuts" role="menuitem">
               <svg class="icon" aria-hidden="true"><use href="#i-keyboard"></use></svg>
               <span data-i18n="menuShortcuts">Keyboard shortcuts</span>
-            </button>
-            <!-- The Files pane is reached from here rather than from a top-bar
-                 button: the overflow menu already holds the entries that open
-                 a view, and one row costs no top-bar width. -->
-            <button class="menu-row" id="menu-browse-files" role="menuitem">
-              <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
-              <span data-i18n="menuBrowseFiles">Browse workspace files</span>
             </button>
             <button class="menu-row" id="menu-open-serial" role="menuitem">
               <svg class="icon" aria-hidden="true"><use href="#i-terminal"></use></svg>
@@ -186,20 +178,28 @@
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
                 </button>
               </div>
-              <div class="transcript-scroll" id="transcript-scroll">
-                <section class="empty-state" id="empty-state">
-                  <img class="empty-mark" src="assets/mark.png" alt="" aria-hidden="true" draggable="false">
-                  <h1 data-i18n="emptyTitle">What should we build?</h1>
-                  <p data-i18n="emptyBody">The agent reads, edits, and runs your code. It asks before changing files unless you switch the mode.</p>
-                  <button class="suggestion" id="setup-button" data-i18n="setupTitle" hidden>
-                    Set up a connection
-                  </button>
-                </section>
-              </div>
               <button class="scroll-bottom" id="scroll-bottom" hidden data-i18n-title="scrollToLatest">
                 <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
               </button>
             </main>
+
+            <!-- A slot of the chat column, not content of the transcript. The
+                 empty state introduces the composer, so it stands against the
+                 card it introduces instead of scrolling away inside the
+                 conversation: `showEmptyState()` / `hideEmptyState()` in
+                 app.js own the visibility, and a session with no turns shows
+                 it. The wrapper is the slot the stylesheet sizes and pads; the
+                 section inside it is what gets hidden. -->
+            <div class="empty-slot" id="empty-slot">
+              <section class="empty-state" id="empty-state">
+                <img class="empty-mark" src="assets/mark.png" alt="" aria-hidden="true" draggable="false">
+                <h1 data-i18n="emptyTitle">Start from a symptom</h1>
+                <p data-i18n="emptyBody">Describe what the board does — garbled serial output, nothing on the console at power-up, a hang that comes and goes. The agent reads the project first; in the default Diagnose mode it asks before it writes a file or runs a command.</p>
+                <button class="suggestion" id="setup-button" data-i18n="setupTitle" hidden>
+                  Set up a connection
+                </button>
+              </section>
+            </div>
 
             <section class="composer-region" id="composer-region">
               <!-- The same plan the transcript card draws, kept in view while
@@ -243,6 +243,69 @@
                 </div>
               </div>
 
+              <!-- The card's status tab: it hangs off the top edge of the
+                   composer, which is why it is the composer's sibling and comes
+                   after the plan strip and approval bar. The branch segment is
+                   a latent slot — this build has no git source (`state.git` is
+                   always null), so it stays hidden until a host sends one. The
+                   context figure is the only entry to the usage popover, and
+                   the tab stays visible even before anything is measured. -->
+              <div class="composer-status-tab" id="composer-status-tab">
+                <span class="status-tab-branch" id="status-tab-branch" hidden></span>
+                <span class="status-tab-cwd" id="status-tab-cwd"></span>
+                <button
+                  type="button"
+                  class="status-tab-context"
+                  id="usage-meter"
+                  aria-haspopup="dialog"
+                  aria-expanded="false"
+                  data-i18n-title="usageTitle"
+                >
+                  <svg class="status-tab-ring" viewBox="0 0 16 16" aria-hidden="true">
+                    <circle class="status-tab-ring-track" cx="8" cy="8" r="6"></circle>
+                    <circle class="status-tab-ring-fill" id="context-ring" cx="8" cy="8" r="6"></circle>
+                  </svg>
+                  <!-- The share of the window in use, not the window's size:
+                       "1M" answered a question nobody asked at the place the
+                       answer is needed ("how full is it"). The size is still in
+                       the popover, beside the tokens it is measured against. -->
+                  <span class="context-pct" id="context-label">—</span>
+                </button>
+                <!-- The popover lives inside the tab, not the composer: it is
+                     anchored to this button, and .composer-status-tab is a
+                     positioning context of its own. Every row below is kept
+                     verbatim — the redesign moved the trigger, not the
+                     panel. -->
+                <div class="usage-popover" id="usage-popover" hidden role="dialog" aria-label="Context window">
+                  <div class="usage-head">
+                    <span data-i18n="usageContext">Context window</span>
+                    <span class="usage-head-value" id="usage-context-value">—</span>
+                  </div>
+                  <!-- One bar, segmented by kind: the width of each colour is
+                       that part's share of the window, so a glance says which
+                       category is the one worth acting on. -->
+                  <div class="usage-stack" id="usage-stack"></div>
+                  <div class="usage-breakdown" id="usage-breakdown"></div>
+                  <div class="usage-foot">
+                    <span class="usage-foot-item"><span data-i18n="usageInput">Input</span> <span class="usage-value" id="usage-input-value">0</span></span>
+                    <span class="usage-foot-item"><span data-i18n="usageCached">Cached</span> <span class="usage-value" id="usage-cached-value">0</span></span>
+                    <span class="usage-foot-item"><span data-i18n="usageOutput">Output</span> <span class="usage-value" id="usage-output-value">0</span></span>
+                  </div>
+                  <div class="usage-row total">
+                    <span data-i18n="usageTotal">Total this session</span>
+                    <span class="usage-value" id="usage-total-value">0</span>
+                  </div>
+                  <!-- Spend only appears when the provider config carries a
+                       price: zero dollars and "no price configured" are not
+                       the same fact, and a $0.00 row would claim the former. -->
+                  <div class="usage-row" id="usage-cost-row" hidden>
+                    <span data-i18n="usageCost">Session cost</span>
+                    <span class="usage-value" id="usage-cost-value">—</span>
+                  </div>
+                  <button type="button" class="btn btn-quiet small usage-reset" id="usage-reset" data-i18n="usageReset">Reset counter</button>
+                </div>
+              </div>
+
               <!-- One box: the textarea and every control that shapes the request
                    live in the same frame. A second row of pills under the box
                    was noise. -->
@@ -251,10 +314,6 @@
                 <div class="file-mention" id="file-mention" hidden role="listbox"></div>
                 <div class="command-menu" id="command-menu" hidden role="listbox"></div>
                 <div class="composer-input-row">
-                  <div class="composer-suggestion" id="composer-suggestion" hidden>
-                    <span class="composer-suggestion-text"></span>
-                    <span class="composer-suggestion-hint" data-i18n="suggestionAccept">Tab to accept</span>
-                  </div>
                   <textarea
                     id="input"
                     rows="1"
@@ -262,13 +321,6 @@
                     placeholder="Ask the agent to change, explain, or build something…"
                     spellcheck="false"
                   ></textarea>
-                  <div class="composer-actions">
-                    <span class="queued-badge" id="queued-badge" hidden></span>
-                    <button class="stop-button" id="stop-button" data-i18n="stop" data-i18n-title="stopTitle" hidden>Stop</button>
-                    <button class="send-button" id="send-button" data-i18n-title="sendTitle">
-                      <svg class="icon" aria-hidden="true"><use href="#i-arrow-up"></use></svg>
-                    </button>
-                  </div>
                 </div>
                 <div class="composer-bar">
                   <div class="controls">
@@ -326,46 +378,14 @@
                       </button>
                       <div class="effort-menu" id="effort-menu" role="menu" hidden></div>
                     </div>
-                    <!-- The usage chip sits last: it is the session's running
-                         accounting, not a control for the next message. Since
-                         D-165 the kernel also reports context occupancy, so
-                         the percentage is shown once a measurement exists;
-                         it starts hidden because "not measured yet" is not
-                         0% (R3), and the renderer unhides it on the first
-                         `context` it receives. -->
-                    <button class="context-chip" id="usage-meter" aria-haspopup="dialog" aria-expanded="false" data-i18n-title="usageTitle">
-                      <span id="context-length">—</span>
-                      <span class="context-pct" id="context-label" hidden></span>
-                    </button>
+                    <div class="composer-actions">
+                      <span class="queued-badge" id="queued-badge" hidden></span>
+                      <button class="stop-button" id="stop-button" data-i18n="stop" data-i18n-title="stopTitle" hidden>Stop</button>
+                      <button class="send-button" id="send-button" data-i18n-title="sendTitle">
+                        <svg class="icon" aria-hidden="true"><use href="#i-arrow-up"></use></svg>
+                      </button>
+                    </div>
                   </div>
-                </div>
-                <div class="usage-popover" id="usage-popover" hidden role="dialog" aria-label="Context window">
-                  <div class="usage-head">
-                    <span data-i18n="usageContext">Context window</span>
-                    <span class="usage-head-value" id="usage-context-value">—</span>
-                  </div>
-                  <!-- One bar, segmented by kind: the width of each colour is
-                       that part's share of the window, so a glance says which
-                       category is the one worth acting on. -->
-                  <div class="usage-stack" id="usage-stack"></div>
-                  <div class="usage-breakdown" id="usage-breakdown"></div>
-                  <div class="usage-foot">
-                    <span class="usage-foot-item"><span data-i18n="usageInput">Input</span> <span class="usage-value" id="usage-input-value">0</span></span>
-                    <span class="usage-foot-item"><span data-i18n="usageCached">Cached</span> <span class="usage-value" id="usage-cached-value">0</span></span>
-                    <span class="usage-foot-item"><span data-i18n="usageOutput">Output</span> <span class="usage-value" id="usage-output-value">0</span></span>
-                  </div>
-                  <div class="usage-row total">
-                    <span data-i18n="usageTotal">Total this session</span>
-                    <span class="usage-value" id="usage-total-value">0</span>
-                  </div>
-                  <!-- Spend only appears when the provider config carries a
-                       price: zero dollars and "no price configured" are not
-                       the same fact, and a $0.00 row would claim the former. -->
-                  <div class="usage-row" id="usage-cost-row" hidden>
-                    <span data-i18n="usageCost">Session cost</span>
-                    <span class="usage-value" id="usage-cost-value">—</span>
-                  </div>
-                  <button type="button" class="btn btn-quiet small usage-reset" id="usage-reset" data-i18n="usageReset">Reset counter</button>
                 </div>
               </div>
             </section>
@@ -389,10 +409,13 @@
                      because they are opened by an action (a tool row click),
                      not by browsing. Serial is the only always-present pane
                      with a backend in this kernel, so it is the default. -->
-                <button role="tab" aria-selected="true" tabindex="0" data-pane="serial" class="active" data-i18n="paneSerial">Serial</button>
-                <button role="tab" aria-selected="false" tabindex="-1" data-pane="file" data-i18n="paneFile" hidden>File</button>
-                <button role="tab" aria-selected="false" tabindex="-1" data-pane="files" data-i18n="paneFiles" hidden>Files</button>
-                <button role="tab" aria-selected="false" tabindex="-1" data-pane="artifact" data-i18n="paneArtifact" hidden>Artifact</button>
+                <!-- `aria-controls` names the pane each tab shows, so a
+                     screen reader announces what the selection changes. The
+                     artifact tab drives two roots: the list before one is
+                     picked, the viewer after. -->
+                <button id="workbench-tab-serial" role="tab" aria-selected="true" aria-controls="serial-root" tabindex="0" data-pane="serial" class="active" data-i18n="paneSerial">Serial</button>
+                <button id="workbench-tab-file" role="tab" aria-selected="false" aria-controls="file-root" tabindex="-1" data-pane="file" data-i18n="paneFile" hidden>File</button>
+                <button id="workbench-tab-artifact" role="tab" aria-selected="false" aria-controls="artifact-list-pane artifact-root" tabindex="-1" data-pane="artifact" data-i18n="paneArtifact" hidden>Artifact</button>
               </div>
               <div class="workbench-meta" id="workbench-meta"></div>
               <button class="icon-button small" id="close-workbench" data-i18n-title="closePane">
@@ -408,7 +431,6 @@
               <button class="btn btn-primary small" id="comments-send" data-i18n="commentSend">Send to agent</button>
             </div>
             <div class="workbench-body">
-              <div class="pane-tree file-tree" id="pane-tree" hidden></div>
               <aside class="diff-filelist" id="diff-filelist" hidden></aside>
               <div class="diff-pane" id="diff-pane">
                 <div class="git-bar" id="git-bar" hidden>

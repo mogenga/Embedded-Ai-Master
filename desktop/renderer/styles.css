@@ -51,18 +51,29 @@
   /* radii: three steps, no more */
   --radius-sm: 6px;
   --radius: 10px;
-  --radius-lg: 14px;
+  /* 20px since 2026-11-04. The step exists for the composer card and the
+     floating panels, and the reference composer's card is visibly rounder
+     than 14px; raising this one token keeps the ramp at three steps and
+     moves every surface that borrows it together, which is the intent. */
+  --radius-lg: 20px;
 
   /* Interface scale multiplies the chrome; the transcript has --font-scale. */
   --ui-scale: 1;
 
-  /* type scale */
-  --text-xs: calc(11px * var(--ui-scale));
-  --text-sm: calc(12px * var(--ui-scale));
-  --text-base: calc(13px * var(--ui-scale));
-  --text-md: calc(14px * var(--ui-scale));
-  --text-lg: calc(17px * var(--ui-scale));
-  --text-xl: 22px;
+  /* type scale
+   *
+   * Moved up one step on 2026-11-04: at 100 % the old ramp put body text at
+   * 13 px and metadata at 11 px, which read smaller than the desktop apps
+   * this window sits next to. The steps keep their 1 px / 3-4 px spacing, so
+   * the hierarchy is unchanged — only the absolute size. `--text-xl` stays
+   * unscaled on purpose: it is display type (empty-state heading, usage
+   * tiles), and it exercises no layout that `--ui-scale` is meant to zoom. */
+  --text-xs: calc(12px * var(--ui-scale));
+  --text-sm: calc(13px * var(--ui-scale));
+  --text-base: calc(14px * var(--ui-scale));
+  --text-md: calc(15px * var(--ui-scale));
+  --text-lg: calc(18px * var(--ui-scale));
+  --text-xl: 24px;
 
   /* motion */
   --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
@@ -70,7 +81,18 @@
   --normal: 170ms;
 
   --mono: "SF Mono", "Cascadia Code", "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
-  --sans: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  /* No `Inter`. It was never installed on this machine — measured with a
+     canvas, `"Inter"` and a deliberately invented family name produce the
+     identical width (114.3308), which is the bare `sans-serif` fallback, while
+     `"Segoe UI Variable Text"` measures 114.9766. The declaration was a dead
+     first step, and worse than dead: on a machine that *did* have Inter the
+     app would change typeface entirely. A Windows-first desktop tool should
+     not have its typography depend on which fonts the user happens to own.
+     Segoe UI Variable is Windows 11's system UI face, which is the right
+     default for a product surface. `--mono` keeps its stack: SF Mono and
+     Cascadia Code are the expected fallbacks there, and a missing entry only
+     falls through to the next name rather than changing the design. */
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
   --shadow-composer: 0 10px 34px rgba(0, 0, 0, 0.42);
   --shadow-popover: 0 14px 40px rgba(0, 0, 0, 0.5);
   /* The sidebar width. `--sidebar-user-width` is written by the resize handle
@@ -204,6 +226,73 @@ body {
   line-height: 1.6;
   -webkit-font-smoothing: antialiased;
   overflow: hidden;
+  /* The parts of the page the design does not draw still carry it. Text
+     selection, the caret, the native checkbox tick and every scrollbar below
+     are browser defaults in a system blue that belongs to no theme; left
+     alone they are the clearest signal that this is a page, not a product. */
+  caret-color: var(--accent);
+  accent-color: var(--accent);
+}
+
+/* A 32 % accent wash is strong enough to read as a selection on every theme
+   and light enough that `--text` keeps its contrast on all four (measured
+   against the washed background: 9.45 dark / 11.11 light / 11.94 contrast /
+   11.83 light-contrast). Selecting with `--accent` itself would have forced
+   white type on a field that sits at roughly 2.8:1 in dark. */
+::selection {
+  background: color-mix(in srgb, var(--accent) 32%, var(--bg));
+  color: var(--text);
+}
+
+/* One scrollbar for the whole window. It used to be two hand-copied rules
+   (`.session-list`, `.transcript`) and Chromium's light default everywhere
+   else, so the settings panes, the model rail, the command palette and the
+   serial monitor each showed a different bar — and every one of them was the
+   OS light one on a dark theme. The thumb is `--border`, a step quieter than
+   `--border-strong`, because a scrollbar is structure, not a control; hover
+   is where it becomes reachable. The 3px transparent border is what keeps the
+   thumb off the track edges: without it the bar reads as a solid stripe.
+   `.workbench-tabs` keeps its own `display: none` — that row is a tab strip
+   that scrolls sideways, and a bar under it would be noise. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: var(--radius-sm);
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border-strong);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Links are markdown's business — `.markdown a` was never written, so every
+   one of them painted Chromium's `rgb(0, 0, 238)`: 2.4:1 on the dark canvas,
+   and off-palette on all four themes. `--accent-text` is the token that exists
+   for accent-coloured *text* (the accent itself is a fill and dips under 4.5
+   on every theme as type). Underlines sit 3px below the baseline so
+   descenders stay legible in Chinese and Latin both; the app's other
+   underlined affordance, `.link-button`, uses the same 3px. */
+a {
+  color: var(--accent-text);
+  text-underline-offset: 3px;
+}
+
+a:hover {
+  color: var(--text);
 }
 
 button {
@@ -499,54 +588,6 @@ body.resizing-sidebar .sidebar {
      difference to --rail-inset. One place to change, and the hover background
      of every row reaches the same left edge as the section label above it. */
   padding: 0 calc(var(--rail-inset) - 10px) 8px;
-}
-
-/* ---------- file tree ---------- */
-
-.tree-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 3px 6px;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  text-align: left;
-}
-
-.tree-row:hover {
-  background: var(--surface);
-  color: var(--text);
-}
-
-.tree-row .twisty {
-  display: flex;
-  width: 14px;
-  color: var(--text-faint);
-  flex: 0 0 auto;
-}
-
-.tree-row .twisty .icon {
-  width: 13px;
-  height: 13px;
-}
-
-.tree-row .tree-icon {
-  color: var(--text-faint);
-  flex: 0 0 auto;
-  width: 13px;
-  height: 13px;
-}
-
-.tree-row .tree-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.tree-children {
-  padding-left: 12px;
 }
 
 .change-row {
@@ -903,12 +944,6 @@ body.resizing-workbench * {
   padding: 6px 4px;
 }
 
-.pane-tree {
-  flex: 1;
-  overflow-y: auto;
-  padding: 6px 8px;
-}
-
 .history-root,
 .artifact-list-pane {
   flex: 1;
@@ -1207,16 +1242,6 @@ body.resizing-workbench * {
 
 .file-line .diff-text {
   color: var(--text);
-}
-
-.session-list::-webkit-scrollbar {
-  width: 8px;
-}
-
-.session-list::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: var(--radius-sm);
-  border: 2px solid var(--sidebar);
 }
 
 /* Task state, as a dot the eye can catch while scanning the list. */
@@ -1519,8 +1544,14 @@ body.resizing-workbench * {
   color: var(--text-secondary);
 }
 
+/* `.session-group:focus-visible` never matched a child button: focus lands on
+   the button itself, so the group div is not `:focus-visible` at all and the
+   `+` vanished the instant a keyboard user tabbed onto it. `:focus-within`
+   is the condition that actually holds while one of the group's descendants
+   has focus — the same one `.session-group-remove` and `.session-more`
+   already use. */
 .session-group:hover .session-group-add,
-.session-group:focus-visible .session-group-add {
+.session-group:focus-within .session-group-add {
   display: grid;
 }
 
@@ -1692,8 +1723,8 @@ body.resizing-workbench * {
   right: calc(9px + 20px + 6px);
 }
 
-/* Shared by the tree, the Tasks pane and the artifact list as well as this
-   column, so it carries no indent of its own. */
+/* Shared by the Tasks pane, the checkpoint list and the artifact list as well
+   as the sidebar column, so it carries no indent of its own. */
 .sidebar-empty {
   padding: 8px;
   font-size: var(--text-sm);
@@ -1843,17 +1874,10 @@ body.resizing-workbench * {
   text-overflow: ellipsis;
 }
 
-.topbar-cwd-branch {
-  display: inline-flex;
-  align-items: center;
-  padding: 1px 7px;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  font-family: var(--mono);
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  white-space: nowrap;
-}
+/* `.topbar-cwd-branch` was the branch pill in the top bar. It never rendered —
+   no host in this build reports a git status — and the branch segment now
+   lives in the composer's status tab. `.status-tab-branch` is where a host
+   that starts sending `git_status` puts it. */
 
 .icon-badge {
   position: absolute;
@@ -2039,7 +2063,7 @@ body.resizing-workbench * {
    many tool calls have finished, and how much text has streamed. */
 .turn-progress {
   max-width: var(--column-width);
-  margin: 0 auto 22px;
+  margin: 0 auto 16px;
   padding: 0 28px;
   display: flex;
   align-items: center;
@@ -2179,16 +2203,6 @@ mark.find-hit.current {
 }
 
 
-.transcript::-webkit-scrollbar {
-  width: 10px;
-}
-
-.transcript::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: var(--radius-sm);
-  border: 3px solid var(--bg);
-}
-
 /* Conversation width and body size are user preferences (Settings > Appearance).
    The column and every fixed-width block move together so a wide window does
    not leave tool output stranded in a narrow strip. */
@@ -2213,7 +2227,7 @@ mark.find-hit.current {
 
 .turn {
   max-width: var(--column-width);
-  margin: 0 auto 22px;
+  margin: 0 auto 24px;
   padding: 0 28px;
 }
 
@@ -2258,7 +2272,7 @@ mark.find-hit.current {
   align-items: center;
   gap: 12px;
   max-width: var(--column-width);
-  margin: 4px auto 24px;
+  margin: 16px auto 24px;
   padding: 0 28px;
   font-size: var(--text-sm);
   color: var(--text-faint);
@@ -2304,7 +2318,7 @@ mark.find-hit.current {
 }
 
 .turn.assistant.after-tools {
-  margin-top: 14px;
+  margin-top: 16px;
 }
 
 .markdown p {
@@ -2320,7 +2334,7 @@ mark.find-hit.current {
 .markdown h3 {
   font-size: var(--text-md);
   font-weight: 600;
-  margin: 20px 0 8px;
+  margin: 24px 0 8px;
   letter-spacing: -0.01em;
 }
 
@@ -2332,12 +2346,30 @@ mark.find-hit.current {
 
 .markdown ul,
 .markdown ol {
-  margin: 0 0 12px;
+  margin: 0 0 16px;
   padding-left: 22px;
 }
 
+/* The marker is the browser's glyph and takes the item's own colour; at body
+   weight in `--text` it reads as loud as the words it introduces. It steps
+   back to `--text-faint`, which still clears AA on every theme against `--bg`
+   (measured 5.35 dark / 5.02 light / 8.83 contrast / 9.59 light-contrast) — a
+   bullet is punctuation, not content. The 2px left padding is the optical gap
+   between the glyph and the first character, which otherwise touch. */
 .markdown li {
-  margin: 3px 0;
+  margin: 4px 0;
+  padding-left: 2px;
+}
+
+.markdown li::marker {
+  color: var(--text-faint);
+}
+
+/* A nested list is a continuation of its parent item, not a new paragraph:
+   the 16px block gap would separate it from the line it explains. */
+.markdown li > ul,
+.markdown li > ol {
+  margin: 4px 0 0;
 }
 
 .markdown code {
@@ -2350,7 +2382,7 @@ mark.find-hit.current {
 }
 
 .markdown pre {
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -2390,8 +2422,13 @@ mark.find-hit.current {
   font-size: var(--text-sm);
 }
 
+/* A quote is a block, not a paragraph: it takes the block step (16px, like a
+   list, a table or a code block) rather than the 12px paragraph rhythm, so a
+   quote, a list and a table all breathe at the same interval. The left rule is
+   the quotation mark here, not a callout tint — it is `--border-strong`, stays
+   inside 2px, and the brief names the quote's edge as one to keep. */
 .markdown blockquote {
-  margin: 0 0 12px;
+  margin: 0 0 16px;
   padding-left: 14px;
   border-left: 2px solid var(--border-strong);
   color: var(--text-secondary);
@@ -2409,7 +2446,7 @@ mark.find-hit.current {
    zero-dependency renderer — so the block reads as a formula through voice
    alone: centred, serif, a touch larger, with source line breaks preserved. */
 .markdown .math {
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   padding: 10px 16px;
   font-family: Georgia, "Times New Roman", serif;
   font-size: var(--text-md);
@@ -2423,7 +2460,7 @@ mark.find-hit.current {
    zero-dependency renderer — so the block reads as a formula through voice
    alone: centred, serif, a touch larger, with source line breaks preserved. */
 .markdown .math {
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   padding: 10px 16px;
   font-family: Georgia, "Times New Roman", serif;
   font-size: var(--text-md);
@@ -2435,7 +2472,7 @@ mark.find-hit.current {
 
 .markdown table {
   border-collapse: collapse;
-  margin: 0 0 14px;
+  margin: 0 0 16px;
   font-size: var(--text-base);
 }
 
@@ -2507,7 +2544,11 @@ mark.find-hit.current {
  * ran — truncating it would hide the one thing the row exists to say. */
 .tool-group {
   max-width: var(--column-width);
-  margin: 22px auto;
+  /* 24px on both sides, the same block interval `.turn` uses: a tool group is
+     a conversation block, and everything inside it (rows at 3+1+3) stays far
+     tighter, so "turns > tool rows" is carried by the interior spacing rather
+     than by giving the group a smaller outer gap. */
+  margin: 24px auto;
   padding: 0 28px;
   display: grid;
   grid-template-columns: 16px minmax(14ch, max-content) minmax(0, 1fr) 18px;
@@ -2774,17 +2815,17 @@ mark.find-hit.current {
  * folded.
  *
  * Spacing: this is a paragraph of the conversation, not a caption on the
- * block below it, so it takes the transcript's own block interval (the 22px
+ * block below it, so it takes the transcript's block interval (the 24px
  * `.turn` uses) on *both* sides. It used to carry only a 10px bottom margin,
  * and because adjacent vertical margins collapse to the larger one, the gap
- * above/below a block came out as 22px above and 10px below — the narrow side
+ * above/below a block came out 22px above and 10px below — the narrow side
  * being the tool group it happened to precede. That is what made a folded
  * thought read as the tool group's title rather than as the model's own
  * paragraph: it was attached to what followed. With equal margins a reasoning
  * block is equidistant from whatever is next, whichever kind of block it is. */
 .thinking {
   max-width: var(--column-width);
-  margin: 22px auto;
+  margin: 24px auto;
   padding: 0 28px;
   font-size: var(--text-sm);
   color: var(--text-faint);
@@ -2880,7 +2921,7 @@ mark.find-hit.current {
 
 .plan {
   max-width: var(--column-width);
-  margin: 0 auto 18px;
+  margin: 0 auto 24px;
   padding: 0 28px;
 }
 
@@ -3074,17 +3115,53 @@ mark.find-hit.current {
   color: var(--warn);
 }
 
-/* A recovered goal is a notice with rows, not a sentence: each row is one
-   session and one action, and the same tokens as every other notice. */
-/* First-run checklist: a notice with rows, in the same voice as recovery. */
-.notice.setup {
-  border-left: 2px solid var(--accent);
-  padding-left: 12px;
+/* First-run checklist and a recovered goal: two notices that carry rows, not
+   a sentence. Each row is one item and one action, in the same tokens as every
+   other notice.
+ *
+ * Both used to be marked by a 2px accent/warn rule on the left edge — the
+ * category default for a callout, and the one habit the direction brief names
+ * outright. The marker is now the heading: the notice takes a neutral
+ * `--surface` card with a hairline border, and the semantic colour is spent on
+ * a 6px dot in front of the title. A shape plus a title is what says "setup"
+ * or "recovered" — the tint alone would not survive a monochrome screenshot,
+ * the contrast theme, or a colour-blind reader. */
+.notice.setup,
+.notice.recovery {
+  margin-top: 4px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-secondary);
 }
 
-.setup-head {
-  color: var(--text-secondary);
+/* The card's own title, carrying the state as the same 6px dot the rest of
+   the interface uses for "this is happening" (`.thinking-head`,
+   `.session-state`, `.turn-progress`). The label is `--text` because it is
+   the card's heading; the hue lives on the dot alone. */
+.setup-head,
+.recovery-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin-bottom: 8px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.setup-head::before,
+.recovery-head::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.recovery-head::before {
+  background: var(--warn);
 }
 
 .setup-row {
@@ -3108,22 +3185,16 @@ mark.find-hit.current {
 .setup-hint {
   margin: 6px 0 0;
   padding: 6px 8px;
-  background: var(--surface);
+  /* The card itself is `--surface` now, so the command block needs the raised
+     step and a hairline to stay a separate object — on `--surface` it merged
+     into the card and the `copy this` affordance disappeared. */
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   font-family: var(--mono);
   font-size: var(--text-xs);
   color: var(--text-secondary);
   white-space: pre-wrap;
-}
-
-.notice.recovery {
-  border-left: 2px solid var(--warn);
-  padding-left: 12px;
-}
-
-.recovery-head {
-  color: var(--text-secondary);
-  margin-bottom: 6px;
 }
 
 .recovery-row {
@@ -3168,9 +3239,60 @@ mark.find-hit.current {
 
 /* ---------- empty state ---------- */
 
+/* The slot is the chat column's own band, directly above the composer card.
+ * The empty state used to live inside `#transcript-scroll` with `margin: 8vh
+ * auto 0`, which left it floating near the top of the scroll area with a few
+ * hundred pixels of nothing between it and the input it introduces. Moving it
+ * out of the scroll box makes it a sibling of `.composer-region`, so it stands
+ * on the card's edge at every width and does not scroll away.
+ *
+ * `[hidden]` must zero the padding, not just the box: leaving `padding: 0 16px
+ * 12px` on a hidden slot would draw an empty band above the composer the
+ * moment the first turn appears.
+ *
+ * The `12px` bottom pad is the slot's only gap to the composer (the card owns
+ * its own top margin-free layout), and it keeps the empty block from touching
+ * the card's rounded top edge. The 16px top pad is the "leads the card"
+ * interval from the shared scale. */
+.empty-slot {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  /* Centred in the band between the top bar and the composer, which lands
+     the introduction slightly above the window's own centre — the reading
+     position a first-run screen wants, rather than pinned just above the
+     input at the very bottom of the column. */
+  justify-content: center;
+  padding: 24px 16px 12px;
+}
+
+.empty-slot[hidden] {
+  display: none;
+}
+
+/* While the empty state is showing the transcript has nothing to say, so it
+   stops growing and hands the whole band to the introduction. Without this
+   the two `flex: 1` siblings split the space evenly and the block settles in
+   the lower half, which is where it was before. `:has()` keeps this pure CSS:
+   the moment a turn arrives the slot is hidden and the transcript takes the
+   column back. */
+.chat-column:has(.empty-slot:not([hidden])) .transcript {
+  flex: 0 0 auto;
+  min-height: 0;
+  /* An empty transcript is pure gutter — 32px of top padding and 16px of
+     bottom padding around nothing. Dropping it lets the introduction centre
+     in the real chat band instead of in whatever is left after a hidden
+     scroll box has taken its share. */
+  padding-block: 0;
+  overflow: visible;
+}
+
+.empty-slot .empty-state {
+  margin: 0 auto;
+}
+
 .empty-state {
   max-width: 620px;
-  margin: 8vh auto 0;
   padding: 0 28px;
   text-align: center;
 }
@@ -3183,7 +3305,10 @@ mark.find-hit.current {
 .empty-mark {
   width: 76px;
   height: 76px;
-  margin-bottom: 22px;
+  /* 24px is the "above a heading" step: the mark is the block's lead and the
+     h1 is the heading, so the space between them belongs to the heading's
+     top side and takes the larger of the two scale steps. */
+  margin-bottom: 24px;
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
@@ -3199,7 +3324,10 @@ mark.find-hit.current {
 .empty-state p {
   color: var(--text-secondary);
   font-size: var(--text-base);
-  margin: 0 auto 26px;
+  /* 24px below the paragraph is the gap to the setup button — the block's one
+     action — so it matches the lead-in above the heading rather than the 26px
+     that sat outside the scale. */
+  margin: 0 auto 24px;
   max-width: 46ch;
 }
 
@@ -3229,7 +3357,13 @@ mark.find-hit.current {
 
 .composer-region {
   flex: 0 0 auto;
-  padding: 0 28px 16px;
+  /* 16, not 28: the transcript's own gutter is `padding: 32px 16px 16px`, so
+     the composer and the messages above it have to start from the same inset.
+     They were 12px apart on each side before — invisible while both boxes were
+     the widest thing in a wide column, obvious the moment the inspector opened
+     and both started shrinking, because the composer drifted left relative to
+     the text it sits under. */
+  padding: 0 16px 16px;
 }
 
 /* ---------- plan strip (above the composer) ----------
@@ -3459,8 +3593,13 @@ mark.find-hit.current {
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 10px 8px 14px;
+  /* Roomier than it was: the card reads as the page's primary surface, and
+     the reference layout gives the prompt real air above it and a second band
+     below for the controls. 16/12 top-bottom plus the 12 px gap between the
+     rows lands the resting height around 92 px — tall enough to invite typing
+     without pushing the transcript up. */
+  gap: 14px;
+  padding: 18px 14px 14px 18px;
   background: var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
@@ -3470,32 +3609,6 @@ mark.find-hit.current {
 
 .composer:focus-within {
   border-color: var(--border-strong);
-}
-
-/* A next-step suggestion sits above the textarea as ghost text, not in it: the
-   draft the user is typing must never be overwritten by a hint. */
-.composer-suggestion {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 2px 10px 4px;
-  font-family: var(--sans);
-  font-size: var(--text-sm);
-  color: var(--text-faint);
-}
-
-.composer-suggestion-text {
-  color: var(--text-secondary);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.composer-suggestion-hint {
-  margin-left: auto;
-  color: var(--text-faint);
-  font-size: var(--text-xs);
 }
 
 .composer-input-row {
@@ -3517,8 +3630,9 @@ mark.find-hit.current {
      the chips carry their own `min-width: 0` and ellipsis. */
   flex-wrap: nowrap;
   min-width: 0;
-  padding-top: 7px;
-  border-top: 1px solid var(--border);
+  /* No rule above it any more. The divider split one card into two boxes; the
+     reference layout keeps the prompt and its controls inside one surface and
+     separates them with space, not a line. */
 }
 
 .composer-bar .controls {
@@ -3633,37 +3747,143 @@ mark.find-hit.current {
   opacity: 0.6;
 }
 
-/* The context chip: the window size next to the model, the fill in the
-   popover. A percentage alone was unreadable — 17% of what? */
-.context-chip {
-  display: inline-flex;
-  /* `center`, not `baseline`: the chip sits beside the model picker, and a
-     baseline alignment moved its text a couple of pixels off theirs whenever
-     the picker showed a chevron and this one did not. */
+/* ---------- the composer's status tab ----------
+   It hangs off the card's top edge rather than sitting in the control row:
+   the folder and the window describe the turn about to be sent, and both are
+   read at a glance rather than steered, which is what a tab is for. It is
+   the composer's sibling, so the two boxes join visually — same max-width and
+   centring as `.composer`, its radius carried on the top corners only, and no
+   bottom border where they meet.
+
+   It is deliberately not mutually exclusive with the plan strip or the
+   approval bar: it is the only entry to the usage popover, and a long run is
+   exactly when that popover is worth opening. */
+.composer-status-tab {
+  position: relative;
+  /* Narrower than the card, and it has to stay that way: the tab's square
+     bottom edge lands on the card's flat top, which only exists past the
+     card's own corner radius, so 28px of card must show at each end.
+
+     The cap has to be the card's own cap, not the token by itself. The card
+     is `min(var(--column-width), 100%)` of this same region; subtracting 56
+     from `var(--column-width)` alone left the tab wider than the card once
+     the region shrank below the reading width (inspector open), and the tab
+     spilled past both card corners. Subtracting from the same `min()` keeps
+     the 28px inset at every width. */
+  max-width: calc(min(var(--column-width), 100%) - 56px);
+  margin: 0 auto;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  /* Same box as `.mode-picker` and `.chip-button` — see the note there. */
-  padding: 4px 8px;
+  gap: 8px;
+  min-width: 0;
+  /* Thinner than the control rows below it on purpose: the tab is a caption
+     for the card, not a control row, and at 30px it read as a third band
+     competing with the input and the bar. 25px still clears the 19.2px line
+     box of --text-xs with 3px above and below, and leaves the 13px ring
+     centred. */
+  height: 25px;
+  padding: 0 9px 0 12px;
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  background: var(--surface);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+/* The folder name is the stable half; the branch, when a host eventually
+   reports one, comes first and is allowed to shrink before the name does. */
+.status-tab-branch {
+  font-family: var(--mono);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.status-tab-cwd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Pushed to the far edge: the left half says where, the right half says how
+   full, and they are read in that order. */
+.status-tab-context {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  padding: 2px 6px;
   border-radius: var(--radius-sm);
   font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   color: var(--text-secondary);
 }
 
-.context-chip:hover,
-.context-chip[aria-expanded="true"] {
-  background: var(--surface);
+.status-tab-context:hover,
+.status-tab-context[aria-expanded="true"] {
+  background: var(--surface-hover);
   color: var(--text);
 }
 
-/* The occupancy percentage (D-165). Legible as-is at --text-faint; tabular
-   figures keep the chip from reflowing as the number climbs. The global
-   `[hidden]` rule (display: none !important) covers this span, so the
-   renderer hides it by toggling the attribute and needs no rule here. */
+/* The ring is drawn, not iconified: the arc is the measured share, so it
+   reads as a gauge at 14px the way a bar does at 100px. An unmeasured
+   session shows the track alone — an empty arc, never a full one. */
+.status-tab-ring {
+  width: 13px;
+  height: 13px;
+  transform: rotate(-90deg);
+  flex: 0 0 auto;
+}
+
+.status-tab-ring-track {
+  fill: none;
+  stroke: var(--border-strong);
+  stroke-width: 2.5;
+}
+
+.status-tab-ring-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dashoffset var(--normal) var(--ease);
+  /* A circle with no dash array is drawn as one unbroken stroke — i.e. a full
+     ring, which reads as "100 % used" before anything has been measured.
+     Declaring the array here makes the SVG's own default match the honest
+     empty state, so the very first paint is an empty track even before the
+     renderer's first frame. `transform` on the parent puts the gap at the
+     top. */
+  stroke-dasharray: 37.7;
+  stroke-dashoffset: 37.7;
+}
+
+.status-tab-ring-fill.empty {
+  stroke: var(--border-strong);
+}
+
+/* The occupancy percentage (D-165). It is the tab's figure now — the window
+   size moved into the popover — so it gets the tab's body colour rather than
+   the muted tone it had as a secondary reading beside "1M".
+
+   Tabular figures keep the label from reflowing as the number climbs, and a
+   fixed minimum width keeps the ring from shifting when it goes 9% → 10% →
+   "—". */
 .context-pct {
+  min-width: 2.6em;
   font-size: var(--text-xs);
-  color: var(--text-faint);
+  color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Nothing measured yet: the em dash is a placeholder, not a reading, so it
+   takes the muted tone the number does not. */
+.context-pct.unknown {
+  color: var(--text-faint);
 }
 
 .effort-picker {
@@ -3700,6 +3920,12 @@ mark.find-hit.current {
   font-size: var(--text-md);
   line-height: 1.55;
   max-height: 220px;
+  /* Floors the resting height at two lines' worth of box even though `rows="1"`
+     and `autoSize()` set an exact height: the reference card's prompt sits in a
+     taller empty area than one line, and the extra room is what makes the card
+     read as a writing surface rather than a search field. `autoSize()` only
+     ever grows past this, never below it. */
+  min-height: 46px;
   padding: 5px 0;
   outline: none;
 }
@@ -3708,16 +3934,28 @@ mark.find-hit.current {
   color: var(--text-faint);
 }
 
+/* The send/stop pair, now the last item of the controls row rather than a
+   block beside the textarea. `margin-left: auto` is not needed — the row is
+   `justify-content: space-between` and this is its third child, but it does
+   need to stop shrinking, or a long model name would squeeze the circle. */
 .composer-actions {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex: 0 0 auto;
 }
 
+/* A filled circle, no stroke: the send action is the one accent-filled
+   control in the composer, and a rounded rectangle read as the same shape as
+   the bordered chips beside it. `999px` rather than half the side, so the
+   circle holds if the size is ever adjusted. */
 .send-button {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
+  /* 36, not 32: with the controls now on the card's own bottom row rather than
+     a thinner strip under a rule, the button is the row's anchor and sits level
+     with the reference layout's send circle. The bar's height follows it. */
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
   display: grid;
   place-items: center;
   background: var(--accent);
@@ -3735,9 +3973,11 @@ mark.find-hit.current {
 }
 
 .stop-button {
-  height: 32px;
-  padding: 0 12px;
-  border-radius: var(--radius-sm);
+  /* Matches the send button beside it: the two never show at once, and a
+     shorter pill next to a 36px circle made the row look misaligned. */
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 999px;
   border: 1px solid var(--border-strong);
   font-size: var(--text-sm);
   color: var(--text-secondary);
@@ -4133,15 +4373,19 @@ mark.find-hit.current {
   gap: 6px;
 }
 
+/* A note the operator pinned to a diff line. The accent used to run down its
+   left edge; it is now a full hairline box at `--radius-sm`, with the line
+   number in mono as the locator. A box reads as an annotation *beside* the
+   diff rather than as another hunk of it. */
 .line-comment {
   display: flex;
   align-items: baseline;
   gap: 8px;
   margin: 4px 10px;
   padding: 6px 9px;
-  border-left: 2px solid var(--accent);
+  border: 1px solid var(--border);
   background: var(--surface);
-  border-radius: 0 6px 6px 0;
+  border-radius: var(--radius-sm);
   font-size: var(--text-sm);
   color: var(--text-secondary);
 }
@@ -4175,22 +4419,32 @@ mark.find-hit.current {
 
 /* ---------- sub-agent group ---------- */
 
+/* A child agent's group. It used to be a surface with a state-coloured left
+   rule; the rule is gone and the state now rides the glyph that already leads
+   the header (`corner-down-right`, tinted per state below) plus the count on
+   the right, which reads "3" while running and the finished/failed word after.
+   The card is a hairline box so it separates from the transcript without a
+   colour bar doing the separating. */
 .subagent {
   max-width: var(--column-width);
-  margin: 2px auto 10px;
-  padding: 8px 12px 9px 14px;
-  border-left: 2px solid var(--border-strong);
+  margin: 4px auto 12px;
+  padding: 8px 12px 9px;
+  border: 1px solid var(--border);
   background: var(--surface);
-  border-radius: 0 8px 8px 0;
+  border-radius: var(--radius-sm);
   font-size: var(--text-sm);
 }
 
-.subagent.running {
-  border-left-color: var(--accent);
+/* State is not carried by the tint alone: the count slot holds a running
+   number while the child works and the word "done" / "failed" once it ends
+   (`subagent_end`), so the text tells the state even in monochrome. The glyph
+   tint is the second, redundant cue. */
+.subagent.running .subagent-glyph {
+  color: var(--accent);
 }
 
-.subagent.failed {
-  border-left-color: var(--danger);
+.subagent.failed .subagent-glyph {
+  color: var(--danger);
 }
 
 .subagent-head {
@@ -4320,19 +4574,17 @@ mark.find-hit.current {
   stroke-width: 1.8;
 }
 
-/* A result that arrived on its own, after the turn that started it. */
+/* A result that arrived on its own, after the turn that started it. Same
+   callout rule as `.notice.setup`: the state is the head's icon plus its
+   word, not a coloured edge — `.background-head .icon` already carries the
+   accent (danger when failed) and the state line says it in text. */
 .background-report {
   max-width: var(--column-width);
-  margin: 2px auto 14px;
+  margin: 4px auto 16px;
   padding: 12px 14px;
   border: 1px solid var(--border);
-  border-left: 2px solid var(--accent);
   border-radius: var(--radius-sm);
   background: var(--surface);
-}
-
-.background-report.failed {
-  border-left-color: var(--danger);
 }
 
 .background-head {
@@ -4685,27 +4937,39 @@ mark.find-hit.current {
 
 /* Secondary composer controls are chips, not segmented rails: the mode stays
    a rail because it changes what the agent may do, everything else is one
-   button that opens a small menu. */
+   button that opens a small menu.
+
+   At rest a chip is text with a chevron — no fill, no border. The composer
+   holds three of these side by side and three bordered boxes turned the
+   control row into a wall of chrome; the reference composer pairs the same
+   plain-text treatment with a hover surface, and `.mode-picker` already
+   worked that way. One shape, not two.
+
+   No border at all — not even a transparent one — so the chip and
+   `.mode-picker` share one box model: the bare `button` rule already sets
+   `border: none`, and adding a transparent border to one of them made the
+   row's two halves differ by a pixel in height. Nothing changes between rest
+   and hover except the fill, so the row cannot shift under the pointer.
+   Padding and radius are unchanged. */
 .chip-button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  /* Symmetric, matching `.mode-picker` and `.context-chip`: the extra 2 px on
+  /* Symmetric, matching `.mode-picker` and the status tab's context figure: the extra 2 px on
      the left existed to balance the chevron on the right, and it only made the
      text sit off the other two chips' text. */
   padding: 4px 8px;
   border-radius: var(--radius-sm);
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: transparent;
   font-family: var(--mono);
   font-size: var(--text-sm);
   color: var(--text-secondary);
-  transition: border-color 120ms ease, color 120ms ease;
+  transition: background 120ms ease, color 120ms ease;
 }
 
 .chip-button:hover,
 .chip-button[aria-expanded="true"] {
-  border-color: var(--border-strong);
+  background: var(--surface);
   color: var(--text);
 }
 
@@ -4866,24 +5130,145 @@ mark.find-hit.current {
   position: absolute;
   bottom: calc(100% + 6px);
   /* Anchored to the right edge, because the chip is the rightmost control:
-     `left: 0` grew the 320px box outwards from a chip near the viewport edge
-     and pushed it off screen. */
+     `left: 0` grew the panel outwards from a chip near the viewport edge and
+     pushed it off screen. */
   right: 0;
-  width: min(320px, calc(100vw - 32px));
-  max-height: 340px;
+  /* Wide enough for the provider rail (a glyph plus a display name) and a
+     model name that does not ellipsise at the first long id; still capped so
+     it never leaves the viewport. */
+  width: min(412px, calc(100vw - 32px));
+  max-height: 360px;
   /* The field and the refresh row stay put and the list scrolls under them;
      scrolling the whole popover made the filter disappear exactly when a long
      list made it useful. */
   display: flex;
-  flex-direction: column;
+  flex-direction: row;
   min-height: 0;
-  padding: 4px;
+  padding: 10px;
+  gap: 8px;
   background: var(--surface-raised);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-popover);
   z-index: 20;
-  animation: slide-up 120ms ease-out;
+  /* Turns in from the edge it is anchored to, the way the reference design's
+     menus do: a short fade, a 2% scale and a slight blur, no travel. */
+  transform-origin: bottom right;
+  animation: menu-in 150ms var(--ease);
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-menu,
+  .mode-menu,
+  .effort-menu,
+  .plus-menu {
+    animation: none;
+  }
+}
+
+/* The provider rail: one row per configured service — the vendor's glyph and
+   the display name. It only exists when more than one service is configured —
+   a rail with a single entry is a label the panel already repeats — and the
+   renderer leaves it out entirely then, so `.model-menu`'s row direction costs
+   nothing. */
+.model-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* Wide enough for a two-line display name without squeezing the model list;
+     anything longer is clamped and the row's tooltip carries the rest. */
+  flex: 0 0 auto;
+  width: 158px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 8px;
+  border-right: 1px solid var(--border);
+}
+
+.model-rail-mark {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 28px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+  text-align: left;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+
+/* The glyphs are filled shapes (see `.vendor-mark` in settings.css), so they
+   take the ink of the row rather than the stroke settings the sprite uses. */
+.model-rail-glyph {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+  stroke: none;
+}
+
+/* A service with no known vendor: the two-letter monogram this rail used to
+   show for every row. Fixed width so the labels of neighbouring rows line up. */
+.model-rail-monogram {
+  flex: 0 0 auto;
+  width: 16px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  letter-spacing: 0.03em;
+  text-align: center;
+}
+
+/* Two lines rather than one ellipsised line: the tail of a display name is
+   usually what tells two keys of one vendor apart ("…公司账号" vs
+   "…家里备用密钥"), and a truncation that cuts it off defeats the label. */
+.model-rail-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  line-height: 1.3;
+}
+
+.model-rail-mark:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.model-rail-mark[aria-selected="true"] {
+  background: var(--surface-hover);
+  color: var(--text);
+  /* The selected provider is marked by the surface plus this edge, not by a
+     tint of its own: the accent is what the model row's check mark means. */
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+/* The right half: a header (title or filter), then the scrolling list, then
+   the fixed refresh row. */
+.model-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  gap: 6px;
 }
 
 .model-list {
@@ -4922,12 +5307,17 @@ mark.find-hit.current {
   border-color: var(--border-strong);
 }
 
-.model-group-label {
-  padding: 6px 10px 4px;
-  font-family: var(--mono);
+/* The header of the model panel's right column: the provider it is showing
+   when the rail is on screen, or nothing (the filter field takes this slot
+   when there are enough models to search). */
+.model-head {
+  padding: 2px 2px 0;
   font-size: var(--text-xs);
+  letter-spacing: 0.02em;
   color: var(--text-faint);
-  text-transform: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The row layout is scoped to this menu: `.model-option` is also the generic
@@ -4935,10 +5325,10 @@ mark.find-hit.current {
 .model-menu .model-option {
   display: flex;
   align-items: flex-start;
-  gap: 6px;
+  gap: 7px;
   width: 100%;
-  padding: 7px 10px;
-  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  border-radius: var(--radius);
   text-align: left;
 }
 
@@ -4947,8 +5337,12 @@ mark.find-hit.current {
   background: var(--surface-hover);
 }
 
+/* The selected row is a neutral raised surface, not a tinted one: the accent
+   is spent on the check mark, which is the fact ("this is the one in use"),
+   while the surface only says "a row". Two accent signals in one row made the
+   keyboard highlight and the selection hard to tell apart. */
 .model-option.active {
-  background: var(--accent-soft);
+  background: var(--surface-hover);
 }
 
 .model-menu .model-option[data-highlight="1"] {
@@ -4960,15 +5354,17 @@ mark.find-hit.current {
 }
 
 .model-mark {
-  flex: 0 0 12px;
-  height: 14px;
+  flex: 0 0 13px;
+  height: 16px;
+  display: grid;
+  place-items: center;
   color: var(--accent-text);
   opacity: 0;
 }
 
 .model-mark svg {
-  width: 12px;
-  height: 12px;
+  width: 13px;
+  height: 13px;
 }
 
 /* Selection is marked by a glyph, not only by the tint: colour alone is not a
@@ -4985,18 +5381,17 @@ mark.find-hit.current {
 }
 
 .model-name {
-  font-family: var(--mono);
-  font-size: var(--text-sm);
+  font-family: var(--sans);
+  font-size: var(--text-base);
   color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.model-option.active .model-name {
-  color: var(--accent-text);
-}
-
+/* The selected name keeps the body colour: the check and the surface already
+   say which row it is, and an accent-coloured name competed with the model
+   chip above, which is the same model. */
 .model-meta {
   font-family: var(--mono);
   font-size: var(--text-xs);
@@ -5039,7 +5434,9 @@ mark.find-hit.current {
   font-size: var(--text-sm);
   color: var(--text-secondary);
   text-align: left;
-  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  /* Follows the panel it is the foot of. With `--radius-sm` a hover fill
+     painted square corners inside the 20px panel silhouette. */
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
 }
 
 .model-refresh .icon {
@@ -5077,11 +5474,11 @@ mark.find-hit.current {
 }
 
 .usage-popover {
-  /* Anchored to the footer's right edge, above the control row. */
+  /* Anchored to the status tab's right edge, opening upward — it used to hang
+     off the control row, and the tab is where its trigger moved to. */
   position: absolute;
   right: 0;
-  top: -6px;
-  transform: translateY(-100%);
+  bottom: calc(100% + 6px);
   z-index: 30;
   width: 268px;
   padding: 12px 14px;
@@ -5304,11 +5701,18 @@ mark.find-hit.current {
   background: none;
   padding: 0;
   margin-left: 6px;
-  color: var(--accent);
+  /* The one underlined affordance that is a button, not an `<a>`. It takes
+     the same offset as a link (see the global `a` rule) so a notice that
+     wraps a sentence and a trailing `link-button` does not show two different
+     underline heights on one line. `--accent-text` rather than `--accent`:
+     this button sits on `--surface` inside a notice, where `--accent` measures
+     4.21:1 in the light theme — under AA for body text — while
+     `--accent-text` measures 6.87:1 there. */
+  color: var(--accent-text);
   font: inherit;
   cursor: pointer;
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-underline-offset: 3px;
   white-space: nowrap;
 }
 
@@ -5795,15 +6199,18 @@ mark.find-hit.current {
   word-break: break-word;
 }
 
+/* Widths follow the text they hold: `HH:MM:SS.mmm` is 12 monospace glyphs and
+   "error" is five, so the old 78 / 34 px columns were sized for the 11px ramp
+   and overflowed the moment the scale moved up one step. */
 .serial-time {
-  flex: 0 0 78px;
+  flex: 0 0 88px;
   font-size: var(--text-xs);
   line-height: 1.6;
   color: var(--text-faint);
 }
 
 .serial-level {
-  flex: 0 0 34px;
+  flex: 0 0 42px;
   font-size: var(--text-xs);
   line-height: 1.6;
   color: var(--text-faint);
@@ -5823,7 +6230,7 @@ mark.find-hit.current {
 
 .serial-tag {
   flex: 0 0 auto;
-  max-width: 120px;
+  max-width: 132px;
   overflow: hidden;
   text-overflow: ellipsis;
   font-size: var(--text-xs);
@@ -5850,10 +6257,13 @@ mark.find-hit.current {
 .serial-badge {
   flex: 0 0 30px;
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
-  line-height: 1.75;
+  /* 1.5 (not 1.75): the badge is a fixed 18px box, and 1.75 was tuned for the
+     old 10px ramp. At 12px it would put a 21px line box inside 18px and the
+     letters would bleed past the tint. */
+  line-height: 1.5;
   text-align: center;
   border-radius: 4px;
   height: 18px;
@@ -6013,7 +6423,7 @@ mark.find-hit.current {
 
 .serial-line-btn {
   font-family: var(--mono);
-  font-size: 10px;
+  font-size: var(--text-xs);
   letter-spacing: 0.05em;
   padding: 0 8px;
   height: 26px;

@@ -2,12 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   availableModelEntries,
   carriedFromModel,
-  connectionSummary,
   contextWindowChoices,
   contextWindowForSave,
   CONTEXT_WINDOW_CHOICES,
   modelEntryForSave,
   modelRowState,
+  serviceHeaderFacts,
+  serviceKeyKind,
   shortWindow,
 } from "../../desktop/renderer/settings-models.js";
 
@@ -51,44 +52,43 @@ describe("availableModelEntries", () => {
   });
 });
 
-describe("connectionSummary", () => {
-  it("中文：模型数与延迟", () => {
-    expect(connectionSummary("zh", { modelCount: 3, latencyMs: 125 })).toBe(
-      "连接正常 · 3 个模型可用 · 125 ms",
-    );
+describe("serviceKeyKind", () => {
+  it("直接填了密钥就是 direct，即使还填了变量名", () => {
+    expect(serviceKeyKind({ apiKey: "sk-abc", apiKeyEnv: "DEEPSEEK_API_KEY" })).toBe("direct");
   });
 
-  it("中文：延迟未知时不写这一段", () => {
-    expect(connectionSummary("zh", { modelCount: 3 })).toBe("连接正常 · 3 个模型可用");
-    expect(connectionSummary("zh", { modelCount: 3, latencyMs: Number.NaN })).toBe("连接正常 · 3 个模型可用");
-    expect(connectionSummary("zh", { modelCount: 3, latencyMs: Number.POSITIVE_INFINITY })).toBe(
-      "连接正常 · 3 个模型可用",
-    );
+  it("只有变量名时是 env，不是「已配置」", () => {
+    expect(serviceKeyKind({ apiKey: "", apiKeyEnv: "DEEPSEEK_API_KEY" })).toBe("env");
   });
 
-  it("中文：0 个模型是另一句话，不是「0 个模型可用」", () => {
-    expect(connectionSummary("zh", { modelCount: 0, latencyMs: 125 })).toBe("端点可达，但没能列出模型");
+  it("都空着（或只有空白）是 missing", () => {
+    expect(serviceKeyKind({})).toBe("missing");
+    expect(serviceKeyKind({ apiKey: "   ", apiKeyEnv: "\t" })).toBe("missing");
+    expect(serviceKeyKind()).toBe("missing");
   });
 
-  it("英文：单复数正确", () => {
-    expect(connectionSummary("en", { modelCount: 1 })).toBe("Connected · 1 model available");
-    expect(connectionSummary("en", { modelCount: 3 })).toBe("Connected · 3 models available");
+  it("与内核同口径：trim 后为空就不算密钥", () => {
+    expect(serviceKeyKind({ apiKey: " sk-x ", apiKeyEnv: "" })).toBe("direct");
+  });
+});
+
+describe("serviceHeaderFacts", () => {
+  it("模型数只算有名字的行，非有限数按 0", () => {
+    expect(serviceHeaderFacts({ modelCount: 3 }).modelCount).toBe(3);
+    expect(serviceHeaderFacts({ modelCount: Number.NaN }).modelCount).toBe(0);
+    expect(serviceHeaderFacts({ modelCount: -2 }).modelCount).toBe(0);
+    expect(serviceHeaderFacts({}).modelCount).toBe(0);
   });
 
-  it("英文：延迟四舍五入到毫秒", () => {
-    expect(connectionSummary("en", { modelCount: 1, latencyMs: 88.4 })).toBe(
-      "Connected · 1 model available · 88 ms",
-    );
+  it("envName 只在 env 状态下给出，且是 trim 后的变量名", () => {
+    expect(serviceHeaderFacts({ apiKeyEnv: "  KIMI_API_KEY " }).envName).toBe("KIMI_API_KEY");
+    expect(serviceHeaderFacts({ apiKey: "sk-x", apiKeyEnv: "KIMI_API_KEY" }).envName).toBe("");
   });
 
-  it("英文：0 个模型", () => {
-    expect(connectionSummary("en", { modelCount: 0 })).toBe(
-      "The endpoint answered, but it did not list any models.",
-    );
-  });
-
-  it("未知 locale 退回英文", () => {
-    expect(connectionSummary("fr", { modelCount: 2 })).toBe("Connected · 2 models available");
+  it("noBaseUrl 只看 trim 后是否为空：写了但写错不算「没填」", () => {
+    expect(serviceHeaderFacts({ baseUrl: "  " }).noBaseUrl).toBe(true);
+    expect(serviceHeaderFacts({ baseUrl: "not-a-url" }).noBaseUrl).toBe(false);
+    expect(serviceHeaderFacts({}).noBaseUrl).toBe(true);
   });
 });
 

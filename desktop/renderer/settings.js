@@ -11,10 +11,24 @@ import { settingsStrings } from "./settings-i18n.js";
 import {
   availableModelEntries,
   carriedFromModel,
-  connectionSummary,
   modelEntryForSave,
   modelRowState,
+  serviceHeaderFacts,
 } from "./settings-models.js";
+import {
+  isAutoProviderName,
+  nextProviderName,
+  presetById,
+  presetFillFor,
+  providerPickerOptions,
+} from "./provider-presets.js";
+import {
+  duplicateDisplayName,
+  providerIdentity,
+  readProviderMeta,
+  writeProviderMeta,
+} from "./provider-meta.js";
+import { VENDOR_MARKS } from "./vendor-marks.js";
 import { iconEl, setIcon } from "./icons.js";
 import { normalizeTranscriptView } from "./thinking-view.js";
 
@@ -55,6 +69,65 @@ export function looksLikeEnvName(value) {
   return /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/.test(text);
 }
 
+/**
+ * The `testProvider` payload for one request on a card.
+ *
+ * `kind` is `"test"` (the card header's button) or `"list"` (the models
+ * section's). Only the fields that were filled in are sent: an empty `apiKey`
+ * would ask the host to send an empty credential, and an empty `apiKeyEnv`
+ * would ask it to read a variable with no name.
+ *
+ * The model name travels only with a test. `probeProvider` falls back to a
+ * one-token chat request when `/models` fails *and* a model was given; that
+ * answers "can it talk", not "what does it list". A list request carrying the
+ * model could come back `ok` for a gateway whose `/models` is a 404, and the
+ * page would draw that as a successful model list (R3).
+ */
+export function providerProbePayload(kind, target) {
+  const baseUrl = typeof target?.baseUrl === "string" ? target.baseUrl : "";
+  const apiKey = typeof target?.apiKey === "string" ? target.apiKey : "";
+  const apiKeyEnv = typeof target?.apiKeyEnv === "string" ? target.apiKeyEnv : "";
+  const model = typeof target?.model === "string" ? target.model : "";
+  return {
+    cmd: "testProvider",
+    baseUrl,
+    ...(apiKey === "" ? {} : { apiKey }),
+    ...(apiKeyEnv === "" ? {} : { apiKeyEnv }),
+    ...(kind === "list" || model === "" ? {} : { model }),
+  };
+}
+
+/**
+ * One `provider_test` answer, split into the three outcomes the page draws.
+ *
+ * The host relays the kernel's rule: `models` is absent when the endpoint did
+ * not list them, as opposed to an empty list (R3) — so an answer without a
+ * list is "answered, listed nothing", never "listed zero". A failure keeps the
+ * kernel's own sentence and its classification code; a code this page does not
+ * know travels through untouched rather than being guessed at.
+ */
+export function probeAnswer(message) {
+  const record = typeof message === "object" && message !== null ? message : {};
+  if (record.ok === true) {
+    const models = Array.isArray(record.models)
+      ? record.models.filter((model) => typeof model === "string")
+      : [];
+    // No measurement means no measurement: a `0 ms` would be a number nobody
+    // took (R3).
+    const latencyMs = typeof record.latencyMs === "number" ? record.latencyMs : undefined;
+    return {
+      outcome: models.length > 0 ? "ok" : "empty",
+      models,
+      ...(latencyMs === undefined ? {} : { latencyMs }),
+    };
+  }
+  return {
+    outcome: "failed",
+    code: typeof record.code === "string" ? record.code : "",
+    detail: typeof record.error === "string" ? record.error : "",
+  };
+}
+
 export function createSettings(deps) {
   const { state, $, api, formatTokens, setTheme, setDensity, setMode, applyLocale, openModal, closeModal, getT, applyCodeFont, confirmAction } = deps;
   // `t` is rebound on every locale change, so every read goes through getT().
@@ -67,7 +140,13 @@ export function createSettings(deps) {
 
 /** Kernel defaults, mirrored so the form has something to compare against
  *  before the host answers (`src/config/app-config.ts`). `maxTurns: null` is
- *  the kernel's "no cap": a message may take as many model calls as it needs. */
+ *  the kernel's "no cap": a message may take as many model calls as it needs.
+ *
+ *  The three limits lost their controls on 2026-11-05; the keys stay because
+ *  `saveRun` writes `run.json` whole. The values in a save come from
+ *  `state.runLimits` (the file, as the host last read it), so editing the
+ *  system prompt carries an existing limit through unchanged instead of
+ *  dropping it back to the default. */
 const DEFAULT_RUN_LIMITS = {
   maxTurns: null,
   maxCostUsd: null,
@@ -162,6 +241,13 @@ let connectionEditSeq = 0;
 let connectionSavedSeq = -1;
 /** A save is in flight; the next settings payload is its answer. */
 let connectionSavePending = false;
+/**
+ * 显示名称没能写进 localStorage（存储被禁用或写满）。
+ *
+ * 它在下次构建页面时显示一次：文件已经保存、标签没保存，这两件事必须分开说
+ * （R3），否则用户会以为重启后还能看到同一个标签。
+ */
+let providerMetaWriteFailed = false;
 /** The last save was accepted — shown until the draft is edited again. */
 let connectionShowSaved = false;
 /** Raised by `openSetup`; cleared when the user leaves the page. */
@@ -284,39 +370,41 @@ function abandonConnectionTests() {
 /**
  * A `provider_test` answer from the host.
  *
- * The event names the endpoint, not the card: several cards may be testing at
- * once, and an answer whose `baseUrl` matches no waiting test belongs to a page
- * that is gone. It is ignored, not shown (R3: no invented result).
+ * The event names the endpoint, not the card: several cards may be probing at
+ * once, and an answer whose `baseUrl` matches no waiting probe belongs to a
+ * page that is gone. It is ignored, not shown (R3: no invented result).
  */
 function handleProviderTest(message) {
   const baseUrl = typeof message.baseUrl === "string" ? message.baseUrl : "";
   const at = connectionPendingTests.findIndex((entry) => entry.baseUrl === baseUrl);
   if (at < 0) return;
   const [pending] = connectionPendingTests.splice(at, 1);
-  // A rebuild replaced the DOM this test was drawing into.
+  // A rebuild replaced the DOM this probe was drawing into.
   if (pending.build !== connectionPageBuild) return;
-  if (message.ok === true) {
-    const models = Array.isArray(message.models)
-      ? message.models.filter((model) => typeof model === "string")
-      : [];
-    pending.finish(models.length > 0 ? "ok" : "empty", {
-      models,
-      latencyMs: typeof message.latencyMs === "number" ? message.latencyMs : undefined,
-    });
-    return;
-  }
-  // The event's own words first; a failure that names neither an error nor a
-  // code is still a failure, and saying so beats an empty warning line.
-  const detail =
-    typeof message.error === "string" && message.error !== ""
-      ? message.error
-      : typeof message.code === "string" && message.code !== ""
-        ? message.code
-        : S().connTestFailed;
-  pending.finish("failed", detail);
+  // The event's own words are the detail; the code travels beside them so the
+  // card can name the failure class without parsing Chinese prose. An event
+  // with neither still names the class ("test failed") — a raw identifier is
+  // not a sentence a user can act on, so it never reaches the block alone.
+  pending.finish(probeAnswer(message));
 }
 
 const S = () => settingsStrings[state.locale] ?? settingsStrings.en;
+
+/**
+ * 渲染层的 localStorage，取不到时返回 null。
+ *
+ * 显示名称与厂商归属存在这里（内核 schema 会剥掉未知键），而设置页在没有
+ * `window` 的环境里也必须能构建——取不到就给 `provider-meta.js` 一个 null，
+ * 它自己会退化成「什么都没存」。
+ */
+function providerMetaStorage() {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    // localStorage 的 getter 本身就可能抛（隐私模式、被禁用）。
+    return null;
+  }
+}
 
 /** Rail glyphs, named from the shared sprite so the rail and the toolbar
  *  speak the same visual language. */
@@ -381,15 +469,29 @@ function el(tag, className, text) {
   return node;
 }
 
-function sRow({ label, desc, control, id, wide = false, mono = false }) {
+/**
+ * One label/description-on-the-left, control-on-the-right row.
+ *
+ * `required` adds a word — "Required" / 「必填」— beside the label, not a bare
+ * asterisk: the mark has to reach a screen reader and the high-contrast theme
+ * too. It is searchable like the rest of the row.
+ */
+function sRow({ label, desc, control, id, wide = false, mono = false, required = false }) {
   const row = el("div", `setting-row${wide ? " wide" : ""}`);
-  row.dataset.search = `${label} ${desc ?? ""}`.toLowerCase();
+  row.dataset.search = `${label} ${desc ?? ""}${required ? ` ${S().connRequired}` : ""}`.toLowerCase();
   const copy = el("div", "setting-copy");
   const labelNode = mono ? el("code", "setting-code", label) : el("label", "setting-label", label);
   // 显式 id 优先；否则控件自己带了 id（sText 总会生成）就自动关联。
   if (id) labelNode.htmlFor = id;
   else if (labelNode.tagName === "LABEL" && control?.id) labelNode.htmlFor = control.id;
-  copy.appendChild(labelNode);
+  if (required) {
+    // 同一行：`.setting-label` 是 block，直接追加会把标记挤到下一行。
+    const line = el("div", "setting-label-line");
+    line.append(labelNode, el("span", "setting-required", S().connRequired));
+    copy.appendChild(line);
+  } else {
+    copy.appendChild(labelNode);
+  }
   if (desc) copy.appendChild(el("p", "setting-desc", desc));
   const controlNode = el("div", "setting-control");
   controlNode.appendChild(control);
@@ -418,6 +520,272 @@ function sSelect({ id, value, options, onChange, disabled = false }) {
   select.disabled = disabled;
   select.addEventListener("change", () => onChange(select.value));
   return select;
+}
+
+/**
+ * One vendor glyph, inline on the shared 24×24 grid.
+ *
+ * `vendor-marks.js` holds filled path data, while the sprite in `icons.js`
+ * holds stroked 1.75 glyphs — so a mark is built here rather than reached for
+ * with `<use>`, and `.vendor-mark` restores `fill: currentColor` that the
+ * global `svg` rule would otherwise turn off. `id` with no mark (the custom
+ * choice) draws the pencil instead of a vendor logo: a neutral placeholder,
+ * not an invented brand (R3).
+ */
+function vendorMarkEl(id) {
+  const mark = id ? VENDOR_MARKS[id] : undefined;
+  if (!mark) return iconEl("edit", "vendor-mark vendor-mark-neutral");
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "vendor-mark");
+  svg.setAttribute("viewBox", mark.viewBox);
+  svg.setAttribute("aria-hidden", "true");
+  svg.setAttribute("focusable", "false");
+  for (const path of mark.paths) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    node.setAttribute("d", path);
+    svg.appendChild(node);
+  }
+  return svg;
+}
+
+/**
+ * The vertical bounds of the scrolling pane `node` is painted inside, or the
+ * window's when there is no such ancestor (a test fixture, or a future place
+ * outside Settings). This menu is `position: absolute` inside the scroll
+ * container, so the pane — not the viewport — is what clips it.
+ */
+function settingsPanesBounds(node) {
+  const panes = node.closest(".settings-panes");
+  if (!panes) return { top: 0, bottom: window.innerHeight };
+  const box = panes.getBoundingClientRect();
+  return { top: box.top, bottom: box.bottom };
+}
+
+/**
+ * 厂商选择器：带图标的自绘下拉。
+ *
+ * 原生 `<select>` 的每一行只能是文本，放不下厂商图标，所以这里是
+ * WAI-ARIA 1.2 的「按钮 + listbox 弹出层」combobox：焦点始终在触发器上，
+ * 高亮行走 `aria-activedescendant` 指认。只有一个焦点来源，Escape / 方向键 /
+ * 回车就不必在两个控件之间倒手。
+ *
+ * `setValue` 只改显示，不回调 `onChange`：调用方改了归属要同步触发器，但那次
+ * 同步不是一次新的选择。
+ *
+ * `getOptions` 每次展开时现算，缓存一份就会给出过期的菜单。
+ */
+function sProviderPicker({ id, value, getOptions, onChange, labels }) {
+  let current = value ?? null;
+  let open = false;
+  /** Rendered rows, in visual order (preset rows, then the custom row). */
+  let rows = [];
+
+  const control = el("div", "provider-picker-control");
+  const button = el("button", "provider-picker");
+  button.type = "button";
+  button.id = id;
+  button.setAttribute("role", "combobox");
+  button.setAttribute("aria-haspopup", "listbox");
+  button.setAttribute("aria-expanded", "false");
+  button.setAttribute("aria-controls", `${id}-menu`);
+  const menu = el("div", "provider-menu");
+  menu.id = `${id}-menu`;
+  menu.setAttribute("role", "listbox");
+  menu.setAttribute("aria-label", labels.menu);
+  menu.hidden = true;
+
+  const renderTrigger = () => {
+    const preset = current ? presetById(current) : undefined;
+    button.textContent = "";
+    button.append(
+      vendorMarkEl(preset?.id),
+      el("span", "provider-picker-name", preset ? preset.label : labels.custom),
+      iconEl("chevron-down", "provider-picker-caret"),
+    );
+  };
+
+  const setHighlight = (row) => {
+    for (const other of rows) other.removeAttribute("data-highlight");
+    button.removeAttribute("aria-activedescendant");
+    if (!row) return;
+    row.dataset.highlight = "1";
+    button.setAttribute("aria-activedescendant", row.id);
+    row.scrollIntoView({ block: "nearest" });
+  };
+
+  /** Move the highlight by `step`, clamped — the list is not a ring. */
+  const moveHighlight = (step) => {
+    const list = rows;
+    if (list.length === 0) return;
+    const at = list.findIndex((row) => row.dataset.highlight === "1");
+    const next = at < 0 ? (step > 0 ? 0 : list.length - 1) : Math.min(list.length - 1, Math.max(0, at + step));
+    setHighlight(list[next]);
+  };
+
+  const closeMenu = ({ restoreFocus = false } = {}) => {
+    if (!open) return;
+    open = false;
+    menu.hidden = true;
+    button.setAttribute("aria-expanded", "false");
+    button.removeAttribute("aria-activedescendant");
+    document.removeEventListener("pointerdown", onDocPointerDown, true);
+    if (restoreFocus) focusTrigger();
+  };
+
+  /** Focus the trigger without scrolling the settings pane back to the top.
+   *  A plain `.focus()` scrolls the trigger into view, and inside a tall
+   *  scrolling pane that yanks the page when the menu closes. */
+  const focusTrigger = () => button.focus({ preventScroll: true });
+
+  /** A click anywhere else closes the menu; so does the card being rebuilt
+   *  out from under it (a detached control would otherwise keep the document
+   *  listener alive for the rest of the session). */
+  function onDocPointerDown(event) {
+    if (!control.isConnected || !control.contains(event.target)) closeMenu({ restoreFocus: false });
+  }
+
+  /**
+   * `source` is `"pointer"` or `"keyboard"`. The caller uses it to decide
+   * where focus goes next: a click on a menu row can reasonably hand the
+   * caret to the field the choice filled in, while a keyboard user is still
+   * driving this control and must stay on it (WAI-ARIA's combobox pattern).
+   */
+  const choose = (row, { source = "pointer" } = {}) => {
+    if (!row || row.disabled) return;
+    const next = row.dataset.custom === "1" ? null : row.dataset.preset;
+    closeMenu({ restoreFocus: true });
+    onChange(next, { source });
+  };
+
+  const buildRows = () => {
+    const view = getOptions();
+    menu.textContent = "";
+    rows = [];
+    const addRow = ({ optionId, presetId, label, selected, custom }) => {
+      const row = el("button", "provider-option");
+      row.type = "button";
+      row.id = `${id}-opt-${optionId}`;
+      row.tabIndex = -1;
+      row.setAttribute("role", "option");
+      row.setAttribute("aria-selected", selected ? "true" : "false");
+      if (custom) row.dataset.custom = "1";
+      else row.dataset.preset = presetId;
+      row.append(vendorMarkEl(custom ? null : presetId), el("span", "provider-option-name", label));
+      if (selected) row.appendChild(iconEl("check", "provider-option-check"));
+      row.addEventListener("click", () => choose(row, { source: "pointer" }));
+      menu.appendChild(row);
+      rows.push(row);
+    };
+    for (const option of view.options) {
+      addRow({
+        optionId: option.id,
+        presetId: option.id,
+        label: option.label,
+        selected: option.selected,
+        custom: false,
+      });
+    }
+    const separator = el("div", "provider-menu-sep");
+    separator.setAttribute("role", "presentation");
+    menu.appendChild(separator);
+    addRow({
+      optionId: "custom",
+      presetId: "",
+      label: labels.custom,
+      selected: view.custom,
+      custom: true,
+    });
+  };
+
+  const openMenu = () => {
+    if (open) return;
+    buildRows();
+    if (rows.length === 0) return;
+    open = true;
+    menu.hidden = false;
+    button.setAttribute("aria-expanded", "true");
+    // The pane scrolls and clips, so a menu that only ever opened downwards
+    // would lose its last rows on a card near the bottom edge — and the
+    // custom row, which is last, is the one a user is most likely to want.
+    // Open toward the roomier side and cap the height to what that side has;
+    // with neither side big enough the menu scrolls inside its own box rather
+    // than overrunning the panel. The bounds are the scrolling pane's own
+    // edges, not the window's: the pane is what clips this absolutely
+    // positioned menu, so a window-based estimate would call "plenty of room"
+    // on a card that is actually at the pane's edge.
+    const trigger = button.getBoundingClientRect();
+    const { top: clipTop, bottom: clipBottom } = settingsPanesBounds(button);
+    const gap = 6 + 10; // menu offset from the trigger, plus breathing room
+    const spaceBelow = clipBottom - trigger.bottom - gap;
+    const spaceAbove = trigger.top - clipTop - gap;
+    const wanted = Math.min(320, rows.length * 36 + 16);
+    const opensUp = spaceBelow < wanted && spaceAbove > spaceBelow;
+    menu.classList.toggle("opens-up", opensUp);
+    const room = Math.floor(opensUp ? spaceAbove : spaceBelow);
+    // Clear the inline cap when there is enough room, so the stylesheet's
+    // 320px is the only number in play in the ordinary case.
+    menu.style.maxHeight = room < wanted ? `${Math.max(120, room)}px` : "";
+    const selectedRow = rows.find((row) => row.getAttribute("aria-selected") === "true");
+    setHighlight(selectedRow ?? rows[0]);
+    document.addEventListener("pointerdown", onDocPointerDown, true);
+  };
+
+  // A click on the trigger toggles; Enter and Space arrive here the same way
+  // when the menu is closed, because a real <button> does that for us.
+  button.addEventListener("click", () => {
+    if (open) closeMenu({ restoreFocus: false });
+    else openMenu();
+  });
+
+  button.addEventListener("keydown", (event) => {
+    const key = event.key;
+    if (key === "Escape") {
+      if (!open) return;
+      // The settings page is a modal <dialog>: an Escape that reached the
+      // document would close the whole page and throw away the draft. This
+      // menu is the innermost open surface, so it takes the key.
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu({ restoreFocus: true });
+      return;
+    }
+    if (key === "ArrowDown" || key === "ArrowUp") {
+      event.preventDefault();
+      if (!open) {
+        openMenu();
+        return;
+      }
+      moveHighlight(key === "ArrowDown" ? 1 : -1);
+      return;
+    }
+    if ((key === "Home" || key === "End") && open) {
+      event.preventDefault();
+      if (rows.length > 0) setHighlight(key === "Home" ? rows[0] : rows[rows.length - 1]);
+      return;
+    }
+    if ((key === "Enter" || key === " ") && open) {
+      // Prevented so the button's native activation does not fire a second
+      // click on keyup and snap the menu shut again.
+      event.preventDefault();
+      choose(rows.find((row) => row.dataset.highlight === "1"), { source: "keyboard" });
+      return;
+    }
+    if (key === "Tab" && open) closeMenu({ restoreFocus: false });
+  });
+
+  control.append(button, menu);
+  renderTrigger();
+
+  return {
+    node: control,
+    controlId: id,
+    /** Follow the card's own state (the name field) without firing onChange. */
+    setValue: (next) => {
+      current = next ?? null;
+      renderTrigger();
+    },
+    close: () => closeMenu({ restoreFocus: false }),
+  };
 }
 
 function sToggle({ id, checked, onChange, disabled = false }) {
@@ -510,10 +878,19 @@ function sSegmented({ options, value, onChange, previews = false }) {
   return wrap;
 }
 
+/**
+ * The page's title block.
+ *
+ * `h2`, not `h1`: the dialog's own heading ("Settings", in the rail) is an
+ * `h2`, and a page title one level *above* its container made the document
+ * outline run h2 → h1 → h3 — a jump a screen reader reads as a broken tree.
+ * The page title is a peer of the rail's heading, and the groups under it are
+ * `h3`s.
+ */
 function sPage(title, description) {
   const pane = el("div", "settings-page");
   const head = el("header", "settings-page-head");
-  head.appendChild(el("h1", "", title));
+  head.appendChild(el("h2", "", title));
   if (description) head.appendChild(el("p", "", description));
   pane.appendChild(head);
   return pane;
@@ -559,7 +936,6 @@ function applyUiPreference(key, value) {
       document.documentElement.style.setProperty("--font-scale", String(value));
       localStorage.setItem("prometheus.fontScale", String(value));
       break;
-    case "suggestions":
     case "updateCheck":
       localStorage.setItem(`prometheus.${key}`, value ? "1" : "0");
       break;
@@ -666,14 +1042,6 @@ function buildGeneralPage() {
             { value: "explanatory", label: s.outputExplanatory },
           ],
           onChange: (value) => applyPref("outputStyle", value),
-        }),
-      }),
-      sRow({
-        label: s.suggestionsPref,
-        desc: s.suggestionsPrefDesc,
-        control: sToggle({
-          checked: state.suggestions !== false,
-          onChange: (value) => applyPref("suggestions", value),
         }),
       }),
       sRow({
@@ -1095,6 +1463,14 @@ function buildConnectionPage() {
   emptyCard.appendChild(el("h3", "", s.connEmptyTitle));
   emptyCard.appendChild(el("p", "", s.connEmptyBody));
 
+  // `providers.json` was written but the display names could not be stored:
+  // the services saved, their labels did not, and only a visible line says so
+  // (R3 — a silently dropped field is a save that lied).
+  if (providerMetaWriteFailed) {
+    pane.appendChild(el("p", "setting-note pack-problem", s.connMetaWriteFailed));
+    providerMetaWriteFailed = false;
+  }
+
   // "Saved" is a success colour, so it gets its own node: painting "unsaved"
   // green would say the opposite of what it means.
   const savedNote = el("span", "setting-inline-status", connectionShowSaved ? s.saved : "");
@@ -1133,13 +1509,21 @@ function buildConnectionPage() {
     }
   };
 
+  /**
+   * 显示名称与厂商归属，按服务名索引，来自渲染层 localStorage。
+   *
+   * `providers.json` 的 schema 会剥掉未知键，所以这两样不进文件（见
+   * `provider-meta.js`）。页面重建时重读一次：别的窗口或上一次会话写下的
+   * 标签要能跟上。
+   */
+  const storage = providerMetaStorage();
+  let meta = readProviderMeta(storage);
+  // Only the write path replaces it (after a successful write, so the page's
+  // own state is what was stored); every read goes through the variable.
+
   /** The first free default name; `provider1` unless that one is taken. */
-  const nextName = () => {
-    const taken = new Set(cards.map((card) => card.nameInput.value.trim()));
-    let index = 1;
-    while (taken.has(`provider${index}`)) index += 1;
-    return `provider${index}`;
-  };
+  const nextName = () =>
+    nextProviderName(cards.map((card) => card.nameInput.value.trim()), null);
 
   // The only protocol the kernel has (`ProviderConfigSchema` in
   // src/config/providers.ts). A new entry carries it so the card states what
@@ -1175,8 +1559,17 @@ function buildConnectionPage() {
    * not edit (`requestTimeoutMs`, `maxResponseBytes`, `pricePerMillion`); they
    * are carried through for the same reason.
    */
-  const entryFrom = (name, provider) => ({
+  const entryFrom = (name, provider) => {
+    // Both come from localStorage (`provider-meta.js`), never from the file.
+    // `providerIdentity` falls back to the service name for services
+    // configured before this field existed; a `null` vendor means Custom.
+    // A display name equal to the service name is stored as "" so the field
+    // shows its placeholder rather than a second copy of the same string.
+    const identity = providerIdentity(meta, name);
+    return {
     name,
+    displayName: identity.displayName === name ? "" : identity.displayName,
+    vendor: identity.vendor,
     protocol: typeof provider?.protocol === "string" ? provider.protocol : DEFAULT_PROTOCOL,
     baseUrl: typeof provider?.baseUrl === "string" ? provider.baseUrl : "",
     // The key lives in the file in clear text (`ProviderConfigSchema.apiKey`).
@@ -1193,7 +1586,17 @@ function buildConnectionPage() {
       ...(provider?.maxResponseBytes !== undefined ? { maxResponseBytes: provider.maxResponseBytes } : {}),
       ...(provider?.pricePerMillion !== undefined ? { pricePerMillion: provider.pricePerMillion } : {}),
     },
-  });
+    };
+  };
+
+  /**
+   * What a new card starts as: an empty custom service.
+   *
+   * The vendor is Custom until the picker says otherwise — the page does not
+   * guess a vendor from anything (R3), and a new card has no evidence either
+   * way.
+   */
+  const newEntry = () => ({ ...blankEntry(), displayName: "", vendor: null });
 
   /** One card. Values are read from the live inputs at save time, so adding or
    *  removing a card never has to re-read the DOM first. */
@@ -1205,6 +1608,10 @@ function buildConnectionPage() {
      *  the trimmed name and the set has to agree with the file. */
     let expanded = connectionExpanded.has(entry.name.trim());
     let lastName = entry.name.trim();
+    /** 这张卡此刻选中的厂商归属（预设 id 或 null = 自定义）。它不再从服务名
+     *  反查：同一个厂商可以有多张卡，名字是名字、厂商是厂商。首次进入时用
+     *  `provider-meta.js` 的判定（有存过的归属就用它，没有才从名字兼容旧数据）。 */
+    let vendor = entry.vendor ?? null;
 
     const head = el("div", "settings-card-head");
     // A real button, so Enter and Space work without a key handler and
@@ -1212,15 +1619,37 @@ function buildConnectionPage() {
     const toggle = el("button", "settings-card-toggle");
     toggle.type = "button";
     const chevron = iconEl("chevron-right", "settings-card-chevron");
-    const title = el("span", "settings-card-name", entry.name || s.connNewProvider);
-    // What the service offers, readable without opening it: the point of a
-    // collapsed card is that a page of services stays scannable. Nothing else
-    // goes here — the endpoint and the keys are what collapsing is meant to
-    // put away.
-    const modelSummary = el("span", "settings-card-summary", "");
-    toggle.append(chevron, title, modelSummary);
+    // The header answers "which key is this?": the display name first, then a
+    // muted second line with the service name and vendor. Two cards of the
+    // same vendor are told apart by the display name, and the service name is
+    // what the file (and every `service/model` reference) actually uses.
+    const titleBox = el("span", "settings-card-title");
+    const title = el("span", "settings-card-name", "");
+    const subtitle = el("span", "settings-card-sub", "");
+    titleBox.append(title, subtitle);
+    // What a closed card has to answer, without being opened: who this is,
+    // how many models it offers, and whether it has what it needs to answer.
+    // Each badge is an icon *and* words — colour alone would not survive the
+    // high-contrast theme, a colour-blind reader, or a screenshot pasted into
+    // a bug report. The endpoint and the keys themselves stay in the body;
+    // collapsing is what puts them away.
+    const badges = el("span", "conn-card-badges");
+    const keyBadge = el("span", "conn-badge");
+    const modelBadge = el("span", "conn-badge");
+    // Only drawn when the address is empty: a card with no endpoint cannot be
+    // saved, so that fact belongs in the header rather than surfacing only
+    // when Save refuses.
+    const addressBadge = el("span", "conn-badge warn");
+    addressBadge.hidden = true;
+    badges.append(keyBadge, modelBadge, addressBadge);
+    const headMark = el("span", "settings-card-mark");
+    toggle.append(chevron, headMark, titleBox, badges);
+    /** This card's own ordinal, fixed at build time. Naming the picker's DOM
+     *  ids from it keeps them unique even after a rename — `connectionCardSeq`
+     *  is bumped by the next card, so reading it later would drift. */
+    const cardSeq = connectionCardSeq++;
     const body = el("div", "settings-form-card-body");
-    body.id = `settings-card-body-${connectionCardSeq++}`;
+    body.id = `settings-card-body-${cardSeq}`;
     toggle.setAttribute("aria-controls", body.id);
     // The test button and Remove go here; the button is built below, once the
     // result area it talks to exists. They sit outside the toggle so a click
@@ -1229,21 +1658,118 @@ function buildConnectionPage() {
     head.append(toggle, headActions);
 
     const nameInput = sText({ value: entry.name, placeholder: "provider1", mono: true });
+    const baseUrlInput = sText({
+      value: entry.baseUrl,
+      placeholder: "https://api.example.com/v1",
+      mono: true,
+    });
+    /**
+     * 人看的标签。默认等于服务名，改它就只是改标签——文件里的键仍是服务名。
+     *
+     * 它不在 `providers.json` 里（内核 schema 会剥掉），由 `save()` 写进
+     * localStorage。空着等于「没设」：页面上显示服务名，不是编一个名字。
+     */
+    const displayNameInput = sText({
+      value: entry.displayName ?? "",
+      placeholder: entry.name || "",
+    });
+    displayNameInput.addEventListener("input", drawCardHeader);
+
+    /** Redraw the header from the live inputs. Called on every keystroke that
+     *  changes what the collapsed card says: display name, service name, and
+     *  (through `refreshHeaderFacts`) the key, the endpoint and the models. */
+    function drawCardHeader() {
+      const serviceName = nameInput.value.trim();
+      const displayName = displayNameInput.value.trim();
+      const preset = vendor === null ? undefined : presetById(vendor);
+      title.textContent =
+        displayName !== ""
+          ? displayName
+          : serviceName !== ""
+            ? serviceName
+            : s.connNewProvider;
+      // 第二行：服务名 + 厂商。服务名为空的新卡没有「键」可报，就只剩厂商。
+      const vendorLabel = preset ? preset.label : s.connProviderCustomShort;
+      subtitle.textContent = [serviceName, vendorLabel].filter(Boolean).join(" · ");
+      headMark.textContent = "";
+      headMark.appendChild(vendorMarkEl(preset?.id));
+      // `drawBadges` also redraws the toggle's `aria-label`, which restates the
+      // badges — the title is part of that name and has just changed.
+      drawBadges();
+    }
+
+    /**
+     * 卡片第一行的厂商选择器。
+     *
+     * 选中哪一家是这张卡自己的状态（`vendor`），不与服务名绑定——同一个厂商
+     * 可以有任意多张卡。选一家预设时：
+     * - 归属记为这家；
+     * - 服务名只在它是页面自己生成的时候跟着换（`isAutoProviderName`：空、
+     *   上一家厂商的 id 或它的 `-N`、`providerN`），换出来的名字在撞名时自动
+     *   加后缀；手写的 `my-gateway` 不动——改厂商不等于改服务名；
+     * - 地址交给 `presetFillFor`：只在空着或仍是某个预设地址时才换，用户手填
+     *   的网关不被覆盖；
+     * - 「推荐模型」chip 行按新厂商重画。
+     */
+    const providerPicker = sProviderPicker({
+      id: `provider-picker-${cardSeq}`,
+      value: vendor,
+      labels: {
+        menu: s.connProvider,
+        custom: s.connProviderCustom,
+      },
+      getOptions: () => providerPickerOptions(vendor),
+      onChange: (presetId, { source }) => {
+        const previousVendor = vendor;
+        vendor = presetId;
+        providerPicker.setValue(vendor);
+        const fill = presetFillFor(presetId === null ? null : presetById(presetId), {
+          baseUrl: baseUrlInput.value,
+        });
+        if (fill !== null) {
+          const serviceName = nameInput.value.trim();
+          // A name this page would have generated itself — empty, a preset id,
+          // or a generated suffix (`deepseek-2`, `provider1`) — follows the new
+          // vendor, with a suffix when that vendor is already taken. A
+          // hand-written name (`my-gateway`, `deepseek-home`) is left alone:
+          // renaming a configured service is not what changing the vendor is
+          // asking for.
+          const otherNames = () =>
+            cards
+              .filter((card) => card.nameInput !== nameInput)
+              .map((card) => card.nameInput.value);
+          if (isAutoProviderName(serviceName, previousVendor)) {
+            const nextNameValue = nextProviderName(otherNames(), fill.name);
+            if (nextNameValue !== nameInput.value) {
+              nameInput.value = nextNameValue;
+              nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+            }
+          }
+          baseUrlInput.value = fill.baseUrl;
+        }
+        drawCardHeader();
+        // 旧厂商的模型列表不能留在新厂商的卡上：那是另一个端点的回答。
+        clearFetchedModels();
+        // 鼠标选完，焦点落在密钥栏：名字与地址刚刚替用户填好，下一步就是贴
+        // key。键盘选完则留在触发器上——用户还在操作这个控件，焦点被抢走就
+        // 等于把键盘流打断了。
+        if (source === "pointer") apiKeyInput.focus();
+        markDirty();
+      },
+    });
+
     nameInput.addEventListener("input", () => {
       const name = nameInput.value.trim();
-      title.textContent = name || s.connNewProvider;
-      drawToggleLabel();
+      // The placeholder shows the default: leaving the display name blank is
+      // exactly "call it whatever the service is called".
+      displayNameInput.placeholder = name;
+      drawCardHeader();
       // The expansion is filed by name, and this field is what changes it:
       // without the move, the next rebuild would reopen nothing.
       if (name !== lastName) {
         if (expanded) renameExpansion(lastName, name);
         lastName = name;
       }
-    });
-    const baseUrlInput = sText({
-      value: entry.baseUrl,
-      placeholder: "https://api.example.com/v1",
-      mono: true,
     });
     const apiKeyEnvInput = sText({
       value: entry.apiKeyEnv,
@@ -1313,30 +1839,122 @@ function buildConnectionPage() {
       input.style.flex = "1 1 auto";
       input.style.minWidth = "0";
       line.appendChild(input);
-      if (button) line.appendChild(button);
+      if (button) {
+        // A one-word button ("Show" / 显示) must not borrow the line's height:
+        // in a flex row it stretches to the tallest item and, with the type
+        // ramp up a step, a 2-character label wrapped onto two lines. It keeps
+        // its own single-line box and its own width.
+        button.style.flex = "0 0 auto";
+        button.style.whiteSpace = "nowrap";
+        line.appendChild(button);
+      }
       cell.append(line, warning);
       return cell;
     };
+
+    // A key can come from the environment instead; when it does, the empty key
+    // field must say so rather than look like a missing credential.
+    const keyEnvHint = el("p", "setting-note conn-key-env-hint", "");
+    keyEnvHint.hidden = true;
+    /** The "required" tag on the key row; assigned when that row is built. The
+     *  first model row is drawn before it and reaches `drawBadges`, so the name
+     *  has to exist — empty — from here on. */
+    let keyRequiredMark = null;
 
     const modelList = el("div", "mcp-list");
     /** One row: a name, a context-window select, and Remove. `carried` rides
      *  along untouched so a save does not drop the counters this page does not
      *  edit (`maxOutput`, `supportsReasoning`, `reasoningEffort`). */
     const modelHandles = [];
+    /** 换厂商或改地址时清掉模型区的旧列表；它在模型组构建之前就要能调用，
+     *  所以先占一个空实现。 */
+    let clearFetchedModels = () => {};
+    /** Assigned when the advanced section is built. The first model row is
+     *  drawn before that happens, and its `refreshModelSummary` reaches the
+     *  advanced summary, so the field has to exist — empty — from here on. */
+    let advancedSummary = null;
+
     /**
-     * Refill the header's model line from the live rows.
+     * One state badge in the header: an icon and a word.
+     *
+     * Colour is a third signal, never the only one — the high-contrast theme
+     * has to carry the same fact, and so does a reader who cannot tell
+     * `--success` from `--warn`.
+     */
+    const setBadge = (node, { icon, label, tone = "", title = "" }) => {
+      node.className = `conn-badge${tone === "" ? "" : ` ${tone}`}`;
+      node.textContent = "";
+      node.append(iconEl(icon, "conn-badge-icon"), el("span", "conn-badge-text", label));
+      if (title === "") node.removeAttribute("title");
+      else node.title = title;
+    };
+
+    /**
+     * Repaint the header's three facts from the live controls.
      *
      * The header is the only thing a collapsed card shows, so it has to track
-     * the inputs rather than the `entry` it was built from: adding, renaming
-     * or removing a model has to be visible without opening the card. A blank
-     * row is skipped — it is an invitation to type, not a model.
+     * the inputs rather than the `entry` it was built from: typing a key,
+     * clearing the endpoint or adding a model has to be visible without
+     * opening the card. A blank model row is skipped — it is an invitation to
+     * type, not a model.
+     *
+     * The env-var state says what the card holds, not that the service will
+     * work: the renderer cannot read the app's environment, so "a variable is
+     * named" and "that variable is set" are different facts and only the
+     * first is known here (R3).
      */
-    const refreshModelSummary = () => {
+    function drawBadges() {
       const names = modelHandles.map((handle) => handle.idInput.value.trim()).filter((id) => id !== "");
-      modelSummary.textContent =
-        names.length > 0 ? names.join(" · ") : s.connNoModelsYet;
-      modelSummary.classList.toggle("empty", names.length === 0);
-    };
+      const facts = serviceHeaderFacts({
+        apiKey: apiKeyInput.value,
+        apiKeyEnv: apiKeyEnvInput.value,
+        baseUrl: baseUrlInput.value,
+        modelCount: names.length,
+      });
+      if (facts.key === "direct") {
+        setBadge(keyBadge, { icon: "check", tone: "ok", label: s.connKeyDirect, title: s.connKeyDirectTitle });
+      } else if (facts.key === "env") {
+        setBadge(keyBadge, {
+          icon: "shield",
+          tone: "neutral",
+          label: s.connKeyEnv,
+          title: s.connKeyEnvTitle.replace("{name}", facts.envName),
+        });
+      } else {
+        setBadge(keyBadge, { icon: "alert", tone: "warn", label: s.connKeyMissing, title: s.connKeyMissingTitle });
+      }
+      const countTemplate =
+        facts.modelCount === 1 && s.connModelCountOne !== undefined ? s.connModelCountOne : s.connModelCount;
+      setBadge(modelBadge, {
+        icon: "layers",
+        label: countTemplate.replace("{n}", String(facts.modelCount)),
+        tone: facts.modelCount === 0 ? "warn" : "neutral",
+        title: names.join(" · "),
+      });
+      addressBadge.hidden = !facts.noBaseUrl;
+      if (facts.noBaseUrl) {
+        setBadge(addressBadge, {
+          icon: "alert",
+          tone: "warn",
+          label: s.connNoAddress,
+          title: s.connNoAddressTitle,
+        });
+      }
+      // The advanced summary restates the env-var field, which is folded away.
+      drawAdvancedSummary();
+      // The key row is marked required, but an env-var key satisfies it: the
+      // hint below the field says which of the two the card is relying on.
+      const usesEnv = facts.key === "env";
+      keyEnvHint.hidden = !usesEnv;
+      keyEnvHint.textContent = usesEnv ? s.connKeyFromEnv.replace("{name}", facts.envName) : "";
+      if (keyRequiredMark !== null) keyRequiredMark.hidden = usesEnv;
+      // The header's accessible name restates these badges, so it has to be
+      // redrawn with them — not only when the title changes.
+      drawToggleLabel();
+    }
+    /** Kept under its old name: the model rows, the key fields and the endpoint
+     *  all call it, because all three change what the collapsed card says. */
+    const refreshModelSummary = drawBadges;
     const addModelRow = (model) => {
       // `.model-row` on top of `.rules-row`: the latter carries the frame
       // (border, padding, gap), while the former divides the free width
@@ -1399,13 +2017,45 @@ function buildConnectionPage() {
     const modelFoot = el("div", "settings-list-foot");
     modelFoot.appendChild(addModel);
 
-    const modelsGroup = el("section", "setting-group");
-    modelsGroup.append(
-      el("h3", "setting-group-title", s.connModels),
-      el("p", "setting-desc", s.connModelsDesc),
-      modelList,
-      modelFoot,
+    // The models field is not a `.setting-row`: its control is a list, not one
+    // input, and a label/control split would squeeze it into half the card.
+    // The heading and description sit above the full-width list instead, and
+    // each row carries its own `aria-label`.
+    const modelsGroup = el("div", "conn-field");
+    modelsGroup.dataset.search =
+      `${s.connModels} ${s.connModelsDesc} ${s.connModelsFetch}`.toLowerCase();
+    const modelHead = el("div", "setting-label-line conn-models-head");
+    modelHead.append(
+      el("span", "setting-label", s.connModels),
+      el("span", "setting-required", s.connRequired),
     );
+
+    /**
+     * What the endpoint listed, fetched on demand.
+     *
+     * Its own block, not a footnote under the header's Test button: "can this
+     * service answer" and "which models does it offer" are different
+     * questions, and a gateway that refuses `/models` while serving chat is a
+     * normal configuration, not a broken one. Nothing is fetched on its own —
+     * several vendors answer `/models` with 401, so a request nobody asked
+     * for would paint a failure onto a working card.
+     *
+     * `aria-live` because the answer arrives after the click; a result only a
+     * sighted user can perceive is a click that reported nothing (R3).
+     */
+    const modelsResult = el("div", "setting-note", "");
+    modelsResult.hidden = true;
+    modelsResult.setAttribute("aria-live", "polite");
+
+    // Bordered rather than quiet: this is the section's primary way of
+    // filling the list, and a ghost button on a heading line reads as a label.
+    const fetchModels = sButton(s.connModelsFetch, () => runProbe("list"));
+    modelHead.append(fetchModels);
+    // The answer sits between the section's own description and the rows it
+    // adds to: directly above them, so a chip and the row it created are one
+    // glance apart, and below the description, which explains the section
+    // rather than this one answer.
+    modelsGroup.append(modelHead, el("p", "setting-desc", s.connModelsDesc), modelsResult, modelList, modelFoot);
 
     // A rejected value has to say so where the field is, not in a notice that
     // scrolls away from the control at fault.
@@ -1414,25 +2064,26 @@ function buildConnectionPage() {
 
     /** What the last connection test said. Built fresh with the card, so a
      *  result never outlives the page that produced it. A container rather
-     *  than a paragraph: a successful test draws a structured block, while a
-     *  failure stays one line of text in the same place. `aria-live` because
-     *  the answer arrives after the click, and a result only a sighted user
-     *  can perceive is a click that reported nothing (R3).
+     *  than a paragraph: a failed test draws a structured block, while the
+     *  connected line stays one line of text in the same place. `aria-live`
+     *  because the answer arrives after the click, and a result only a sighted
+     *  user can perceive is a click that reported nothing (R3).
      *
      *  It is the first thing in the body (see `body.append` below), directly
      *  under the header that holds the Test button. At the foot of the form it
      *  answered a click from a full set of fields away — the user had to find
-     *  the result rather than simply see it. */
+     *  the result rather than simply see it. The models the endpoint lists are
+     *  *not* drawn here: that answer belongs to the models section above. */
     const testResult = el("div", "setting-note", "");
     testResult.hidden = true;
     testResult.setAttribute("aria-live", "polite");
 
     // The protocol is the one fixed fact about a card (the kernel has exactly
-    // one), so it stays a chip rather than a field. It lives in the body, not
-    // the header: the header is the summary the user asked for — name and
-    // models — and this is a detail of the form under it.
+    // one), so it stays a chip rather than a field. It lives in the advanced
+    // section: nothing here can change it, and it is a detail of how the
+    // endpoint is spoken to rather than a decision the form offers.
     const protocolLine = el("div", "settings-card-protocol");
-    protocolLine.appendChild(el("code", "setting-code", entry.protocol));
+    protocolLine.append(el("span", "conn-advanced-label", s.connProtocol), el("code", "setting-code", entry.protocol));
 
     // None of the warnings below stops a save: the value is written as typed,
     // and a wrong guess about a real naming scheme must not cost the user their
@@ -1442,24 +2093,89 @@ function buildConnectionPage() {
     // it, so the answer lands where the click happened instead of below every
     // field in the form. `problem`, the body's other note, stays at the foot —
     // it belongs to Save, which is at the foot too.
-    body.append(
-      testResult,
-      protocolLine,
+    // The provider picker leads the form: it is the one row that can fill in
+    // the address below it, so it has to be read before it.
+    //
+    // Three tiers, because eight equal rows hid what a card actually needs:
+    // 1) the minimum that makes a service work — vendor, key, models;
+    // 2) things that already have a sensible value and are edited rarely —
+    //    display name, service name (it changes `service/model` references
+    //    already in sessions), address (filled by the vendor choice);
+    // 3) the env-var key and the protocol — almost never touched, so they are
+    //    folded away and the summary says what is inside.
+    const requiredSection = el("section", "conn-section");
+    requiredSection.append(
+      el("h3", "conn-section-title", s.connSectionRequired),
+      el("p", "conn-section-desc", s.connSectionRequiredDesc),
+    );
+    const keyRow = sRow({
+      label: s.connApiKey,
+      desc: s.connApiKeyDesc,
+      control: fieldCell(apiKeyInput, apiKeyToggle, keyWarning),
+      required: true,
+    });
+    // The key row is required *or* filled by the env-var field below. While a
+    // variable is named, the tag on the empty key field would call a working
+    // card unfinished, so it moves with the live state.
+    keyRequiredMark = keyRow.querySelector(".setting-required");
+
+    requiredSection.append(
+      // `id` names the trigger, not the wrapper: the label has to point at the
+      // thing a click focuses.
+      sRow({
+        id: providerPicker.controlId,
+        label: s.connProvider,
+        desc: s.connProviderDesc,
+        control: providerPicker.node,
+        required: true,
+      }),
+      keyRow,
+      keyEnvHint,
+      modelsGroup,
+    );
+
+    const optionalSection = el("section", "conn-section");
+    optionalSection.append(
+      el("h3", "conn-section-title", s.connSectionOptional),
+      el("p", "conn-section-desc", s.connSectionOptionalDesc),
+      // 显示名称在服务名之上：它是人先看到、也先用来区分两张同厂商卡的那一行。
+      sRow({ label: s.connDisplayName, desc: s.connDisplayNameDesc, control: displayNameInput }),
       sRow({ label: s.name, desc: s.connNameDesc, control: nameInput }),
       sRow({ label: s.baseUrl, desc: s.baseUrlDesc, control: baseUrlInput }),
-      sRow({
-        label: s.connApiKey,
-        desc: s.connApiKeyDesc,
-        control: fieldCell(apiKeyInput, apiKeyToggle, keyWarning),
-      }),
+    );
+
+    // A native `<details>` gives the disclosure its keyboard behaviour for
+    // free (Enter/Space on the summary, announced expanded state) and needs no
+    // key handler. The summary carries the live env-var name, so a folded
+    // section still says whether it holds anything.
+    const advanced = el("details", "setting-advanced");
+    advancedSummary = el("summary", "setting-advanced-summary", "");
+    advanced.appendChild(advancedSummary);
+    const advancedBody = el("div", "setting-advanced-body");
+    advancedBody.append(
       sRow({
         label: s.connApiKeyOrEnv,
         desc: s.connApiKeyEnvDesc,
         control: fieldCell(apiKeyEnvInput, null, envWarning),
       }),
-      modelsGroup,
-      problem,
+      protocolLine,
     );
+    advanced.appendChild(advancedBody);
+    // A value already in the file is opened, not hidden: folding it away while
+    // it is in effect would make the card look like it has no key at all.
+    advanced.open = entry.apiKeyEnv.trim() !== "";
+
+    /** The advanced summary: what is folded under it, or that nothing is. */
+    function drawAdvancedSummary() {
+      if (advancedSummary === null) return;
+      const selected = serviceHeaderFacts({ apiKey: apiKeyInput.value, apiKeyEnv: apiKeyEnvInput.value });
+      advancedSummary.textContent =
+        selected.key === "env"
+          ? s.connAdvancedEnv.replace("{name}", selected.envName)
+          : s.connAdvancedIdle;
+    }
+
+    body.append(testResult, requiredSection, optionalSection, advanced, problem);
     node.append(head, body);
 
     /**
@@ -1469,10 +2185,22 @@ function buildConnectionPage() {
      * both halves: the action ("Expand") and which service it applies to.
      * Without the name, every card on the page announces the same word.
      */
-    const drawToggleLabel = () => {
-      const name = nameInput.value.trim() || title.textContent;
-      toggle.setAttribute("aria-label", (expanded ? s.connCollapseNamed : s.connExpandNamed).replace("{name}", name));
-    };
+    function drawToggleLabel() {
+      // The header's own text, not the service name: a card is announced by
+      // whatever it is called on screen, which with two keys of one vendor is
+      // the display name, not the generated file key.
+      const name = title.textContent || s.connNewProvider;
+      // `aria-label` replaces the button's content, and the badges are inside
+      // it — without this the state a sighted user reads off the header would
+      // be silent to a screen reader.
+      const state = [...badges.children]
+        .filter((node) => !node.hidden)
+        .map((node) => node.textContent)
+        .filter(Boolean)
+        .join(", ");
+      const action = (expanded ? s.connCollapseNamed : s.connExpandNamed).replace("{name}", name);
+      toggle.setAttribute("aria-label", state === "" ? action : `${action} — ${state}`);
+    }
 
     /**
      * Open or close the card, and say so to assistive tech.
@@ -1484,6 +2212,10 @@ function buildConnectionPage() {
     const setExpanded = (open, { remember = true } = {}) => {
       expanded = open;
       body.hidden = !open;
+      // A menu that is open when the card closes would keep its document
+      // listener and reopen with the card, in a state the user never asked
+      // for. Closing is the same thing collapsing does to every other field.
+      if (!open) providerPicker.close();
       toggle.setAttribute("aria-expanded", open ? "true" : "false");
       setIcon(chevron, open ? "chevron-down" : "chevron-right");
       drawToggleLabel();
@@ -1497,6 +2229,7 @@ function buildConnectionPage() {
     };
     toggle.addEventListener("click", () => setExpanded(!expanded));
     setExpanded(expanded, { remember: false });
+    drawCardHeader();
     refreshModelSummary();
 
     /** Re-run both warnings against what is in the fields right now. */
@@ -1513,21 +2246,29 @@ function buildConnectionPage() {
       );
     };
     // Live, not on save: the warning has to appear while the user is still
-    // looking at the field they got wrong.
-    apiKeyInput.addEventListener("input", checkFields);
-    apiKeyEnvInput.addEventListener("input", checkFields);
+    // looking at the field they got wrong. The header follows the same three
+    // controls, so a key typed or cleared is visible on the collapsed card.
+    apiKeyInput.addEventListener("input", () => {
+      checkFields();
+      drawBadges();
+    });
+    apiKeyEnvInput.addEventListener("input", () => {
+      checkFields();
+      drawBadges();
+    });
+    baseUrlInput.addEventListener("input", drawBadges);
     checkFields();
 
     /**
-     * The endpoint this card would test, and the key (direct, or the variable
+     * The endpoint a probe would call, and the key (direct, or the variable
      * naming it) and model that go with it; `problem` is set when the URL
      * cannot be called at all.
      *
-     * The test does not save, so it reads the live inputs rather than the file:
+     * Probing does not save, so it reads the live inputs rather than the file:
      * a user who just typed an endpoint wants to find out whether it answers
      * before committing it.
      */
-    const testTarget = () => {
+    const probeTarget = () => {
       const baseUrl = baseUrlInput.value.trim();
       if (baseUrl === "") return { problem: s.connBaseUrlRequired, field: baseUrlInput };
       if (!isFetchableUrl(baseUrl)) return { problem: s.connBaseUrlInvalid, field: baseUrlInput };
@@ -1539,37 +2280,130 @@ function buildConnectionPage() {
       };
     };
 
-    let testing = false;
-
-    /**
-     * Empty the result area and forget which kind of result it held.
-     *
-     * Both writers start here, so a previous block can never leave a heading,
-     * a chip, or the warning colour behind under a new answer.
-     */
-    const resetTestResult = () => {
-      testResult.textContent = "";
-      testResult.className = "";
-      testResult.style.color = "";
+    /** What this card is waiting on: `""`, `"test"` or `"list"`. One at a
+     *  time, because the host's answer names the endpoint and not the card —
+     *  two answers for one `baseUrl` would land on whichever asked first. */
+    let probeInFlight = "";
+    /** Both probe buttons, so the one that is not running says it is held. */
+    const probeButtons = [];
+    const registerProbeButton = (kind, node, idle, busy) => {
+      probeButtons.push({ kind, node, idle, busy });
+    };
+    /** Disable both while either runs, and let the running one say what it is
+     *  doing: a second click would queue behind the first and then answer
+     *  twice — two results for one visible action. */
+    const drawProbeButtons = () => {
+      for (const entry of probeButtons) {
+        const busy = probeInFlight === entry.kind;
+        entry.node.disabled = probeInFlight !== "";
+        entry.node.textContent = busy ? entry.busy : entry.idle;
+        entry.node.title = probeInFlight !== "" && !busy ? s.connProbeBusy : "";
+      }
     };
 
     /**
-     * One line of outcome. A failed test takes the warn colour (the token the
-     * transcript's warnings use), not the error red: an endpoint that did not
-     * answer is a fact about the endpoint, not a crash. The colour is applied
-     * inline because the settings stylesheet needs no entry for one class.
+     * Empty one result area and forget which kind of result it held.
      *
-     * Every writer opens the card first. `runTest` already does, but the answer
-     * arrives later — a user who collapsed the card while waiting would other-
-     * wise get a result nobody can see, and a test that "did nothing" (R3).
+     * Every writer starts here, so a previous block can never leave a heading,
+     * a chip, or the warning colour behind under a new answer.
      */
-    const showTestLine = (text, { warn = false } = {}) => {
+    const resetProbeResult = (kind) => {
+      const target = kind === "list" ? modelsResult : testResult;
+      target.textContent = "";
+      target.className = "";
+      target.style.color = "";
+    };
+
+    /**
+     * One line of outcome. Used by the connected line (latency only — the
+     * model list belongs to the models section) and by "answered, but listed
+     * nothing", which is neither a success block nor a failure.
+     *
+     * Every writer opens the card first. `runProbe` already does, but the
+     * answer arrives later — a user who collapsed the card while waiting would
+     * otherwise get a result nobody can see, and a probe that "did nothing"
+     * (R3).
+     */
+    const showProbeLine = (kind, text) => {
       setExpanded(true);
-      resetTestResult();
-      testResult.className = "setting-note";
-      testResult.textContent = text;
-      testResult.style.color = warn ? "var(--warn)" : "";
-      testResult.hidden = false;
+      resetProbeResult(kind);
+      const target = kind === "list" ? modelsResult : testResult;
+      target.className = "setting-note";
+      target.textContent = text;
+      target.hidden = false;
+    };
+
+    /** "Connected · 42 ms", or plain "Connected" when the probe reported no
+     *  measurement — never a made-up `0 ms` (R3). */
+    const connectedLine = (latencyMs) =>
+      Number.isFinite(latencyMs) ? `${s.connTestConnected} · ${Math.round(latencyMs)} ms` : s.connTestConnected;
+
+    /**
+     * The failure class the kernel reported, as words.
+     *
+     * `provider_test` carries a `code` from `src/model/probe.ts`
+     * (`invalid_base_url` / `unreachable` / `unauthorized` / `http_error`, plus
+     * the contract-reserved `bad_response`). Four kinds of failure need four
+     * different next steps — check the address, check the network, check the
+     * key, read the status — and a single warn sentence made them all look
+     * alike. The kernel's own sentence, which names the field and the fix,
+     * stays underneath: this label is the classification, not a replacement
+     * for it. A code this page does not know is not guessed at (R3).
+     */
+    const failureLabel = (code) => {
+      switch (code) {
+        case "invalid_base_url":
+          return s.connTestFailAddress;
+        case "unreachable":
+          return s.connTestFailUnreachable;
+        case "unauthorized":
+          return s.connTestFailAuth;
+        case "http_error":
+        case "bad_response":
+          return s.connTestFailHttp;
+        default:
+          return s.connTestFailed;
+      }
+    };
+
+    /**
+     * A failed probe, in the result area it belongs to: the class as a word
+     * beside a mark, then the kernel's sentence. Mark and word together mean
+     * the state survives the high-contrast theme and a reader who cannot tell
+     * `--warn` from `--text`.
+     *
+     * A failed *list* says one more thing below the kernel's sentence: many
+     * gateways do not implement `/models` at all, so a refusal here is a
+     * refusal to enumerate — not evidence that the service is misconfigured.
+     * Saying so is the difference between a user who checks their key and one
+     * who gives up on a working endpoint.
+     */
+    const showProbeFailure = (kind, code, detail, { note = "" } = {}) => {
+      setExpanded(true);
+      resetProbeResult(kind);
+      const target = kind === "list" ? modelsResult : testResult;
+      target.className = "conn-test-result";
+      target.hidden = false;
+      const head = el("div", "conn-test-head");
+      const status = el("span", "conn-test-status failed");
+      status.append(
+        iconEl("alert", "conn-test-status-icon"),
+        el("span", "", failureLabel(code)),
+      );
+      head.appendChild(status);
+      target.appendChild(head);
+      // A failure that cannot name itself is still reported (R3); the class
+      // word in the head is the one thing it can always say.
+      if (detail !== "") target.appendChild(el("p", "conn-test-detail", detail));
+      // A second sentence about a different cause gets its own line: run into
+      // the kernel's sentence it read as one long clause.
+      if (note !== "") target.appendChild(el("p", "conn-test-detail", note));
+      // Only for the classes where the endpoint did answer: an address that
+      // never left the window, or one that never answered, has nothing to do
+      // with whether this gateway implements `/models`.
+      if (kind === "list" && (code === "unauthorized" || code === "http_error" || code === "bad_response")) {
+        target.appendChild(el("p", "conn-test-detail", s.connModelsFetchRefused));
+      }
     };
 
     /** The enabled chip says what clicking it does; the disabled one says why
@@ -1598,55 +2432,43 @@ function buildConnectionPage() {
     };
 
     /**
-     * A successful test, drawn as a result block: what answered, how fast, and
-     * every model the endpoint listed.
+     * What the endpoint listed, drawn in the models section: how many, and
+     * every one of them as a chip that adds the row.
      *
      * The list is complete. A model already on the card is not dropped — it is
      * drawn in the added state — because a list that quietly hides half the
      * answer is a wrong answer about the endpoint (R3).
      */
-    const showTestModels = (models, latencyMs) => {
-      setExpanded(true);
-      resetTestResult();
-      testResult.className = "conn-test-result";
-      testResult.hidden = false;
-
+    const showFetchedModels = (models, latencyMs) => {
       const entries = availableModelEntries(
         models,
         modelHandles.map((handle) => handle.idInput.value),
       );
+      // A list of nothing but blank ids is not a list: the same sentence the
+      // "no list" answer gets, rather than a heading over an empty block.
+      if (entries.length === 0) {
+        showProbeLine("list", s.connTestOkNoModels);
+        return;
+      }
+      setExpanded(true);
+      resetProbeResult("list");
+      modelsResult.className = "conn-test-result";
+      modelsResult.hidden = false;
       const count = entries.length;
 
-      // The summary is built without a latency (it renders one only when it is
-      // given one): the measurement gets its own muted span here, so folding
-      // it into the sentence would print it twice.
       const head = el("div", "conn-test-head");
-      // A test that reached the endpoint but got no list back is not the same
-      // outcome as one that found models, and the mark says so rather than
-      // leaving a green check beside a sentence about failure.
-      const status = el("span", `conn-test-status${count === 0 ? " empty" : ""}`);
+      const status = el("span", "conn-test-status");
       status.append(
         iconEl("check", "conn-test-status-icon"),
-        el("span", "", connectionSummary(state.locale, { modelCount: count })),
+        el("span", "", s.connModelsFetched.replace("{n}", String(count))),
       );
       head.appendChild(status);
       if (Number.isFinite(latencyMs)) {
         head.appendChild(el("span", "conn-test-latency", `${Math.round(latencyMs)} ms`));
       }
-      testResult.appendChild(head);
-
-      // No list, no section: an empty "Available models 0" heading would be a
-      // heading about nothing. The status line already said it.
-      if (count === 0) return;
+      modelsResult.appendChild(head);
 
       const block = el("div", "conn-test-models");
-      const modelsHead = el("div", "conn-test-models-head");
-      modelsHead.append(
-        el("span", "", s.connTestAvailableModels),
-        el("span", "conn-test-count", s.connTestModelsCount.replace("{n}", String(count))),
-      );
-      block.appendChild(modelsHead);
-
       for (const entry of entries) {
         const chip = el("button", "conn-model-chip");
         chip.type = "button";
@@ -1657,7 +2479,17 @@ function buildConnectionPage() {
           chip.setAttribute("aria-label", chipLabel(entry.name, { added: false }));
           chip.append(iconEl("plus", "conn-model-chip-icon"), el("span", "conn-model-chip-name", entry.name));
           chip.addEventListener("click", () => {
-            addModelRow({ id: entry.name, carried: {} });
+            // A blank row is an invitation to type, not a model the user
+            // wanted: fill the first one instead of appending, or a fresh card
+            // would end up with an empty row beside the one just added — and
+            // Save refuses a row without a name.
+            const blank = modelHandles.find((handle) => handle.idInput.value.trim() === "");
+            if (blank) {
+              blank.idInput.value = entry.name;
+              blank.idInput.dispatchEvent(new Event("input", { bubbles: true }));
+            } else {
+              addModelRow({ id: entry.name, carried: {} });
+            }
             // The row is an edit like any other: the draft is now newer than
             // the file, and Save is what makes it real.
             markDirty();
@@ -1666,100 +2498,138 @@ function buildConnectionPage() {
         }
         block.appendChild(chip);
       }
-
-      testResult.appendChild(block);
+      modelsResult.appendChild(block);
     };
 
-    /** The test this card is waiting on, if any. */
-    let currentTest = null;
+    /** The probe this card is waiting on, if any. */
+    let currentProbe = null;
 
     /** Drop the wait: cancel the timer and stop matching an answer to it. */
-    const cancelTest = (pending) => {
+    const cancelProbe = (pending) => {
       clearTimeout(pending.timer);
       connectionTestTimers.delete(pending.timer);
       const at = connectionPendingTests.indexOf(pending);
       if (at >= 0) connectionPendingTests.splice(at, 1);
-      if (currentTest === pending) currentTest = null;
+      if (currentProbe === pending) currentProbe = null;
     };
 
-    /** Back to the idle button, whatever the outcome was. */
-    const endTest = (pending) => {
-      cancelTest(pending);
-      testing = false;
-      testButton.disabled = false;
-      testButton.textContent = s.connTest;
+    /** Back to the idle label, whatever the outcome was. */
+    const endProbe = (pending) => {
+      cancelProbe(pending);
+      probeInFlight = "";
+      drawProbeButtons();
     };
 
-    const runTest = () => {
-      if (testing) return;
-      // The result line lives in the body, so a test started from a collapsed
-      // card would report to nobody. Opening it is the honest fix: the answer
-      // has to be somewhere the user is looking (R3 — a click that produces no
+    /**
+     * The card now talks to a different endpoint, so what it listed before is
+     * about somewhere else — including a list still in flight, whose answer
+     * would otherwise land on the new vendor's card.
+     *
+     * Forgetting is not the same as reporting an empty list: the models area
+     * goes back to having said nothing (R3). A *test* in flight is left alone:
+     * its answer goes to the header's own line, and cancelling it here would
+     * be a silent abort of something this function does not own.
+     */
+    clearFetchedModels = () => {
+      resetProbeResult("list");
+      modelsResult.hidden = true;
+      if (currentProbe?.kind !== "list") return;
+      cancelProbe(currentProbe);
+      probeInFlight = "";
+      drawProbeButtons();
+    };
+
+    /**
+     * Start one probe: `"test"` (can this service answer) or `"list"` (which
+     * models does it offer).
+     *
+     * Both go through the host's `testProvider`, and both are serialised on
+     * the card: the host's `provider_test` answer names the endpoint, not the
+     * request, so two in flight for one `baseUrl` would be resolved by
+     * whichever registered first. That is a protocol limit, not a choice.
+     */
+    const runProbe = (kind) => {
+      if (probeInFlight !== "") return;
+      // The result lives in the body, so a probe started from a collapsed card
+      // would report to nobody. Opening it is the honest fix: the answer has
+      // to be somewhere the user is looking (R3 — a click that produces no
       // visible answer is a lie by omission).
       setExpanded(true);
-      const target = testTarget();
+      const target = probeTarget();
       if (target.problem !== undefined) {
-        showTestLine(target.problem, { warn: true });
+        // Refused before a request left the window: the same shape as a
+        // failed probe, with the class the page can already name.
+        showProbeFailure(kind, "invalid_base_url", target.problem);
         target.field?.focus();
         return;
       }
-      testing = true;
-      testButton.disabled = true;
-      testButton.textContent = s.connTesting;
-      // The last answer described a test that has already happened; leaving it
+      probeInFlight = kind;
+      drawProbeButtons();
+      // The last answer described a probe that has already happened; leaving it
       // on screen while a new one runs would show a result for the wrong try.
-      resetTestResult();
-      testResult.className = "setting-note";
-      testResult.hidden = true;
+      resetProbeResult(kind);
+      (kind === "list" ? modelsResult : testResult).hidden = true;
       // No key of either kind. Leaving both empty is legal — a local endpoint
       // needs none — so this is not a refusal, but when the test then fails the
       // reason has to name the likely cause instead of leaving the user to
       // wonder what the endpoint wants.
       const keyless = target.apiKey === "" && target.apiKeyEnv === "";
-      const pending = { build, baseUrl: target.baseUrl, timer: undefined };
+      const pending = { build, kind, baseUrl: target.baseUrl, timer: undefined };
       // The endpoint is the identity the answer comes back with; two cards may
-      // be testing at once, so matching on it is what keeps an answer on the
+      // be probing at once, so matching on it is what keeps an answer on the
       // card that asked.
-      pending.finish = (kind, detail) => {
-        endTest(pending);
-        if (kind === "ok") showTestModels(detail.models ?? [], detail.latencyMs);
-        else if (kind === "empty") showTestLine(s.connTestOkNoModels);
-        else showTestLine(keyless ? `${detail} ${s.connTestNoKey}` : detail, { warn: true });
+      pending.finish = (answer) => {
+        endProbe(pending);
+        if (answer.outcome === "ok") {
+          if (kind === "list") showFetchedModels(answer.models, answer.latencyMs);
+          // Connected, and the models are the models section's to show: a
+          // second chip list under the header would be the same answer twice.
+          else showProbeLine(kind, connectedLine(answer.latencyMs));
+          return;
+        }
+        if (answer.outcome === "empty") {
+          // A test answered without listing: it was asked whether the service
+          // answers, and it did. Only a list request has anything to say about
+          // the absence of a list.
+          showProbeLine(kind, kind === "list" ? s.connTestOkNoModels : connectedLine(answer.latencyMs));
+          return;
+        }
+        // The keyless addendum explains a 401 the user cannot otherwise
+        // account for; it goes under the kernel's sentence, not inside it.
+        showProbeFailure(kind, answer.code, answer.detail === "" ? s.connTestFailedDetail : answer.detail, {
+          note: keyless ? s.connTestNoKey : "",
+        });
       };
-      currentTest = pending;
+      currentProbe = pending;
       connectionPendingTests.push(pending);
-      // Nothing else will ever resolve this test, and a button stuck on
+      // Nothing else will ever resolve this probe, and a button stuck on
       // "Testing…" is a click that produced no answer (R3).
       pending.timer = setTimeout(() => {
         connectionTestTimers.delete(pending.timer);
         if (pending.build !== connectionPageBuild) return;
-        endTest(pending);
-        showTestLine(s.connTestTimeout, { warn: true });
+        endProbe(pending);
+        // No answer inside the window is the page's own conclusion, and what
+        // it means is "did not reach the endpoint" — the same class the
+        // kernel reports as `unreachable`.
+        showProbeFailure(kind, "unreachable", s.connTestTimeout);
       }, CONNECTION_TEST_TIMEOUT_MS);
       // (A timeout is about reachability, not credentials, so it gets no
       // keyless addendum.)
       connectionTestTimers.add(pending.timer);
-      // Only the fields that were filled in: an empty `apiKey` would ask the
-      // host to send an empty credential, and an empty `apiKeyEnv` would ask it
-      // to read a variable with no name.
-      api.send({
-        cmd: "testProvider",
-        baseUrl: target.baseUrl,
-        ...(target.apiKey === "" ? {} : { apiKey: target.apiKey }),
-        ...(target.apiKeyEnv === "" ? {} : { apiKeyEnv: target.apiKeyEnv }),
-        ...(target.model === "" ? {} : { model: target.model }),
-      });
+      api.send(providerProbePayload(kind, target));
     };
 
-    const testButton = sButton(s.connTest, runTest, { quiet: true });
+    const testButton = sButton(s.connTest, () => runProbe("test"), { quiet: true });
+    registerProbeButton("test", testButton, s.connTest, s.connTesting);
+    registerProbeButton("list", fetchModels, s.connModelsFetch, s.connModelsFetching);
     headActions.append(
       testButton,
       sButton(
         s.remove,
         () => {
-          // A test this card started has nowhere to report now; leaving it
+          // A probe this card started has nowhere to report now; leaving it
           // pending would let an answer land on a node nothing shows.
-          if (currentTest) cancelTest(currentTest);
+          if (currentProbe) cancelProbe(currentProbe);
           // The card is gone, and the name it was filed under is free again;
           // leaving the mark behind would open an unrelated card that later
           // took the same name.
@@ -1812,6 +2682,11 @@ function buildConnectionPage() {
       const apiKeyEnv = apiKeyEnvInput.value.trim();
       return {
         name,
+        // 这两项不进 `value`（写的是 `providers.json`），由 `save()` 交给
+        // localStorage。空白显示名称是「没设」，写进 meta 反而是给未来留一个
+        // 会遮住服务名的旧标签。
+        displayName: displayNameInput.value.trim(),
+        vendor,
         value: {
           protocol: entry.protocol,
           baseUrl,
@@ -1828,7 +2703,10 @@ function buildConnectionPage() {
     return {
       node,
       nameInput,
+      displayNameInput,
       baseUrlInput,
+      // 供应商选择器里选完一家后，名字与地址已替用户填好，下一步就是贴 key。
+      apiKeyInput,
       read,
       clearProblem: () => {
         problem.hidden = true;
@@ -1841,6 +2719,16 @@ function buildConnectionPage() {
         setExpanded(true);
         problem.textContent = message;
         problem.hidden = false;
+        // Beside the field it is about, not at the card's foot. A refusal six
+        // fields away from the one that caused it makes the user search for
+        // the reason; the row's copy column is where the label and the
+        // description already are, so the complaint lands directly under them.
+        // A field with no row of its own (the models list) takes the card's
+        // foot, which is the only place left.
+        const row = field?.closest?.(".setting-row");
+        const host = row?.querySelector(".setting-copy") ?? field?.closest?.(".conn-field") ?? null;
+        if (host !== null && node.contains(host)) host.appendChild(problem);
+        else body.appendChild(problem);
         field?.focus();
       },
       /** The first-run path needs a way to open a card the user has never
@@ -1864,6 +2752,7 @@ function buildConnectionPage() {
     // the user chooses, and `__proto__` as a provider name must be a key, not
     // a prototype assignment that drops the provider.
     const next = Object.create(null);
+    const read = [];
     for (const card of cards) {
       const result = card.read();
       if (result.problem !== undefined) {
@@ -1875,6 +2764,43 @@ function buildConnectionPage() {
         return;
       }
       next[result.name] = result.value;
+      read.push({ card, ...result });
+    }
+    // 两个卡都叫「DeepSeek 工作」，在面板左栏里就是两行一模一样的字——这正是
+    // 显示名称要解决的事。比较在 `provider-meta.js` 里（trim + 忽略大小写，
+    // 空显示名称按服务名算），第二个出问题的卡就地报错并聚焦。
+    const duplicate = duplicateDisplayName(
+      read.map((item) => ({ name: item.name, displayName: item.displayName })),
+    );
+    if (duplicate !== null) {
+      const offender = read[duplicate.index].card;
+      offender.showProblem(
+        s.connDisplayNameDuplicate.replace("{name}", duplicate.displayName),
+        offender.displayNameInput,
+      );
+      return;
+    }
+    // 标签不写进 `providers.json`（内核 schema 会剥掉），所以它们在这里、由
+    // 页面上这些卡重新拼一整份写回 localStorage：这也是删掉的服务留下孤儿
+    // 条目的清除点。
+    //
+    // 写在本机、不等宿主回包：写入失败时页面会明说这一半没存下，而不是让
+    // 文件保存成功、标签悄悄消失（R3）。宿主拒绝保存时多出来的标签是孤儿
+    // ——`provider-meta.js` 只按文件里的服务名查，孤儿永远不显示，下一次保存
+    // 会把它清掉。
+    const nextMeta = Object.create(null);
+    for (const item of read) {
+      const entryMeta = {
+        ...(item.displayName !== "" ? { displayName: item.displayName } : {}),
+        vendor: item.vendor,
+      };
+      if (Object.keys(entryMeta).length > 0) nextMeta[item.name] = entryMeta;
+    }
+    if (writeProviderMeta(storage, nextMeta)) {
+      meta = readProviderMeta(storage);
+      providerMetaWriteFailed = false;
+    } else {
+      providerMetaWriteFailed = true;
     }
     // The draft stays dirty until the host answers with a fresh snapshot; a
     // save that fails sends a notice and no snapshot, so the draft survives.
@@ -1897,12 +2823,18 @@ function buildConnectionPage() {
     sButton(
       s.connAddProvider,
       () => {
-        const card = addCard(blankEntry());
+        const card = addCard(newEntry());
         // A new card has nothing to read in a header — no endpoint, no models —
         // so it opens, ready to be filled in.
         card.expand();
         markDirty();
-        card.nameInput.focus();
+        // Bring it into view before focusing. The list grows downward and the
+        // button sits below it, so with two or three services the new card can
+        // land entirely off-screen: focus had already moved there, and a
+        // focused-but-invisible field is a click that looks like it did
+        // nothing. `block: "nearest"` scrolls only when it has to.
+        card.node.scrollIntoView({ block: "nearest", inline: "nearest" });
+        card.nameInput.focus({ preventScroll: true });
       },
       { quiet: true },
     ),
@@ -2172,120 +3104,54 @@ function buildBehaviorPage() {
   rulesGroup.appendChild(foot);
   pane.appendChild(rulesGroup);
 
-  /* ---------- run limits ---------- */
+  /* ---------- system prompt: not editable here ----------
+   *
+   * Removed on the user's instruction (2026-11-05). The field wrote
+   * `run.json`'s `systemPrompt`, which the kernel prepends to every turn; a
+   * free-text box over it let the operator overwrite the rules the agent runs
+   * under. The kernel still reads that key — a file edited by hand keeps
+   * working — the renderer simply no longer offers a way to change it.
+   *
+   * Same honesty rule as the removed limits below: a value that is actually in
+   * force is named rather than hidden, so nobody is surprised by a prompt they
+   * did not know was there.
+   */
+  const customPrompt = typeof run.systemPrompt === "string" ? run.systemPrompt.trim() : "";
+  if (customPrompt !== "" && !configProblem) {
+    pane.appendChild(
+      sHint(
+        s.behaviorSystemPromptNote
+          .replace("{path}", state.configPaths?.run ?? "run.json"),
+      ),
+    );
+  }
 
-  // Each numeric limit is positive-or-empty; empty means "no limit" and is
-  // sent as null, which the host passes to the kernel as "unset".
-  const positiveOrNull = (value) => {
-    const text = String(value).trim();
-    if (text === "") return { value: null };
-    const parsed = Number(text);
-    if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
-    return { value: parsed };
-  };
-
-  const runRefusal = refusal();
-  const promptArea = document.createElement("textarea");
-  promptArea.className = "setting-textarea";
-  promptArea.id = "setting-system-prompt";
-  promptArea.rows = 6;
-  promptArea.spellcheck = false;
-  promptArea.placeholder = s.behaviorSystemPromptPlaceholder;
-  promptArea.value = run.systemPrompt ?? "";
-  // Text commits on blur, like every other text control in this dialog: a save
-  // per keystroke would rewrite run.json while the sentence is still forming.
-  promptArea.addEventListener("change", () => saveRun({ systemPrompt: promptArea.value }));
-
-  const maxTurnsInput = sText({
-    id: "setting-max-turns",
-    type: "number",
-    min: 1,
-    step: 1,
-    value: run.maxTurns ?? "",
-    // An optional cap, not a required one: empty is the kernel's "no limit",
-    // said out loud so a blank field does not read as an unfinished setting.
-    placeholder: s.behaviorUnlimited,
-    onChange: (value) => {
-      const text = String(value).trim();
-      // Empty is a real value here — the absence of a cap — and it is sent as
-      // null, the shape the kernel reads as "unset".
-      if (text === "") {
-        saveRun({ maxTurns: null });
-        return;
-      }
-      const parsed = Number(text);
-      // The kernel stops the loop *before* turn one when this is 0, so a zero
-      // here reads as "the agent does nothing" rather than "unlimited".
-      if (!Number.isInteger(parsed) || parsed <= 0) {
-        runRefusal.show(s.behaviorMaxTurnsInvalid, maxTurnsInput, run.maxTurns ?? "");
-        return;
-      }
-      saveRun({ maxTurns: parsed });
-    },
-  });
-  const maxCostInput = sText({
-    id: "setting-max-cost",
-    type: "number",
-    min: 0,
-    step: 0.01,
-    value: run.maxCostUsd ?? "",
-    placeholder: s.behaviorUnlimited,
-    onChange: (value) => {
-      const parsed = positiveOrNull(value);
-      if (parsed === undefined) {
-        runRefusal.show(s.behaviorMaxCostInvalid, maxCostInput, run.maxCostUsd ?? "");
-        return;
-      }
-      saveRun({ maxCostUsd: parsed.value });
-    },
-  });
-  const runTimeoutInput = sText({
-    id: "setting-run-timeout",
-    type: "number",
-    min: 1,
-    step: 1000,
-    value: run.timeoutMs ?? "",
-    placeholder: s.behaviorUnlimited,
-    onChange: (value) => {
-      const parsed = positiveOrNull(value);
-      if (parsed === undefined) {
-        runRefusal.show(s.behaviorRunTimeoutInvalid, runTimeoutInput, run.timeoutMs ?? "");
-        return;
-      }
-      saveRun({ timeoutMs: parsed.value });
-    },
-  });
-
-  pane.appendChild(
-    sGroup(s.groupRunLimits, [
-      sRow({
-        id: "setting-max-turns",
-        label: s.behaviorMaxTurns,
-        desc: s.behaviorMaxTurnsDesc,
-        control: maxTurnsInput,
-      }),
-      sRow({
-        id: "setting-max-cost",
-        label: s.behaviorMaxCost,
-        desc: s.behaviorMaxCostDesc,
-        control: maxCostInput,
-      }),
-      sRow({
-        id: "setting-run-timeout",
-        label: s.behaviorRunTimeout,
-        desc: s.behaviorRunTimeoutDesc,
-        control: runTimeoutInput,
-      }),
-      sRow({
-        id: "setting-system-prompt",
-        label: s.behaviorSystemPrompt,
-        desc: s.behaviorSystemPromptDesc,
-        control: promptArea,
-        wide: true,
-      }),
-      runRefusal.node,
-    ]),
-  );
+  // The three limits lost their controls (2026-11-05), but a value already in
+  // `run.json` keeps capping the run. Only a set limit is worth a sentence: an
+  // all-null file is the default, and a permanent note about nothing would be
+  // noise. Naming the values that are actually in force is the honest half of
+  // "we removed the UI" (R3) — a silent cap is one the operator cannot see.
+  //
+  // Skipped when the files could not be read: the copy above says so, and
+  // numbers taken from a mirror of a file nobody just read are not "in force".
+  const setLimits = [
+    ["maxTurns", run.maxTurns],
+    ["maxCostUsd", run.maxCostUsd],
+    ["timeoutMs", run.timeoutMs],
+  ].filter(([, value]) => typeof value === "number" && Number.isFinite(value));
+  if (setLimits.length > 0 && !configProblem) {
+    const limitsText = setLimits.map(([name, value]) => `${name} = ${value}`).join(", ");
+    // `run.json` is the name the kernel uses; a host that could not read the
+    // files sends no path, and naming the file is still more useful than
+    // dropping the sentence.
+    pane.appendChild(
+      sHint(
+        s.behaviorRunLimitsNote
+          .replace("{limits}", limitsText)
+          .replace("{path}", state.configPaths?.run ?? "run.json"),
+      ),
+    );
+  }
 
   return pane;
 }
@@ -2673,6 +3539,25 @@ function buildMcpPage() {
  * the page telling the user their corpus is empty when it is really missing
  * (R3) — and "empty" is the one answer that would make them stop looking.
  */
+/**
+ * The corpus root, rendered so a long absolute path loses its head rather
+ * than its tail.
+ *
+ * Two elements are needed, and the split is not cosmetic: `direction: rtl` on
+ * the outer box is what puts `text-overflow`'s ellipsis at the *start*, while
+ * the inner `direction: ltr` span keeps the segments in readable order. One
+ * element cannot do both — its own `direction` decides truncation, and a
+ * bidi override on the same box either reverses the text or is ignored.
+ *
+ * The full path is the `title`, so truncation never hides it for good.
+ */
+function kbRootPath(root) {
+  const code = el("code", "setting-code kb-root-path");
+  code.title = root;
+  code.appendChild(el("span", "", root));
+  return code;
+}
+
 function buildKbPage() {
   const s = S();
   const pane = sPage(s.pageKb, s.pageKbDesc);
@@ -3103,7 +3988,21 @@ function buildKbPage() {
 
     body.appendChild(
       sGroup(s.kbGroupStatus, [
-        sRow({ label: s.kbRoot, desc: sourceNote(kb), control: el("code", "setting-code", root), wide: true }),
+        // Not `wide`: a wide row hands the control the whole line, which left
+        // the path starting at the label and running across the row. The path
+        // is a value belonging to the label, so it sits in the right-hand
+        // column like every other value on this page — right-aligned against
+        // the same edge as the counts and badges below it.
+        sRow({
+          label: s.kbRoot,
+          desc: sourceNote(kb),
+          // The path is the value, so it sits in the right-hand column — but
+          // a path does not wrap, so it truncates from the left and keeps the
+          // tail, which is the part that tells two corpus folders apart.
+          // The inner span carries the left-to-right order while the box
+          // around it carries the right-to-left truncation edge.
+          control: kbRootPath(root),
+        }),
         sRow({
           label: s.kbFileCount,
           control: el("span", "", s.kbFileCountValue.replace("{n}", String(kb.fileCount ?? 0))),
@@ -4193,6 +5092,9 @@ function selectSettingsTab(tab) {
   });
   const panes = $("settings-panes");
   panes.innerHTML = "";
+  // The bodies the search had opened belonged to the pane being replaced; a
+  // tab switch with the box still full starts over on the new page's cards.
+  searchOpenedBodies.clear();
   panes.appendChild(page.build());
   const empty = el("div", "settings-empty");
   empty.id = "settings-empty";
@@ -4233,6 +5135,17 @@ $("settings-search").addEventListener("input", (event) => {
 });
 
 /**
+ * Card bodies the search opened because they were collapsed.
+ *
+ * A row inside a closed card can match a query, and a result the user cannot
+ * see is not a result. These are reopened for as long as the box holds text;
+ * clearing it closes exactly the ones the search opened, leaving cards the
+ * user had opened (or closed) alone. Module-level because the clear path runs
+ * on a later event with no other record of what it changed.
+ */
+const searchOpenedBodies = new Set();
+
+/**
  * Search filters the rows on the current page and, when nothing on this page
  * matches, points at the pages that do. A settings page without search makes
  * the user guess which tab hides the control they want.
@@ -4241,21 +5154,74 @@ function applySettingsSearch() {
   const query = state.settingsQuery;
   const panes = $("settings-panes");
   const empty = $("settings-empty");
+  // A row inside a collapsed card, or folded into an advanced disclosure, is
+  // matched but invisible. A query opens both for as long as it is active;
+  // clearing the box puts the card back the way the user had it — the toggle's
+  // `aria-expanded` is the state `setExpanded` keeps, so the restore does not
+  // have to guess.
+  const opened = panes.querySelectorAll(".setting-advanced.search-open");
   if (!query) {
-    panes.querySelectorAll(".setting-row, .setting-group, .settings-page").forEach((node) => {
-      node.hidden = false;
-    });
+    panes
+      .querySelectorAll(".setting-row, .conn-field, .setting-group, .conn-section, .setting-advanced, .settings-page, .settings-form-card")
+      .forEach((node) => {
+        node.hidden = false;
+      });
+    for (const section of opened) {
+      section.open = false;
+      section.classList.remove("search-open");
+    }
+    // `aria-expanded` is the card's own state: a card the user opened while
+    // the search was running must stay open, and one they closed must stay
+    // closed. Only the bodies the search itself revealed go back.
+    for (const body of searchOpenedBodies) {
+      const toggle = body.closest(".settings-form-card")?.querySelector(".settings-card-toggle");
+      body.hidden = toggle?.getAttribute("aria-expanded") !== "true";
+    }
+    searchOpenedBodies.clear();
     if (empty) empty.hidden = true;
     return;
   }
+  // Collapsed cards only. Other pages' `settings-form-card-body` is always
+  // shown and is left alone — this list is what the clear path restores.
+  panes.querySelectorAll(".settings-form-card-body").forEach((body) => {
+    if (body.hidden) {
+      searchOpenedBodies.add(body);
+      body.hidden = false;
+    }
+  });
   let visible = 0;
-  panes.querySelectorAll(".setting-row").forEach((row) => {
+  panes.querySelectorAll(".setting-row, .conn-field").forEach((row) => {
     const match = (row.dataset.search ?? "").includes(query);
     row.hidden = !match;
     if (match) visible++;
   });
-  panes.querySelectorAll(".setting-group").forEach((group) => {
-    group.hidden = ![...group.querySelectorAll(".setting-row")].some((row) => !row.hidden);
+  // A group keeps its heading only while something under it is showing.
+  panes.querySelectorAll(".setting-group, .conn-section").forEach((group) => {
+    group.hidden = ![...group.querySelectorAll(".setting-row, .conn-field")].some((row) => !row.hidden);
+  });
+  // The same rule for a card: one whose every row missed the query left its
+  // header and its Test/Remove buttons on screen with nothing under them — a
+  // card that matched nothing, drawn as if it had. Cards with no searchable
+  // rows at all (a page that does not register them) are left alone, because
+  // this rule cannot say anything true about them.
+  panes.querySelectorAll(".settings-form-card").forEach((card) => {
+    const rows = [...card.querySelectorAll(".setting-row, .conn-field")];
+    if (rows.length > 0) card.hidden = !rows.some((row) => !row.hidden);
+  });
+  panes.querySelectorAll(".setting-advanced").forEach((section) => {
+    const hasMatch = [...section.querySelectorAll(".setting-row")].some((row) => !row.hidden);
+    // A folded section whose fields all missed the query is a summary line
+    // about nothing — hide it while a query is active.
+    section.hidden = !hasMatch;
+    if (hasMatch) {
+      if (!section.open) {
+        section.open = true;
+        section.classList.add("search-open");
+      }
+    } else if (section.classList.contains("search-open")) {
+      section.open = false;
+      section.classList.remove("search-open");
+    }
   });
   if (!empty) return;
   empty.hidden = visible > 0;
