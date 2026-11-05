@@ -16,8 +16,39 @@ permissions:
   contents: read
 
 jobs:
+  # 快速反馈：类型与语法在 1 分钟内出结论，不必等 Windows 上那套完整测试。
+  #
+  # Linux 而不是 Windows，是因为这一步不碰任何平台相关的东西——`tsc --noEmit`
+  # 与 `check:js` 都是纯静态。放在 ubuntu 上它跑得快，也不会和下面那个
+  # Windows job 抢队列。
+  quick:
+    name: typecheck + syntax (fast)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # `tsconfig.json` 只 include src/tests/mcp-servers，而 `allowJs` 未开启——
+      # desktop/renderer/app.js 与 settings.js 因此不在 tsc 里，也没有测试导入
+      # 它们。实测：往 app.js 塞一段语法错误，npm test 仍然全绿。这一步解析
+      # desktop/ 与 scripts/ 下每个 JS 文件补上这个盲区。
+      - name: Syntax check JS (desktop / scripts)
+        run: npm run check:js
+
   offline:
-    name: typecheck + build + test (offline)
+    name: build + test (offline)
     runs-on: windows-latest
     timeout-minutes: 30
 
@@ -39,25 +70,26 @@ jobs:
       - name: Build kernel and domain MCP servers
         run: npm run build && npm run build:mcp
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      # `tsconfig.json` 只 include src/tests/mcp-servers，而 `allowJs` 未开启——
-      # desktop/renderer/app.js 与 settings.js 因此不在 tsc 里，也没有测试导入
-      # 它们。实测：往 app.js 塞一段语法错误，npm test 仍然全绿。这一步用
-      # `node --check` 扫 desktop/ 与 scripts/ 下每个 JS 文件补上这个盲区。
-      - name: Syntax check JS (desktop / scripts)
-        run: npm run check:js
-
-      # npm test 不触网；语料与查询集是本地资产（不入库），相关回归组会自动
-      # skip，这是设计好的行为，不是失败。
-      - name: Test (offline)
-        run: npm test
-
-      # vitest.config.ts 里设了 lines 85% 阈值，但它只在 --coverage 下生效，
-      # 而 `npm test` 不生成覆盖率——不单独跑这一步，那道闸门等于不存在。
-      - name: Coverage gate (lines ≥ 85%)
+      # **只有 coverage 这一步在跑测试。**
+      #
+      # 以前这里先是 `npm test`、再是 `npm run coverage`——而
+      # `vitest run --coverage` 会**重跑整个套件**，于是 3566 个用例跑了两遍，
+      # 那一步占了整条流水线约 40% 的时间，没有换来任何新信息：coverage 失败时
+      # 同样会打印哪条用例红了。
+      #
+      # vitest.config.ts 里的 lines 85% 阈值只在 `--coverage` 下生效，所以
+      # 这一步同时承担「跑测试」与「覆盖率闸门」两件事。
+      #
+      # 语料与查询集是本地资产（不入库），相关回归组会自动 skip，这是设计好的
+      # 行为，不是失败。
+      - name: Test + coverage gate (lines ≥ 85%)
         run: npm run coverage
 
-  # lint 目前等同 tsc --noEmit（D-006），所以没有独立 job —— 跑两遍不会
-  # 多提供任何信息。等 D-006 关闭、接上真正的静态检查后再加。
+      # lint 目前等同 tsc --noEmit（D-006），而 typecheck 已经在 quick job 里；
+      # 跑两遍不会多提供任何信息。等 D-006 关闭、接上真正的静态检查后再加。
+
+      # 桌面的原生依赖（electron / serialport / electron-updater）刻意**不装**：
+      # 现有测试只对 desktop/ 做静态读取（readFileSync 读源码与 package.json），
+      # 从不 import 它们。serialport 要编译原生模块，装上会让这条流水线明显变慢。
+      # 如果将来有测试真的 import 了 desktop/，这一步会红——那时再加
+      # `npm --prefix desktop ci`。
