@@ -334,15 +334,12 @@ function handleProviderTest(message) {
     });
     return;
   }
-  // The event's own words first; a failure that names neither an error nor a
-  // code is still a failure, and saying so beats an empty warning line.
-  const detail =
-    typeof message.error === "string" && message.error !== ""
-      ? message.error
-      : typeof message.code === "string" && message.code !== ""
-        ? message.code
-        : S().connTestFailed;
-  pending.finish("failed", detail);
+  // The event's own words are the detail; the code travels beside them so the
+  // card can name the failure class without parsing Chinese prose. An event
+  // with neither still names the class ("test failed") — a raw identifier is
+  // not a sentence a user can act on, so it never reaches the block alone.
+  const detail = typeof message.error === "string" ? message.error : "";
+  pending.finish("failed", { code: typeof message.code === "string" ? message.code : "", detail });
 }
 
 const S = () => settingsStrings[state.locale] ?? settingsStrings.en;
@@ -835,10 +832,19 @@ function sSegmented({ options, value, onChange, previews = false }) {
   return wrap;
 }
 
+/**
+ * The page's title block.
+ *
+ * `h2`, not `h1`: the dialog's own heading ("Settings", in the rail) is an
+ * `h2`, and a page title one level *above* its container made the document
+ * outline run h2 → h1 → h3 — a jump a screen reader reads as a broken tree.
+ * The page title is a peer of the rail's heading, and the groups under it are
+ * `h3`s.
+ */
 function sPage(title, description) {
   const pane = el("div", "settings-page");
   const head = el("header", "settings-page-head");
-  head.appendChild(el("h1", "", title));
+  head.appendChild(el("h2", "", title));
   if (description) head.appendChild(el("p", "", description));
   pane.appendChild(head);
   return pane;
@@ -2281,22 +2287,74 @@ function buildConnectionPage() {
     };
 
     /**
-     * One line of outcome. A failed test takes the warn colour (the token the
-     * transcript's warnings use), not the error red: an endpoint that did not
-     * answer is a fact about the endpoint, not a crash. The colour is applied
-     * inline because the settings stylesheet needs no entry for one class.
+     * One line of outcome. Used by the "answered, but listed nothing" case,
+     * which is neither a success block nor a failure.
      *
      * Every writer opens the card first. `runTest` already does, but the answer
      * arrives later — a user who collapsed the card while waiting would other-
      * wise get a result nobody can see, and a test that "did nothing" (R3).
      */
-    const showTestLine = (text, { warn = false } = {}) => {
+    const showTestLine = (text) => {
       setExpanded(true);
       resetTestResult();
       testResult.className = "setting-note";
       testResult.textContent = text;
-      testResult.style.color = warn ? "var(--warn)" : "";
       testResult.hidden = false;
+    };
+
+    /**
+     * The failure class the kernel reported, as words.
+     *
+     * `provider_test` carries a `code` from `src/model/probe.ts`
+     * (`invalid_base_url` / `unreachable` / `unauthorized` / `http_error`, plus
+     * the contract-reserved `bad_response`). Four kinds of failure need four
+     * different next steps — check the address, check the network, check the
+     * key, read the status — and a single warn sentence made them all look
+     * alike. The kernel's own sentence, which names the field and the fix,
+     * stays underneath: this label is the classification, not a replacement
+     * for it. A code this page does not know is not guessed at (R3).
+     */
+    const failureLabel = (code) => {
+      switch (code) {
+        case "invalid_base_url":
+          return s.connTestFailAddress;
+        case "unreachable":
+          return s.connTestFailUnreachable;
+        case "unauthorized":
+          return s.connTestFailAuth;
+        case "http_error":
+        case "bad_response":
+          return s.connTestFailHttp;
+        default:
+          return s.connTestFailed;
+      }
+    };
+
+    /**
+     * A failed test, in the same slot and the same shape as a successful one:
+     * the class as a word beside a mark, then the kernel's sentence. Mark and
+     * word together mean the state survives the high-contrast theme and a
+     * reader who cannot tell `--warn` from `--text`.
+     */
+    const showTestFailure = (code, detail, { note = "" } = {}) => {
+      setExpanded(true);
+      resetTestResult();
+      testResult.className = "conn-test-result";
+      testResult.hidden = false;
+      const head = el("div", "conn-test-head");
+      const status = el("span", "conn-test-status failed");
+      status.append(
+        iconEl("alert", "conn-test-status-icon"),
+        el("span", "", failureLabel(code)),
+      );
+      head.appendChild(status);
+      testResult.appendChild(head);
+      // A failure that cannot name itself is still reported (R3); the class
+      // word in the head is the one thing it can always say.
+      if (detail !== "") testResult.appendChild(el("p", "conn-test-detail", detail));
+      // A second sentence about a different cause gets its own line: run into
+      // the kernel's sentence it read as one long clause.
+      if (note !== "") testResult.appendChild(el("p", "conn-test-detail", note));
     };
 
     /** The enabled chip says what clicking it does; the disabled one says why
@@ -2426,7 +2484,9 @@ function buildConnectionPage() {
       setExpanded(true);
       const target = testTarget();
       if (target.problem !== undefined) {
-        showTestLine(target.problem, { warn: true });
+        // Refused before a request left the window: the same shape as a
+        // failed test, with the class the page can already name.
+        showTestFailure("invalid_base_url", target.problem);
         target.field?.focus();
         return;
       }
@@ -2451,7 +2511,13 @@ function buildConnectionPage() {
         endTest(pending);
         if (kind === "ok") showTestModels(detail.models ?? [], detail.latencyMs);
         else if (kind === "empty") showTestLine(s.connTestOkNoModels);
-        else showTestLine(keyless ? `${detail} ${s.connTestNoKey}` : detail, { warn: true });
+        // The keyless addendum explains a 401 the user cannot otherwise
+        // account for; it goes under the kernel's sentence, not inside it.
+        else {
+          showTestFailure(detail.code, detail.detail === "" ? s.connTestFailedDetail : detail.detail, {
+            note: keyless ? s.connTestNoKey : "",
+          });
+        }
       };
       currentTest = pending;
       connectionPendingTests.push(pending);
@@ -2461,7 +2527,10 @@ function buildConnectionPage() {
         connectionTestTimers.delete(pending.timer);
         if (pending.build !== connectionPageBuild) return;
         endTest(pending);
-        showTestLine(s.connTestTimeout, { warn: true });
+        // No answer inside the window is the page's own conclusion, and what
+        // it means is "did not reach the endpoint" — the same class the
+        // kernel reports as `unreachable`.
+        showTestFailure("unreachable", s.connTestTimeout);
       }, CONNECTION_TEST_TIMEOUT_MS);
       // (A timeout is about reachability, not credentials, so it gets no
       // keyless addendum.)
@@ -2576,6 +2645,16 @@ function buildConnectionPage() {
         setExpanded(true);
         problem.textContent = message;
         problem.hidden = false;
+        // Beside the field it is about, not at the card's foot. A refusal six
+        // fields away from the one that caused it makes the user search for
+        // the reason; the row's copy column is where the label and the
+        // description already are, so the complaint lands directly under them.
+        // A field with no row of its own (the models list) takes the card's
+        // foot, which is the only place left.
+        const row = field?.closest?.(".setting-row");
+        const host = row?.querySelector(".setting-copy") ?? field?.closest?.(".conn-field") ?? null;
+        if (host !== null && node.contains(host)) host.appendChild(problem);
+        else body.appendChild(problem);
         field?.focus();
       },
       /** The first-run path needs a way to open a card the user has never
@@ -5009,7 +5088,7 @@ function applySettingsSearch() {
   const opened = panes.querySelectorAll(".setting-advanced.search-open");
   if (!query) {
     panes
-      .querySelectorAll(".setting-row, .conn-field, .setting-group, .conn-section, .setting-advanced, .settings-page")
+      .querySelectorAll(".setting-row, .conn-field, .setting-group, .conn-section, .setting-advanced, .settings-page, .settings-form-card")
       .forEach((node) => {
         node.hidden = false;
       });
@@ -5045,6 +5124,15 @@ function applySettingsSearch() {
   // A group keeps its heading only while something under it is showing.
   panes.querySelectorAll(".setting-group, .conn-section").forEach((group) => {
     group.hidden = ![...group.querySelectorAll(".setting-row, .conn-field")].some((row) => !row.hidden);
+  });
+  // The same rule for a card: one whose every row missed the query left its
+  // header and its Test/Remove buttons on screen with nothing under them — a
+  // card that matched nothing, drawn as if it had. Cards with no searchable
+  // rows at all (a page that does not register them) are left alone, because
+  // this rule cannot say anything true about them.
+  panes.querySelectorAll(".settings-form-card").forEach((card) => {
+    const rows = [...card.querySelectorAll(".setting-row, .conn-field")];
+    if (rows.length > 0) card.hidden = !rows.some((row) => !row.hidden);
   });
   panes.querySelectorAll(".setting-advanced").forEach((section) => {
     const hasMatch = [...section.querySelectorAll(".setting-row")].some((row) => !row.hidden);

@@ -19,6 +19,66 @@
   outline: none;
 }
 
+/* ---------- browser surfaces ----------
+   Selection, the caret and scrollbars are drawn by Chromium, not by this
+   file — which is why they were the one part of Settings that ignored every
+   theme: system blue over `--text`, and a light thumb in a dark window. Every
+   value below comes from a semantic token, so all four themes follow. */
+.settings-dialog ::selection {
+  /* Text in the page's own background colour rather than `--on-accent`:
+     white on `--accent` is only 2.85:1 in the dark theme. Dark ink on the
+     same blue clears AA in all four themes and is how a terminal marks a
+     selection. */
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.settings-dialog :where(input, textarea) {
+  caret-color: var(--accent);
+}
+
+/* The rail and the pane are the page's two scroll containers; the provider
+   menu and the approval-rule list scroll on their own once they get long.
+   Same measurements as the transcript's bar: 10px, a `--border` thumb with a
+   3px transparent inset so it never touches the edge, and a hover that moves
+   it one step to `--border-strong`. */
+.settings-nav::-webkit-scrollbar,
+.settings-panes::-webkit-scrollbar,
+.provider-menu::-webkit-scrollbar,
+.rules-list::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.settings-nav::-webkit-scrollbar-track,
+.settings-panes::-webkit-scrollbar-track,
+.provider-menu::-webkit-scrollbar-track,
+.rules-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.settings-nav::-webkit-scrollbar-thumb,
+.settings-panes::-webkit-scrollbar-thumb,
+.provider-menu::-webkit-scrollbar-thumb,
+.rules-list::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: var(--radius-sm);
+  background-color: var(--border);
+  background-clip: padding-box;
+}
+
+.settings-nav::-webkit-scrollbar-thumb:hover,
+.settings-panes::-webkit-scrollbar-thumb:hover,
+.provider-menu::-webkit-scrollbar-thumb:hover,
+.rules-list::-webkit-scrollbar-thumb:hover {
+  background-color: var(--border-strong);
+}
+
+/* The `<details>` triangles are browser chrome too. */
+.settings-dialog ::marker {
+  color: var(--text-faint);
+}
+
 .settings-form {
   display: flex;
   height: 100%;
@@ -83,6 +143,26 @@
 
 .settings-search input:focus {
   border-color: var(--accent);
+}
+
+.settings-search input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Placeholders are browser chrome too. With no rule they take Chromium's
+   `#757575`, which is 4.2:1 on `--surface` in the light theme — under the
+   4.5:1 floor, and the one colour on this page that belonged to no theme.
+   `--text-faint` is what every other placeholder in the app uses
+   (`styles.css`), and it measures 4.56:1 on the same surface. The two field
+   types below cover every placeholder the page draws: `sText` and
+   `sTextarea` both write theirs onto `.setting-input` / `.setting-textarea`,
+   and the search box is the one static one in `index.html`. */
+.settings-search input::placeholder,
+.setting-input::placeholder,
+.setting-textarea::placeholder {
+  color: var(--text-faint);
+  opacity: 1;
 }
 
 .settings-nav {
@@ -216,10 +296,13 @@
 .settings-page {
   max-width: 780px;
   margin: 0 auto;
-  padding: 28px 34px 56px;
+  padding: 32px 32px 24px;
 }
 
-.settings-page-head h1 {
+/* The page title sits under the rail's own "Settings" heading, so it is an
+   `h2` — same level, not a second document title. `h1` here made the outline
+   run h2 → h1 → h3, which a screen reader announces as a broken tree. */
+.settings-page-head h2 {
   margin: 0 0 4px;
   font-size: var(--text-lg);
   font-weight: 600;
@@ -227,14 +310,16 @@
 }
 
 .settings-page-head p {
-  margin: 0 0 22px;
+  margin: 0 0 24px;
   font-size: var(--text-sm);
   line-height: 1.55;
   color: var(--text-secondary);
 }
 
+/* Groups are separated by one step (32) and the heading under each is held
+   close to its rows (8): more air above a heading than below it. */
 .setting-group {
-  margin-bottom: 26px;
+  margin-bottom: 32px;
 }
 
 /* Product header: the mark at a size where its gradient reads, then the name.
@@ -243,7 +328,7 @@
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 0 0 14px;
+  margin: 0 0 16px;
 }
 
 .about-mark {
@@ -266,8 +351,8 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin: 0 0 18px;
-  padding-bottom: 14px;
+  margin: 0 0 16px;
+  padding-bottom: 16px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -283,22 +368,27 @@
 /* The status line is text, not a control: it takes the full width under the
    version row rather than shrinking to a button-sized column. */
 .update-note {
-  margin: -8px 0 18px;
+  margin: -8px 0 16px;
 }
 
 .setting-group-title {
-  margin: 0 0 6px;
+  margin: 0 0 8px;
   padding: 0 2px;
   font-size: var(--text-sm);
-  font-weight: 500;
-  color: var(--text-faint);
+  font-weight: 600;
+  color: var(--text-secondary);
 }
 
+/* One row = two lines: a label, and a description held to it (4px), with the
+   rows themselves apart by 12px of vertical padding. The label→description
+   gap is deliberately smaller than the row→row gap, so the pair reads as one
+   unit instead of four evenly spaced lines. The values are all steps of the
+   4/8/12/16/24/32 set the page's other spacing uses. */
 .setting-row {
   display: flex;
   align-items: center;
   gap: 24px;
-  padding: 11px 2px;
+  padding: 12px 2px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -322,7 +412,7 @@
 }
 
 .setting-desc {
-  margin: 2px 0 0;
+  margin: 4px 0 0;
   font-size: var(--text-sm);
   line-height: 1.5;
   color: var(--text-faint);
@@ -340,6 +430,15 @@
 
 .settings-page.page-wide {
   max-width: 880px;
+}
+
+/* On this page the control column is a full-width input, and letting both
+   columns grow at 1:1 squeezed the label column to ~190px — long descriptions
+   wrapped to six lines beside a field that did not need the room. The copy
+   column now holds a readable measure and the field takes the rest. */
+.page-wide .setting-copy {
+  flex: 0 1 300px;
+  min-width: 240px;
 }
 
 .page-wide .setting-control {
@@ -369,6 +468,17 @@
   font: inherit;
   font-size: var(--text-sm);
   outline: none;
+}
+
+/* A 1px border tint alone is not a focus ring: on the high-contrast themes
+   `--accent` and `--border-strong` sit close enough that a keyboard user
+   loses the cursor, and V9 in the design doc asks every control for a visible
+   ring. The outline sits outside the 6px corner like every button's. */
+.setting-select:focus-visible,
+.setting-input:focus-visible,
+.setting-textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* Same reason as `.serial-select`: the native `<select>` chrome on Windows
@@ -424,7 +534,11 @@
 }
 
 .setting-badge.warn {
-  background: var(--danger-soft);
+  /* The badge's tone and its surface have to agree: this was a danger-tinted
+     background under warn-coloured text, so the two signals pointed at
+     different severities. `color-mix` keeps it on the token, since the palette
+     has no `--warn-soft`. */
+  background: color-mix(in srgb, var(--warn) 14%, transparent);
   color: var(--warn);
 }
 
@@ -441,7 +555,7 @@
   border-radius: 999px;
   background: var(--surface-hover);
   border: 1px solid var(--border-strong);
-  transition: background 120ms ease, border-color 120ms ease;
+  transition: background var(--fast) var(--ease), border-color var(--fast) var(--ease);
 }
 
 .setting-switch-knob {
@@ -452,7 +566,7 @@
   height: 15px;
   border-radius: 50%;
   background: var(--text-faint);
-  transition: transform 140ms ease, background 140ms ease;
+  transition: transform var(--fast) var(--ease), background var(--fast) var(--ease);
 }
 
 .setting-switch.on {
@@ -598,7 +712,7 @@
 }
 
 .settings-empty {
-  padding: 22px 0;
+  padding: 24px 0;
 }
 
 .settings-empty-actions {
@@ -629,7 +743,7 @@
 }
 
 .settings-empty-card {
-  padding: 22px 2px 8px;
+  padding: 24px 2px 8px;
 }
 
 .settings-empty-card h3 {
@@ -758,7 +872,7 @@
   background: var(--accent);
   opacity: 0.75;
   min-height: 0;
-  transition: opacity 120ms ease;
+  transition: opacity var(--fast) var(--ease);
 }
 
 .usage-day:hover .usage-bar {
@@ -1105,21 +1219,23 @@
 
 /* A tier of the form with its own heading. The rule above the heading is what
    makes the tiers read as sections rather than as eight rows with three
-   labels dropped between them. */
+   labels dropped between them. Section → rule 24, title → description 4,
+   description → first row 8: the heading is closer to what it names than to
+   what precedes it. */
 .conn-section {
-  padding-top: 12px;
-  margin-top: 10px;
+  padding-top: 16px;
+  margin-top: 24px;
   border-top: 1px solid var(--border);
 }
 
 .conn-section:first-of-type {
-  padding-top: 4px;
-  margin-top: 4px;
+  padding-top: 8px;
+  margin-top: 8px;
   border-top: none;
 }
 
 .conn-section-title {
-  margin: 0 0 2px;
+  margin: 0 0 4px;
   padding: 0 2px;
   font-size: var(--text-sm);
   font-weight: 600;
@@ -1127,7 +1243,7 @@
 }
 
 .conn-section-desc {
-  margin: 0 0 4px;
+  margin: 0 0 8px;
   padding: 0 2px;
   font-size: var(--text-xs);
   line-height: 1.5;
@@ -1137,7 +1253,7 @@
 /* A field that is not label-left / control-right: the models list needs the
    card's full width, so its heading sits above it rather than beside it. */
 .conn-field {
-  padding: 10px 2px 4px;
+  padding: 8px 2px 4px;
 }
 
 .conn-field > .setting-desc {
@@ -1163,11 +1279,18 @@
   color: var(--text-faint);
 }
 
-/* The env-var key satisfies the required key row without filling it in. */
+/* The env-var key satisfies the required key row without filling it in.
+   A recessed surface rather than a 2px colour bar down the left edge: the bar
+   was the category's default way of saying "note", not this product's. The
+   inset is what attaches it to the key row above — the 12px is one step of
+   the spacing set, and the surface is `--bg`, the one neutral that is not the
+   card's own `--surface` (the note is inside `.settings-form-card`, so a
+   `--surface` panel here would be invisible in all four themes). */
 .conn-key-env-hint {
-  margin: -4px 2px 2px;
-  padding-left: 9px;
-  border-left: 2px solid var(--border-strong);
+  margin: -4px 2px 4px 12px;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
 }
 
 /* A `<details>` disclosure that does not look like a second card: no frame,
@@ -1230,15 +1353,18 @@
   color: var(--text-faint);
 }
 
-/* What "Test connection" found: one status line, then every model the endpoint
-   listed. The block is a surface of its own rather than a bare note, because it
-   holds controls (the add chips) and a result you can act on has to look like
-   one. A failure stays a plain `.setting-note` line in the same slot. */
+/* What "Test connection" found: a status line, then either the models the
+   endpoint listed or the failure's own sentence. The block is a surface of its
+   own rather than a bare note, because a result you can act on has to look
+   like one — and a failure is a result too: as a plain warn-coloured line in
+   the same slot it read like a stray comment, and the four failure classes
+   (`invalid_base_url` / `unreachable` / `unauthorized` / `http_error`) were
+   indistinguishable from each other. */
 .conn-test-result {
   display: flex;
   flex-direction: column;
-  margin-top: 10px;
-  padding: 11px 13px;
+  margin-top: 12px;
+  padding: 12px 14px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -1273,6 +1399,24 @@
    colour the rest of the page uses for "worked, but not as expected". */
 .conn-test-status.empty .conn-test-status-icon {
   color: var(--warn);
+}
+
+/* A failed test: warn, not danger. The endpoint not answering is a fact about
+   the configuration, not a crash — the same choice `showTestLine` made when
+   this was one coloured sentence. The word beside the mark carries the class
+   (address / unreachable / auth / HTTP), so colour is never the only signal. */
+.conn-test-status.failed .conn-test-status-icon {
+  color: var(--warn);
+}
+
+/* The kernel's own sentence: which field failed and what to do about it. Body
+   colour and full measure — it is the actionable half of the answer. */
+.conn-test-detail {
+  margin: 6px 0 0;
+  font-size: var(--text-sm);
+  line-height: 1.55;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
 }
 
 /* Latency is a measurement, so it is set apart from the sentence: muted, its
@@ -1390,12 +1534,21 @@
   margin-top: 10px;
 }
 
+/* A card's rows are tighter than the page's: a card holds up to six of them
+   inside a bordered surface, where the page's 12px would add up to a long
+   scroll for one service. 8 above and below is still the spacing set's step,
+   and still more than the 4px between a label and its description. */
 .settings-form-card .setting-row {
-  padding: 7px 0;
+  padding: 8px 0;
 }
 
+/* Inside a card the label and its description share a size (two steps of the
+   ramp would make a six-row card shout), so weight carries the difference
+   that size carries elsewhere. Colour alone would leave the two lines reading
+   as one paragraph. */
 .settings-form-card .setting-label {
   font-size: var(--text-sm);
+  font-weight: 500;
 }
 
 /* knowledge base */
@@ -1408,7 +1561,7 @@
 
 /* The head sits above the first group, and `.kb-body` is a zero-gap flex
    column: without a margin of its own the group title lands flush against the
-   note and reads as a third line of it rather than as a heading. The 26px is
+   note and reads as a third line of it rather than as a heading. The 32px is
    `.setting-group`'s own `margin-bottom` — every block on this page is
    separated by that value, and the 14px this carried made the standing note
    look attached to the "Status" title under it.
@@ -1419,7 +1572,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 26px;
+  margin-bottom: 32px;
   padding: 0 2px;
 }
 
@@ -1444,10 +1597,10 @@
 }
 
 /* The truncation warning sits between the update group and the tree group, so
-   it takes `.setting-group`'s 26px above it (`.kb-body` is a flex column, so
-   margins do not collapse) and the tree title's own 6px below. */
+   it takes `.setting-group`'s 32px above it (`.kb-body` is a flex column, so
+   margins do not collapse) and the tree title's own 8px below. */
 .kb-truncated {
-  margin: 0 2px 6px;
+  margin: 0 2px 8px;
   color: var(--warn);
 }
 
@@ -1456,14 +1609,14 @@
    line sat flush against the "Corpus updates" title that follows it and the
    two read as one paragraph. */
 .kb-loading {
-  margin: 0 2px 26px;
+  margin: 0 2px 32px;
 }
 
 /* The "no corpus here" card is followed by the update group. The card's own 8px
-   bottom padding is a list item's rhythm, not a block's; 18px brings the
-   distance to that group's title to the same 26px the groups use. */
+   bottom padding is a list item's rhythm, not a block's; 24px brings the
+   distance to that group's title to the same 32px the groups use. */
 .kb-body > .settings-empty-card {
-  margin-bottom: 18px;
+  margin-bottom: 24px;
 }
 
 /* Corpus updates. The reason a check or a verify failed is the most important
@@ -1736,6 +1889,12 @@
   .setting-control {
     max-width: none;
   }
+  /* In a column the `flex-basis` above would become a height, so the copy
+     column goes back to taking its natural height. */
+  .page-wide .setting-copy {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
 }
 
 
@@ -1853,7 +2012,7 @@
 
 /* 高级区：页面底部的折叠块，装包流程之外的一切都住在这里。 */
 .tc-advanced {
-  margin-top: 18px;
+  margin-top: 24px;
   border-top: 1px solid var(--border);
   padding-top: 8px;
 }
@@ -1880,7 +2039,7 @@
 }
 
 .tc-advanced-body > * + * {
-  margin-top: 14px;
+  margin-top: 16px;
 }
 
 .pack-none {
@@ -1893,7 +2052,7 @@
   gap: 12px;
   flex-wrap: wrap;
   padding: 10px 14px;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -2007,9 +2166,15 @@
   width: 0;
   border-radius: 3px;
   background: var(--accent);
-  transition: width 160ms var(--ease);
+  transition: width var(--normal) var(--ease);
 }
 
+/* Underline offset 3px, matching `styles.css`'s `.link-button`: the two files
+   are loaded together and a link-button can appear on either surface, so two
+   offsets would show as two different underline heights. `--accent-text` is
+   already the resting colour here, and is what the main window uses for the
+   same reason — `--accent` on `--surface` measures 4.21:1 in the light theme,
+   under AA for body text. */
 .link-button {
   background: none;
   border: none;
@@ -2018,7 +2183,7 @@
   font-size: inherit;
   cursor: pointer;
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-underline-offset: 3px;
 }
 
 .link-button:hover {
@@ -2050,8 +2215,8 @@
 /* 离线安装是外网受限时的唯一出路，但它不是主路径：放在列表末尾，
    用一条分隔线而不是一张卡片，避免和"可安装"那组抢注意力。 */
 .pack-offline {
-  margin-top: 18px;
-  padding-top: 14px;
+  margin-top: 24px;
+  padding-top: 16px;
   border-top: 1px solid var(--border);
 }
 
@@ -2112,9 +2277,18 @@
   background: var(--surface);
 }
 
-.provider-picker:focus-visible,
+/* The open menu is shown by the caret flip and the accent border; the
+   keyboard ring has to be its own signal, because the border alone is not
+   visible enough in the two high-contrast themes (same reason as the fields
+   above). */
 .provider-picker[aria-expanded="true"] {
   outline: none;
+  border-color: var(--accent);
+}
+
+.provider-picker:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
   border-color: var(--accent);
 }
 
@@ -2178,7 +2352,7 @@
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow-popover);
-  animation: slide-up 120ms ease-out;
+  animation: slide-up var(--normal) var(--ease);
 }
 
 /* Near the bottom of the window the menu opens upward instead of pushing its
