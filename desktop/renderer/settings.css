@@ -1269,6 +1269,18 @@
   min-width: 0;
 }
 
+/* The models heading carries the one action the section has: the label and
+   its "required" mark keep their baseline pairing on the left, and the button
+   takes the far end of the same line. `space-between` would have spread all
+   three children, pushing the tag into the middle. */
+.conn-models-head {
+  align-items: center;
+}
+
+.conn-models-head > .btn {
+  margin-left: auto;
+}
+
 .setting-required {
   flex: 0 0 auto;
   padding: 0 5px;
@@ -1394,17 +1406,11 @@
   color: var(--success);
 }
 
-/* Reached the endpoint, got no list back: the call worked, the answer did not.
-   A green mark beside that sentence would overstate it, so it takes the warn
-   colour the rest of the page uses for "worked, but not as expected". */
-.conn-test-status.empty .conn-test-status-icon {
-  color: var(--warn);
-}
-
-/* A failed test: warn, not danger. The endpoint not answering is a fact about
-   the configuration, not a crash — the same choice `showTestLine` made when
-   this was one coloured sentence. The word beside the mark carries the class
-   (address / unreachable / auth / HTTP), so colour is never the only signal. */
+/* A failed probe: warn, not danger. The endpoint not answering is a fact about
+   the configuration, not a crash — the same choice the one-line result made
+   when this was a single coloured sentence. The word beside the mark carries
+   the class (address / unreachable / auth / HTTP), so colour is never the only
+   signal. */
 .conn-test-status.failed .conn-test-status-icon {
   color: var(--warn);
 }
@@ -1437,25 +1443,6 @@
   margin-top: 10px;
   padding-top: 10px;
   border-top: 1px solid var(--border);
-}
-
-/* The heading spans the row so the chips wrap under it. */
-.conn-test-models-head {
-  flex: 1 1 100%;
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-}
-
-.conn-test-count {
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--surface-hover);
-  color: var(--text-secondary);
-  font-variant-numeric: tabular-nums;
 }
 
 /* One model. The name is mono because a model id is an identifier, and the
@@ -2427,49 +2414,6 @@
   height: 1px;
   margin: 4px 6px;
   background: var(--border);
-}
-
-/* ---------- suggested models (inside a service card) ----------
-   The names the vendor documents, offered rather than written: the file only
-   gets a model the user clicked. The row disappears when nothing is left to
-   offer, so a card never ends with a heading over an empty line. */
-.preset-models {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 0 2px;
-}
-
-.preset-models-label {
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  margin-right: 2px;
-}
-
-.preset-model-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 9px 3px 7px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface-raised);
-  color: var(--text-secondary);
-  font-family: var(--mono);
-  font-size: var(--text-sm);
-  transition: border-color var(--fast) var(--ease), color var(--fast) var(--ease);
-}
-
-.preset-model-chip:hover {
-  border-color: var(--accent);
-  color: var(--text);
-}
-
-.preset-model-chip-icon {
-  width: 11px;
-  height: 11px;
-  color: var(--accent);
 }
 
 /* The knowledge base's corpus path: a long absolute path in the value column.

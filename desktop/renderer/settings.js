@@ -11,7 +11,6 @@ import { settingsStrings } from "./settings-i18n.js";
 import {
   availableModelEntries,
   carriedFromModel,
-  connectionSummary,
   modelEntryForSave,
   modelRowState,
   serviceHeaderFacts,
@@ -21,7 +20,6 @@ import {
   nextProviderName,
   presetById,
   presetFillFor,
-  presetModelSuggestions,
   providerPickerOptions,
 } from "./provider-presets.js";
 import {
@@ -69,6 +67,65 @@ export function looksLikeEnvName(value) {
   const text = typeof value === "string" ? value.trim() : "";
   if (text === "" || text.length >= 60) return false;
   return /^[A-Z][A-Z0-9]*(_[A-Z0-9]+)+$/.test(text);
+}
+
+/**
+ * The `testProvider` payload for one request on a card.
+ *
+ * `kind` is `"test"` (the card header's button) or `"list"` (the models
+ * section's). Only the fields that were filled in are sent: an empty `apiKey`
+ * would ask the host to send an empty credential, and an empty `apiKeyEnv`
+ * would ask it to read a variable with no name.
+ *
+ * The model name travels only with a test. `probeProvider` falls back to a
+ * one-token chat request when `/models` fails *and* a model was given; that
+ * answers "can it talk", not "what does it list". A list request carrying the
+ * model could come back `ok` for a gateway whose `/models` is a 404, and the
+ * page would draw that as a successful model list (R3).
+ */
+export function providerProbePayload(kind, target) {
+  const baseUrl = typeof target?.baseUrl === "string" ? target.baseUrl : "";
+  const apiKey = typeof target?.apiKey === "string" ? target.apiKey : "";
+  const apiKeyEnv = typeof target?.apiKeyEnv === "string" ? target.apiKeyEnv : "";
+  const model = typeof target?.model === "string" ? target.model : "";
+  return {
+    cmd: "testProvider",
+    baseUrl,
+    ...(apiKey === "" ? {} : { apiKey }),
+    ...(apiKeyEnv === "" ? {} : { apiKeyEnv }),
+    ...(kind === "list" || model === "" ? {} : { model }),
+  };
+}
+
+/**
+ * One `provider_test` answer, split into the three outcomes the page draws.
+ *
+ * The host relays the kernel's rule: `models` is absent when the endpoint did
+ * not list them, as opposed to an empty list (R3) — so an answer without a
+ * list is "answered, listed nothing", never "listed zero". A failure keeps the
+ * kernel's own sentence and its classification code; a code this page does not
+ * know travels through untouched rather than being guessed at.
+ */
+export function probeAnswer(message) {
+  const record = typeof message === "object" && message !== null ? message : {};
+  if (record.ok === true) {
+    const models = Array.isArray(record.models)
+      ? record.models.filter((model) => typeof model === "string")
+      : [];
+    // No measurement means no measurement: a `0 ms` would be a number nobody
+    // took (R3).
+    const latencyMs = typeof record.latencyMs === "number" ? record.latencyMs : undefined;
+    return {
+      outcome: models.length > 0 ? "ok" : "empty",
+      models,
+      ...(latencyMs === undefined ? {} : { latencyMs }),
+    };
+  }
+  return {
+    outcome: "failed",
+    code: typeof record.code === "string" ? record.code : "",
+    detail: typeof record.error === "string" ? record.error : "",
+  };
 }
 
 export function createSettings(deps) {
@@ -313,33 +370,22 @@ function abandonConnectionTests() {
 /**
  * A `provider_test` answer from the host.
  *
- * The event names the endpoint, not the card: several cards may be testing at
- * once, and an answer whose `baseUrl` matches no waiting test belongs to a page
- * that is gone. It is ignored, not shown (R3: no invented result).
+ * The event names the endpoint, not the card: several cards may be probing at
+ * once, and an answer whose `baseUrl` matches no waiting probe belongs to a
+ * page that is gone. It is ignored, not shown (R3: no invented result).
  */
 function handleProviderTest(message) {
   const baseUrl = typeof message.baseUrl === "string" ? message.baseUrl : "";
   const at = connectionPendingTests.findIndex((entry) => entry.baseUrl === baseUrl);
   if (at < 0) return;
   const [pending] = connectionPendingTests.splice(at, 1);
-  // A rebuild replaced the DOM this test was drawing into.
+  // A rebuild replaced the DOM this probe was drawing into.
   if (pending.build !== connectionPageBuild) return;
-  if (message.ok === true) {
-    const models = Array.isArray(message.models)
-      ? message.models.filter((model) => typeof model === "string")
-      : [];
-    pending.finish(models.length > 0 ? "ok" : "empty", {
-      models,
-      latencyMs: typeof message.latencyMs === "number" ? message.latencyMs : undefined,
-    });
-    return;
-  }
   // The event's own words are the detail; the code travels beside them so the
   // card can name the failure class without parsing Chinese prose. An event
   // with neither still names the class ("test failed") — a raw identifier is
   // not a sentence a user can act on, so it never reaches the block alone.
-  const detail = typeof message.error === "string" ? message.error : "";
-  pending.finish("failed", { code: typeof message.code === "string" ? message.code : "", detail });
+  pending.finish(probeAnswer(message));
 }
 
 const S = () => settingsStrings[state.locale] ?? settingsStrings.en;
@@ -1711,7 +1757,8 @@ function buildConnectionPage() {
           baseUrlInput.value = fill.baseUrl;
         }
         drawCardHeader();
-        drawSuggestions();
+        // 旧厂商的模型列表不能留在新厂商的卡上：那是另一个端点的回答。
+        clearFetchedModels();
         // 鼠标选完，焦点落在密钥栏：名字与地址刚刚替用户填好，下一步就是贴
         // key。键盘选完则留在触发器上——用户还在操作这个控件，焦点被抢走就
         // 等于把键盘流打断了。
@@ -1828,9 +1875,9 @@ function buildConnectionPage() {
      *  along untouched so a save does not drop the counters this page does not
      *  edit (`maxOutput`, `supportsReasoning`, `reasoningEffort`). */
     const modelHandles = [];
-    /** 「推荐模型」行；在模型组之后构建（它要用这里的 `addModelRow`），
-     *  行本身的点击与重画由 `drawSuggestions` 驱动。 */
-    let drawSuggestions = () => {};
+    /** 换厂商或改地址时清掉模型区的旧列表；它在模型组构建之前就要能调用，
+     *  所以先占一个空实现。 */
+    let clearFetchedModels = () => {};
     /** Assigned when the advanced section is built. The first model row is
      *  drawn before that happens, and its `refreshModelSummary` reaches the
      *  advanced summary, so the field has to exist — empty — from here on. */
@@ -1913,8 +1960,6 @@ function buildConnectionPage() {
       // The header's accessible name restates these badges, so it has to be
       // redrawn with them — not only when the title changes.
       drawToggleLabel();
-      // 已加过的名字要从建议里让位，否则点一下就是一条重复行。
-      drawSuggestions();
     }
     /** Kept under its old name: the model rows, the key fields and the endpoint
      *  all call it, because all three change what the collapsed card says. */
@@ -1986,68 +2031,40 @@ function buildConnectionPage() {
     // The heading and description sit above the full-width list instead, and
     // each row carries its own `aria-label`.
     const modelsGroup = el("div", "conn-field");
-    modelsGroup.dataset.search = `${s.connModels} ${s.connModelsDesc}`.toLowerCase();
-    const modelHead = el("div", "setting-label-line");
+    modelsGroup.dataset.search =
+      `${s.connModels} ${s.connModelsDesc} ${s.connModelsFetch}`.toLowerCase();
+    const modelHead = el("div", "setting-label-line conn-models-head");
     modelHead.append(
       el("span", "setting-label", s.connModels),
       el("span", "setting-required", s.connRequired),
     );
-    modelsGroup.append(modelHead, el("p", "setting-desc", s.connModelsDesc), modelList, modelFoot);
 
     /**
-     * 「推荐模型」：预设带的模型名，点一下才进卡片。
+     * What the endpoint listed, fetched on demand.
      *
-     * 为什么不直接预填进模型行：官方文档里的模型名会随版本退役，写进文件
-     * 就是一条可能失效的断言。chip 把「服务商这么说」和「我确认要这个」
-     * 分开，文件里只留后者。
+     * Its own block, not a footnote under the header's Test button: "can this
+     * service answer" and "which models does it offer" are different
+     * questions, and a gateway that refuses `/models` while serving chat is a
+     * normal configuration, not a broken one. Nothing is fetched on its own —
+     * several vendors answer `/models` with 401, so a request nobody asked
+     * for would paint a failure onto a working card.
      *
-     * 整行在两种情况下消失：预设没有模型名（OpenAI：文档站不可达，没核实
-     * 过），或者全部都已在卡片里。前者是「我们没说」，后者是「这一行已经
-     * 没有可点的东西」——两种情况都不该留一个空标题。
+     * `aria-live` because the answer arrives after the click; a result only a
+     * sighted user can perceive is a click that reported nothing (R3).
      */
-    const suggestionRow = el("div", "preset-models");
-    suggestionRow.hidden = true;
-    drawSuggestions = () => {
-      // The vendor is what says which documented names apply — not the
-      // service name, which may be `deepseek-2` or a hand-written key.
-      const pending = presetModelSuggestions(
-        vendor === null ? [] : (presetById(vendor)?.models ?? []),
-        modelHandles.map((handle) => handle.idInput.value),
-      );
-      suggestionRow.textContent = "";
-      suggestionRow.hidden = pending.length === 0;
-      if (pending.length === 0) return;
-      suggestionRow.appendChild(el("span", "preset-models-label", s.connSuggestedModels));
-      for (const name of pending) {
-        const chip = el("button", "preset-model-chip");
-        chip.type = "button";
-        chip.title = s.connTestAddModel;
-        chip.setAttribute("aria-label", `${name} — ${s.connTestAddModel}`);
-        chip.append(iconEl("plus", "preset-model-chip-icon"), el("span", "", name));
-        chip.addEventListener("click", () => {
-          // A blank row is an invitation to type, not a model the user wanted:
-          // fill the first one instead of appending, or a fresh card would end
-          // up with an empty row beside the one just added — and Save refuses
-          // a row without a name. Only add a row when every row already names
-          // a model.
-          const blank = modelHandles.find((handle) => handle.idInput.value.trim() === "");
-          if (blank) {
-            blank.idInput.value = name;
-            blank.idInput.dispatchEvent(new Event("input", { bubbles: true }));
-          } else {
-            addModelRow({ id: name, carried: {} });
-          }
-          markDirty();
-          // 这一行因为这个点击少一个 chip；加完重画，全部加完时整行收起。
-          drawSuggestions();
-        });
-        suggestionRow.appendChild(chip);
-      }
-    };
-    // 厂商一变，预设就跟着变；选回「自定义」时整行缩回去——那正是用户放弃
-    // 预设、准备手填的时刻。模型行增删也要重画，否则已加过的名字会留在建议
-    // 里，点一下就是一条重复行。
-    drawSuggestions();
+    const modelsResult = el("div", "setting-note", "");
+    modelsResult.hidden = true;
+    modelsResult.setAttribute("aria-live", "polite");
+
+    // Bordered rather than quiet: this is the section's primary way of
+    // filling the list, and a ghost button on a heading line reads as a label.
+    const fetchModels = sButton(s.connModelsFetch, () => runProbe("list"));
+    modelHead.append(fetchModels);
+    // The answer sits between the section's own description and the rows it
+    // adds to: directly above them, so a chip and the row it created are one
+    // glance apart, and below the description, which explains the section
+    // rather than this one answer.
+    modelsGroup.append(modelHead, el("p", "setting-desc", s.connModelsDesc), modelsResult, modelList, modelFoot);
 
     // A rejected value has to say so where the field is, not in a notice that
     // scrolls away from the control at fault.
@@ -2056,15 +2073,16 @@ function buildConnectionPage() {
 
     /** What the last connection test said. Built fresh with the card, so a
      *  result never outlives the page that produced it. A container rather
-     *  than a paragraph: a successful test draws a structured block, while a
-     *  failure stays one line of text in the same place. `aria-live` because
-     *  the answer arrives after the click, and a result only a sighted user
-     *  can perceive is a click that reported nothing (R3).
+     *  than a paragraph: a failed test draws a structured block, while the
+     *  connected line stays one line of text in the same place. `aria-live`
+     *  because the answer arrives after the click, and a result only a sighted
+     *  user can perceive is a click that reported nothing (R3).
      *
      *  It is the first thing in the body (see `body.append` below), directly
      *  under the header that holds the Test button. At the foot of the form it
      *  answered a click from a full set of fields away — the user had to find
-     *  the result rather than simply see it. */
+     *  the result rather than simply see it. The models the endpoint lists are
+     *  *not* drawn here: that answer belongs to the models section above. */
     const testResult = el("div", "setting-note", "");
     testResult.hidden = true;
     testResult.setAttribute("aria-live", "polite");
@@ -2123,7 +2141,6 @@ function buildConnectionPage() {
       keyRow,
       keyEnvHint,
       modelsGroup,
-      suggestionRow,
     );
 
     const optionalSection = el("section", "conn-section");
@@ -2252,15 +2269,15 @@ function buildConnectionPage() {
     checkFields();
 
     /**
-     * The endpoint this card would test, and the key (direct, or the variable
+     * The endpoint a probe would call, and the key (direct, or the variable
      * naming it) and model that go with it; `problem` is set when the URL
      * cannot be called at all.
      *
-     * The test does not save, so it reads the live inputs rather than the file:
+     * Probing does not save, so it reads the live inputs rather than the file:
      * a user who just typed an endpoint wants to find out whether it answers
      * before committing it.
      */
-    const testTarget = () => {
+    const probeTarget = () => {
       const baseUrl = baseUrlInput.value.trim();
       if (baseUrl === "") return { problem: s.connBaseUrlRequired, field: baseUrlInput };
       if (!isFetchableUrl(baseUrl)) return { problem: s.connBaseUrlInvalid, field: baseUrlInput };
@@ -2272,35 +2289,63 @@ function buildConnectionPage() {
       };
     };
 
-    let testing = false;
+    /** What this card is waiting on: `""`, `"test"` or `"list"`. One at a
+     *  time, because the host's answer names the endpoint and not the card —
+     *  two answers for one `baseUrl` would land on whichever asked first. */
+    let probeInFlight = "";
+    /** Both probe buttons, so the one that is not running says it is held. */
+    const probeButtons = [];
+    const registerProbeButton = (kind, node, idle, busy) => {
+      probeButtons.push({ kind, node, idle, busy });
+    };
+    /** Disable both while either runs, and let the running one say what it is
+     *  doing: a second click would queue behind the first and then answer
+     *  twice — two results for one visible action. */
+    const drawProbeButtons = () => {
+      for (const entry of probeButtons) {
+        const busy = probeInFlight === entry.kind;
+        entry.node.disabled = probeInFlight !== "";
+        entry.node.textContent = busy ? entry.busy : entry.idle;
+        entry.node.title = probeInFlight !== "" && !busy ? s.connProbeBusy : "";
+      }
+    };
 
     /**
-     * Empty the result area and forget which kind of result it held.
+     * Empty one result area and forget which kind of result it held.
      *
-     * Both writers start here, so a previous block can never leave a heading,
+     * Every writer starts here, so a previous block can never leave a heading,
      * a chip, or the warning colour behind under a new answer.
      */
-    const resetTestResult = () => {
-      testResult.textContent = "";
-      testResult.className = "";
-      testResult.style.color = "";
+    const resetProbeResult = (kind) => {
+      const target = kind === "list" ? modelsResult : testResult;
+      target.textContent = "";
+      target.className = "";
+      target.style.color = "";
     };
 
     /**
-     * One line of outcome. Used by the "answered, but listed nothing" case,
-     * which is neither a success block nor a failure.
+     * One line of outcome. Used by the connected line (latency only — the
+     * model list belongs to the models section) and by "answered, but listed
+     * nothing", which is neither a success block nor a failure.
      *
-     * Every writer opens the card first. `runTest` already does, but the answer
-     * arrives later — a user who collapsed the card while waiting would other-
-     * wise get a result nobody can see, and a test that "did nothing" (R3).
+     * Every writer opens the card first. `runProbe` already does, but the
+     * answer arrives later — a user who collapsed the card while waiting would
+     * otherwise get a result nobody can see, and a probe that "did nothing"
+     * (R3).
      */
-    const showTestLine = (text) => {
+    const showProbeLine = (kind, text) => {
       setExpanded(true);
-      resetTestResult();
-      testResult.className = "setting-note";
-      testResult.textContent = text;
-      testResult.hidden = false;
+      resetProbeResult(kind);
+      const target = kind === "list" ? modelsResult : testResult;
+      target.className = "setting-note";
+      target.textContent = text;
+      target.hidden = false;
     };
+
+    /** "Connected · 42 ms", or plain "Connected" when the probe reported no
+     *  measurement — never a made-up `0 ms` (R3). */
+    const connectedLine = (latencyMs) =>
+      Number.isFinite(latencyMs) ? `${s.connTestConnected} · ${Math.round(latencyMs)} ms` : s.connTestConnected;
 
     /**
      * The failure class the kernel reported, as words.
@@ -2331,16 +2376,23 @@ function buildConnectionPage() {
     };
 
     /**
-     * A failed test, in the same slot and the same shape as a successful one:
-     * the class as a word beside a mark, then the kernel's sentence. Mark and
-     * word together mean the state survives the high-contrast theme and a
-     * reader who cannot tell `--warn` from `--text`.
+     * A failed probe, in the result area it belongs to: the class as a word
+     * beside a mark, then the kernel's sentence. Mark and word together mean
+     * the state survives the high-contrast theme and a reader who cannot tell
+     * `--warn` from `--text`.
+     *
+     * A failed *list* says one more thing below the kernel's sentence: many
+     * gateways do not implement `/models` at all, so a refusal here is a
+     * refusal to enumerate — not evidence that the service is misconfigured.
+     * Saying so is the difference between a user who checks their key and one
+     * who gives up on a working endpoint.
      */
-    const showTestFailure = (code, detail, { note = "" } = {}) => {
+    const showProbeFailure = (kind, code, detail, { note = "" } = {}) => {
       setExpanded(true);
-      resetTestResult();
-      testResult.className = "conn-test-result";
-      testResult.hidden = false;
+      resetProbeResult(kind);
+      const target = kind === "list" ? modelsResult : testResult;
+      target.className = "conn-test-result";
+      target.hidden = false;
       const head = el("div", "conn-test-head");
       const status = el("span", "conn-test-status failed");
       status.append(
@@ -2348,13 +2400,19 @@ function buildConnectionPage() {
         el("span", "", failureLabel(code)),
       );
       head.appendChild(status);
-      testResult.appendChild(head);
+      target.appendChild(head);
       // A failure that cannot name itself is still reported (R3); the class
       // word in the head is the one thing it can always say.
-      if (detail !== "") testResult.appendChild(el("p", "conn-test-detail", detail));
+      if (detail !== "") target.appendChild(el("p", "conn-test-detail", detail));
       // A second sentence about a different cause gets its own line: run into
       // the kernel's sentence it read as one long clause.
-      if (note !== "") testResult.appendChild(el("p", "conn-test-detail", note));
+      if (note !== "") target.appendChild(el("p", "conn-test-detail", note));
+      // Only for the classes where the endpoint did answer: an address that
+      // never left the window, or one that never answered, has nothing to do
+      // with whether this gateway implements `/models`.
+      if (kind === "list" && (code === "unauthorized" || code === "http_error" || code === "bad_response")) {
+        target.appendChild(el("p", "conn-test-detail", s.connModelsFetchRefused));
+      }
     };
 
     /** The enabled chip says what clicking it does; the disabled one says why
@@ -2383,55 +2441,43 @@ function buildConnectionPage() {
     };
 
     /**
-     * A successful test, drawn as a result block: what answered, how fast, and
-     * every model the endpoint listed.
+     * What the endpoint listed, drawn in the models section: how many, and
+     * every one of them as a chip that adds the row.
      *
      * The list is complete. A model already on the card is not dropped — it is
      * drawn in the added state — because a list that quietly hides half the
      * answer is a wrong answer about the endpoint (R3).
      */
-    const showTestModels = (models, latencyMs) => {
-      setExpanded(true);
-      resetTestResult();
-      testResult.className = "conn-test-result";
-      testResult.hidden = false;
-
+    const showFetchedModels = (models, latencyMs) => {
       const entries = availableModelEntries(
         models,
         modelHandles.map((handle) => handle.idInput.value),
       );
+      // A list of nothing but blank ids is not a list: the same sentence the
+      // "no list" answer gets, rather than a heading over an empty block.
+      if (entries.length === 0) {
+        showProbeLine("list", s.connTestOkNoModels);
+        return;
+      }
+      setExpanded(true);
+      resetProbeResult("list");
+      modelsResult.className = "conn-test-result";
+      modelsResult.hidden = false;
       const count = entries.length;
 
-      // The summary is built without a latency (it renders one only when it is
-      // given one): the measurement gets its own muted span here, so folding
-      // it into the sentence would print it twice.
       const head = el("div", "conn-test-head");
-      // A test that reached the endpoint but got no list back is not the same
-      // outcome as one that found models, and the mark says so rather than
-      // leaving a green check beside a sentence about failure.
-      const status = el("span", `conn-test-status${count === 0 ? " empty" : ""}`);
+      const status = el("span", "conn-test-status");
       status.append(
         iconEl("check", "conn-test-status-icon"),
-        el("span", "", connectionSummary(state.locale, { modelCount: count })),
+        el("span", "", s.connModelsFetched.replace("{n}", String(count))),
       );
       head.appendChild(status);
       if (Number.isFinite(latencyMs)) {
         head.appendChild(el("span", "conn-test-latency", `${Math.round(latencyMs)} ms`));
       }
-      testResult.appendChild(head);
-
-      // No list, no section: an empty "Available models 0" heading would be a
-      // heading about nothing. The status line already said it.
-      if (count === 0) return;
+      modelsResult.appendChild(head);
 
       const block = el("div", "conn-test-models");
-      const modelsHead = el("div", "conn-test-models-head");
-      modelsHead.append(
-        el("span", "", s.connTestAvailableModels),
-        el("span", "conn-test-count", s.connTestModelsCount.replace("{n}", String(count))),
-      );
-      block.appendChild(modelsHead);
-
       for (const entry of entries) {
         const chip = el("button", "conn-model-chip");
         chip.type = "button";
@@ -2442,7 +2488,17 @@ function buildConnectionPage() {
           chip.setAttribute("aria-label", chipLabel(entry.name, { added: false }));
           chip.append(iconEl("plus", "conn-model-chip-icon"), el("span", "conn-model-chip-name", entry.name));
           chip.addEventListener("click", () => {
-            addModelRow({ id: entry.name, carried: {} });
+            // A blank row is an invitation to type, not a model the user
+            // wanted: fill the first one instead of appending, or a fresh card
+            // would end up with an empty row beside the one just added — and
+            // Save refuses a row without a name.
+            const blank = modelHandles.find((handle) => handle.idInput.value.trim() === "");
+            if (blank) {
+              blank.idInput.value = entry.name;
+              blank.idInput.dispatchEvent(new Event("input", { bubbles: true }));
+            } else {
+              addModelRow({ id: entry.name, carried: {} });
+            }
             // The row is an edit like any other: the draft is now newer than
             // the file, and Save is what makes it real.
             markDirty();
@@ -2451,111 +2507,138 @@ function buildConnectionPage() {
         }
         block.appendChild(chip);
       }
-
-      testResult.appendChild(block);
+      modelsResult.appendChild(block);
     };
 
-    /** The test this card is waiting on, if any. */
-    let currentTest = null;
+    /** The probe this card is waiting on, if any. */
+    let currentProbe = null;
 
     /** Drop the wait: cancel the timer and stop matching an answer to it. */
-    const cancelTest = (pending) => {
+    const cancelProbe = (pending) => {
       clearTimeout(pending.timer);
       connectionTestTimers.delete(pending.timer);
       const at = connectionPendingTests.indexOf(pending);
       if (at >= 0) connectionPendingTests.splice(at, 1);
-      if (currentTest === pending) currentTest = null;
+      if (currentProbe === pending) currentProbe = null;
     };
 
-    /** Back to the idle button, whatever the outcome was. */
-    const endTest = (pending) => {
-      cancelTest(pending);
-      testing = false;
-      testButton.disabled = false;
-      testButton.textContent = s.connTest;
+    /** Back to the idle label, whatever the outcome was. */
+    const endProbe = (pending) => {
+      cancelProbe(pending);
+      probeInFlight = "";
+      drawProbeButtons();
     };
 
-    const runTest = () => {
-      if (testing) return;
-      // The result line lives in the body, so a test started from a collapsed
-      // card would report to nobody. Opening it is the honest fix: the answer
-      // has to be somewhere the user is looking (R3 — a click that produces no
+    /**
+     * The card now talks to a different endpoint, so what it listed before is
+     * about somewhere else — including a list still in flight, whose answer
+     * would otherwise land on the new vendor's card.
+     *
+     * Forgetting is not the same as reporting an empty list: the models area
+     * goes back to having said nothing (R3). A *test* in flight is left alone:
+     * its answer goes to the header's own line, and cancelling it here would
+     * be a silent abort of something this function does not own.
+     */
+    clearFetchedModels = () => {
+      resetProbeResult("list");
+      modelsResult.hidden = true;
+      if (currentProbe?.kind !== "list") return;
+      cancelProbe(currentProbe);
+      probeInFlight = "";
+      drawProbeButtons();
+    };
+
+    /**
+     * Start one probe: `"test"` (can this service answer) or `"list"` (which
+     * models does it offer).
+     *
+     * Both go through the host's `testProvider`, and both are serialised on
+     * the card: the host's `provider_test` answer names the endpoint, not the
+     * request, so two in flight for one `baseUrl` would be resolved by
+     * whichever registered first. That is a protocol limit, not a choice.
+     */
+    const runProbe = (kind) => {
+      if (probeInFlight !== "") return;
+      // The result lives in the body, so a probe started from a collapsed card
+      // would report to nobody. Opening it is the honest fix: the answer has
+      // to be somewhere the user is looking (R3 — a click that produces no
       // visible answer is a lie by omission).
       setExpanded(true);
-      const target = testTarget();
+      const target = probeTarget();
       if (target.problem !== undefined) {
         // Refused before a request left the window: the same shape as a
-        // failed test, with the class the page can already name.
-        showTestFailure("invalid_base_url", target.problem);
+        // failed probe, with the class the page can already name.
+        showProbeFailure(kind, "invalid_base_url", target.problem);
         target.field?.focus();
         return;
       }
-      testing = true;
-      testButton.disabled = true;
-      testButton.textContent = s.connTesting;
-      // The last answer described a test that has already happened; leaving it
+      probeInFlight = kind;
+      drawProbeButtons();
+      // The last answer described a probe that has already happened; leaving it
       // on screen while a new one runs would show a result for the wrong try.
-      resetTestResult();
-      testResult.className = "setting-note";
-      testResult.hidden = true;
+      resetProbeResult(kind);
+      (kind === "list" ? modelsResult : testResult).hidden = true;
       // No key of either kind. Leaving both empty is legal — a local endpoint
       // needs none — so this is not a refusal, but when the test then fails the
       // reason has to name the likely cause instead of leaving the user to
       // wonder what the endpoint wants.
       const keyless = target.apiKey === "" && target.apiKeyEnv === "";
-      const pending = { build, baseUrl: target.baseUrl, timer: undefined };
+      const pending = { build, kind, baseUrl: target.baseUrl, timer: undefined };
       // The endpoint is the identity the answer comes back with; two cards may
-      // be testing at once, so matching on it is what keeps an answer on the
+      // be probing at once, so matching on it is what keeps an answer on the
       // card that asked.
-      pending.finish = (kind, detail) => {
-        endTest(pending);
-        if (kind === "ok") showTestModels(detail.models ?? [], detail.latencyMs);
-        else if (kind === "empty") showTestLine(s.connTestOkNoModels);
+      pending.finish = (answer) => {
+        endProbe(pending);
+        if (answer.outcome === "ok") {
+          if (kind === "list") showFetchedModels(answer.models, answer.latencyMs);
+          // Connected, and the models are the models section's to show: a
+          // second chip list under the header would be the same answer twice.
+          else showProbeLine(kind, connectedLine(answer.latencyMs));
+          return;
+        }
+        if (answer.outcome === "empty") {
+          // A test answered without listing: it was asked whether the service
+          // answers, and it did. Only a list request has anything to say about
+          // the absence of a list.
+          showProbeLine(kind, kind === "list" ? s.connTestOkNoModels : connectedLine(answer.latencyMs));
+          return;
+        }
         // The keyless addendum explains a 401 the user cannot otherwise
         // account for; it goes under the kernel's sentence, not inside it.
-        else {
-          showTestFailure(detail.code, detail.detail === "" ? s.connTestFailedDetail : detail.detail, {
-            note: keyless ? s.connTestNoKey : "",
-          });
-        }
+        showProbeFailure(kind, answer.code, answer.detail === "" ? s.connTestFailedDetail : answer.detail, {
+          note: keyless ? s.connTestNoKey : "",
+        });
       };
-      currentTest = pending;
+      currentProbe = pending;
       connectionPendingTests.push(pending);
-      // Nothing else will ever resolve this test, and a button stuck on
+      // Nothing else will ever resolve this probe, and a button stuck on
       // "Testing…" is a click that produced no answer (R3).
       pending.timer = setTimeout(() => {
         connectionTestTimers.delete(pending.timer);
         if (pending.build !== connectionPageBuild) return;
-        endTest(pending);
+        endProbe(pending);
         // No answer inside the window is the page's own conclusion, and what
         // it means is "did not reach the endpoint" — the same class the
         // kernel reports as `unreachable`.
-        showTestFailure("unreachable", s.connTestTimeout);
+        showProbeFailure(kind, "unreachable", s.connTestTimeout);
       }, CONNECTION_TEST_TIMEOUT_MS);
       // (A timeout is about reachability, not credentials, so it gets no
       // keyless addendum.)
       connectionTestTimers.add(pending.timer);
-      // Only the fields that were filled in: an empty `apiKey` would ask the
-      // host to send an empty credential, and an empty `apiKeyEnv` would ask it
-      // to read a variable with no name.
-      api.send({
-        cmd: "testProvider",
-        baseUrl: target.baseUrl,
-        ...(target.apiKey === "" ? {} : { apiKey: target.apiKey }),
-        ...(target.apiKeyEnv === "" ? {} : { apiKeyEnv: target.apiKeyEnv }),
-        ...(target.model === "" ? {} : { model: target.model }),
-      });
+      api.send(providerProbePayload(kind, target));
     };
 
-    const testButton = sButton(s.connTest, runTest, { quiet: true });
+    const testButton = sButton(s.connTest, () => runProbe("test"), { quiet: true });
+    registerProbeButton("test", testButton, s.connTest, s.connTesting);
+    registerProbeButton("list", fetchModels, s.connModelsFetch, s.connModelsFetching);
     headActions.append(
       testButton,
       sButton(
         s.remove,
         () => {
-          // A test this card started has nowhere to report now; leaving it
+          // A probe this card started has nowhere to report now; leaving it
           // pending would let an answer land on a node nothing shows.
-          if (currentTest) cancelTest(currentTest);
+          if (currentProbe) cancelProbe(currentProbe);
           // The card is gone, and the name it was filed under is free again;
           // leaving the mark behind would open an unrelated card that later
           // took the same name.

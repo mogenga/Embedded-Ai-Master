@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   availableModelEntries,
   carriedFromModel,
-  connectionSummary,
   contextWindowChoices,
   contextWindowForSave,
   CONTEXT_WINDOW_CHOICES,
@@ -50,47 +49,6 @@ describe("availableModelEntries", () => {
 
   it("listedIds 不是数组时按全未列出处理", () => {
     expect(availableModelEntries(["a"], null)).toEqual([{ name: "a", alreadyListed: false }]);
-  });
-});
-
-describe("connectionSummary", () => {
-  it("中文：模型数与延迟", () => {
-    expect(connectionSummary("zh", { modelCount: 3, latencyMs: 125 })).toBe(
-      "连接正常 · 3 个模型可用 · 125 ms",
-    );
-  });
-
-  it("中文：延迟未知时不写这一段", () => {
-    expect(connectionSummary("zh", { modelCount: 3 })).toBe("连接正常 · 3 个模型可用");
-    expect(connectionSummary("zh", { modelCount: 3, latencyMs: Number.NaN })).toBe("连接正常 · 3 个模型可用");
-    expect(connectionSummary("zh", { modelCount: 3, latencyMs: Number.POSITIVE_INFINITY })).toBe(
-      "连接正常 · 3 个模型可用",
-    );
-  });
-
-  it("中文：0 个模型是另一句话，不是「0 个模型可用」", () => {
-    expect(connectionSummary("zh", { modelCount: 0, latencyMs: 125 })).toBe("端点可达，但没能列出模型");
-  });
-
-  it("英文：单复数正确", () => {
-    expect(connectionSummary("en", { modelCount: 1 })).toBe("Connected · 1 model available");
-    expect(connectionSummary("en", { modelCount: 3 })).toBe("Connected · 3 models available");
-  });
-
-  it("英文：延迟四舍五入到毫秒", () => {
-    expect(connectionSummary("en", { modelCount: 1, latencyMs: 88.4 })).toBe(
-      "Connected · 1 model available · 88 ms",
-    );
-  });
-
-  it("英文：0 个模型", () => {
-    expect(connectionSummary("en", { modelCount: 0 })).toBe(
-      "The endpoint answered, but it did not list any models.",
-    );
-  });
-
-  it("未知 locale 退回英文", () => {
-    expect(connectionSummary("fr", { modelCount: 2 })).toBe("Connected · 2 models available");
   });
 });
 

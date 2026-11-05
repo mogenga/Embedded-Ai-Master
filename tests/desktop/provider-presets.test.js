@@ -5,7 +5,6 @@ import {
   PRESETS_BY_ID,
   presetById,
   presetFillFor,
-  presetModelSuggestions,
   PROVIDER_PRESETS,
   providerMark,
   providerPickerOptions,
@@ -19,12 +18,17 @@ describe("PROVIDER_PRESETS", () => {
     expect(ids).toEqual(["deepseek", "kimi", "glm", "qwen", "minimax", "openai", "gemini"]);
   });
 
-  it("每家都有 id / label / baseUrl / models / docsUrl", () => {
+  it("每家都有 id / label / baseUrl / docsUrl", () => {
     for (const preset of PROVIDER_PRESETS) {
       expect(preset.id).toMatch(/^[a-z][a-z0-9-]*$/);
       expect(preset.label.length).toBeGreaterThan(0);
       expect(preset.docsUrl).toMatch(/^https:\/\//);
-      expect(Array.isArray(preset.models)).toBe(true);
+    }
+  });
+
+  it("不预置模型名：列表由「在线获取」向端点现取", () => {
+    for (const preset of PROVIDER_PRESETS) {
+      expect(Object.hasOwn(preset, "models")).toBe(false);
     }
   });
 
@@ -48,19 +52,6 @@ describe("PROVIDER_PRESETS", () => {
       const url = new URL(`${preset.baseUrl.replace(/\/+$/, "")}/chat/completions`);
       expect(url.pathname.endsWith("/chat/completions")).toBe(true);
     }
-  });
-
-  it("模型名不含空白与斜杠", () => {
-    for (const preset of PROVIDER_PRESETS) {
-      for (const model of preset.models) {
-        expect(model).not.toMatch(/[\s/]/);
-        expect(model.trim()).toBe(model);
-      }
-    }
-  });
-
-  it("OpenAI 不预置模型名（文档站不可达，未核实）", () => {
-    expect(presetById("openai")?.models).toEqual([]);
   });
 });
 
@@ -86,31 +77,6 @@ describe("providerMark", () => {
 
   it("数字开头的名字也照取", () => {
     expect(providerMark("9router")).toBe("9R");
-  });
-});
-
-describe("presetModelSuggestions", () => {
-  it("去掉已在卡片里的名字", () => {
-    expect(
-      presetModelSuggestions(["deepseek-flash", "deepseek-v4-pro"], [" deepseek-flash ", ""]),
-    ).toEqual(["deepseek-v4-pro"]);
-  });
-
-  it("预设内部重复只留第一次，顺序不变", () => {
-    expect(presetModelSuggestions(["b", "a", "b"], [])).toEqual(["b", "a"]);
-  });
-
-  it("丢掉非字符串、空白与只有空格的名字", () => {
-    expect(presetModelSuggestions(["  ", null, 42, "ok "], [])).toEqual(["ok"]);
-  });
-
-  it("入参不是数组时回退为空数组", () => {
-    expect(presetModelSuggestions(undefined, [])).toEqual([]);
-    expect(presetModelSuggestions(["a"], undefined)).toEqual(["a"]);
-  });
-
-  it("全部已列出时返回空数组（chip 行整行消失）", () => {
-    expect(presetModelSuggestions(["a", "b"], ["a", "b"])).toEqual([]);
   });
 });
 

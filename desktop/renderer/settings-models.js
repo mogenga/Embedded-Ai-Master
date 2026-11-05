@@ -40,29 +40,6 @@ export function availableModelEntries(models, listedIds) {
 }
 
 /**
- * The status line of a successful test.
- *
- * Three facts, each omitted rather than faked when it is not known:
- * - a latency that is not finite gets no segment (never "0 ms");
- * - a count of zero is a different sentence, not "0 models available" — the
- *   endpoint answered but listed nothing, and those are different outcomes;
- * - an unknown locale falls back to English, like the rest of the settings
- *   dictionary.
- */
-export function connectionSummary(locale, { modelCount, latencyMs } = {}) {
-  const count = Number.isFinite(modelCount) ? Math.max(0, Math.trunc(modelCount)) : 0;
-  const zh = locale === "zh";
-  if (count === 0) {
-    return zh ? "端点可达，但没能列出模型" : "The endpoint answered, but it did not list any models.";
-  }
-  const head = zh
-    ? `连接正常 · ${count} 个模型可用`
-    : `Connected · ${count} ${count === 1 ? "model" : "models"} available`;
-  if (!Number.isFinite(latencyMs)) return head;
-  return `${head} · ${Math.round(latencyMs)} ms`;
-}
-
-/**
  * Which kind of credential a service card holds, from what is typed into it.
  *
  * - `direct`: a key in `apiKey`, which the kernel prefers when both are set;

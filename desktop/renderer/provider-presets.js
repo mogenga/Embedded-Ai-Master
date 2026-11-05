@@ -10,7 +10,8 @@
  * 2026-11-04 从官方文档原文核实；DeepSeek / Kimi / GLM / Qwen / MiniMax
  * 五家的 `/models` 端点另外实测过，均返回 401（端点存在、协议正确）。
  * OpenAI 文档站从本机返回 403、Gemini 与 OpenAI 域名直连不通，所以这两家
- * 只核实到端点存活——**OpenAI 因此不预置模型名**（R3：没核实过的不写）。
+ * 只核实到端点存活。模型名因此**不预置**：设置页的「在线获取」只在用户点
+ * 击时请求 `/models`，默认态不自动拉取（很多网关会拒绝或干脆不实现它）。
  *
  * ## baseUrl 的书写规则
  *
@@ -26,7 +27,6 @@
  * @property {string} id     表单里的服务名，也是厂商栏的排序与匹配键
  * @property {string} label  界面上显示的名字
  * @property {string} baseUrl 已按上面的规则写好，不带尾斜杠
- * @property {string[]} models 官方文档里的模型名；空数组表示不预置
  * @property {{zh: string, en: string}} [note] 需要额外说明时的一句话
  * @property {string} [docsUrl] 官方文档入口，供用户核对
  */
@@ -37,21 +37,18 @@ export const PROVIDER_PRESETS = Object.freeze([
     id: "deepseek",
     label: "DeepSeek",
     baseUrl: "https://api.deepseek.com",
-    models: ["deepseek-flash", "deepseek-v4-pro"],
     docsUrl: "https://api-docs.deepseek.com/zh-cn/",
   },
   {
     id: "kimi",
     label: "Kimi",
     baseUrl: "https://api.moonshot.cn/v1",
-    models: ["kimi-k3.1-pro", "kimi-k3", "kimi-k2.6", "kimi-k2.7-code"],
     docsUrl: "https://platform.moonshot.cn/docs/api/chat",
   },
   {
     id: "glm",
     label: "GLM",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    models: ["GLM-5.3", "GLM-5.2", "GLM-5.3-Flash", "GLM-4.7"],
     note: {
       zh: "模型名按官网标题的大小写填写；若请求返回「模型不存在」，请按控制台里的写法改。",
       en: "Model ids follow the capitalisation on the official model page. If a request says the model does not exist, use the spelling shown in the console.",
@@ -62,7 +59,6 @@ export const PROVIDER_PRESETS = Object.freeze([
     id: "qwen",
     label: "Qwen",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    models: ["qwen3.8-max", "qwen3.7-plus", "qwen3.8-flash"],
     note: {
       zh: "也可使用按工作区的地址：https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
       en: "A per-workspace endpoint also works: https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
@@ -73,23 +69,18 @@ export const PROVIDER_PRESETS = Object.freeze([
     id: "minimax",
     label: "MiniMax",
     baseUrl: "https://api.minimax.cn/v1",
-    models: ["MiniMax-M3.1-Flash", "MiniMax-M3"],
     docsUrl: "https://platform.minimaxi.com/docs/api-reference/text-openai-api",
   },
   {
     id: "openai",
     label: "OpenAI",
     baseUrl: "https://api.openai.com/v1",
-    // 不预置：文档站从本机不可达，只核实到端点存活。模型名交给「测试连接」
-    // 列出来的那一步，用户点一下才进文件。
-    models: [],
     docsUrl: "https://platform.openai.com/docs/api-reference",
   },
   {
     id: "gemini",
     label: "Gemini",
     baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    models: ["gemini-3.8-flash"],
     docsUrl: "https://ai.google.dev/gemini-api/docs/openai",
   },
 ]);
@@ -227,29 +218,3 @@ export function presetFillFor(preset, { baseUrl = "" } = {}) {
   };
 }
 
-/**
- * 「推荐模型」chip 要显示哪些名字。
- *
- * 已经在卡片里的不重复给出：点一下会得到两行同名模型，保存时被
- * `connModelDuplicate` 拦下——那个错误应该来自用户的手误，不该由我们造。
- * 返回顺序沿用预设表，名字去重按 trim 后的原文。
- *
- * @param {readonly string[]} presetModels
- * @param {string[]} listedIds 卡片当前已列的模型名
- */
-export function presetModelSuggestions(presetModels, listedIds) {
-  const listed = new Set(
-    (Array.isArray(listedIds) ? listedIds : [])
-      .map((id) => (typeof id === "string" ? id.trim() : ""))
-      .filter((id) => id !== ""),
-  );
-  const seen = new Set();
-  const out = [];
-  for (const raw of Array.isArray(presetModels) ? presetModels : []) {
-    const name = typeof raw === "string" ? raw.trim() : "";
-    if (name === "" || seen.has(name) || listed.has(name)) continue;
-    seen.add(name);
-    out.push(name);
-  }
-  return out;
-}
