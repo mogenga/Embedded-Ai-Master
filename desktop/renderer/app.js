@@ -6271,15 +6271,36 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+/**
+ * Did this click land on the model panel — asked **before** the click's own
+ * handler can rebuild the panel.
+ *
+ * Bubble-time geometry cannot answer that question: picking a provider (and
+ * refreshing the list) re-renders the menu, which replaces its children. The
+ * clicked button is then detached, so `event.target.closest("#model-menu")`
+ * is null by the time the document-level dismissal runs, and a click on the
+ * panel's own controls was indistinguishable from a click outside it — the
+ * panel closed the moment a vendor was chosen. The capture phase runs first,
+ * while the DOM the user clicked still exists.
+ */
+let modelMenuClickInside = false;
+document.addEventListener(
+  "click",
+  (event) => {
+    const target = event.target;
+    modelMenuClickInside = Boolean(
+      target?.closest?.("#model-menu") || target?.closest?.(".model-control"),
+    );
+  },
+  true,
+);
+
 document.addEventListener("click", (event) => {
-  // The panel's own surface counts as "inside" — not just `.model-control`.
-  // The menu is absolutely positioned but it is not a descendant of
-  // `.model-control`'s trigger, and the provider rail is a separate control
-  // inside the same popover: picking a provider re-rendered the list and the
-  // document-level handler then read that click as "outside" and closed the
-  // whole panel, so choosing a vendor felt like choosing a model.
   if (modelMenu.hidden) return;
-  if (event.target.closest(".model-control") || event.target.closest("#model-menu")) return;
+  if (modelMenuClickInside) return;
+  // Belt and braces: a click synthesised without a capture pass (or one whose
+  // target is still attached) is still recognised by geometry.
+  if (event.target.closest?.(".model-control") || event.target.closest?.("#model-menu")) return;
   closeModelMenu();
 });
 
