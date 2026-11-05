@@ -21,7 +21,6 @@ const api = window.prometheus;
 
 const $ = (id) => document.getElementById(id);
 const transcript = $("transcript");
-const emptyState = $("empty-state");
 const input = $("input");
 const sendButton = $("send-button");
 const stopButton = $("stop-button");
@@ -41,7 +40,6 @@ const planStripCount = $("plan-strip-count");
 const planStripCurrent = $("plan-strip-current");
 const planStripList = $("plan-strip-items");
 
-const transcriptScroll = $("transcript-scroll");
 const workbench = $("workbench");
 const workbenchTabs = $("workbench-tabs");
 const workbenchMeta = $("workbench-meta");
@@ -225,6 +223,53 @@ let t = getDict(state.locale);
  */
 let applySettingsLocale = () => {};
 
+/**
+ * Repaint the caption button that depends on the window's state, or nothing.
+ *
+ * The maximize/restore caption is the one control whose name is not a fixed
+ * dictionary entry: the same button is "Maximize" in one state and "Restore"
+ * in the other. The `[data-i18n-title]` sweep below would paint the resting
+ * name over a maximized window, so the live state has to be re-applied after
+ * it. Assigned once the window-controls block runs, long before any locale
+ * switch.
+ */
+let applyWindowState = () => {};
+
+/**
+ * Does this element carry a name of its own in visible text?
+ *
+ * A control that shows words is already named by them, and an `aria-label`
+ * would replace that name rather than complete it. A readout does not count:
+ * `—`, `0`, `1/2` are figures, not names, so an icon-only button that happens
+ * to print one still needs a label. `innerText` (not `textContent`) is the
+ * right read here — it skips the `[hidden]` badge inside the changes button,
+ * which `textContent` would have counted as the text "0".
+ */
+function hasVisibleName(node) {
+  return /\p{L}/u.test(node.innerText ?? "");
+}
+
+/**
+ * Paint an icon-only control's tooltip, and name it with the same string.
+ *
+ * Most of these strings come from `[data-i18n-title]` and are swept below, but
+ * a few change at runtime (a paused serial port, a maximized window, the
+ * current session filter), and those used to move the tooltip while leaving
+ * the accessible name behind on the old value. One helper keeps the two in
+ * step. `aria-labelledby` already names the element, and a `<label>` is named
+ * by the text it wraps; neither is touched.
+ */
+function setControlTitle(node, text) {
+  // A key with no entry in this dictionary leaves the element as it was: one
+  // language missing a string must not blank the tooltip in the other.
+  if (!node || typeof text !== "string") return;
+  node.title = text;
+  const named = node.hasAttribute("aria-labelledby") || (node.tagName === "LABEL" && hasVisibleName(node));
+  if (named) return;
+  if (String(text ?? "").trim() === "") node.removeAttribute("aria-label");
+  else if (!hasVisibleName(node)) node.setAttribute("aria-label", text);
+}
+
 function applyLocale(locale, { announce = false } = {}) {
   state.locale = locale;
   t = getDict(locale);
@@ -234,10 +279,7 @@ function applyLocale(locale, { announce = false } = {}) {
     const value = t[node.dataset.i18n];
     if (typeof value === "string") node.textContent = value;
   });
-  document.querySelectorAll("[data-i18n-title]").forEach((node) => {
-    const value = t[node.dataset.i18nTitle];
-    if (typeof value === "string") node.title = value;
-  });
+  document.querySelectorAll("[data-i18n-title]").forEach((node) => setControlTitle(node, t[node.dataset.i18nTitle]));
   document.querySelectorAll("[data-i18n-placeholder]").forEach((node) => {
     const value = t[node.dataset.i18nPlaceholder];
     if (typeof value === "string") node.placeholder = value;
@@ -247,8 +289,8 @@ function applyLocale(locale, { announce = false } = {}) {
   $("terminal-restart").textContent = t.terminalRestart;
   const terminalTab = workbenchTabs.querySelector('[data-pane="terminal"]');
   if (terminalTab) terminalTab.textContent = t.paneTerminal;
-  sendButton.title = t.sendTitle;
-  stopButton.title = t.stopTitle;
+  setControlTitle(sendButton, state.busy ? t.queueSend : t.sendTitle);
+  setControlTitle(stopButton, t.stopTitle);
   // The sidebar workspace entry is written by renderTopbarLocation, and its
   // "no folder" text and tooltip are language-dependent, so redraw it here
   // after `t` has been swapped. This runs before the title assignment below
@@ -258,7 +300,9 @@ function applyLocale(locale, { announce = false } = {}) {
   $("refresh-sessions").title = t.refresh;
   const search = $("session-search");
   search.placeholder = t.searchSessions;
-  search.title = t.searchSessions;
+  // A placeholder is not a name: it disappears as soon as the field has
+  // content, and some screen readers skip it. The field gets a real label.
+  setControlTitle(search, t.searchSessions);
   $("find-input").placeholder = t.findPlaceholder;
   // No update control lives here: the About page builds its own button on
   // demand, and `#check-update` (looked up here for years) was never in the
@@ -304,6 +348,9 @@ function applyLocale(locale, { announce = false } = {}) {
     fillSerialControls();
     renderSerialStatus();
   }
+  // Last, after the sweep: this caption's name follows the window's state, and
+  // the sweep just painted the resting one.
+  applyWindowState();
   void announce;
 }
 
@@ -358,12 +405,36 @@ function setScrollButtonVisible(away) {
   button.classList.remove("entering", "leaving");
 }
 
+/**
+ * The slot the empty state lives in.
+ *
+ * The slot is hidden, not just the card: a hidden child still leaves the
+ * slot's own padding standing, which would keep an empty band above the
+ * composer long after the first turn.
+ */
+const emptySlot = $("empty-slot");
+
 function hideEmptyState() {
-  if (emptyState && !emptyState.hidden) emptyState.hidden = true;
+  if (emptySlot && !emptySlot.hidden) emptySlot.hidden = true;
 }
 
-function addNode(html) {
-  hideEmptyState();
+/**
+ * Draw the composer's introduction back for a session with no turns.
+ *
+ * The element is a sibling of the transcript, not a child, so it has to be
+ * toggled rather than re-appended: it is not conversation content and must not
+ * scroll away with it.
+ */
+function showEmptyState() {
+  if (emptySlot && emptySlot.hidden) emptySlot.hidden = false;
+}
+
+function addNode(html, { keepEmptyState = false } = {}) {
+  // A notice is the shell talking, not a turn: a startup notice used to hide
+  // the introduction on a conversation that was still empty, leaving the first
+  // screen with one dim line and no way in. Turns, tool rows and plans are
+  // conversation content and do retire it.
+  if (!keepEmptyState) hideEmptyState();
   const wrapper = document.createElement("div");
   wrapper.innerHTML = html;
   const node = wrapper.firstElementChild;
@@ -1028,7 +1099,7 @@ function endThinking() {
 function addNotice(level, text) {
   const cls = level === "warn" ? "warn" : level === "error" ? "error" : level === "dim" ? "dim" : "";
   if (!cls) return;
-  addNode(`<div class="notice ${cls}">${escapeHtml(text)}</div>`);
+  addNode(`<div class="notice ${cls}">${escapeHtml(text)}</div>`, { keepEmptyState: true });
 }
 
 /**
@@ -1239,7 +1310,7 @@ function setBusy(busy) {
   // the two ways to send disagreed. The button now queues as well, and says so.
   sendButton.disabled = false;
   sendButton.classList.toggle("queues", busy);
-  sendButton.title = busy ? t.queueSend : t.sendLabel;
+  setControlTitle(sendButton, busy ? t.queueSend : t.sendLabel);
   // Finishing a turn must not paint "ready" over a stopped host or a config
   // error that is still the actual state.
   if (busy) setStatus("statusWorking");
@@ -1355,11 +1426,11 @@ function runFind() {
     return;
   }
   const needle = query.toLowerCase();
-  const walker = document.createTreeWalker(transcriptScroll, NodeFilter.SHOW_TEXT, {
+  const walker = document.createTreeWalker(transcript, NodeFilter.SHOW_TEXT, {
     acceptNode: (node) => {
       if (!node.nodeValue || !node.nodeValue.toLowerCase().includes(needle)) return NodeFilter.FILTER_REJECT;
       const parent = node.parentElement;
-      if (!parent || parent.closest(".find-bar, .empty-state, script, style")) return NodeFilter.FILTER_REJECT;
+      if (!parent || parent.closest(".find-bar, script, style")) return NodeFilter.FILTER_REJECT;
       return NodeFilter.FILTER_ACCEPT;
     },
   });
@@ -2971,7 +3042,7 @@ function handleEvent(message) {
       if (state.needsSetup) {
         state.needsSetup = false;
         $("setup-button").hidden = true;
-        addNode(`<div class="notice dim">${escapeHtml(t.setupBody)}</div>`);
+        addNode(`<div class="notice dim">${escapeHtml(t.setupBody)}</div>`, { keepEmptyState: true });
       }
       break;
     }
@@ -2996,6 +3067,9 @@ function handleEvent(message) {
       addNode(
         `<div class="notice setup"><div class="setup-head">${escapeHtml(t.setupChecklistTitle)}</div>${rows}` +
           `<button class="link-button" id="setup-dismiss">${escapeHtml(t.setupChecklistDismiss)}</button></div>`,
+        // A checklist is the shell reporting on this machine, not a turn; the
+        // first screen keeps its introduction underneath it.
+        { keepEmptyState: true },
       );
       $("setup-dismiss")?.addEventListener("click", () => {
         localStorage.setItem("prometheus.setupDismissed", "1");
@@ -3979,8 +4053,7 @@ function handleEvent(message) {
         }
       }
       if ((message.messages || []).length === 0) {
-        target.appendChild(emptyState);
-        emptyState.hidden = false;
+        showEmptyState();
       }
       // The plan is rebuilt from the session, not from the replayed messages:
       // `messages` only carries chat bubbles. Replayed after the messages so
@@ -4571,6 +4644,10 @@ function renderSerialStatus() {
   status.textContent = parts.join(" · ");
   $("serial-pause").disabled = !serial.open;
   setIcon($("serial-pause").querySelector("svg"), serial.paused ? "play" : "pause");
+  // The glyph is the only visible label, so the name has to say what the next
+  // click does — "Pause" painted over a play triangle names the button for the
+  // wrong state.
+  setControlTitle($("serial-pause"), serial.paused ? t.serialResume : t.serialPause);
   $("serial-follow").setAttribute("aria-pressed", String(serial.follow));
   // 发送按钮在串口未开时明确禁用，禁用原因放在 title 里——静默吞掉
   // 点击（点了没反应又不解释）违反禁用态要解释原因的规范。
@@ -5686,9 +5763,18 @@ function renderSessions(sessions) {
     count.className = "session-group-count";
     count.textContent = String(items.length);
     // New chat inside this project, without leaving the current conversation.
+    //
+    // Built after the locale sweep, so it names itself here; "+" is
+    // punctuation and cannot serve as a name. It stays a mouse affordance: the
+    // stylesheet only draws it on `:hover` / `.session-group:focus-visible`,
+    // and making it tabbable without a `:focus-within` rule would hide the
+    // control the moment it took focus, dropping focus to nowhere. The
+    // keyboard routes into a new conversation are `#new-session` and the
+    // workspace row's "new chat" button.
     const add = document.createElement("span");
     add.className = "session-group-add";
     add.title = t.newSessionIn(label);
+    add.setAttribute("aria-label", t.newSessionIn(label));
     add.textContent = "+";
     add.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -5812,7 +5898,11 @@ function renderSessions(sessions) {
       more.className = "session-more";
       more.setAttribute("role", "button");
       more.tabIndex = 0;
+      // Built after the locale sweep ran, so it has to name itself: nothing
+      // revisits this node to add the label. The glyph inside is `▁`-shaped
+      // and carries no letters, so it cannot stand in as the name.
       more.title = t.sessionMenu;
+      more.setAttribute("aria-label", t.sessionMenu);
       more.innerHTML = icon("more");
       more.addEventListener("click", (event) => {
         event.stopPropagation();
@@ -6659,7 +6749,6 @@ $("palette-scrim").addEventListener("mousedown", closePalette);
 /* ---------- scroll-to-latest ---------- */
 
 transcript.addEventListener("scroll", updateScrollButton);
-transcriptScroll.addEventListener("scroll", updateScrollButton);
 $("scroll-bottom").addEventListener("click", () => scrollToBottom(true));
 
 /**
@@ -7098,7 +7187,7 @@ function openSessionFilter(event) {
       state.sessionFilter = option.value;
       closeSessionMenu();
       trigger.setAttribute("aria-expanded", "false");
-      trigger.title = option.label;
+      setControlTitle(trigger, option.label);
       sendSessionList();
     });
     menu.appendChild(item);
@@ -7142,7 +7231,7 @@ $("session-filter").addEventListener("keydown", (event) => {
 $("toggle-archived").addEventListener("click", () => {
   state.showArchived = !state.showArchived;
   $("toggle-archived").classList.toggle("active", state.showArchived);
-  $("toggle-archived").title = state.showArchived ? t.hideArchived : t.showArchived;
+  setControlTitle($("toggle-archived"), state.showArchived ? t.hideArchived : t.showArchived);
   sendSessionList();
 });
 
@@ -7433,11 +7522,10 @@ function renderTopbarLocation() {
   // restore the second "workspace" concept the two-level list removed. The
   // button still needs a name of its own for a screen reader, and it has to
   // say what the click does — the folder in the list says where you are.
-  $("sidebar-workspace").title = cwd ? `${t.changeFolderTitle}: ${cwd}` : t.workspaceChoose;
-  $("sidebar-workspace").setAttribute(
-    "aria-label",
-    cwd ? `${t.changeFolderTitle}: ${cwd}` : t.workspaceChoose,
-  );
+  // `setControlTitle` would skip this one: the button contains the folder
+  // glyph and no text, so it is icon-only and does get named — the path is
+  // the reason the name is built here rather than read off the dictionary.
+  setControlTitle($("sidebar-workspace"), cwd ? `${t.changeFolderTitle}: ${cwd}` : t.workspaceChoose);
   $("sidebar-workspace").classList.toggle("empty", name === "");
 }
 
@@ -7474,7 +7562,7 @@ function renderChangesBadge() {
   badge.textContent = String(count);
   // A change landing mid-turn is worth a glance without opening the pane.
   badge.classList.toggle("live", state.busy && count > 0);
-  $("changes-button").title = count > 0 ? `${t.paneDiff} (${count})` : t.paneDiff;
+  setControlTitle($("changes-button"), count > 0 ? `${t.paneDiff} (${count})` : t.paneDiff);
 }
 
 $("changes-button").addEventListener("click", () => {
@@ -7492,9 +7580,17 @@ workbenchTabs.querySelectorAll("button").forEach((button) => {
   button.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
-    const tabs = [...workbenchTabs.querySelectorAll("button")];
-    const index = tabs.indexOf(button);
-    const next = tabs[(index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+    // Only tabs on screen: File and Artifact start `hidden` and are revealed
+    // by the action that opens them. Walking onto a hidden tab used to call
+    // `focus()` on a `display: none` button and then reveal it, so the
+    // selection moved to a pane the focus never followed — the strip showed
+    // File selected while the keyboard was still on Serial. With one visible
+    // tab the key does nothing.
+    const tabs = [...workbenchTabs.querySelectorAll("button")].filter((tab) => !tab.hidden);
+    if (tabs.length < 2) return;
+    const index = Math.max(0, tabs.indexOf(button));
+    const step = event.key === "ArrowRight" ? 1 : -1;
+    const next = tabs[(index + step + tabs.length) % tabs.length];
     next.focus();
     openWorkbench(next.dataset.pane);
   });
@@ -7524,9 +7620,13 @@ if (api.platform !== "darwin") {
   windowControls.querySelectorAll("[data-window]").forEach((button) => {
     button.addEventListener("click", () => api.windowControl(button.dataset.window));
   });
-  const applyWindowState = ({ maximized }) => {
-    document.documentElement.classList.toggle("window-maximized", Boolean(maximized));
-    $("window-maximize").title = maximized ? "Restore" : "Maximize";
+  let windowMaximized = false;
+  applyWindowState = ({ maximized } = {}) => {
+    if (typeof maximized === "boolean") windowMaximized = maximized;
+    document.documentElement.classList.toggle("window-maximized", windowMaximized);
+    // The caption buttons are icon-only, and this string used to be hardcoded
+    // English — the one place in the window bar that ignored the locale.
+    setControlTitle($("window-maximize"), windowMaximized ? t.restore : t.maximize);
   };
   api.onWindowState?.(applyWindowState);
   void api.windowState?.().then(applyWindowState);

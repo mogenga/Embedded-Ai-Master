@@ -4,8 +4,8 @@ export const dictionaries = {
   en: {
     appName: "Embedded AI Master",
     tagline: "A general-purpose coding agent",
-    emptyTitle: "What should we build?",
-    emptyBody: "The agent reads, edits, and runs your code. It asks before changing files unless you switch the mode.",
+    emptyTitle: "Start from a symptom",
+    emptyBody: "Describe what the board does — garbled serial output, nothing on the console at power-up, a hang that comes and goes. The agent reads the project first; in the default Diagnose mode it asks before it writes a file or runs a command.",
     placeholder: "Ask the agent to change, explain, or build something…",
     composerPlaceholder: "Ask the agent to change, explain, or build something…",
     sendTitle: "Send (Enter)",
@@ -455,8 +455,8 @@ export const dictionaries = {
   zh: {
     appName: "Embedded AI Master",
     tagline: "通用编程智能体",
-    emptyTitle: "要构建点什么？",
-    emptyBody: "Agent 会读取、修改并运行你的代码。除非切换模式，否则改动文件前会先征求你的同意。",
+    emptyTitle: "从症状说起",
+    emptyBody: "说说板子现在什么表现——串口乱码、上电没有打印、间歇死机。Agent 先读工程；默认的「诊断」模式下，写文件或跑命令前都会先征求你的同意。",
     placeholder: "让 Agent 修改、解释或构建点什么…",
     composerPlaceholder: "让 Agent 修改、解释或构建点什么…",
     sendTitle: "发送（Enter）",

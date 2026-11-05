@@ -178,20 +178,28 @@
                   <svg class="icon" aria-hidden="true"><use href="#i-x"></use></svg>
                 </button>
               </div>
-              <div class="transcript-scroll" id="transcript-scroll">
-                <section class="empty-state" id="empty-state">
-                  <img class="empty-mark" src="assets/mark.png" alt="" aria-hidden="true" draggable="false">
-                  <h1 data-i18n="emptyTitle">What should we build?</h1>
-                  <p data-i18n="emptyBody">The agent reads, edits, and runs your code. It asks before changing files unless you switch the mode.</p>
-                  <button class="suggestion" id="setup-button" data-i18n="setupTitle" hidden>
-                    Set up a connection
-                  </button>
-                </section>
-              </div>
               <button class="scroll-bottom" id="scroll-bottom" hidden data-i18n-title="scrollToLatest">
                 <svg class="icon" aria-hidden="true"><use href="#i-arrow-down"></use></svg>
               </button>
             </main>
+
+            <!-- A slot of the chat column, not content of the transcript. The
+                 empty state introduces the composer, so it stands against the
+                 card it introduces instead of scrolling away inside the
+                 conversation: `showEmptyState()` / `hideEmptyState()` in
+                 app.js own the visibility, and a session with no turns shows
+                 it. The wrapper is the slot the stylesheet sizes and pads; the
+                 section inside it is what gets hidden. -->
+            <div class="empty-slot" id="empty-slot">
+              <section class="empty-state" id="empty-state">
+                <img class="empty-mark" src="assets/mark.png" alt="" aria-hidden="true" draggable="false">
+                <h1 data-i18n="emptyTitle">Start from a symptom</h1>
+                <p data-i18n="emptyBody">Describe what the board does — garbled serial output, nothing on the console at power-up, a hang that comes and goes. The agent reads the project first; in the default Diagnose mode it asks before it writes a file or runs a command.</p>
+                <button class="suggestion" id="setup-button" data-i18n="setupTitle" hidden>
+                  Set up a connection
+                </button>
+              </section>
+            </div>
 
             <section class="composer-region" id="composer-region">
               <!-- The same plan the transcript card draws, kept in view while
@@ -405,9 +413,13 @@
                      because they are opened by an action (a tool row click),
                      not by browsing. Serial is the only always-present pane
                      with a backend in this kernel, so it is the default. -->
-                <button role="tab" aria-selected="true" tabindex="0" data-pane="serial" class="active" data-i18n="paneSerial">Serial</button>
-                <button role="tab" aria-selected="false" tabindex="-1" data-pane="file" data-i18n="paneFile" hidden>File</button>
-                <button role="tab" aria-selected="false" tabindex="-1" data-pane="artifact" data-i18n="paneArtifact" hidden>Artifact</button>
+                <!-- `aria-controls` names the pane each tab shows, so a
+                     screen reader announces what the selection changes. The
+                     artifact tab drives two roots: the list before one is
+                     picked, the viewer after. -->
+                <button id="workbench-tab-serial" role="tab" aria-selected="true" aria-controls="serial-root" tabindex="0" data-pane="serial" class="active" data-i18n="paneSerial">Serial</button>
+                <button id="workbench-tab-file" role="tab" aria-selected="false" aria-controls="file-root" tabindex="-1" data-pane="file" data-i18n="paneFile" hidden>File</button>
+                <button id="workbench-tab-artifact" role="tab" aria-selected="false" aria-controls="artifact-list-pane artifact-root" tabindex="-1" data-pane="artifact" data-i18n="paneArtifact" hidden>Artifact</button>
               </div>
               <div class="workbench-meta" id="workbench-meta"></div>
               <button class="icon-button small" id="close-workbench" data-i18n-title="closePane">
