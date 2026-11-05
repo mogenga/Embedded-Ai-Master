@@ -121,13 +121,6 @@
               <svg class="icon" aria-hidden="true"><use href="#i-keyboard"></use></svg>
               <span data-i18n="menuShortcuts">Keyboard shortcuts</span>
             </button>
-            <!-- The Files pane is reached from here rather than from a top-bar
-                 button: the overflow menu already holds the entries that open
-                 a view, and one row costs no top-bar width. -->
-            <button class="menu-row" id="menu-browse-files" role="menuitem">
-              <svg class="icon" aria-hidden="true"><use href="#i-folder"></use></svg>
-              <span data-i18n="menuBrowseFiles">Browse workspace files</span>
-            </button>
             <button class="menu-row" id="menu-open-serial" role="menuitem">
               <svg class="icon" aria-hidden="true"><use href="#i-terminal"></use></svg>
               <span data-i18n="menuOpenSerial">Open serial monitor</span>
@@ -414,7 +407,6 @@
                      with a backend in this kernel, so it is the default. -->
                 <button role="tab" aria-selected="true" tabindex="0" data-pane="serial" class="active" data-i18n="paneSerial">Serial</button>
                 <button role="tab" aria-selected="false" tabindex="-1" data-pane="file" data-i18n="paneFile" hidden>File</button>
-                <button role="tab" aria-selected="false" tabindex="-1" data-pane="files" data-i18n="paneFiles" hidden>Files</button>
                 <button role="tab" aria-selected="false" tabindex="-1" data-pane="artifact" data-i18n="paneArtifact" hidden>Artifact</button>
               </div>
               <div class="workbench-meta" id="workbench-meta"></div>
@@ -431,22 +423,6 @@
               <button class="btn btn-primary small" id="comments-send" data-i18n="commentSend">Send to agent</button>
             </div>
             <div class="workbench-body">
-              <div class="pane-tree file-tree" id="pane-tree" hidden>
-                <!-- Which folder the tree is rooted at, kept above the rows:
-                     after scrolling a deep tree the top of the pane no longer
-                     says where you are. The refresh re-reads the root and
-                     replays the folders that were open. -->
-                <div class="tree-head">
-                  <span class="tree-root" id="tree-root"></span>
-                  <!-- Disabled until the pane knows a root to re-read; a live
-                       button with nothing behind it is the same false control
-                       the rest of this window avoids (R3). -->
-                  <button class="icon-button small tree-refresh" id="tree-refresh" data-i18n-title="refresh" disabled>
-                    <svg class="icon" aria-hidden="true"><use href="#i-refresh"></use></svg>
-                  </button>
-                </div>
-                <div class="tree-level" id="tree-list"></div>
-              </div>
               <aside class="diff-filelist" id="diff-filelist" hidden></aside>
               <div class="diff-pane" id="diff-pane">
                 <div class="git-bar" id="git-bar" hidden>

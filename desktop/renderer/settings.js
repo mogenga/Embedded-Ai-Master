@@ -14,6 +14,7 @@ import {
   connectionSummary,
   modelEntryForSave,
   modelRowState,
+  serviceHeaderFacts,
 } from "./settings-models.js";
 import {
   isAutoProviderName,
@@ -425,15 +426,29 @@ function el(tag, className, text) {
   return node;
 }
 
-function sRow({ label, desc, control, id, wide = false, mono = false }) {
+/**
+ * One label/description-on-the-left, control-on-the-right row.
+ *
+ * `required` adds a word — "Required" / 「必填」— beside the label, not a bare
+ * asterisk: the mark has to reach a screen reader and the high-contrast theme
+ * too. It is searchable like the rest of the row.
+ */
+function sRow({ label, desc, control, id, wide = false, mono = false, required = false }) {
   const row = el("div", `setting-row${wide ? " wide" : ""}`);
-  row.dataset.search = `${label} ${desc ?? ""}`.toLowerCase();
+  row.dataset.search = `${label} ${desc ?? ""}${required ? ` ${S().connRequired}` : ""}`.toLowerCase();
   const copy = el("div", "setting-copy");
   const labelNode = mono ? el("code", "setting-code", label) : el("label", "setting-label", label);
   // 显式 id 优先；否则控件自己带了 id（sText 总会生成）就自动关联。
   if (id) labelNode.htmlFor = id;
   else if (labelNode.tagName === "LABEL" && control?.id) labelNode.htmlFor = control.id;
-  copy.appendChild(labelNode);
+  if (required) {
+    // 同一行：`.setting-label` 是 block，直接追加会把标记挤到下一行。
+    const line = el("div", "setting-label-line");
+    line.append(labelNode, el("span", "setting-required", S().connRequired));
+    copy.appendChild(line);
+  } else {
+    copy.appendChild(labelNode);
+  }
   if (desc) copy.appendChild(el("p", "setting-desc", desc));
   const controlNode = el("div", "setting-control");
   controlNode.appendChild(control);
@@ -1569,13 +1584,23 @@ function buildConnectionPage() {
     const title = el("span", "settings-card-name", "");
     const subtitle = el("span", "settings-card-sub", "");
     titleBox.append(title, subtitle);
-    // What the service offers, readable without opening it: the point of a
-    // collapsed card is that a page of services stays scannable. Nothing else
-    // goes here — the endpoint and the keys are what collapsing is meant to
-    // put away.
-    const modelSummary = el("span", "settings-card-summary", "");
+    // What a closed card has to answer, without being opened: who this is,
+    // how many models it offers, and whether it has what it needs to answer.
+    // Each badge is an icon *and* words — colour alone would not survive the
+    // high-contrast theme, a colour-blind reader, or a screenshot pasted into
+    // a bug report. The endpoint and the keys themselves stay in the body;
+    // collapsing is what puts them away.
+    const badges = el("span", "conn-card-badges");
+    const keyBadge = el("span", "conn-badge");
+    const modelBadge = el("span", "conn-badge");
+    // Only drawn when the address is empty: a card with no endpoint cannot be
+    // saved, so that fact belongs in the header rather than surfacing only
+    // when Save refuses.
+    const addressBadge = el("span", "conn-badge warn");
+    addressBadge.hidden = true;
+    badges.append(keyBadge, modelBadge, addressBadge);
     const headMark = el("span", "settings-card-mark");
-    toggle.append(chevron, headMark, titleBox, modelSummary);
+    toggle.append(chevron, headMark, titleBox, badges);
     /** This card's own ordinal, fixed at build time. Naming the picker's DOM
      *  ids from it keeps them unique even after a rename — `connectionCardSeq`
      *  is bumped by the next card, so reading it later would drift. */
@@ -1607,8 +1632,9 @@ function buildConnectionPage() {
     });
     displayNameInput.addEventListener("input", drawCardHeader);
 
-    /** Redraw the header from the live inputs. Called on every keystroke of
-     *  the display name and the service name — both change what it says. */
+    /** Redraw the header from the live inputs. Called on every keystroke that
+     *  changes what the collapsed card says: display name, service name, and
+     *  (through `refreshHeaderFacts`) the key, the endpoint and the models. */
     function drawCardHeader() {
       const serviceName = nameInput.value.trim();
       const displayName = displayNameInput.value.trim();
@@ -1624,7 +1650,9 @@ function buildConnectionPage() {
       subtitle.textContent = [serviceName, vendorLabel].filter(Boolean).join(" · ");
       headMark.textContent = "";
       headMark.appendChild(vendorMarkEl(preset?.id));
-      drawToggleLabel();
+      // `drawBadges` also redraws the toggle's `aria-label`, which restates the
+      // badges — the title is part of that name and has just changed.
+      drawBadges();
     }
 
     /**
@@ -1780,6 +1808,15 @@ function buildConnectionPage() {
       return cell;
     };
 
+    // A key can come from the environment instead; when it does, the empty key
+    // field must say so rather than look like a missing credential.
+    const keyEnvHint = el("p", "setting-note conn-key-env-hint", "");
+    keyEnvHint.hidden = true;
+    /** The "required" tag on the key row; assigned when that row is built. The
+     *  first model row is drawn before it and reaches `drawBadges`, so the name
+     *  has to exist — empty — from here on. */
+    let keyRequiredMark = null;
+
     const modelList = el("div", "mcp-list");
     /** One row: a name, a context-window select, and Remove. `carried` rides
      *  along untouched so a save does not drop the counters this page does not
@@ -1788,22 +1825,94 @@ function buildConnectionPage() {
     /** 「推荐模型」行；在模型组之后构建（它要用这里的 `addModelRow`），
      *  行本身的点击与重画由 `drawSuggestions` 驱动。 */
     let drawSuggestions = () => {};
+    /** Assigned when the advanced section is built. The first model row is
+     *  drawn before that happens, and its `refreshModelSummary` reaches the
+     *  advanced summary, so the field has to exist — empty — from here on. */
+    let advancedSummary = null;
+
     /**
-     * Refill the header's model line from the live rows.
+     * One state badge in the header: an icon and a word.
+     *
+     * Colour is a third signal, never the only one — the high-contrast theme
+     * has to carry the same fact, and so does a reader who cannot tell
+     * `--success` from `--warn`.
+     */
+    const setBadge = (node, { icon, label, tone = "", title = "" }) => {
+      node.className = `conn-badge${tone === "" ? "" : ` ${tone}`}`;
+      node.textContent = "";
+      node.append(iconEl(icon, "conn-badge-icon"), el("span", "conn-badge-text", label));
+      if (title === "") node.removeAttribute("title");
+      else node.title = title;
+    };
+
+    /**
+     * Repaint the header's three facts from the live controls.
      *
      * The header is the only thing a collapsed card shows, so it has to track
-     * the inputs rather than the `entry` it was built from: adding, renaming
-     * or removing a model has to be visible without opening the card. A blank
-     * row is skipped — it is an invitation to type, not a model.
+     * the inputs rather than the `entry` it was built from: typing a key,
+     * clearing the endpoint or adding a model has to be visible without
+     * opening the card. A blank model row is skipped — it is an invitation to
+     * type, not a model.
+     *
+     * The env-var state says what the card holds, not that the service will
+     * work: the renderer cannot read the app's environment, so "a variable is
+     * named" and "that variable is set" are different facts and only the
+     * first is known here (R3).
      */
-    const refreshModelSummary = () => {
+    function drawBadges() {
       const names = modelHandles.map((handle) => handle.idInput.value.trim()).filter((id) => id !== "");
-      modelSummary.textContent =
-        names.length > 0 ? names.join(" · ") : s.connNoModelsYet;
-      modelSummary.classList.toggle("empty", names.length === 0);
+      const facts = serviceHeaderFacts({
+        apiKey: apiKeyInput.value,
+        apiKeyEnv: apiKeyEnvInput.value,
+        baseUrl: baseUrlInput.value,
+        modelCount: names.length,
+      });
+      if (facts.key === "direct") {
+        setBadge(keyBadge, { icon: "check", tone: "ok", label: s.connKeyDirect, title: s.connKeyDirectTitle });
+      } else if (facts.key === "env") {
+        setBadge(keyBadge, {
+          icon: "shield",
+          tone: "neutral",
+          label: s.connKeyEnv,
+          title: s.connKeyEnvTitle.replace("{name}", facts.envName),
+        });
+      } else {
+        setBadge(keyBadge, { icon: "alert", tone: "warn", label: s.connKeyMissing, title: s.connKeyMissingTitle });
+      }
+      const countTemplate =
+        facts.modelCount === 1 && s.connModelCountOne !== undefined ? s.connModelCountOne : s.connModelCount;
+      setBadge(modelBadge, {
+        icon: "layers",
+        label: countTemplate.replace("{n}", String(facts.modelCount)),
+        tone: facts.modelCount === 0 ? "warn" : "neutral",
+        title: names.join(" · "),
+      });
+      addressBadge.hidden = !facts.noBaseUrl;
+      if (facts.noBaseUrl) {
+        setBadge(addressBadge, {
+          icon: "alert",
+          tone: "warn",
+          label: s.connNoAddress,
+          title: s.connNoAddressTitle,
+        });
+      }
+      // The advanced summary restates the env-var field, which is folded away.
+      drawAdvancedSummary();
+      // The key row is marked required, but an env-var key satisfies it: the
+      // hint below the field says which of the two the card is relying on.
+      const usesEnv = facts.key === "env";
+      keyEnvHint.hidden = !usesEnv;
+      keyEnvHint.textContent = usesEnv ? s.connKeyFromEnv.replace("{name}", facts.envName) : "";
+      if (keyRequiredMark !== null) keyRequiredMark.hidden = usesEnv;
+      // The header's accessible name restates these badges, so it has to be
+      // redrawn with them — not only when the title changes.
+      drawToggleLabel();
       // 已加过的名字要从建议里让位，否则点一下就是一条重复行。
       drawSuggestions();
-    };
+    }
+    /** Kept under its old name: the model rows, the key fields and the endpoint
+     *  all call it, because all three change what the collapsed card says. */
+    const refreshModelSummary = drawBadges;
     const addModelRow = (model) => {
       // `.model-row` on top of `.rules-row`: the latter carries the frame
       // (border, padding, gap), while the former divides the free width
@@ -1866,13 +1975,18 @@ function buildConnectionPage() {
     const modelFoot = el("div", "settings-list-foot");
     modelFoot.appendChild(addModel);
 
-    const modelsGroup = el("section", "setting-group");
-    modelsGroup.append(
-      el("h3", "setting-group-title", s.connModels),
-      el("p", "setting-desc", s.connModelsDesc),
-      modelList,
-      modelFoot,
+    // The models field is not a `.setting-row`: its control is a list, not one
+    // input, and a label/control split would squeeze it into half the card.
+    // The heading and description sit above the full-width list instead, and
+    // each row carries its own `aria-label`.
+    const modelsGroup = el("div", "conn-field");
+    modelsGroup.dataset.search = `${s.connModels} ${s.connModelsDesc}`.toLowerCase();
+    const modelHead = el("div", "setting-label-line");
+    modelHead.append(
+      el("span", "setting-label", s.connModels),
+      el("span", "setting-required", s.connRequired),
     );
+    modelsGroup.append(modelHead, el("p", "setting-desc", s.connModelsDesc), modelList, modelFoot);
 
     /**
      * 「推荐模型」：预设带的模型名，点一下才进卡片。
@@ -1950,11 +2064,11 @@ function buildConnectionPage() {
     testResult.setAttribute("aria-live", "polite");
 
     // The protocol is the one fixed fact about a card (the kernel has exactly
-    // one), so it stays a chip rather than a field. It lives in the body, not
-    // the header: the header is the summary the user asked for — name and
-    // models — and this is a detail of the form under it.
+    // one), so it stays a chip rather than a field. It lives in the advanced
+    // section: nothing here can change it, and it is a detail of how the
+    // endpoint is spoken to rather than a decision the form offers.
     const protocolLine = el("div", "settings-card-protocol");
-    protocolLine.appendChild(el("code", "setting-code", entry.protocol));
+    protocolLine.append(el("span", "conn-advanced-label", s.connProtocol), el("code", "setting-code", entry.protocol));
 
     // None of the warnings below stops a save: the value is written as typed,
     // and a wrong guess about a real naming scheme must not cost the user their
@@ -1965,12 +2079,32 @@ function buildConnectionPage() {
     // field in the form. `problem`, the body's other note, stays at the foot —
     // it belongs to Save, which is at the foot too.
     // The provider picker leads the form: it is the one row that can fill in
-    // the two below it, so it has to be read before them. The protocol chip
-    // sits just above the models group instead of at the top — it describes
-    // how the endpoint is spoken to, which is a fact about the card as a
-    // whole rather than the first decision in it.
-    body.append(
-      testResult,
+    // the address below it, so it has to be read before it.
+    //
+    // Three tiers, because eight equal rows hid what a card actually needs:
+    // 1) the minimum that makes a service work — vendor, key, models;
+    // 2) things that already have a sensible value and are edited rarely —
+    //    display name, service name (it changes `service/model` references
+    //    already in sessions), address (filled by the vendor choice);
+    // 3) the env-var key and the protocol — almost never touched, so they are
+    //    folded away and the summary says what is inside.
+    const requiredSection = el("section", "conn-section");
+    requiredSection.append(
+      el("h3", "conn-section-title", s.connSectionRequired),
+      el("p", "conn-section-desc", s.connSectionRequiredDesc),
+    );
+    const keyRow = sRow({
+      label: s.connApiKey,
+      desc: s.connApiKeyDesc,
+      control: fieldCell(apiKeyInput, apiKeyToggle, keyWarning),
+      required: true,
+    });
+    // The key row is required *or* filled by the env-var field below. While a
+    // variable is named, the tag on the empty key field would call a working
+    // card unfinished, so it moves with the live state.
+    keyRequiredMark = keyRow.querySelector(".setting-required");
+
+    requiredSection.append(
       // `id` names the trigger, not the wrapper: the label has to point at the
       // thing a click focuses.
       sRow({
@@ -1978,26 +2112,56 @@ function buildConnectionPage() {
         label: s.connProvider,
         desc: s.connProviderDesc,
         control: providerPicker.node,
+        required: true,
       }),
+      keyRow,
+      keyEnvHint,
+      modelsGroup,
+      suggestionRow,
+    );
+
+    const optionalSection = el("section", "conn-section");
+    optionalSection.append(
+      el("h3", "conn-section-title", s.connSectionOptional),
+      el("p", "conn-section-desc", s.connSectionOptionalDesc),
       // 显示名称在服务名之上：它是人先看到、也先用来区分两张同厂商卡的那一行。
       sRow({ label: s.connDisplayName, desc: s.connDisplayNameDesc, control: displayNameInput }),
       sRow({ label: s.name, desc: s.connNameDesc, control: nameInput }),
       sRow({ label: s.baseUrl, desc: s.baseUrlDesc, control: baseUrlInput }),
-      sRow({
-        label: s.connApiKey,
-        desc: s.connApiKeyDesc,
-        control: fieldCell(apiKeyInput, apiKeyToggle, keyWarning),
-      }),
+    );
+
+    // A native `<details>` gives the disclosure its keyboard behaviour for
+    // free (Enter/Space on the summary, announced expanded state) and needs no
+    // key handler. The summary carries the live env-var name, so a folded
+    // section still says whether it holds anything.
+    const advanced = el("details", "setting-advanced");
+    advancedSummary = el("summary", "setting-advanced-summary", "");
+    advanced.appendChild(advancedSummary);
+    const advancedBody = el("div", "setting-advanced-body");
+    advancedBody.append(
       sRow({
         label: s.connApiKeyOrEnv,
         desc: s.connApiKeyEnvDesc,
         control: fieldCell(apiKeyEnvInput, null, envWarning),
       }),
       protocolLine,
-      modelsGroup,
-      suggestionRow,
-      problem,
     );
+    advanced.appendChild(advancedBody);
+    // A value already in the file is opened, not hidden: folding it away while
+    // it is in effect would make the card look like it has no key at all.
+    advanced.open = entry.apiKeyEnv.trim() !== "";
+
+    /** The advanced summary: what is folded under it, or that nothing is. */
+    function drawAdvancedSummary() {
+      if (advancedSummary === null) return;
+      const selected = serviceHeaderFacts({ apiKey: apiKeyInput.value, apiKeyEnv: apiKeyEnvInput.value });
+      advancedSummary.textContent =
+        selected.key === "env"
+          ? s.connAdvancedEnv.replace("{name}", selected.envName)
+          : s.connAdvancedIdle;
+    }
+
+    body.append(testResult, requiredSection, optionalSection, advanced, problem);
     node.append(head, body);
 
     /**
@@ -2007,13 +2171,22 @@ function buildConnectionPage() {
      * both halves: the action ("Expand") and which service it applies to.
      * Without the name, every card on the page announces the same word.
      */
-    const drawToggleLabel = () => {
+    function drawToggleLabel() {
       // The header's own text, not the service name: a card is announced by
       // whatever it is called on screen, which with two keys of one vendor is
       // the display name, not the generated file key.
       const name = title.textContent || s.connNewProvider;
-      toggle.setAttribute("aria-label", (expanded ? s.connCollapseNamed : s.connExpandNamed).replace("{name}", name));
-    };
+      // `aria-label` replaces the button's content, and the badges are inside
+      // it — without this the state a sighted user reads off the header would
+      // be silent to a screen reader.
+      const state = [...badges.children]
+        .filter((node) => !node.hidden)
+        .map((node) => node.textContent)
+        .filter(Boolean)
+        .join(", ");
+      const action = (expanded ? s.connCollapseNamed : s.connExpandNamed).replace("{name}", name);
+      toggle.setAttribute("aria-label", state === "" ? action : `${action} — ${state}`);
+    }
 
     /**
      * Open or close the card, and say so to assistive tech.
@@ -2059,9 +2232,17 @@ function buildConnectionPage() {
       );
     };
     // Live, not on save: the warning has to appear while the user is still
-    // looking at the field they got wrong.
-    apiKeyInput.addEventListener("input", checkFields);
-    apiKeyEnvInput.addEventListener("input", checkFields);
+    // looking at the field they got wrong. The header follows the same three
+    // controls, so a key typed or cleared is visible on the collapsed card.
+    apiKeyInput.addEventListener("input", () => {
+      checkFields();
+      drawBadges();
+    });
+    apiKeyEnvInput.addEventListener("input", () => {
+      checkFields();
+      drawBadges();
+    });
+    baseUrlInput.addEventListener("input", drawBadges);
     checkFields();
 
     /**
@@ -4719,6 +4900,9 @@ function selectSettingsTab(tab) {
   });
   const panes = $("settings-panes");
   panes.innerHTML = "";
+  // The bodies the search had opened belonged to the pane being replaced; a
+  // tab switch with the box still full starts over on the new page's cards.
+  searchOpenedBodies.clear();
   panes.appendChild(page.build());
   const empty = el("div", "settings-empty");
   empty.id = "settings-empty";
@@ -4759,6 +4943,17 @@ $("settings-search").addEventListener("input", (event) => {
 });
 
 /**
+ * Card bodies the search opened because they were collapsed.
+ *
+ * A row inside a closed card can match a query, and a result the user cannot
+ * see is not a result. These are reopened for as long as the box holds text;
+ * clearing it closes exactly the ones the search opened, leaving cards the
+ * user had opened (or closed) alone. Module-level because the clear path runs
+ * on a later event with no other record of what it changed.
+ */
+const searchOpenedBodies = new Set();
+
+/**
  * Search filters the rows on the current page and, when nothing on this page
  * matches, points at the pages that do. A settings page without search makes
  * the user guess which tab hides the control they want.
@@ -4767,21 +4962,65 @@ function applySettingsSearch() {
   const query = state.settingsQuery;
   const panes = $("settings-panes");
   const empty = $("settings-empty");
+  // A row inside a collapsed card, or folded into an advanced disclosure, is
+  // matched but invisible. A query opens both for as long as it is active;
+  // clearing the box puts the card back the way the user had it — the toggle's
+  // `aria-expanded` is the state `setExpanded` keeps, so the restore does not
+  // have to guess.
+  const opened = panes.querySelectorAll(".setting-advanced.search-open");
   if (!query) {
-    panes.querySelectorAll(".setting-row, .setting-group, .settings-page").forEach((node) => {
-      node.hidden = false;
-    });
+    panes
+      .querySelectorAll(".setting-row, .conn-field, .setting-group, .conn-section, .setting-advanced, .settings-page")
+      .forEach((node) => {
+        node.hidden = false;
+      });
+    for (const section of opened) {
+      section.open = false;
+      section.classList.remove("search-open");
+    }
+    // `aria-expanded` is the card's own state: a card the user opened while
+    // the search was running must stay open, and one they closed must stay
+    // closed. Only the bodies the search itself revealed go back.
+    for (const body of searchOpenedBodies) {
+      const toggle = body.closest(".settings-form-card")?.querySelector(".settings-card-toggle");
+      body.hidden = toggle?.getAttribute("aria-expanded") !== "true";
+    }
+    searchOpenedBodies.clear();
     if (empty) empty.hidden = true;
     return;
   }
+  // Collapsed cards only. Other pages' `settings-form-card-body` is always
+  // shown and is left alone — this list is what the clear path restores.
+  panes.querySelectorAll(".settings-form-card-body").forEach((body) => {
+    if (body.hidden) {
+      searchOpenedBodies.add(body);
+      body.hidden = false;
+    }
+  });
   let visible = 0;
-  panes.querySelectorAll(".setting-row").forEach((row) => {
+  panes.querySelectorAll(".setting-row, .conn-field").forEach((row) => {
     const match = (row.dataset.search ?? "").includes(query);
     row.hidden = !match;
     if (match) visible++;
   });
-  panes.querySelectorAll(".setting-group").forEach((group) => {
-    group.hidden = ![...group.querySelectorAll(".setting-row")].some((row) => !row.hidden);
+  // A group keeps its heading only while something under it is showing.
+  panes.querySelectorAll(".setting-group, .conn-section").forEach((group) => {
+    group.hidden = ![...group.querySelectorAll(".setting-row, .conn-field")].some((row) => !row.hidden);
+  });
+  panes.querySelectorAll(".setting-advanced").forEach((section) => {
+    const hasMatch = [...section.querySelectorAll(".setting-row")].some((row) => !row.hidden);
+    // A folded section whose fields all missed the query is a summary line
+    // about nothing — hide it while a query is active.
+    section.hidden = !hasMatch;
+    if (hasMatch) {
+      if (!section.open) {
+        section.open = true;
+        section.classList.add("search-open");
+      }
+    } else if (section.classList.contains("search-open")) {
+      section.open = false;
+      section.classList.remove("search-open");
+    }
   });
   if (!empty) return;
   empty.hidden = visible > 0;

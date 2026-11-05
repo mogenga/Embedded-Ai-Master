@@ -54,7 +54,7 @@ v1.4 描述的是一套**从未按此实现**的设计基线（Preact + Vite、�
 
 git / PR、终端、worktree、packs、browser、skills / memory / instructions / hooks、subagents、goals、检查点恢复、附件（图片）、板卡/串口的写操作、`effort` 直设（内核适配层不发该参数，如实拒绝而不是假装生效）。
 
-> **已从本文档移出的能力**（2026-10-21 起陆续接通，此处列表曾长期未同步）：文件树、导出、会话 fork / 删除 / 改名、工作目录切换、模型直选、`@` 文件补全、斜杠命令（`/clear` `/context` `/compact`）、压缩（桌面形态）。它们现在在本文件 §7、§8 与 `desktop/MATRIX.md` 里按「已支持」描述。
+> **已从本文档移出的能力**（2026-10-21 起陆续接通，此处列表曾长期未同步）：导出、会话 fork / 删除 / 改名、工作目录切换、模型直选、`@` 文件补全、斜杠命令（`/clear` `/context` `/compact`）、压缩（桌面形态）。它们现在在本文件 §7、§8 与 `desktop/MATRIX.md` 里按「已支持」描述。**文件树（目录浏览）于 2026-11-05 删除**，不是「移出」——入口、DOM、渲染代码与样式都不在了，单文件预览面板 `pane=file` 保留（§7.8）。
 
 > **「始终允许」按钮不渲染**：内核审批桥只有单次 allow/deny，没有持久规则。渲染出来就是一句兑现不了的承诺。
 
@@ -79,7 +79,7 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 - **样式**：手写 CSS 变量体系，两张表（`styles.css` 5473 行 + `settings.css` 1243 行），无 CSS 预处理器。
 - **Markdown**：零依赖手写渲染器（`markdown.js`），带 `IncrementalRenderer` 增量 diff。支持的块级语法是围栏代码块、`#`~`######`（降到 h3）、无序/有序列表、`>` 引用、**GFM 最小集表格**（表头 + `:?-{3,}:?` 分隔行；切列走状态机，`\|` 与 code-span 内的 `\|` 不拆列；对齐三态用 `style="text-align"`；短行补空单元、长行截断，保证每行同列数）、**分割线**（`---` / `***` / `___` / `- - -`，仅在段落为空时产出 `<hr>`，所以 `上面一行\n---` 仍是正文——本渲染器没有 setext 标题）、**显示数学块**（`$$` 围栏：单行 `$$E=mc^2$$` 或多行 `$$`…`$$`；LaTeX 源原样转义显示、不做 TeX 排版、不做行内语法处理；未闭合宽容渲染到块尾；开/闭 `$$` 同行的内容并入公式体）。不支持嵌套表格、多行单元格、单元格内的块级语法、setext 标题、**行内 `$...$`**（调试输出里 `$sp`、`$1 = 0x2000` 高频，配对单 `$` 误伤面太大）。表格、`hr` 与数学块的样式在 `styles.css` 的 `.markdown table` / `.markdown hr` / `.markdown .math`（居中、衬线、`pre-wrap` 保留源换行）。
 - **图标**：内联 SVG sprite（`icons.js`），单一 24×24 网格、`stroke-width: 1.75`。**零 emoji**。
-- **i18n**：`i18n.js`（en 437 键 / zh 438 键）+ `settings-i18n.js`（604 行），中英双语，默认跟随系统语言。
+- **i18n**：`i18n.js`（en 399 键 / zh 399 键）+ `settings-i18n.js`（604 行），中英双语，默认跟随系统语言。
 
 > 根 `package.json` 的 `devDependencies` 里 `vite` 已是死依赖（仓库内无任何引用，`vite.config.ts` 已删），可清理；`vitest` 自身仍需要它。
 
@@ -356,16 +356,16 @@ prometheus.locale  theme  density  width  view  motion  uiScale  fontScale
 prometheus.codeFont  sidebarWidth  sidebarCollapsed
 prometheus.suggestions  updateCheck  setupDismissed  workbench  pane
 prometheus.expandedProjects  collapsedProjects
-prometheus.workbenchWidth  workbenchPane  treeExpanded
+prometheus.workbenchWidth  workbenchPane
 ```
 
-> `prometheus.workbenchPane` 记住工作台最后停留的面板，`prometheus.treeExpanded` 记住文件树里展开过的目录（最多 200 条，超出按最久未用淘汰）。两者都只由渲染层读写，**不写 `providers.json` 或任何配置文件**。`prometheus.pane` 仍是死键（无读写方，见 §7.8）。
+> `prometheus.workbenchPane` 记住工作台最后停留的面板（`file` / `serial` / `artifact`；旧值 `files` 不再被接受，见 §7.8）。只由渲染层读写，**不写 `providers.json` 或任何配置文件**。`prometheus.treeExpanded` 随目录树删除（2026-11-05），老档案里的残留值无人读取。`prometheus.pane` 仍是死键（无读写方，见 §7.8）。
 
 > 键名前缀是 `prometheus.*`（**不是** v1.4 的 `eam-theme`；`eam-theme` 随 `src/ui/theme.ts` 删除）。
 
 ### 6.5 i18n
 
-- 语言：`en` / `zh` 两套（`i18n.js` en 437 键 / zh 438 键，`settings-i18n.js` 独立一套）。
+- 语言：`en` / `zh` 两套（`i18n.js` en 399 键 / zh 399 键，`settings-i18n.js` 独立一套）。
 - 默认：`detectLocale()`（`i18n.js:927`）先读 `prometheus.locale`，否则看 `navigator.language`（`zh*` → `zh`，其余 → `en`）。**没有硬编码默认值**，跟随操作系统。
 - 键是扁平 camelCase，值可以是字符串或带参函数。
 - DOM 绑定：`applyLocale()`（`app.js:164`）扫描 `data-i18n`（textContent）、`data-prompt-key`（写 `dataset.prompt`）、`data-i18n-title`（title）、`data-i18n-placeholder`（placeholder）四类属性，外加一批手动补的节点。
@@ -515,20 +515,15 @@ prometheus.workbenchWidth  workbenchPane  treeExpanded
 
 - 宽 420px（可拖 320–560），内部用 **tab 切换**，只有两个 tab：**板卡（board）** 与 **串口（serial）**。
 
-> **2026-11-05 文件面板（Files）**。上面两条关于 tab 数量与面板清单的描述仍是 v2.0 的历史记录；本轮只改**文件树 / 关闭**，其余面板的取舍以 `desktop/MATRIX.md` 与 §7.8 下方注释为准。
+> **2026-11-05 目录树（Files）已删除**（用户「直接删除浏览工作区文件」）。上面两条关于 tab 数量与面板清单的描述仍是 v2.0 的历史记录；本轮删掉的是 ⋯ 菜单「浏览工作区文件」及其打开的目录树，**单文件内容面板保留**，其余面板的取舍以 `desktop/MATRIX.md` 为准。
 >
-> - **结构**：`#pane-tree` 是一列——固定的 `.tree-head`（根目录名 + 刷新按钮）在上，`.tree-level#tree-list` 自己滚动。根目录名因此不会随列表滚走；刷新按钮在标记里带 `disabled`，只有 `requestTree` 拿到非空根目录才启用（没有可重读的根时它不该看起来能点），重读根目录并**按记忆重放展开状态**。
-> - **区分目录与文件**：三重信号——图标（`folder` / `file`）、箭头（只有目录有）、目录名 600 字重；选中项另有 `--accent-soft` 底 + 左侧 2px accent 内阴影（`box-shadow: inset`，不占布局）+ `aria-current="true"`。**不只靠颜色**。
-> - **缩进**：每一行自带 `--tree-indent`（深度 × 12px，封顶 8 层），不是嵌套容器——500 项目录仍是 500 个浅元素。超过 8 层的深度只体现在 `data-depth` 与 tooltip 里，不再继续右移，否则 320px 面板只剩名字的首字母。
-> - **长文件名**：`.tree-name` 单行省略号，完整路径在行 `title` 上；320px 面板实测无横向溢出。
-> - **空 / 加载 / 截断**：三者都用 `.tree-note`（`.sidebar-empty` 的变体），缩进与名称对齐。展开一个尚未答复的目录立刻显示「正在读取工作区…」，不是一块空白；宿主截断（>500 项）在列表末尾给出「只列出前 N 项」。
-> - **并发展开**：`treeRequests` 是**先进先出队列**，不再是单个 `pendingTreeTarget`。宿主的命令队列串行执行 `getTree`，回复顺序等于发送顺序，所以连点两个目录时各自的列表落在各自的行下。根请求会把队列里旧的目标清空（它们的内容已被重绘覆盖），但**保留槽位**以维持顺序。`host_exit` 清空整个队列。
-> - **展开记忆**：`prometheus.treeExpanded` 存展开过的目录绝对路径（上限 200，按插入序淘汰最旧的）。展开 / 收起立即写入；字体、语言切换不重绘树，所以不需要额外同步。重开面板、刷新、切走再切回都按它重放（深度上限 16，防止一次重绘打开整条深链）。
-> - **选中记忆**：`.tree-row.active` 由 `openFile` 设一次，之后由每次 `renderTree` 按路径重新标注；切到别的面板再回来仍然是那一行。
-> - **切 tab 不重复拉取**：`openWorkbench("files")` 只在根目录变了或列表为空时才 `getTree`，切走再切回保留滚动位置；主动重读用头部的刷新按钮。
-> - **面板记忆**：`prometheus.workbenchPane` 记住最后的面板，菜单「浏览工作区文件」不带参数打开时回到 **Files 或 File（且仍有打开的文件）**，其它面板一律回 Files——菜单问的是文件。
-> - **关闭路径**：`#close-workbench` 按钮、`Ctrl+\`、以及 **Esc**（见 §7.10 的优先级）。`Esc` 只在焦点**不在文本输入控件**里时关闭工作台；焦点原本在工作台内部时，关闭后还给打开它的控件。焦点仍在别处（例如光标在输入框）时 `Ctrl+\` 关面板不抢焦点。
-- 其余 7 个面板（files / diff / history / tasks / artifact / terminal / browser）的 DOM 仍在 `index.html:381-501`，但**不在 tab 条里**，`openWorkbench()` 对非支持面板直接 return（`app.js:2654`）。空 tab 是死路，不是占位。
+> - **删除范围**：`#menu-browse-files` 菜单行、tab 条里的 `data-pane="files"`、`#pane-tree`（`.tree-head` + `.tree-level#tree-list`）、`i18n.js` 的 `menuBrowseFiles` / `paneFiles` / `treeEmpty` / `treeLoading` / `treeNoWorkspace` / `treeTruncated`（以及只被树头使用的 `workspace`）、`app.js` 的 `treeRequests` / `requestTree` / `renderTree` / `expandTreeRow` / `collapseTreeRow` / `renderTreeHead` / `treeRow` / `treeNote` / `markTreeSelection` / `activeTreePath` / `state.treePath` / `treeExpanded` / `readTreeExpanded` / `rememberTreeExpanded`、`tree` 事件分支、`host_exit` 的队列清理、`state` 与 `session_loaded` 里的 cwd 重读、`styles.css` 的 `.tree-*` / `.file-tree` / `.pane-tree`。
+> - **单文件面板（pane `file`）保留**：`#file-root` / `fileRoot` / `openFile` / `renderFilePreview` 与 `getFile` 的宿主 handler 不变。点可打开的工具行（`FILE_TOOLS`）仍会切到 File tab 并显示内容；`getFile` 失败时面板给出「读取失败」而不是一直挂着省略号（R3）。
+> - **面板记忆**：`prometheus.workbenchPane` 仍是最后停留的面板，但不再接受 `files`——旧档案里的 `files` 回退到 `serial`（File 只在 `state.selectedFile` 仍有值时恢复）。不传 pane 的 `openWorkbench()` 因此只会落到 `serial` 或 `file`，不会画出空面板。
+> - **tab 条只剩三个**（`serial` / `file` / `artifact`）：切换逻辑遍历 DOM 里的按钮，没有硬编码数量；左右方向键在这三个之间循环。
+> - **宿主 `getTree` 仍存在**（`desktop/host/host.js`，`listDirectory` + 边界检查），只是渲染层已无调用方；`MATRIX.md` 已注明。
+> - **关闭路径不变**：`#close-workbench` 按钮、`Ctrl+\`、以及 **Esc**（见 §7.10 的优先级）。`Esc` 只在焦点**不在文本输入控件**里时关闭工作台；焦点原本在工作台内部时，关闭后还给打开它的控件（菜单入口固定还给 `#more-button`）。
+- 其余 6 个面板（diff / history / tasks / artifact / terminal / browser）的 DOM 仍在 `index.html`，但**不在 tab 条里**，`openWorkbench()` 对非支持面板直接 return。空 tab 是死路，不是占位；`files` 的 DOM 已随本轮删除。
 - 板卡面板消费 `board_state`（由内核 `device_status` 事件转换而来），`state.device` 原样透传，**内核与 UI 都不解释、不补全、不推断**。
 - 串口面板有端口 / 波特率选择、过滤、暂停、清空、导出、跟随开关。
 - **板卡/串口的写操作入口已隐藏**（`desktop/MATRIX.md`）。
@@ -563,10 +558,30 @@ prometheus.workbenchWidth  workbenchPane  treeExpanded
 - **孤儿条目静默忽略**：文件被手改（服务删了/改名了）时，按服务名查不到就不再显示；下一次保存会按页面上的卡片重写整份 meta，孤儿在这次保存时消失。**删卡保存后其 meta 一并消失**（同一份重写覆盖），所以以后新建同名服务不会继承旧标签。
 - **显示名称不能重复**：保存时比较 trim 后、忽略大小写的标签（空标签按服务名算）；第二张冲突的卡就地报错并聚焦它的显示名称输入框（`duplicateDisplayName`）。
 - **服务名自动生成**（`nextProviderName`）：出厂厂商第一张用厂商 id（`deepseek`），之后 `deepseek-2`、`deepseek-3`；自定义用 `provider1`、`provider2`。换厂商时只有**页面自己生成的名字**跟着换（`isAutoProviderName`：空、当前厂商 id 或它的 `-N`、以及 `providerN`）；手写的 `my-gateway` 不动。
-- **卡片头**：厂商图标 + **显示名称**（第一行，`--text-base`/600）+ `服务名 · 厂商`（第二行，`--text-xs`/`--text-faint`）；模型摘要最多占 46% 宽，先让位给显示名称。折叠态的 `aria-label` 也用显示名称（`展开 / 收起 <显示名称>`）。展开后第一行是显示名称输入，其后才是服务名、地址。
+- **卡片头**：厂商图标 + **显示名称**（第一行，`--text-base`/600）+ `服务名 · 厂商`（第二行，`--text-xs`/`--text-faint`）；右侧是**三个状态徽章**（见下）。折叠态的 `aria-label` = `展开 / 收起 <显示名称> — <徽章文字…>`，徽章不是只有视觉的信号。
 - **厂商下拉的行为变了**：不再按「服务名 = 厂商 id」反查（`providerPickerOptions(vendorId)` 现在只收归属），**同一厂商的选项不再置灰**——同名冲突已由后缀解决，置灰反而挡住了本任务要的用法。选中厂商只写归属与（可替换时的）地址。
 - **标签写入的错误不吞**：localStorage 写失败（被禁用/写满）时，文件照常保存，但页面顶部出现一行说明「服务已保存、显示名称没存下，重启后会回落到服务名」（`connMetaWriteFailed`）。
 - **不受影响的部分**：`baseUrl` 的替换规则（空着或仍是某个预设地址才替换）、`presetFillFor`、「推荐模型」chip（现在按**归属**而不是名字取模型名）都与上一版一致。
+
+**卡片信息层级（2026-11-05 第二轮重构）**
+
+展开后的表单按「离能用有多远」分三层，不再是一列等权重的八行：
+
+| 层 | 内容 | 理由 |
+|---|---|---|
+| 必填（`conn-section-title` + 行内「必填」文字标记） | 厂商、API 密钥、模型 | 这是「服务能用」的最小集；其余全都有默认值 |
+| 基础设置（可选/少改） | 显示名称、服务名、服务地址 | 已有合理默认值：显示名称空=用服务名、服务名自动生成、地址由厂商选择填好。服务名描述里写明了改名会影响已有会话的 `服务/模型` 引用 |
+| 高级（原生 `<details>`，默认收起） | 密钥环境变量、协议 | 很少用。文件里已有 `apiKeyEnv` 时**默认展开**——正在生效的值不该被折叠藏起来 |
+
+- **为什么「模型」不在右边的控制列**：它的控件是一列可增删的行，不是单个输入框。放在 `.setting-row` 的 56% 控制列里会被压扁，所以 `.conn-field` 把标题与说明放在列表上方，整行占满卡片宽度。每一行模型自带 `aria-label`。
+- **密钥「必填」与 env 互斥**：填了环境变量名时，密钥行的「必填」标记隐藏，密钥栏下出现一行说明「这个服务使用环境变量 X，上面的密钥栏是刻意留空的」。两个字段共同满足一个要求，界面必须说清是哪一个在起作用。
+- **状态徽章**（折叠态的三个）：密钥（`已配置密钥` / `密钥来自环境变量` / `缺少密钥`）、模型数（`N 个模型`，0 时转 warn）、地址（只在为空时出现：`缺少地址`）。每个都是**图标 + 文字**，颜色只是第三重信号：高对比主题、色觉差异、灰度截图里都必须读得出来。
+- **`密钥来自环境变量` 不等于「已配置」**：渲染层读不到应用的环境变量，那个变量有没有设置是未知的。徽章只陈述「卡片里存的是什么」，不推断服务可用（R3）。
+- **徽章随输入实时更新**：key、地址、模型行的 `input` 事件都重画头部；`aria-label` 里的状态文字同步重画。
+- **徽章宽度优先于标题**：`.conn-card-badges` 是 `flex: 0 0 auto`（最多 60% 宽），超长显示名称由标题自己省略。徽章被裁成 `…` 等于状态没说。
+- **搜索**：查询时折叠的卡片正文临时展开、`<details>` 临时打开（`searchOpenedBodies` 记下是搜索打开的），清空搜索后只把这些收回，用户自己开/关的状态不动。
+
+**测试连接的结果**仍在卡片正文最上方（`aria-live="polite"`）：失败是一行 warn 色文字，成功是 `.conn-test-result` 区块（状态 + 延迟 + 可点击加入的模型 chip）。这两块本轮未改结构，仅因正文字段重排而在视觉上跟着移动。
 
 **厂商选择器（2026-11-04 起，行为于 2026-11-05 调整）**：每张服务卡片内的**第一行**，自绘下拉（`sProviderPicker`，WAI-ARIA combobox + listbox）。
 
@@ -686,7 +701,7 @@ interface SessionEventEnvelope extends SessionEvent {
 
 NDJSON over stdio，Electron 主进程以 `ELECTRON_RUN_AS_NODE=1` spawn。宿主只从编译后的 `dist/` 导入内核模块；`dist/` 缺失时发 `fatal` 并 `exit(1)`。
 
-**命令**：`init`、`prompt`、`abort`、`permission`、`newSession`、`loadSession`、`listSessions`、`setMode`、`setLocale`、`setUiPreference`、`getSettings`、`getUsage`、`getSetupChecklist`、`listCommands`、`getTree`、`searchFiles`、`searchSessions`、`compact`、`shutdown`。
+**命令**：`init`、`prompt`、`abort`、`permission`、`newSession`、`loadSession`、`listSessions`、`setMode`、`setLocale`、`setUiPreference`、`getSettings`、`getUsage`、`getSetupChecklist`、`listCommands`、`getTree`（渲染层已无调用方，见 §7.8）、`searchFiles`、`searchSessions`、`compact`、`shutdown`。
 
 **斜杠命令**（2026-10-22）：`listCommands` 回 `clear` / `context` / `compact` 三个。**命令真正执行时，敲进去的原文会作为一条普通用户消息留在转录里**（`/clear` 也一样，虽然它紧接着的 `session_loaded` 会清空转录）；未知命令与「带了参数被拒」的命令**不 echo**——先留一条消息再报错，会让人以为它跑过。`/clear` 在渲染器侧直接发 `newSession`；`/context` 由渲染器从内核自己的测量回答，逐行给出「用了多少 / 窗口 / 百分比」、每个类别占窗口的份额、剩余空间与压缩前余量，未知时明说「没有测量」而不是打印一页 0；`/compact` 走宿主的 `handleCompact`——用 `resumeSession` 打开会话、调内核 `compactSession({…, force: true})`。**不再看阈值**：用户显式要求压缩时，`force` 跳过软阈值提前返回与 microcompact 阶段，直接产出摘要；随后把新追加的 `compaction` 事件经 `sessionEventToHostEvents` 投影（复用既有的 `compacted` 标记），给出压缩前后的实测 token 数，并用新的测量刷新 `state.context` 与 `contextBreakdown`。压缩期间持有 `run_start`/`run_end` 与一个独立的 `AbortController`，`abort` 会先中止它。**三个命令都不接受参数**：内核 `compactSession` 没有 focus / keep 选项，`--keep N` 会是一个没人兑现的承诺（原 `parseCompactArgs` 已删）。`dist/` 缺 `context/compact.js` 或 `context/breakdown.js` 时回「请先 npm run build」而不是崩宿主。
 

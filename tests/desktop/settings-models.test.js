@@ -8,6 +8,8 @@ import {
   CONTEXT_WINDOW_CHOICES,
   modelEntryForSave,
   modelRowState,
+  serviceHeaderFacts,
+  serviceKeyKind,
   shortWindow,
 } from "../../desktop/renderer/settings-models.js";
 
@@ -89,6 +91,46 @@ describe("connectionSummary", () => {
 
   it("未知 locale 退回英文", () => {
     expect(connectionSummary("fr", { modelCount: 2 })).toBe("Connected · 2 models available");
+  });
+});
+
+describe("serviceKeyKind", () => {
+  it("直接填了密钥就是 direct，即使还填了变量名", () => {
+    expect(serviceKeyKind({ apiKey: "sk-abc", apiKeyEnv: "DEEPSEEK_API_KEY" })).toBe("direct");
+  });
+
+  it("只有变量名时是 env，不是「已配置」", () => {
+    expect(serviceKeyKind({ apiKey: "", apiKeyEnv: "DEEPSEEK_API_KEY" })).toBe("env");
+  });
+
+  it("都空着（或只有空白）是 missing", () => {
+    expect(serviceKeyKind({})).toBe("missing");
+    expect(serviceKeyKind({ apiKey: "   ", apiKeyEnv: "\t" })).toBe("missing");
+    expect(serviceKeyKind()).toBe("missing");
+  });
+
+  it("与内核同口径：trim 后为空就不算密钥", () => {
+    expect(serviceKeyKind({ apiKey: " sk-x ", apiKeyEnv: "" })).toBe("direct");
+  });
+});
+
+describe("serviceHeaderFacts", () => {
+  it("模型数只算有名字的行，非有限数按 0", () => {
+    expect(serviceHeaderFacts({ modelCount: 3 }).modelCount).toBe(3);
+    expect(serviceHeaderFacts({ modelCount: Number.NaN }).modelCount).toBe(0);
+    expect(serviceHeaderFacts({ modelCount: -2 }).modelCount).toBe(0);
+    expect(serviceHeaderFacts({}).modelCount).toBe(0);
+  });
+
+  it("envName 只在 env 状态下给出，且是 trim 后的变量名", () => {
+    expect(serviceHeaderFacts({ apiKeyEnv: "  KIMI_API_KEY " }).envName).toBe("KIMI_API_KEY");
+    expect(serviceHeaderFacts({ apiKey: "sk-x", apiKeyEnv: "KIMI_API_KEY" }).envName).toBe("");
+  });
+
+  it("noBaseUrl 只看 trim 后是否为空：写了但写错不算「没填」", () => {
+    expect(serviceHeaderFacts({ baseUrl: "  " }).noBaseUrl).toBe(true);
+    expect(serviceHeaderFacts({ baseUrl: "not-a-url" }).noBaseUrl).toBe(false);
+    expect(serviceHeaderFacts({}).noBaseUrl).toBe(true);
   });
 });
 

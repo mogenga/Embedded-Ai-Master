@@ -48,7 +48,6 @@ const workbenchMeta = $("workbench-meta");
 const diffFilelist = $("diff-filelist");
 const diffRoot = $("diff-root");
 const fileRoot = $("file-root");
-const fileTree = $("tree-list");
 const changesList = $("changes-list");
 const changesSummary = $("changes-summary");
 const checkpointList = $("checkpoint-list");
@@ -162,8 +161,6 @@ const state = {
   mentionFiles: [],
   /** Sub-agent records for the Tasks pane. */
   subagents: [],
-  /** Absolute root the Files pane last asked for; "" means no workspace yet. */
-  treePath: "",
   pr: null,
   commands: [],
   /**
@@ -3038,12 +3035,6 @@ function handleEvent(message) {
       }
       state.cwd = message.cwd;
       renderTopbarLocation();
-      // A different workspace is a different tree. Only when the pane is on
-      // screen: asking at every state event would refetch the list each time
-      // a mode changes, and the reply would paint over a closed pane.
-      if (!workbench.hidden && state.pane === "files" && state.treePath !== (state.cwd ?? "")) {
-        requestTree(state.cwd);
-      }
       // A state event carries session-level totals: replace, never add. It
       // may also carry spend and occupancy (the host attaches them when it
       // opens a stored session). An event that omits either is the same
@@ -3166,18 +3157,6 @@ function handleEvent(message) {
       state.checkpointRedo = Boolean(message.redo);
       renderCheckpoints();
       break;
-
-    case "tree": {
-      // Replies come back in the order the requests were sent (the host runs
-      // its command queue serially), so the oldest entry owns this one. The
-      // root request that repainted the pane nulls the older targets: it has
-      // already replaced their DOM, and the listing that arrives for them
-      // belongs to a tree nobody is looking at.
-      const request = treeRequests.shift();
-      if (request === undefined || request.target === null) break;
-      renderTree(request.target, message.nodes ?? [], { truncated: message.truncated === true });
-      break;
-    }
 
     case "artifacts":
       state.artifacts = message.artifacts ?? [];
@@ -4023,9 +4002,6 @@ function handleEvent(message) {
       if (message.cwd) {
         state.cwd = message.cwd;
         renderTopbarLocation();
-        // Absolute, like every other tree request: "." is resolved against the
-        // host process and refused by its boundary.
-        requestTree(state.cwd);
         api.send({ cmd: "listSessions", includeArchived: state.showArchived });
       }
       scrollToBottom(true);
@@ -4132,10 +4108,6 @@ function handleEvent(message) {
     case "host_exit":
       setBusy(false);
       setStatus("statusHostStopped");
-      // Nothing will answer the outstanding `getTree`s. Keeping their slots
-      // would make the first reply after a restart land under a folder that
-      // was expanded in the previous host.
-      treeRequests.length = 0;
       addNode(
         `<div class="notice error">${escapeHtml(t.hostStopped)} ` +
           `<button class="link-button" id="host-retry">${escapeHtml(t.hostRestart)}</button></div>`,
@@ -4187,7 +4159,7 @@ function renderSubagents() {
   }
 }
 
-/* ---------- workbench: diff, file, tree, checkpoints ---------- */
+/* ---------- workbench: diff, file, checkpoints ---------- */
 
 /**
  * Panes with a backend in this kernel. Everything else is unreachable.
@@ -4195,140 +4167,24 @@ function renderSubagents() {
  * The serial monitor is host-backed since the PowerShell serial bridge
  * landed: `serialOpen`/`serialStatus`/… have real handlers, the events feed
  * the pane below, and the agent reads the same ring through `embed_serial`.
- *
- * `files` is the workspace tree: `getTree` is real in the host, and a
- * directory row expands through the same `getTree` the pane's root uses.
  */
-const SUPPORTED_PANES = new Set(["file", "files", "artifact", "serial"]);
-
-/**
- * Fill the tree pane from `path`.
- *
- * An absolute path is required: the host decides access by comparing the
- * resolved path against the session workspace, and "." resolves against
- * whatever the host's process happened to have as its cwd — it gets refused.
- * With no workspace open there is nothing to ask for, so the pane says so
- * instead of leaving an empty list that looks like an empty folder.
- *
- * Requests waiting for a `tree` reply, oldest first.
- *
- * The host runs commands one at a time in arrival order, and `getTree` is
- * awaited on that queue, so reply order matches send order. Keeping the whole
- * queue — instead of one `pendingTreeTarget` — is what lets two folder
- * expansions be in flight at once: the old single slot let the second click
- * overwrite the target, so each listing landed under the other row (or the
- * first reply painted a child folder over the root).
- */
-const treeRequests = [];
-
-/** Directories the reader left open, restored when their level is painted. */
-const TREE_EXPANDED_KEY = "prometheus.treeExpanded";
-/** Cap on remembered paths: a deep tree must not grow localStorage forever. */
-const MAX_TREE_EXPANDED = 200;
-/** Depth guard for the restore walk; deeper levels are scrolled, not opened. */
-const MAX_TREE_DEPTH = 16;
-
-function readTreeExpanded() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(TREE_EXPANDED_KEY) || "[]");
-    return new Set(Array.isArray(parsed) ? parsed.filter((entry) => typeof entry === "string") : []);
-  } catch {
-    // A hand-edited or truncated value means "nothing remembered", not a
-    // thrown error before the first paint.
-    return new Set();
-  }
-}
-
-const treeExpanded = readTreeExpanded();
-
-function rememberTreeExpanded(path, expanded) {
-  if (expanded) treeExpanded.add(path);
-  else treeExpanded.delete(path);
-  while (treeExpanded.size > MAX_TREE_EXPANDED) {
-    // Insertion order is the age order: drop the path remembered longest ago.
-    treeExpanded.delete(treeExpanded.values().next().value);
-  }
-  localStorage.setItem(TREE_EXPANDED_KEY, JSON.stringify([...treeExpanded]));
-}
-
-/** The head above the tree: which folder it is rooted at, and a re-read. */
-function renderTreeHead(root) {
-  const label = $("tree-root");
-  const refresh = $("tree-refresh");
-  if (!label) return;
-  if (root === "") {
-    // `data-i18n` so a language switch while the pane sits empty retranslates
-    // this one word through the same pass as the static text.
-    label.dataset.i18n = "workspace";
-    label.textContent = t.workspace;
-    label.removeAttribute("title");
-  } else {
-    const parts = root.split(/[\\/]/).filter(Boolean);
-    label.textContent = parts.length > 0 ? parts[parts.length - 1] : root;
-    label.title = root;
-    delete label.dataset.i18n;
-  }
-  if (refresh) refresh.disabled = root === "";
-}
-
-function requestTree(path) {
-  const root = typeof path === "string" ? path.trim() : "";
-  // The pane's own root, also remembered as "what the tree is showing" so a
-  // workspace change (a `state` event with a new cwd) is noticed and re-read
-  // instead of painting a tree of the previous folder under the new name.
-  state.treePath = root;
-  // A root request repaints everything below it. Listings still in flight
-  // keep their queue slot (so later replies stay aligned) but lose their
-  // target: their contents are obsolete, and painting one would drop a child
-  // folder's listing on top of the new root.
-  for (const pending of treeRequests) pending.target = null;
-  renderTreeHead(root);
-  if (root === "") {
-    fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeNoWorkspace)}</div>`;
-    return;
-  }
-  fileTree.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.treeLoading)}</div>`;
-  treeRequests.push({ target: fileTree, path: root });
-  api.send({ cmd: "getTree", path: root });
-}
-
-/**
- * Path of the file the File pane is showing, matched against the rows.
- *
- * The marker survives a pane switch because it describes what the File tab
- * holds, not what was clicked last in this visit. A path that is no longer in
- * the list simply matches no row.
- */
-let activeTreePath = "";
-
-function markTreeSelection(path) {
-  activeTreePath = path;
-  for (const row of fileTree.querySelectorAll(".tree-row")) {
-    const active = row.dataset.path === path;
-    row.classList.toggle("active", active);
-    if (active) row.setAttribute("aria-current", "true");
-    else row.removeAttribute("aria-current");
-  }
-}
+const SUPPORTED_PANES = new Set(["file", "artifact", "serial"]);
 
 /**
  * Which pane the workbench was on last time it was open.
  *
- * Only the file-browsing panes are restored: the entry that opens the panel
- * without naming a pane is the menu's "Browse workspace files", so coming back
- * to the file that was being read (pane `file`) is the same promise kept, while
- * coming back to the serial monitor would answer a different question than the
- * one that was clicked. Every explicit open (a tab, a tool row) still wins.
+ * `files` is not a pane in this build: a profile that ran the version with
+ * the workspace tree can still hold it on disk, and restoring a pane that no
+ * longer exists would draw an empty panel. Everything that is not a File tab
+ * still holding a file falls back to the serial monitor, which always has a
+ * backend. Every explicit open (a tab, a tool row) still wins.
  */
 const WORKBENCH_PANE_KEY = "prometheus.workbenchPane";
 
 function lastWorkbenchPane() {
   const saved = localStorage.getItem(WORKBENCH_PANE_KEY);
-  // The File tab is only meaningful while it still holds a file. After a
-  // restart the key survives but `fileRoot` is empty, so the menu lands on
-  // the tree instead of on a blank pane with no way back to the list.
   if (saved === "file" && state.selectedFile) return "file";
-  return "files";
+  return "serial";
 }
 
 function openWorkbench(pane, { opener = null } = {}) {
@@ -4363,7 +4219,7 @@ function openWorkbench(pane, { opener = null } = {}) {
     button.classList.toggle("active", active);
     // A tab strip is one stop in the tab order, with arrows moving between
     // tabs: otherwise every pane button is a tab stop and keyboard users walk
-    // through eight of them to get past the strip.
+    // through all of them to get past the strip.
     button.setAttribute("aria-selected", String(active));
     button.tabIndex = active ? 0 : -1;
   });
@@ -4371,7 +4227,6 @@ function openWorkbench(pane, { opener = null } = {}) {
   const showTerminal = state.pane === "terminal";
   const showArtifact = state.pane === "artifact";
   const showBrowser = state.pane === "browser";
-  const showFiles = state.pane === "files";
   const showHistory = state.pane === "history";
   const showTasks = state.pane === "tasks";
   const showFile = state.pane === "file";
@@ -4386,7 +4241,6 @@ function openWorkbench(pane, { opener = null } = {}) {
   diffRoot.hidden = !showDiff;
   diffFilelist.hidden = !showDiff || state.changes.files.length === 0;
   $("diff-scope").hidden = !showDiff;
-  $("pane-tree").hidden = !showFiles;
   $("changes-list").hidden = !showDiff;
   $("history-root").hidden = !showHistory;
   $("artifact-list-pane").hidden = !showArtifact || Boolean(state.selectedArtifact);
@@ -4396,16 +4250,6 @@ function openWorkbench(pane, { opener = null } = {}) {
   $("browser-root").hidden = !showBrowser;
   $("serial-root").hidden = !showSerial;
   if (showDiff) renderDiff();
-  // Re-read only a tree that is not already showing this workspace's rows.
-  // Coming back to the Files tab used to re-fetch the root and repaint it
-  // from scratch, throwing away the scroll position for a listing that had
-  // not changed; the head's refresh button is the deliberate way to re-read.
-  // A pane holding a note instead of rows (a refusal, a missing workspace, an
-  // empty folder) still re-asks: those are exactly the states that can change
-  // or recover between visits.
-  if (showFiles && (state.treePath !== (state.cwd ?? "") || fileTree.querySelector(".tree-row") === null)) {
-    requestTree(state.cwd);
-  }
   if (showHistory) api.send({ cmd: "getCheckpoints" });
   if (showArtifact) api.send({ cmd: "getArtifacts" });
   if (showTerminal) {
@@ -5472,132 +5316,8 @@ function renderCheckpoints() {
   }
 }
 
-/** A one-line note in the tree, indented to line up with the names. */
-function treeNote(text) {
-  const note = document.createElement("div");
-  note.className = "sidebar-empty tree-note";
-  note.textContent = text;
-  return note;
-}
-
-/**
- * Paint one level of the tree.
- *
- * The pane's root and every folder's `.tree-children` go through here, so an
- * empty folder, a truncated listing and a loading folder are worded the same
- * at every depth. The target is the element the matching `tree` reply fills.
- */
-function renderTree(target, nodes, { truncated = false } = {}) {
-  target.innerHTML = "";
-  const depth = Number(target.dataset.depth ?? 0);
-  // The level's own indent: rows write their own (they have a depth), but the
-  // notes this function adds have none and still have to line up with the
-  // names around them.
-  target.style.setProperty("--tree-indent", `${Math.min(depth, 8) * 12 + 4}px`);
-  if (nodes.length === 0) {
-    target.appendChild(treeNote(t.treeEmpty));
-    return;
-  }
-  for (const node of nodes) target.appendChild(treeRow(node, depth));
-  if (truncated) target.appendChild(treeNote(t.treeTruncated(nodes.length)));
-  // Reopen the branches the reader left open. Restoring is a click's worth of
-  // work: this creates the child level and asks for its listing, and the reply
-  // lands in the container created here because it joined the queue after the
-  // level that is being painted. The depth guard stops a remembered deep path
-  // from opening the whole chain on every repaint; past it the level is one
-  // click away.
-  for (const node of nodes) {
-    if (depth >= MAX_TREE_DEPTH) break;
-    if (node.type !== "dir" || !treeExpanded.has(node.path)) continue;
-    const row = [...target.children].find((child) => child.dataset?.path === node.path);
-    if (row) expandTreeRow(row, node);
-  }
-  markTreeSelection(activeTreePath);
-}
-
-/**
- * Open one folder row: create its child level and request the listing, or
- * reveal the level that already exists.
- */
-function expandTreeRow(row, node) {
-  const existing = row.nextElementSibling;
-  if (existing && existing.classList.contains("tree-children")) {
-    existing.hidden = false;
-    row.setAttribute("aria-expanded", "true");
-    setIcon(row.querySelector(".twisty svg"), "chevron-down");
-    return existing;
-  }
-  const container = document.createElement("div");
-  container.className = "tree-children";
-  const depth = Number(row.dataset.depth ?? 0) + 1;
-  container.dataset.depth = String(depth);
-  // The container carries the level's indent so its loading/empty note lines
-  // up with the names below it; each row still writes its own.
-  container.style.setProperty("--tree-indent", `${Math.min(depth, 8) * 12 + 4}px`);
-  // Without this an expanded folder whose listing is still on its way is a
-  // blank gap under the row, which reads as an empty folder.
-  container.appendChild(treeNote(t.treeLoading));
-  row.after(container);
-  row.setAttribute("aria-expanded", "true");
-  setIcon(row.querySelector(".twisty svg"), "chevron-down");
-  // Recorded before the request goes out, so a reply cannot land elsewhere.
-  treeRequests.push({ target: container, path: node.path });
-  api.send({ cmd: "getTree", path: node.path });
-  return container;
-}
-
-function collapseTreeRow(row) {
-  const existing = row.nextElementSibling;
-  if (!existing || !existing.classList.contains("tree-children")) return;
-  existing.hidden = true;
-  row.setAttribute("aria-expanded", "false");
-  setIcon(row.querySelector(".twisty svg"), "chevron-right");
-}
-
-/**
- * One row of the tree.
- *
- * Folders and files are told apart by shape, not only by colour: a folder
- * glyph versus a file glyph, a chevron that only folders have, and a heavier
- * name for folders. The indentation stops growing after eight levels — a deep
- * tree would otherwise push names out of a 320 px pane — while the depth still
- * reaches the row as `data-depth` and the full path stays in the tooltip.
- */
-function treeRow(node, depth = 0) {
-  const isDir = node.type === "dir";
-  const row = document.createElement("button");
-  row.className = `tree-row ${isDir ? "is-dir" : "is-file"}`;
-  row.dataset.path = node.path;
-  row.dataset.depth = String(depth);
-  row.style.setProperty("--tree-indent", `${Math.min(depth, 8) * 12 + 4}px`);
-  row.innerHTML =
-    `<span class="twisty">${isDir ? icon("chevron-right") : ""}</span>` +
-    `<span class="tree-icon">${icon(isDir ? "folder" : "file")}</span>` +
-    `<span class="tree-name">${escapeHtml(node.name)}</span>`;
-  row.title = node.path;
-  if (isDir) row.setAttribute("aria-expanded", "false");
-  row.addEventListener("click", () => {
-    if (!isDir) {
-      openFile(node.path);
-      return;
-    }
-    const existing = row.nextElementSibling;
-    if (existing && existing.classList.contains("tree-children") && !existing.hidden) {
-      collapseTreeRow(row);
-      rememberTreeExpanded(node.path, false);
-      return;
-    }
-    expandTreeRow(row, node);
-    rememberTreeExpanded(node.path, true);
-  });
-  return row;
-}
-
 function openFile(path) {
   state.selectedFile = path;
-  // The tree marks the row when it repaints; do it now as well so a row clicked
-  // in the list is marked before the File pane's reply arrives.
-  markTreeSelection(path);
   openWorkbench("file");
   fileRoot.innerHTML = `<div class="diff-empty">…</div>`;
   // The failure path is a notice, which the transcript shows — but the pane
@@ -6552,7 +6272,15 @@ document.addEventListener("keydown", (event) => {
 });
 
 document.addEventListener("click", (event) => {
-  if (!modelMenu.hidden && !event.target.closest(".model-control")) closeModelMenu();
+  // The panel's own surface counts as "inside" — not just `.model-control`.
+  // The menu is absolutely positioned but it is not a descendant of
+  // `.model-control`'s trigger, and the provider rail is a separate control
+  // inside the same popover: picking a provider re-rendered the list and the
+  // document-level handler then read that click as "outside" and closed the
+  // whole panel, so choosing a vendor felt like choosing a model.
+  if (modelMenu.hidden) return;
+  if (event.target.closest(".model-control") || event.target.closest("#model-menu")) return;
+  closeModelMenu();
 });
 
 
@@ -7258,9 +6986,9 @@ modelPicker.addEventListener("click", (event) => {
  * Register a local folder as the workspace root and switch to it.
  *
  * `setCwd` only moved the directory the next session would start in; it did
- * not register the folder as a workspace root, so every later `getTree` and
- * `getFile` under it was refused by the host's boundary check. `setWorkspace`
- * does both, which is why the top bar sends it instead.
+ * not register the folder as a workspace root, so every later `getFile` under
+ * it was refused by the host's boundary check. `setWorkspace` does both, which
+ * is why the top bar sends it instead.
  */
 function setWorkspace(path) {
   const dir = typeof path === "string" ? path.trim() : "";
@@ -7753,13 +7481,6 @@ workbenchTabs.querySelectorAll("button").forEach((button) => {
 
 $("close-workbench").addEventListener("click", closeWorkbench);
 
-// Re-read the tree from its root. `requestTree` drops the older listings and
-// `renderTree` replays the folders that were open, so a refresh after an
-// external change (a new file, a deleted folder) keeps the reader's place.
-$("tree-refresh").addEventListener("click", () => {
-  if (state.cwd) requestTree(state.cwd);
-});
-
 $("diff-scope").querySelectorAll("button").forEach((button) => {
   button.addEventListener("click", () => {
     state.diffScope = button.dataset.scope;
@@ -7976,7 +7697,6 @@ topbarMenu.addEventListener("click", (event) => {
   setTopbarMenu(false);
   if (row.id === "menu-export") api.send({ cmd: "exportSession" });
   else if (row.id === "menu-shortcuts") openShortcuts();
-  else if (row.id === "menu-browse-files") openWorkbench(undefined, { opener: $("more-button") });
   else if (row.id === "menu-open-serial") openWorkbench("serial", { opener: $("more-button") });
   else if (row.id === "menu-clear") clearConversation();
 });
@@ -8088,8 +7808,5 @@ if (state.workbenchOpen) {
   state.workbenchOpen = false;
   localStorage.setItem("prometheus.workbench", "0");
 }
-// No tree request here: the Files pane asks for its own root with an absolute
-// path when it is opened. A "." sent at boot was refused by the host boundary
-// and its empty reply would have painted over a tree the pane had loaded.
 api.send({ cmd: "setLocale", locale: state.locale });
 input.focus();

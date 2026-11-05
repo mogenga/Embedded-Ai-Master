@@ -512,129 +512,6 @@ body.resizing-sidebar .sidebar {
   padding: 0 calc(var(--rail-inset) - 10px) 8px;
 }
 
-/* ---------- file tree ---------- */
-
-/* The root strip sits above the scrolling list (the pane is a column and only
-   `.tree-level` scrolls), so the folder name stays put while its rows move —
-   the whole point of it is to answer "which folder is this" at any scroll. */
-.tree-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 4px;
-  padding: 2px 4px 6px;
-  border-bottom: 1px solid var(--border);
-}
-
-.tree-root {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--text-faint);
-  text-transform: uppercase;
-}
-
-.tree-refresh:disabled {
-  /* No workspace means no root to re-read; the control is present so the row
-     keeps its shape, but it must not look live. */
-  opacity: 0.45;
-  cursor: default;
-}
-
-/* Indentation lives on the row, not on a wrapper: `--tree-indent` is set per
-   row from its depth, so a level of 500 entries is 500 shallow elements
-   instead of 500 nested containers. It stops growing at eight levels — a deep
-   tree in a 320 px pane would otherwise spend the whole width on indent and
-   leave only an ellipsis per name. */
-.tree-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding-left: var(--tree-indent, 4px);
-  padding-top: 3px;
-  padding-right: 6px;
-  padding-bottom: 3px;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-  text-align: left;
-}
-
-.tree-row:hover {
-  background: var(--surface);
-  color: var(--text);
-}
-
-/* Third mark for "this is what the File pane holds", after the icon and the
-   weight: an inset accent bar plus a tint. The bar is drawn with
-   `box-shadow` rather than a border so the row's height and text offset do
-   not shift when it is selected. Colour is never the only signal —
-   `aria-current` states it to a screen reader. */
-.tree-row.active {
-  background: var(--accent-soft);
-  box-shadow: inset 2px 0 0 var(--accent);
-  color: var(--text);
-}
-
-.tree-row.active .tree-name {
-  font-weight: 600;
-}
-
-.tree-row .twisty {
-  display: flex;
-  width: 14px;
-  color: var(--text-faint);
-  flex: 0 0 auto;
-}
-
-.tree-row .twisty .icon {
-  width: 13px;
-  height: 13px;
-}
-
-.tree-row .tree-icon {
-  color: var(--text-faint);
-  flex: 0 0 auto;
-  width: 13px;
-  height: 13px;
-  display: flex;
-}
-
-/* The span is the 13 px slot; the sprite glyph inside has to follow it or a
-   16 px glyph overflows its own box by three. */
-.tree-row .tree-icon .icon {
-  width: 13px;
-  height: 13px;
-}
-
-.tree-row .tree-name {
-  flex: 1 1 auto;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The second, non-colour difference between a folder and a file. */
-.tree-row.is-dir .tree-name {
-  font-weight: 600;
-  color: var(--text);
-}
-
-/* Loading, empty and truncated notes line up with the names they describe
-   rather than with the pane's edge, so a note under a folder is not mistaken
-   for a sibling of the root's children. */
-/* 39 px is the row's own lead-in to the name (twisty 14 + gap 6 + glyph 13 +
-   gap 6), so a note sits under the first letter of the names it describes. */
-.sidebar-empty.tree-note {
-  padding: 3px 8px 3px calc(var(--tree-indent, 4px) + 39px);
-}
-
 .change-row {
   display: flex;
   align-items: center;
@@ -987,27 +864,6 @@ body.resizing-workbench * {
   overflow-y: auto;
   border-right: 1px solid var(--border);
   padding: 6px 4px;
-}
-
-/* The root strip stays put and the rows scroll under it: the folder name must
-   not scroll away with the list it names. */
-.pane-tree {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  min-width: 0;
-  padding: 6px 8px 4px;
-}
-
-.tree-level {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  /* The indent is inside the row's width; keeping it from widening the pane
-     is what makes `text-overflow` do anything on a long path. */
-  min-width: 0;
 }
 
 .history-root,
@@ -1793,8 +1649,8 @@ body.resizing-workbench * {
   right: calc(9px + 20px + 6px);
 }
 
-/* Shared by the tree, the Tasks pane and the artifact list as well as this
-   column, so it carries no indent of its own. */
+/* Shared by the Tasks pane, the checkpoint list and the artifact list as well
+   as the sidebar column, so it carries no indent of its own. */
 .sidebar-empty {
   padding: 8px;
   font-size: var(--text-sm);

@@ -1010,10 +1010,11 @@
   height: 16px;
 }
 
-/* The one thing a collapsed card is for: the summary line. It takes the
-   remaining width and truncates rather than wraps, so the header stays a
-   single line whatever it holds. Shared by the model-services cards (their
-   model names) and the MCP cards (command basename and argument count). */
+/* The MCP cards' summary line (command basename and argument count). It takes
+   the remaining width and truncates rather than wraps, so the header stays a
+   single line whatever it holds. The model-services cards use
+   `.conn-card-badges` instead — a row of fixed-width state pills, which has to
+   keep its full width rather than shrink. */
 .settings-card-summary {
   flex: 1 1 auto;
   min-width: 0;
@@ -1024,13 +1025,6 @@
   color: var(--text-secondary);
 }
 
-/* Nothing to show is a state, not a value: saying it in the same colour as a
-   real value would make an empty card look configured. */
-.settings-card-summary.empty {
-  font-style: italic;
-  color: var(--text-faint);
-}
-
 /* The body is a plain container: it exists so `hidden` has one element to
    switch and `aria-controls` has one id to name. */
 .settings-form-card-body {
@@ -1038,6 +1032,178 @@
   flex-direction: column;
   gap: 2px;
   padding-top: 6px;
+}
+
+/* ---------- model-services card: header badges ---------- */
+
+/* The three facts a collapsed card states. They keep their own width and the
+   title ellipsises instead: the badges are short fixed words, while a long
+   display name has room to lose a few characters and still be recognisable.
+   Wrapping is the last resort — at a card's narrowest the row grows one line
+   rather than clipping a badge into an ellipsis that says nothing. */
+.conn-card-badges {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+  max-width: 60%;
+}
+
+/* One badge: glyph + word, on the card's own surface. The glyph carries the
+   tone and the word carries the meaning, so the state survives a theme where
+   the two colours are hard to tell apart. */
+.conn-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  padding: 1px 7px 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.conn-badge-icon {
+  width: 11px;
+  height: 11px;
+  color: var(--text-faint);
+}
+
+.conn-badge-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Configured: the one badge that is good news. Muted success rather than a
+   filled green pill — the header is a summary, not an alert. */
+.conn-badge.ok {
+  border-color: color-mix(in srgb, var(--success) 40%, var(--border));
+  color: var(--text);
+}
+
+.conn-badge.ok .conn-badge-icon {
+  color: var(--success);
+}
+
+/* Missing something: warn, not danger. The service is not broken, it is not
+   finished, and danger is reserved for the Remove button beside it. */
+.conn-badge.warn {
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+
+.conn-badge.warn .conn-badge-icon {
+  color: var(--warn);
+}
+
+/* ---------- model-services card: three-tier body ---------- */
+
+/* A tier of the form with its own heading. The rule above the heading is what
+   makes the tiers read as sections rather than as eight rows with three
+   labels dropped between them. */
+.conn-section {
+  padding-top: 12px;
+  margin-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.conn-section:first-of-type {
+  padding-top: 4px;
+  margin-top: 4px;
+  border-top: none;
+}
+
+.conn-section-title {
+  margin: 0 0 2px;
+  padding: 0 2px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text);
+}
+
+.conn-section-desc {
+  margin: 0 0 4px;
+  padding: 0 2px;
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+/* A field that is not label-left / control-right: the models list needs the
+   card's full width, so its heading sits above it rather than beside it. */
+.conn-field {
+  padding: 10px 2px 4px;
+}
+
+.conn-field > .setting-desc {
+  margin-bottom: 8px;
+}
+
+/* "Required" beside a label. Words, not a bare asterisk: the mark has to
+   read in a screen reader and in the high-contrast theme too. */
+.setting-label-line {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.setting-required {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+/* The env-var key satisfies the required key row without filling it in. */
+.conn-key-env-hint {
+  margin: -4px 2px 2px;
+  padding-left: 9px;
+  border-left: 2px solid var(--border-strong);
+}
+
+/* A `<details>` disclosure that does not look like a second card: no frame,
+   a summary on the section rule, and the fields indented under it. */
+.setting-advanced {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.setting-advanced-summary {
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  color: var(--text-faint);
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.setting-advanced-summary:hover {
+  color: var(--text-secondary);
+}
+
+.setting-advanced-summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.setting-advanced[open] .setting-advanced-summary {
+  margin-bottom: 2px;
+  color: var(--text-secondary);
+}
+
+.setting-advanced-body {
+  padding-top: 2px;
 }
 
 /* The command line of an MCP card: one long shell command, wrapped rather than
@@ -1050,11 +1216,18 @@
   white-space: pre-wrap;
 }
 
-/* The protocol chip sits above the fields, on its own line: it is a fact
-   about the card, not a control. */
+/* The protocol chip: a label and the fixed value, on one line. It is a fact
+   about the card, not a control — nothing here is editable. */
 .settings-card-protocol {
   display: flex;
-  padding: 2px 2px 4px;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px 4px;
+}
+
+.conn-advanced-label {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
 }
 
 /* What "Test connection" found: one status line, then every model the endpoint

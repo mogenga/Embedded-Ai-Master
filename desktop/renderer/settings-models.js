@@ -63,6 +63,45 @@ export function connectionSummary(locale, { modelCount, latencyMs } = {}) {
 }
 
 /**
+ * Which kind of credential a service card holds, from what is typed into it.
+ *
+ * - `direct`: a key in `apiKey`, which the kernel prefers when both are set;
+ * - `env`: only the NAME of an environment variable;
+ * - `missing`: neither.
+ *
+ * `env` is deliberately not called "configured": the renderer cannot read the
+ * app's environment, so whether that variable is set is unknown here. The
+ * header states which kind it is rather than implying the service is ready
+ * (R3). Values are trimmed the way `resolveProviderApiKey` trims them, so a
+ * whitespace-only field is not a credential.
+ */
+export function serviceKeyKind({ apiKey, apiKeyEnv } = {}) {
+  const direct = typeof apiKey === "string" ? apiKey.trim() : "";
+  if (direct !== "") return "direct";
+  const env = typeof apiKeyEnv === "string" ? apiKeyEnv.trim() : "";
+  return env !== "" ? "env" : "missing";
+}
+
+/**
+ * What a collapsed card's header states about one service.
+ *
+ * `modelCount` counts named rows only (a card always carries at least one
+ * blank row), and a non-finite count reads as zero rather than NaN. `noBaseUrl`
+ * is true only for an empty field after trimming: a URL that is present but
+ * malformed is a different fact, and save/test state it where the field is.
+ */
+export function serviceHeaderFacts({ apiKey, apiKeyEnv, baseUrl, modelCount } = {}) {
+  const key = serviceKeyKind({ apiKey, apiKeyEnv });
+  const count = Number.isFinite(modelCount) ? Math.max(0, Math.trunc(modelCount)) : 0;
+  return {
+    key,
+    envName: key === "env" ? String(apiKeyEnv).trim() : "",
+    modelCount: count,
+    noBaseUrl: (typeof baseUrl === "string" ? baseUrl : "").trim() === "",
+  };
+}
+
+/**
  * The per-model values this page does not edit, copied for the trip through
  * the form and back.
  *

@@ -72,6 +72,32 @@
 - [x] 新增单测：`tests/desktop/provider-meta.test.js`（25 例）+ `provider-presets.test.js` 增补（`nextProviderName` / `isAutoProviderName`，`providerPickerOptions` 改为归属语义），两文件共 61 例通过。
 - [x] 文档同步：`docs/frontend-design.md` §7.6 模型面板与 §7.9 模型服务页；`desktop/MATRIX.md` 的 `saveProviders` 行。
 
+### 2.7 第五轮：删除「浏览工作区文件」目录树（2026-11-05，Task E）
+
+用户原话：「直接删除浏览工作区文件。」
+
+- [x] 删除 ⋯ 菜单 `#menu-browse-files` 行；删掉 tab 条里的 `data-pane="files"`。
+- [x] 删除 `#pane-tree`（`.tree-head` + `.tree-level#tree-list`）与 `app.js` 整棵目录树：`treeRequests` / `requestTree` / `renderTree` / `expandTreeRow` / `collapseTreeRow` / `renderTreeHead` / `treeRow` / `treeNote` / `markTreeSelection` / `activeTreePath` / `state.treePath` / `treeExpanded` / `readTreeExpanded` / `rememberTreeExpanded`、`tree` 事件分支、`host_exit` 队列清理、`openWorkbench` 的 `showFiles` 分支、`state` 与 `session_loaded` 的 cwd 重读。
+- [x] 删除 `styles.css` 的 `.tree-*`（head / root / refresh / row / children / level / note）、`.file-tree`、`.pane-tree`。
+- [x] 删除 i18n 键（en + zh）：`menuBrowseFiles`、`paneFiles`、`treeEmpty`、`treeLoading`、`treeNoWorkspace`、`treeTruncated`，以及只被树头使用的 `workspace`。
+- [x] **单文件内容面板保留**：`#file-root` / `openFile` / `renderFilePreview` / `getFile` 都不动，点工具行仍打开文件内容（已实测）。
+- [x] **面板记忆回退**：`lastWorkbenchPane()` 不再返回 `files`；旧档案里的 `files` 回退到 `serial`，`file` 只在仍有打开文件时恢复。
+- [x] 宿主 `getTree` handler 保留（本任务不碰宿主），渲染层已无调用方，`desktop/MATRIX.md` 已注明。
+
+### 2.8 第六轮：模型服务页全面重构（2026-11-05，Task F）
+
+用户原话：「设置中的模型服务页面全面重构美化。」
+
+- [x] **信息层级**：展开后的八行等权表单改成三层——必填（厂商 / 密钥 / 模型，行内「必填」文字标记）、基础设置（显示名称 / 服务名 / 地址）、高级（原生 `<details>`：密钥环境变量 + 协议）。`apiKeyEnv` 已有值时高级区默认展开。
+- [x] **折叠态徽章**：密钥（`已配置密钥` / `密钥来自环境变量` / `缺少密钥`）、模型数（`N 个模型`，0 转 warn）、地址（为空时才出现 `缺少地址`）。每枚都是**图标 + 文字**；`aria-label` 同步带上状态。
+- [x] **模型字段占整行**：`.conn-field` 让标题与说明在列表上方，不再被 56% 控制列压扁；`data-search` 仍可搜。
+- [x] **密钥必填与 env 互斥**：填了环境变量名时密钥行的「必填」隐藏，栏下出现一行说明。
+- [x] **服务名描述补后果**：改名会影响已有会话里记录的 `服务/模型` 引用。
+- [x] **纯函数 + 单测**：`serviceKeyKind` / `serviceHeaderFacts`（`settings-models.js`），`tests/desktop/settings-models.test.js` 新增 7 例。
+- [x] **搜索适配**：查询时展开折叠的卡片正文与 `<details>`，清空后只收回搜索打开的那些。
+- [x] **不改的东西**：数据结构（`providers.json` / `prometheus.providerMeta`）、`saveProviders` 单一路径、每一条校验、内核与宿主，全部未动。
+- [x] 文档：`docs/frontend-design.md` §7.9 新增「卡片信息层级」小节。
+
 ### 2.5 复核时补的（2026-11-05）
 
 - [x] `.chip-button` 去边框后，设置页「无匹配」空态的跳转按钮也失去了边框——那是空页面里唯一的可点物，静止态必须像个控件。加 `.settings-empty-actions .chip-button` 覆盖：设置页自己的边框 + 表面 + 无衬线字，hover 时边框转 accent。**这是去边框带来的连带影响，不是新设计**。
