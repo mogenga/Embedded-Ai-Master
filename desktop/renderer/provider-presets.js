@@ -1,0 +1,255 @@
+/**
+ * 常见模型厂商的预设：只用来把「模型服务」页里那三个查文档才能得到的常量
+ * 填进表单。
+ *
+ * 纯数据 + 纯函数，不碰 `document`，因此可以在 Node 里直接测
+ * （`tests/desktop/provider-presets.test.js`）。
+ *
+ * ## 值的出处
+ *
+ * 2026-11-04 从官方文档原文核实；DeepSeek / Kimi / GLM / Qwen / MiniMax
+ * 五家的 `/models` 端点另外实测过，均返回 401（端点存在、协议正确）。
+ * OpenAI 文档站从本机返回 403、Gemini 与 OpenAI 域名直连不通，所以这两家
+ * 只核实到端点存活——**OpenAI 因此不预置模型名**（R3：没核实过的不写）。
+ *
+ * ## baseUrl 的书写规则
+ *
+ * 内核用 `pathname.replace(/\/+$/, "") + "/chat/completions"` 拼接
+ * （`src/model/openai.ts`、`src/model/probe.ts` 同口径）。所以这里的地址
+ * **一律不带尾部斜杠**，并且必须自带版本段（`/v1`、`/v4`、
+ * `/compatible-mode/v1`、`/v1beta/openai`）。DeepSeek 官方地址本身不带
+ * `/v1`，照官方写。少写一段会得到 404，而界面会把它归咎于用户的密钥。
+ */
+
+/**
+ * @typedef {object} ProviderPreset
+ * @property {string} id     表单里的服务名，也是厂商栏的排序与匹配键
+ * @property {string} label  界面上显示的名字
+ * @property {string} baseUrl 已按上面的规则写好，不带尾斜杠
+ * @property {string[]} models 官方文档里的模型名；空数组表示不预置
+ * @property {{zh: string, en: string}} [note] 需要额外说明时的一句话
+ * @property {string} [docsUrl] 官方文档入口，供用户核对
+ */
+
+/** @type {readonly ProviderPreset[]} */
+export const PROVIDER_PRESETS = Object.freeze([
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    baseUrl: "https://api.deepseek.com",
+    models: ["deepseek-flash", "deepseek-v4-pro"],
+    docsUrl: "https://api-docs.deepseek.com/zh-cn/",
+  },
+  {
+    id: "kimi",
+    label: "Kimi",
+    baseUrl: "https://api.moonshot.cn/v1",
+    models: ["kimi-k3.1-pro", "kimi-k3", "kimi-k2.6", "kimi-k2.7-code"],
+    docsUrl: "https://platform.moonshot.cn/docs/api/chat",
+  },
+  {
+    id: "glm",
+    label: "GLM",
+    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    models: ["GLM-5.3", "GLM-5.2", "GLM-5.3-Flash", "GLM-4.7"],
+    note: {
+      zh: "模型名按官网标题的大小写填写；若请求返回「模型不存在」，请按控制台里的写法改。",
+      en: "Model ids follow the capitalisation on the official model page. If a request says the model does not exist, use the spelling shown in the console.",
+    },
+    docsUrl: "https://docs.bigmodel.cn/cn/guide/develop/openai/introduction",
+  },
+  {
+    id: "qwen",
+    label: "Qwen",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    models: ["qwen3.8-max", "qwen3.7-plus", "qwen3.8-flash"],
+    note: {
+      zh: "也可使用按工作区的地址：https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+      en: "A per-workspace endpoint also works: https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+    },
+    docsUrl: "https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope",
+  },
+  {
+    id: "minimax",
+    label: "MiniMax",
+    baseUrl: "https://api.minimax.cn/v1",
+    models: ["MiniMax-M3.1-Flash", "MiniMax-M3"],
+    docsUrl: "https://platform.minimaxi.com/docs/api-reference/text-openai-api",
+  },
+  {
+    id: "openai",
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    // 不预置：文档站从本机不可达，只核实到端点存活。模型名交给「测试连接」
+    // 列出来的那一步，用户点一下才进文件。
+    models: [],
+    docsUrl: "https://platform.openai.com/docs/api-reference",
+  },
+  {
+    id: "gemini",
+    label: "Gemini",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    models: ["gemini-3.8-flash"],
+    docsUrl: "https://ai.google.dev/gemini-api/docs/openai",
+  },
+]);
+
+/**
+ * 厂商标识用的两字母字标。
+ *
+ * 厂商栏列的是 `providers.json` 里的 provider，其中会有手写的
+ * `my-gateway`、改名后的 `deepseek2` 这类不在预设表里的名字——把字标写死在
+ * 预设里，就等于这些真实存在的 provider 没有字标可显示。所以按名字现算：
+ *
+ * - 取名字里的字母数字，前两个字符大写（`my-gateway` → `MY`）；
+ * - 只有一个字符时补一个中点（`x` → `X·`）；
+ * - 一个字母数字都没有时回退到 `?`（不编造一个看着像名字的字符）。
+ *
+ * 返回值始终是 2 个字符，厂商栏的方块才不会因为字标长度不同而跳动。
+ */
+export function providerMark(name) {
+  const compact = String(name ?? "").replace(/[^0-9A-Za-z]/g, "");
+  if (compact === "") return "?";
+  if (compact.length === 1) return `${compact.toUpperCase()}·`;
+  return compact.slice(0, 2).toUpperCase();
+}
+
+/** 按 id 索引的预设表，供需要按名字查的调用方用；顺序与数组一致。 */
+export const PRESETS_BY_ID = new Map(PROVIDER_PRESETS.map((preset) => [preset.id, preset]));
+
+/** 按 id 找预设；找不到返回 `undefined`（手写 provider 的正常情况）。 */
+export function presetById(id) {
+  return PRESETS_BY_ID.get(id);
+}
+
+/**
+ * 「厂商」下拉要摆出来的选项，以及这张卡当前属于哪一家。
+ *
+ * 选中状态来自**这张卡记下的厂商归属**（`provider-meta.js` 的 `vendorIdFor`），
+ * 不再从服务名反查：同一个厂商可以有多张卡（`deepseek`、`deepseek-2`），名字
+ * 与厂商已经是两件事。归属为 `null` 是用户明确选了「自定义」。
+ *
+ * 选项一律可选。旧版本把「另一张卡已占用同名」的厂商置灰，那条规则的前提是
+ * 「服务名 = 厂商 id」——现在服务名由 `nextProviderName` 自动加后缀，两张卡
+ * 可以同时属于 DeepSeek，置灰反而挡住了本任务要的用法。
+ *
+ * @param {string | null} vendorId 这张卡的厂商归属（预设 id，或 null = 自定义）
+ * @returns {{selectedId: string | null, custom: boolean, options: {id: string, label: string, selected: boolean}[]}}
+ */
+export function providerPickerOptions(vendorId) {
+  const selected = typeof vendorId === "string" ? presetById(vendorId.trim()) : undefined;
+  return {
+    selectedId: selected?.id ?? null,
+    custom: selected === undefined,
+    options: PROVIDER_PRESETS.map((preset) => ({
+      id: preset.id,
+      label: preset.label,
+      selected: preset.id === selected?.id,
+    })),
+  };
+}
+
+/**
+ * Is this service name one this page would have generated by itself?
+ *
+ * True for an empty name, for the current vendor's id and its `-N` suffixes,
+ * and for the custom `providerN` form. Such a name is free to follow a vendor
+ * change; a hand-written one (`my-gateway`, `deepseek-home`) is not — renaming
+ * a configured service is not what changing its vendor is asking for.
+ */
+export function isAutoProviderName(name, vendorId) {
+  const text = typeof name === "string" ? name.trim() : "";
+  if (text === "") return true;
+  if (/^provider\d+$/.test(text)) return true;
+  const vendor = typeof vendorId === "string" ? vendorId.trim() : "";
+  if (vendor === "") return false;
+  if (text === vendor) return true;
+  const escaped = vendor.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}-\\d+$`).test(text);
+}
+
+/**
+ * 新卡片该叫什么服务名。
+ *
+ * `providers.json` 是以服务名为键的 map，同名键不可能共存，所以同厂商的第
+ * 二张卡必须换一个键：
+ *
+ * - 出厂厂商：第一张用厂商 id（`deepseek`，与旧版本一致），之后 `deepseek-2`、
+ *   `deepseek-3`；
+ * - 自定义：没有厂商 id 可依，用 `provider1`、`provider2`。
+ *
+ * `takenNames` 传**其余**卡片的名字；被改名的这张卡不在里面，所以重选同一家
+ * 厂商是「名字不变」，而不是把自己逼到 `-2`。
+ */
+export function nextProviderName(takenNames, vendorId) {
+  const taken = new Set(
+    (Array.isArray(takenNames) ? takenNames : [])
+      .map((name) => (typeof name === "string" ? name.trim() : ""))
+      .filter((name) => name !== ""),
+  );
+  const vendor = typeof vendorId === "string" ? vendorId.trim() : "";
+  if (vendor !== "") {
+    if (!taken.has(vendor)) return vendor;
+    let index = 2;
+    while (taken.has(`${vendor}-${index}`)) index += 1;
+    return `${vendor}-${index}`;
+  }
+  let index = 1;
+  while (taken.has(`provider${index}`)) index += 1;
+  return `provider${index}`;
+}
+
+/**
+ * 从下拉里选中一家厂商之后，卡片上要变成什么。
+ *
+ * - `preset` 为 `null`（「自定义」）时返回 `null`：什么也不改，这正是「自定义」
+ *   的含义——已经填好的东西不该因为一次选择被清空。
+ * - `name` 是**建议的服务名**（预设 id）。是否采用由调用方判定：页面自己生成的
+ *   名字跟着换，手写的名字不动（`isAutoProviderName`），撞名时再加后缀
+ *   （`nextProviderName`）。
+ * - `baseUrl` 只在它**不是用户手写**时才被替换：空着，或者正好等于预设表里
+ *   某一家的地址（说明它是上一次选择填进去的）。用户手填的公司网关不会被一次
+ *   换厂商的点击冲掉——地址栏就在旁边，显示的就是真正会用的那一个，留着它不会
+ *   让界面说假话；而「DeepSeek → Kimi」这种连着换的路径仍然会更新地址，否则
+ *   卡片会顶着 Kimi 的名字连到 DeepSeek。
+ *
+ * 返回 `null` 表示「什么也不改」，调用方据此决定要不要 `markDirty()`——没有
+ * 变化就不该把页面标成「未保存」。
+ */
+export function presetFillFor(preset, { baseUrl = "" } = {}) {
+  if (!preset || typeof preset.id !== "string" || preset.id === "") return null;
+  const existing = typeof baseUrl === "string" ? baseUrl : "";
+  const trimmed = existing.trim();
+  const replaceable = trimmed === "" || PROVIDER_PRESETS.some((entry) => entry.baseUrl === trimmed);
+  return {
+    name: preset.id,
+    baseUrl: replaceable ? preset.baseUrl : existing,
+  };
+}
+
+/**
+ * 「推荐模型」chip 要显示哪些名字。
+ *
+ * 已经在卡片里的不重复给出：点一下会得到两行同名模型，保存时被
+ * `connModelDuplicate` 拦下——那个错误应该来自用户的手误，不该由我们造。
+ * 返回顺序沿用预设表，名字去重按 trim 后的原文。
+ *
+ * @param {readonly string[]} presetModels
+ * @param {string[]} listedIds 卡片当前已列的模型名
+ */
+export function presetModelSuggestions(presetModels, listedIds) {
+  const listed = new Set(
+    (Array.isArray(listedIds) ? listedIds : [])
+      .map((id) => (typeof id === "string" ? id.trim() : ""))
+      .filter((id) => id !== ""),
+  );
+  const seen = new Set();
+  const out = [];
+  for (const raw of Array.isArray(presetModels) ? presetModels : []) {
+    const name = typeof raw === "string" ? raw.trim() : "";
+    if (name === "" || seen.has(name) || listed.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
