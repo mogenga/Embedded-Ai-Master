@@ -170,10 +170,6 @@ export const dictionaries = {
     settingsAbout: "About",
     checkUpdate: "Check for updates",
     updateAvailableBanner: (version) => `Embedded AI Master ${version} is available (About → Check for updates).`,
-    suggestionAccept: "Tab to accept",
-    suggestRunTests: "Run the tests to check that.",
-    suggestFixErrors: "Fix the errors that came up.",
-    suggestReviewDiff: "Show me the diff of what changed.",
     // The About page's update labels live in `settings-i18n.js`: that page reads
     // `S()`, not this dictionary. `updateChecking` and friends used to be
     // duplicated here for a builder that read `t`; keeping both copies let them
@@ -613,10 +609,6 @@ export const dictionaries = {
     settingsAbout: "关于",
     checkUpdate: "检查更新",
     updateAvailableBanner: (version) => `有新版 Embedded AI Master ${version}（关于 → 检查更新）。`,
-    suggestionAccept: "按 Tab 采用",
-    suggestRunTests: "跑一遍测试验证一下。",
-    suggestFixErrors: "把刚才报的错修掉。",
-    suggestReviewDiff: "给我看改动的 diff。",
     terminalPlaceholder: "在工作区运行命令…",
     terminalExited: "终端已退出，重启后可以继续执行。",
     terminalRestart: "重启",

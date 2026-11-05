@@ -3611,32 +3611,6 @@ mark.find-hit.current {
   border-color: var(--border-strong);
 }
 
-/* A next-step suggestion sits above the textarea as ghost text, not in it: the
-   draft the user is typing must never be overwritten by a hint. */
-.composer-suggestion {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 2px 10px 4px;
-  font-family: var(--sans);
-  font-size: var(--text-sm);
-  color: var(--text-faint);
-}
-
-.composer-suggestion-text {
-  color: var(--text-secondary);
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.composer-suggestion-hint {
-  margin-left: auto;
-  color: var(--text-faint);
-  font-size: var(--text-xs);
-}
-
 .composer-input-row {
   display: flex;
   align-items: flex-end;

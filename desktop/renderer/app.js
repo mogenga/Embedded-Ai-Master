@@ -56,8 +56,6 @@ const terminalPrompt = $("terminal-prompt");
 
 const state = {
   busy: false,
-  /** The next-turn suggestion currently offered; Tab accepts it. */
-  suggestion: "",
   goalRun: null,
   mode: "ask",
   effort: "auto",
@@ -1250,41 +1248,6 @@ planStripToggle?.addEventListener("click", () => {
 });
 
 /* ---------- state ---------- */
-
-/**
- * Suggest the next thing to ask, after a turn ends.
- *
- * Drawn from the turn that just finished rather than a generic list: "run the
- * tests" is only a good suggestion when the agent just said they pass. Three
- * shapes cover what a follow-up usually is — verify, explain, continue.
- */
-function suggestNextTurn() {
-  const suggestion = $("composer-suggestion");
-  if (!suggestion) return;
-  const text = summariseLastAssistant();
-  if (!text || localStorage.getItem("prometheus.suggestions") === "0") {
-    suggestion.hidden = true;
-    return;
-  }
-  const lower = text.toLowerCase();
-  let next = "";
-  if (/test/.test(lower) && !/pass(ed|ing)?/.test(lower)) next = t.suggestRunTests;
-  else if (/error|fail/.test(lower)) next = t.suggestFixErrors;
-  else if (/implemented|added|changed/.test(lower)) next = t.suggestReviewDiff;
-  if (!next) {
-    suggestion.hidden = true;
-    return;
-  }
-  state.suggestion = next;
-  suggestion.querySelector(".composer-suggestion-text").textContent = next;
-  suggestion.hidden = false;
-}
-
-function clearSuggestion() {
-  state.suggestion = "";
-  const suggestion = $("composer-suggestion");
-  if (suggestion) suggestion.hidden = true;
-}
 
 function setBusy(busy) {
   state.busy = busy;
@@ -3430,9 +3393,9 @@ function handleEvent(message) {
       // leave a localStorage key written by a control that no longer exists.
       // `restartSession` left for the same reason: the launch no longer
       // restores a session, so the toggle would describe a behaviour that
-      // does not exist.
+      // does not exist. `suggestions` followed on 2026-11-05 with the feature
+      // itself: the next-turn hint is gone, so nothing reads that key.
       const map = {
-        suggestions: "suggestions",
         updateCheck: "updateCheck",
       };
       const key = map[message.key];
@@ -3512,7 +3475,6 @@ function handleEvent(message) {
 
     case "run_start":
       setBusy(true);
-      clearSuggestion();
       endThinking();
       // Keep typing possible while the turn runs; the message is queued.
       input.focus();
@@ -3962,7 +3924,6 @@ function handleEvent(message) {
       flushAssistant();
       endThinking();
       setBusy(false);
-      suggestNextTurn();
       // The host's `run_end` carries no occupancy — the turn's `usage` event
       // already delivered it. Passing `undefined` keeps that figure instead of
       // clearing a measurement the run just made.
@@ -6159,7 +6120,6 @@ function submit() {
 
 input.addEventListener("input", () => {
   autoSize();
-  if (input.value.trim()) clearSuggestion();
 });
 input.addEventListener("keydown", (event) => {
   if (!commandMenu.hidden && commandState) {
@@ -6218,14 +6178,6 @@ input.addEventListener("keydown", (event) => {
       input.setSelectionRange(input.value.length, input.value.length);
       return;
     }
-  }
-  if (event.key === "Tab" && state.suggestion && !input.value.trim() && !event.shiftKey) {
-    event.preventDefault();
-    input.value = state.suggestion;
-    clearSuggestion();
-    autoSize();
-    input.focus();
-    return;
   }
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
