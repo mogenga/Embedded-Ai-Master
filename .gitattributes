@@ -1,0 +1,31 @@
+# 换行与文本判定。
+#
+# 仓库的 index 已经是 100% LF：`git ls-files --eol` 里没有一条 i/crlf。
+# 这里把**工作区**也钉成 LF，让 checkout 出来的内容与工具（node / tsc /
+# vitest / electron）写出的内容一致，不再出现「400 多个文件在 CRLF 与 LF
+# 之间来回跳」的假改动。
+#
+# 之所以敢全局 eol=lf：仓库里没有 .bat / .cmd / .ps1，没有需要 CRLF 才能
+# 运行的脚本；Node、.NET 与 YAML 解析器对两者都接受。
+* text=auto eol=lf
+
+# 二进制：不让 git 尝试 diff / merge。
+# （git 本来就能自动识别这些，写出来是为了明确意图，也防止将来某个
+#  小尺寸图片被启发式误判成文本。）
+*.png  binary
+*.ico  binary
+*.jpg  binary
+*.jpeg binary
+*.pdf  binary
+*.zip  binary
+*.exe  binary
+*.dll  binary
+*.node binary
+
+# Keil 工程夹具按 latin1 逐字节读写（mcp-servers/keil/keilProjectFile.ts
+# 的契约：UTF-8 往返会损坏编码）。**不要**给它加 -text：index 里现在是
+# LF，改成 -text 会让工作区的 CRLF 与 index 的 LF 立刻对不上，两个夹具
+# 会变成幽灵改动；保持默认的 text 归一化，两边就都是 LF。
+#
+# 语料正文与查询集（mcp-servers/kb/kb、mcp-servers/datasheet/corpus）走
+# gitignore，不进版本库，sha256 清单因此不受换行影响——不要把它们加进来。
