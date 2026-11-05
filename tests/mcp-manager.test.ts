@@ -396,24 +396,56 @@ describe("McpManager 工具调用", () => {
     expect(Date.now() - started).toBeLessThan(600);
   });
 
+  /**
+   * 这条曾经是全量跑里最稳定的一条红。
+   *
+   * 根因不是超时阈值，是**竞速**：调用超时后 `beginDispose` 异步跑
+   * `terminateAndWait(pid)`，而 `terminateAndWait` 的预算默认
+   * `DEFAULT_TERMINATE_TIMEOUT_MS = 2000`。紧接着的下一次 `call` 会
+   * `await state.terminating`，等满仍没死就把状态标成 `uncertain`，返回
+   * `mcp_uncertain` 而不是重连。
+   *
+   * 实测（`PID_LOG`+`isAlive` 打点）：空载时「杀到确认死亡」约 950–1100 ms，
+   * 已经是 2 s 预算的一半；同一台机器上并发跑 7 份本文件时该值升到
+   * 约 2080 ms——**刚好越线**，于是七份全红。也就是说这条用例测的是
+   * 「2 秒内 taskkill 能收走一个 Node 子进程」，那是机器的负载，不是 manager
+   * 的语义。
+   *
+   * 修法：预算是 `McpManagerOptions.terminateTimeoutMs` 的既有可注入项，把它
+   * 放大到 10 s（见下方构造），用例就只锁自己真正要锁的东西——超时 → 旧进程
+   * 被收 → 下一次调用重连成功 → 一共只 spawn 两个进程。断言一条未删：进程
+   * 仍须真的消失（`waitFor(isAlive → false)`），pids 仍须恰好两条。
+   *
+   * 「终止未确认时拒绝重连并返回 mcp_uncertain」那条仍用很小的预算（50 ms）
+   * 覆盖 `uncertain` 分支本身，两个方向都有人管。
+   */
   it("timeout 后关闭 server，后续调用重连且不残留旧进程", async () => {
     const root = tempRoot();
     const pidLog = path.join(root, "pid.log");
+    // 终止预算放大到 10 s。默认 2 s 在这里不是被测对象，而是一条「机器多快
+    // 能收走一个 Node 子进程」的门槛：实测空载 ~1.0 s，满载 ~2.08 s，越线后
+    // manager 按设计标 `uncertain` 并拒绝重连，于是本用例红在一个与重连无关
+    // 的量上。预算已经是 `McpManagerOptions` 的可注入项，测试侧直接注入。
     const manager = track(
-      new McpManager([config("echo", { timeoutMs: 100, env: { PID_LOG: pidLog } })]),
+      new McpManager(
+        [config("echo", { timeoutMs: 100, env: { PID_LOG: pidLog } })],
+        { terminateTimeoutMs: 10_000 },
+      ),
     );
     await manager.connectAll();
     const firstPid = Number(readFileSync(pidLog, "utf8").trim().split("\n")[0]);
 
     const timedOut = await manager.call("echo", "slow", { ms: 800, tag: "timeout" }, signal());
     expect(timedOut).toMatchObject({ isError: true, code: "mcp_timeout" });
-    await waitFor(() => !isAlive(firstPid), 3_000);
+    // 旧进程必须真的消失——这是断言，不是等待技巧。上限与上面注入的终止预算
+    // 同量级：满载时 `taskkill` 走完可能要好几秒（实测 6 份并发 > 3 s）。
+    await waitFor(() => !isAlive(firstPid), 15_000);
 
     const after = await manager.call("echo", "echo", { text: "after-timeout" }, signal());
     expect(after).toMatchObject({ isError: false, code: "ok", text: "after-timeout" });
     const pids = readFileSync(pidLog, "utf8").trim().split("\n");
     expect(pids).toHaveLength(2);
-  });
+  }, 30_000);
 
   it("终止未确认时拒绝重连并返回 mcp_uncertain", async () => {
     const root = tempRoot();

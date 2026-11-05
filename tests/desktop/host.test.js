@@ -258,10 +258,27 @@ function runHost(home, commands, options = {}) {
     });
     const events = [];
     let buffer = "";
-    const timer = setTimeout(() => {
+    let lastCommand;
+    const timedOut = () => {
       child.kill();
-      reject(new Error(`host timed out; events: ${events.map((event) => event.type).join(",")}`));
-    }, options.timeoutMs ?? 20_000);
+      // The old message said only which event types had arrived, which does not
+      // distinguish "the host never booted" from "it booted and then sat on the
+      // command I just sent" — the two need different fixes. Name the last
+      // command written, the last three events, and whether the process is
+      // still alive, so a timeout row is diagnosable without a rerun.
+      const tail = events.slice(-3).map((event) => JSON.stringify(event).slice(0, 300));
+      return new Error([
+        "host timed out",
+        `last command: ${JSON.stringify(lastCommand)}`,
+        `last events (${events.length} total): ${tail.join(" | ") || "(none)"}`,
+        `process alive: ${child.exitCode === null && child.signalCode === null} (code ${child.exitCode}, signal ${child.signalCode})`,
+        `stderr: ${events.filter((event) => event.type === "stderr").map((event) => event.text).join("") || "(none)"}`,
+      ].join("\n"));
+    };
+    const timer = setTimeout(
+      () => reject(timedOut()),
+      options.timeoutMs ?? 20_000,
+    );
 
     child.stdout.on("data", (chunk) => {
       buffer += chunk.toString("utf8");
@@ -289,7 +306,10 @@ function runHost(home, commands, options = {}) {
       resolve(events);
     });
 
-    for (const command of commands) child.stdin.write(`${JSON.stringify(command)}\n`);
+    for (const command of commands) {
+      lastCommand = command;
+      child.stdin.write(`${JSON.stringify(command)}\n`);
+    }
   });
 }
 

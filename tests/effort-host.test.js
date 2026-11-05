@@ -106,9 +106,19 @@ function runHost(home, commands, options = {}) {
     });
     const events = [];
     let buffer = "";
+    let lastCommand;
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error(`host timed out; events: ${events.map((event) => event.type).join(",")}`));
+      // Name the last command, the last three events and whether the process is
+      // still alive: "events: a,b,c" alone cannot tell a host that never booted
+      // from one that booted and stalled on the command just sent.
+      const tail = events.slice(-3).map((event) => JSON.stringify(event).slice(0, 300));
+      reject(new Error([
+        "host timed out",
+        `last command: ${JSON.stringify(lastCommand)}`,
+        `last events (${events.length} total): ${tail.join(" | ") || "(none)"}`,
+        `process alive: ${child.exitCode === null && child.signalCode === null} (code ${child.exitCode}, signal ${child.signalCode})`,
+      ].join("\n")));
     }, options.timeoutMs ?? 20_000);
 
     child.stdout.on("data", (chunk) => {
@@ -137,7 +147,10 @@ function runHost(home, commands, options = {}) {
       resolve(events);
     });
 
-    for (const command of commands) child.stdin.write(`${JSON.stringify(command)}\n`);
+    for (const command of commands) {
+      lastCommand = command;
+      child.stdin.write(`${JSON.stringify(command)}\n`);
+    }
   });
 }
 

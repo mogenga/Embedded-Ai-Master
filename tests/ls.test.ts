@@ -3,7 +3,7 @@ import type { Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { lsTool } from "../src/tools/ls.js";
 import type { ToolCtx } from "../src/tools/types.js";
 
@@ -43,6 +43,30 @@ function run(
 ) {
   return lsTool.execute(input, makeCtx(workdir), signalOverride);
 }
+
+/**
+ * Create `count` files named f000… under `workdir`.
+ *
+ * The two truncation cases used to build 500 entries one `writeFileSync` at a
+ * time inside the test body. That is ~250 ms alone, but on a loaded machine the
+ * 501 stat-free creates plus the tool's own per-entry `lstat` creep toward
+ * vitest's 5 s per-test default — observed as a timeout under the full suite
+ * while the same file passes alone. The fixture work is not what these cases
+ * assert, so it moves here: `beforeAll` runs outside the test timeout, and the
+ * assertion itself then only has to cover the directory read.
+ *
+ * It stays real files on a real filesystem — the point of the case is that
+ * `ls` truncates what `readdir` actually returns, which a mocked dirent list
+ * would not prove.
+ */
+function writeMany(workdir: string, count: number): void {
+  for (let index = 0; index < count; index++) {
+    writeAt(workdir, `f${String(index).padStart(3, "0")}.txt`);
+  }
+}
+
+/** 造 500+ 个文件在满载下可能超过 vitest 的 5 s 默认，钩子单独给一个上限。 */
+const MANY_ENTRIES_TIMEOUT_MS = 60_000;
 
 afterEach(() => {
   if (passthrough) readdirMock.mockImplementation(passthrough);
@@ -230,35 +254,51 @@ describe("ls 执行", () => {
     expect(r.code).toBe("path_outside_workdir");
   });
 
-  it("超过 500 条时只返回 500 条并如实标记 truncated", async () => {
-    const workdir = makeWorkdir();
-    for (let index = 0; index < 501; index++) {
-      writeAt(workdir, `f${String(index).padStart(3, "0")}.txt`);
-    }
+  // 这两条以前在用例体内逐个 writeFileSync 造 500 个文件。单机约 350–400 ms，
+  // 但那是 500 次真实创建，满载时接近 vitest 默认 5 s 的用例超时——全量跑偶尔
+  // 红、单文件跑必绿，红的是「造夹具」而不是「ls 截断」。
+  //
+  // 夹具移到 beforeAll：它不进任何一条用例的超时计时，而断言覆盖的东西不变
+  // （仍然是真实文件系统上由 readdir 返回的 500/501 条）。目录按下标分两个，
+  // 免得两条用例互相看见对方的条目。
+  describe("500 条上限", () => {
+    let over: string;
+    let exact: string;
 
-    const r = await run(workdir, {});
-    const lines = r.text.split("\n");
+    beforeAll(() => {
+      // 不进 `tempDirs`：外层 `afterEach` 每条用例后都会清空它，那样第二条
+      // 用例就找不到目录了（实测报 `directory not found: .`）。这两个目录由
+      // 本组自己的 `afterAll` 收。
+      over = mkdtempSync(path.join(tmpdir(), "eam-ls-many-"));
+      writeMany(over, 501);
+      exact = mkdtempSync(path.join(tmpdir(), "eam-ls-exact-"));
+      writeMany(exact, 500);
+    }, MANY_ENTRIES_TIMEOUT_MS);
 
-    expect(lines).toHaveLength(501);
-    expect(lines[0]).toBe("f  0.0 B  f000.txt");
-    expect(lines[499]).toBe("f  0.0 B  f499.txt");
-    expect(lines[500]).toBe("[truncated]");
-    expect(r.detail).toMatchObject({ truncated: true });
-    expect((r.detail as { entries: unknown[] }).entries).toHaveLength(500);
-  });
+    afterAll(() => {
+      for (const dir of [over, exact]) rmSync(dir, { recursive: true, force: true });
+    });
 
-  it("恰好 500 条不标记 truncated", async () => {
-    const workdir = makeWorkdir();
-    for (let index = 0; index < 500; index++) {
-      writeAt(workdir, `f${String(index).padStart(3, "0")}.txt`);
-    }
+    it("超过 500 条时只返回 500 条并如实标记 truncated", async () => {
+      const r = await run(over, {});
+      const lines = r.text.split("\n");
 
-    const r = await run(workdir, {});
-    const lines = r.text.split("\n");
+      expect(lines).toHaveLength(501);
+      expect(lines[0]).toBe("f  0.0 B  f000.txt");
+      expect(lines[499]).toBe("f  0.0 B  f499.txt");
+      expect(lines[500]).toBe("[truncated]");
+      expect(r.detail).toMatchObject({ truncated: true });
+      expect((r.detail as { entries: unknown[] }).entries).toHaveLength(500);
+    });
 
-    expect(lines).toHaveLength(500);
-    expect(lines).not.toContain("[truncated]");
-    expect(r.detail).toMatchObject({ truncated: false });
+    it("恰好 500 条不标记 truncated", async () => {
+      const r = await run(exact, {});
+      const lines = r.text.split("\n");
+
+      expect(lines).toHaveLength(500);
+      expect(lines).not.toContain("[truncated]");
+      expect(r.detail).toMatchObject({ truncated: false });
+    });
   });
 
   it("符号链接只标记不跟随", async (ctx) => {

@@ -59,16 +59,27 @@ function detailOf(result: ToolResult): Record<string, unknown> {
   return (result.detail ?? {}) as Record<string, unknown>;
 }
 
+/**
+ * 轮询直到 `probe` 给出值。
+ *
+ * 间隔从 25 ms 起步并按 1.5 倍退避（封顶 1 s）。固定 25 ms 时，一条要等
+ * 500 ms 的作业会被问 20 次、一条等 5 s 的被问 200 次；每次都是一次
+ * `terminalBgCheckTool.execute`，在满载机器上这些空转本身就是负载的一部分。
+ * 退避让「很快就绪」仍然在 25 ms 内拿到，而「还要等很久」不再把 CPU 花在
+ * 明知不会变的轮询上。判据仍是同一个谓词，只是问得少。
+ */
 async function waitFor<T>(
   probe: () => T | undefined | Promise<T | undefined>,
   timeoutMs = 10_000,
 ): Promise<T> {
   const deadline = Date.now() + timeoutMs;
+  let interval = 25;
   for (;;) {
     const value = await probe();
     if (value !== undefined) return value;
     if (Date.now() > deadline) throw new Error("condition not met in time");
-    await new Promise((resolve) => setTimeout(resolve, 25));
+    await new Promise((resolve) => setTimeout(resolve, interval));
+    interval = Math.min(Math.round(interval * 1.5), 1_000);
   }
 }
 
@@ -578,9 +589,10 @@ describe("terminal_bg_check 查询", () => {
 
   it("别的会话看不到本会话的作业", async () => {
     const workdir = makeWorkdir();
+    const owner = makeCtx(workdir, "s-owner");
     const r = await terminalBgTool.execute(
       { command: nodeCommand("setTimeout(() => {}, 30000)") },
-      makeCtx(workdir, "s-owner"),
+      owner,
       new AbortController().signal,
     );
     const id = String(detailOf(r).id);
@@ -593,28 +605,34 @@ describe("terminal_bg_check 查询", () => {
 
     expect(other.isError).toBe(true);
     expect(other.code).toBe("background_job_unknown");
+
+    // 由属主会话收掉，而不是留给 afterEach：`killAllBackgroundJobs` 对
+    // Windows 上的每个作业先跑两次 `taskkill /T /F`（实测各约 1 s），
+    // 一条用例在 afterEach 里省下的两秒比它自己跑的还长。
+    await terminalBgCheckTool.execute({ id, kill: true }, owner, new AbortController().signal);
+    await waitForExit(Number(detailOf(r).pid));
   });
 
   it("不带 id 时列出本会话的作业", async () => {
     const workdir = makeWorkdir();
-    const sessionId = "s-list";
+    const ctx = makeCtx(workdir, "s-list");
     const r = await terminalBgTool.execute(
       { command: nodeCommand("setTimeout(() => {}, 30000)") },
-      makeCtx(workdir, sessionId),
+      ctx,
       new AbortController().signal,
     );
     const id = String(detailOf(r).id);
 
-    const list = await terminalBgCheckTool.execute(
-      {},
-      makeCtx(workdir, sessionId),
-      new AbortController().signal,
-    );
+    const list = await terminalBgCheckTool.execute({}, ctx, new AbortController().signal);
 
     expect(list.isError).toBe(false);
     expect(list.text).toContain(id);
     expect(list.text).toContain("running");
     expect(Array.isArray(detailOf(list).jobs)).toBe(true);
+
+    // 同上：在用例里收掉，别让 afterEach 为它付两次 taskkill。
+    await terminalBgCheckTool.execute({ id, kill: true }, ctx, new AbortController().signal);
+    await waitForExit(Number(detailOf(r).pid));
   });
 
   it("空会话的列表不是错误", async () => {
