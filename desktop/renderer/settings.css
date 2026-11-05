@@ -2297,3 +2297,33 @@
   height: 11px;
   color: var(--accent);
 }
+
+/* The knowledge base's corpus path: a long absolute path in the value column.
+ *
+ * One line, truncated from the **left**. Wrapping it was worse than the left
+ * alignment it replaced: a path broken mid-segment reads as two paths. The
+ * interesting end of a path is its tail (`…\mcp-servers\kb\kb`), so the
+ * ellipsis belongs at the start.
+ *
+ * `direction: rtl` moves the overflow to the logical start, but it also
+ * reverses the visual order of the segments — which is why the text needs an
+ * inner `ltr` box. The two directions have to sit on different elements;
+ * putting `unicode-bidi: plaintext` on one element (the first attempt) lets
+ * the browser derive direction from the first strong character, so `E:\` won
+ * and the path truncated at the tail like it always had. The full path stays
+ * in `title`. */
+.kb-root-path {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.kb-root-path > span {
+  direction: ltr;
+  unicode-bidi: embed;
+}

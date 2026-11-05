@@ -2675,7 +2675,13 @@ function buildConnectionPage() {
         // so it opens, ready to be filled in.
         card.expand();
         markDirty();
-        card.nameInput.focus();
+        // Bring it into view before focusing. The list grows downward and the
+        // button sits below it, so with two or three services the new card can
+        // land entirely off-screen: focus had already moved there, and a
+        // focused-but-invisible field is a click that looks like it did
+        // nothing. `block: "nearest"` scrolls only when it has to.
+        card.node.scrollIntoView({ block: "nearest", inline: "nearest" });
+        card.nameInput.focus({ preventScroll: true });
       },
       { quiet: true },
     ),
@@ -3380,6 +3386,25 @@ function buildMcpPage() {
  * the page telling the user their corpus is empty when it is really missing
  * (R3) — and "empty" is the one answer that would make them stop looking.
  */
+/**
+ * The corpus root, rendered so a long absolute path loses its head rather
+ * than its tail.
+ *
+ * Two elements are needed, and the split is not cosmetic: `direction: rtl` on
+ * the outer box is what puts `text-overflow`'s ellipsis at the *start*, while
+ * the inner `direction: ltr` span keeps the segments in readable order. One
+ * element cannot do both — its own `direction` decides truncation, and a
+ * bidi override on the same box either reverses the text or is ignored.
+ *
+ * The full path is the `title`, so truncation never hides it for good.
+ */
+function kbRootPath(root) {
+  const code = el("code", "setting-code kb-root-path");
+  code.title = root;
+  code.appendChild(el("span", "", root));
+  return code;
+}
+
 function buildKbPage() {
   const s = S();
   const pane = sPage(s.pageKb, s.pageKbDesc);
@@ -3810,7 +3835,21 @@ function buildKbPage() {
 
     body.appendChild(
       sGroup(s.kbGroupStatus, [
-        sRow({ label: s.kbRoot, desc: sourceNote(kb), control: el("code", "setting-code", root), wide: true }),
+        // Not `wide`: a wide row hands the control the whole line, which left
+        // the path starting at the label and running across the row. The path
+        // is a value belonging to the label, so it sits in the right-hand
+        // column like every other value on this page — right-aligned against
+        // the same edge as the counts and badges below it.
+        sRow({
+          label: s.kbRoot,
+          desc: sourceNote(kb),
+          // The path is the value, so it sits in the right-hand column — but
+          // a path does not wrap, so it truncates from the left and keeps the
+          // tail, which is the part that tells two corpus folders apart.
+          // The inner span carries the left-to-right order while the box
+          // around it carries the right-to-left truncation edge.
+          control: kbRootPath(root),
+        }),
         sRow({
           label: s.kbFileCount,
           control: el("span", "", s.kbFileCountValue.replace("{n}", String(kb.fileCount ?? 0))),
