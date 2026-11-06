@@ -183,6 +183,49 @@ export function replaceElement(xml: string, tag: string, value: string, options:
 }
 
 /**
+ * Copy the files a project edit will rewrite, before uVision touches them.
+ *
+ * Project edits are handed to the running uVision, which writes the file only
+ * when it exits — so there is no moment at which this process can read "the
+ * old bytes" once the edit is under way. The backup is taken up front instead:
+ * it is the state from just before the edit, and it is the only way back if
+ * uVision refuses, crashes, or writes something unexpected at close.
+ *
+ * Both the `.uvprojx` and, when it exists, the `.uvoptx` are copied: uVision
+ * may rewrite either one. The backup sits in the same directory as its file
+ * (the path is the file path with `.prometheus.bak` appended), so it cannot
+ * escape the project directory, and the suffix is one project discovery skips
+ * (`\.(bak|orig|backup|save|tmp)$` in `project.ts` / `projectLookup.ts`), so a
+ * backup is never opened as the project. Like `writeProjectField`, it is
+ * overwritten on each edit: the file always holds the state from just before
+ * the most recent change.
+ *
+ * **Fail-closed**: a backup that cannot be written means nothing is edited.
+ */
+export function backupProjectFiles(projectFile: string): { ok: boolean; backups: string[]; reason?: string } {
+  const files = [projectFile];
+  const options = optionFileFor(projectFile);
+  if (existsSync(options)) files.push(options);
+  const backups: string[] = [];
+  for (const file of files) {
+    const backup = `${file}.prometheus.bak`;
+    try {
+      copyFileSync(file, backup);
+      backups.push(backup);
+    } catch (error) {
+      return {
+        ok: false,
+        backups,
+        reason:
+          `could not back up ${file} before editing ` +
+          `(${error instanceof Error ? error.message : String(error)}); the project was not edited`,
+      };
+    }
+  }
+  return { ok: true, backups };
+}
+
+/**
  * Write a field back to the file that owns it, after taking a backup.
  *
  * The backup is the price of editing a file a closed-source IDE also writes.

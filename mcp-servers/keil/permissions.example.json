@@ -49,7 +49,7 @@
         { "key": "action", "in": ["add_group", "add_file", "remove_group", "remove_file", "set_option", "set_target", "set_output_name", "close"] }
       ],
       "action": "ask",
-      "reason": "工程文件编辑(.uvprojx/.uvoptx):经 uVision 落盘,编辑前自动备份"
+      "reason": "工程文件编辑(.uvprojx/.uvoptx):经 uVision 落盘,编辑前自动备份为 .prometheus.bak,备份失败则不编辑"
     }
   ]
 }

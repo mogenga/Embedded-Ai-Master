@@ -23,7 +23,13 @@ const BUILD_ACTIONS = new Set([
 
 const DEBUG_STATE = new Set(["breakpoint_add", "breakpoint_delete", "watch_add", "watch_remove"]);
 
-const PROJECT_EDIT = new Set(["add_group", "add_file", "remove_file", "remove_group", "set_option", "set_target", "set_output_name"]);
+/**
+ * 会改写工程文件的动作。tools.ts 在派发这些动作前必须先用它触发备份，
+ * 两边共用同一份清单，避免声明与实现各说一套。
+ */
+export const PROJECT_EDIT_ACTIONS: ReadonlySet<string> = new Set([
+  "add_group", "add_file", "remove_file", "remove_group", "set_option", "set_target", "set_output_name",
+]);
 
 const WIDTH_BYTES: Record<string, number> = { u8: 1, u16: 2, u32: 4 };
 
@@ -33,8 +39,8 @@ export function declarationFor(tool: string, action: string, input: Record<strin
   }
 
   if (tool === "keil_project") {
-    if (PROJECT_EDIT.has(action)) {
-      return { operation: "project_edit", effect: "经 uVision 改写 .uvprojx/.uvoptx(编辑前自动备份)" };
+    if (PROJECT_EDIT_ACTIONS.has(action)) {
+      return { operation: "project_edit", effect: "经 uVision 改写 .uvprojx/.uvoptx(编辑前自动备份 .prometheus.bak,备份失败则不编辑)" };
     }
     return undefined;
   }
@@ -66,7 +72,7 @@ export function declarationFor(tool: string, action: string, input: Record<strin
   if (action === "flash") {
     return {
       operation: "flash_download",
-      effect: "擦除并烧写镜像扇区;仅擦除镜像自身扇区,不是整片(A 实测);随后回读校验",
+      effect: "擦除并烧写镜像扇区;仅擦除镜像自身扇区,不是整片(A 实测);随后只对镜像起始处默认前 64 字节回读抽检,整镜像不校验",
     };
   }
   if (action === "erase") {

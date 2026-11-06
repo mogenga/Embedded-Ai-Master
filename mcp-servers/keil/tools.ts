@@ -22,7 +22,7 @@
  */
 
 import { debugInputSchema, projectInputSchema, DEBUG_DESCRIPTION, PROJECT_DESCRIPTION, EVIDENCE_ACTIONS, DESTRUCTIVE_ACTIONS } from "./actions.js";
-import { declarationFor } from "./declarations.js";
+import { declarationFor, PROJECT_EDIT_ACTIONS } from "./declarations.js";
 import { selectionFromEnv } from "./resolve.js";
 import type { ProbeToolResult, ProbeToolSpec } from "../probe/tools.js";
 import { existsSync, readFileSync } from "node:fs";
@@ -43,6 +43,8 @@ import {
   cleanInIde,
   closeKeilSession,
   verifyFlash,
+  FLASH_VERIFY_MAX_BYTES,
+  FLASH_VERIFY_SPOT_BYTES,
   currentLocation,
   currentTarget,
   eraseFlash,
@@ -104,12 +106,13 @@ import {
   writeMemory,
   closeDebugSessions,
   type KeilSession,
+  type FlashVerifyResult,
   type OptionName,
 } from "./keilSession.js";
 import { diagnoseFlashFailure } from "./flash.js";
 import { keilCli } from "./keilCli.js";
 import { NEEDS_EXTENDED_STACK, UNSUPPORTED_ON_MDK_5_43 } from "./keilExtra.js";
-import { readProjectFacts } from "./keilProjectFile.js";
+import { backupProjectFiles, readProjectFacts } from "./keilProjectFile.js";
 import { toolEnv } from "./toolEnv.js";
 import { stopReasonName } from "./uvsock.js";
 
@@ -139,6 +142,26 @@ const hex = (value: number) => `0x${value.toString(16)}`;
 
 /** The last addressable byte of a Cortex-M's 32-bit address space. */
 const LAST_ADDRESS = 0xffffffff;
+
+/**
+ * An all-zero read is not evidence that the value is zero.
+ *
+ * Same meaning as the probe backends' constants (`openocd.ts` /
+ * `renode-backend.ts` use `*_all_zero_or_unmapped`), repeated here rather than
+ * imported: domain servers do not depend on each other. R3 — an unmapped or
+ * refused region also answers zeroes, and decoding that as "no fault" is the
+ * exact mistake the rule forbids.
+ */
+export const KEIL_ALL_ZERO_WARNING = "keil_all_zero_or_unmapped";
+
+/**
+ * Whether a memory read is all zeroes, or `undefined` when there is nothing to
+ * judge (an empty reply is not an all-zero one).
+ */
+export function allZeroBytes(bytes: readonly number[]): boolean | undefined {
+  if (bytes.length === 0) return undefined;
+  return bytes.every((byte) => byte === 0);
+}
 
 /**
  * The rows a `read` prints, one per access width.
@@ -436,7 +459,7 @@ const keilDebugTool: LegacyTool = {
       kind: { type: "string", enum: ["exec", "read", "write", "readwrite"], description: "Breakpoint kind (default exec)" },
       address: { type: "integer", description: "For read/write/run_to/disassemble: the address" },
       width: { type: "string", enum: ["u8", "u16", "u32"], description: "For read/write: access width (default u32)" },
-      count: { type: "integer", description: "For read: how many values; for step_many: how many steps (default 1); for disassemble: how many instructions' worth of bytes (default 8)" },
+      count: { type: "integer", description: "For read: how many values; for step_many: how many steps (default 1); for disassemble: how many instructions' worth of bytes (default 8); for flash: how many image bytes to read back for the comparison (default 64, max 8192 — the rest of the image is not verified)" },
       frame: { type: "integer", description: "For variables: which stack frame to list the locals of (0, the default, lists the globals)" },
       value: { type: "integer", description: "For write: the value to store" },
       expression: { type: "string", description: "For evaluate: a debugger expression, e.g. `uwTick` or `&g_state`" },
@@ -531,6 +554,15 @@ const keilDebugTool: LegacyTool = {
         failure = reason;
         lines.push(reason);
       };
+      // What the flash read-back covered: a spot window, the whole image, or
+      // nothing. Attached to the structured result so a caller never has to
+      // parse the text to learn the scope (R3).
+      let flashVerify: { scope: FlashVerifyResult["scope"]; bytes: number; imageBytes: number; ok: boolean } | undefined;
+      // The bytes a `read` returned, with the all-zero verdict. Structured, so
+      // a consumer does not have to scrape the warning out of the text.
+      let memoryRead:
+        | { address: number; bytes: number[]; allZero?: true; warning?: string; reliable: boolean; errorAddress?: number }
+        | undefined;
 
       if (action === "open") {
         // Re-entering after `EXIT` from the command window: the session was
@@ -791,6 +823,29 @@ const keilDebugTool: LegacyTool = {
             lines.push(`${hex(row.address)} = ${row.value} (${hex(row.value)})`);
           }
           if (memory.errorAddress !== undefined) lines.push(`(the bus refused access at ${hex(memory.errorAddress)})`);
+          // R3: an all-zero reply is not evidence the register is zero. An
+          // unmapped or refused region answers zeroes too, so the read says so
+          // and marks itself unreliable rather than letting the caller read
+          // "0" as a finding (probe does the same with its `warning`).
+          const zero = allZeroBytes(memory.bytes);
+          if (zero === true) {
+            const unreachable = memory.errorAddress !== undefined ? ` (the bus refused access at ${hex(memory.errorAddress)})` : "";
+            lines.push(
+              `warning: ${KEIL_ALL_ZERO_WARNING} — every byte read is 0. That is not evidence the value is 0: ` +
+                `an unmapped or refused region answers the same way${unreachable}.`,
+            );
+          }
+          // `reliable` is about the bytes, not the call: an empty or all-zero
+          // reply, or a partial one (the bus refused an address, leaving
+          // bytes missing), is not a trustworthy picture of memory.
+          const reliable = zero === false && memory.errorAddress === undefined;
+          memoryRead = {
+            address,
+            bytes: memory.bytes,
+            ...(zero === true ? { allZero: true, warning: KEIL_ALL_ZERO_WARNING } : {}),
+            reliable,
+            ...(memory.errorAddress !== undefined ? { errorAddress: memory.errorAddress } : {}),
+          };
         }
       } else if (action === "write") {
         const address = Number(input.address);
@@ -1048,8 +1103,24 @@ const keilDebugTool: LegacyTool = {
           if (hex) {
             const check = await openKeilSession({ cwd: ctx.cwd, project: session.project, target: "hardware", port: 4823, timeoutMs: 40_000 });
             if (check.ok && check.session) {
-              const compared = await verifyFlash(check.session, hex);
-              lines.push(`flash check: ${compared.detail}`);
+              // `count` is the explicit request for a bigger window; the
+              // default stays the 64-byte spot check. The read-back is capped
+              // at `FLASH_VERIFY_MAX_BYTES` (one DBG_MEM_READ), and the result
+              // says what was actually compared either way.
+              const asked = Number(input.count);
+              const verifyBytes = Number.isFinite(asked) && asked > 0 ? Math.min(FLASH_VERIFY_MAX_BYTES, Math.trunc(asked)) : FLASH_VERIFY_SPOT_BYTES;
+              const compared = await verifyFlash(check.session, hex, verifyBytes);
+              // The comparison reads a bounded window back from the image's
+              // start; saying "verified" without the window let a 64-byte
+              // spot check read as a whole-image check. The line and the
+              // structured result both carry the scope.
+              lines.push(`flash check (${compared.scope === "full" ? "whole image" : compared.scope === "spot" ? "spot check" : "not run"}): ${compared.detail}`);
+              flashVerify = {
+                scope: compared.scope,
+                bytes: compared.bytes,
+                imageBytes: compared.imageBytes,
+                ok: compared.ok,
+              };
               // Fail closed: a verify that could not read the chip back is not
               // a pass. The old condition (`expected && got`) treated "the
               // debugger could not read flash" as a footnote while the tool
@@ -1066,10 +1137,12 @@ const keilDebugTool: LegacyTool = {
             } else {
               // An unreadable chip is not a verified flash: say the download
               // succeeded but the check did not run, and fail loudly.
+              flashVerify = { scope: "none", bytes: 0, imageBytes: 0, ok: false };
               lines.push(`flash check: skipped — the debugger could not be opened to read the chip back (${check.reason ?? "no session"})`);
               fail(`flash verify could not run — the debugger could not be opened to read the chip back (${check.reason ?? "no session"})`);
             }
           } else {
+            flashVerify = { scope: "none", bytes: 0, imageBytes: 0, ok: false };
             lines.push("flash check: skipped — the build produced no .hex or .axf to compare against");
           }
         }
@@ -1088,6 +1161,7 @@ const keilDebugTool: LegacyTool = {
       }
       return {
         ...(failure ? { isError: true } : {}),
+        ...(flashVerify || memoryRead ? { data: { ...(flashVerify ? { flashVerify } : {}), ...(memoryRead ? { memoryRead } : {}) } } : {}),
         content: lines.join("\n") || "(no output)",
         display: failure ? `keil: ${action} failed` : `keil: ${action}`,
       };
@@ -1146,6 +1220,15 @@ const keilProjectTool: LegacyTool = {
     const session = opened.session;
     const group = input.group ? String(input.group) : "";
     const lines: string[] = [];
+    // An edit is handed to uVision, which writes the project only when it
+    // exits — so the "before" bytes have to be copied now. Fail-closed: if the
+    // backup cannot be written, the edit is not attempted, because the
+    // declaration promises one exists.
+    if (PROJECT_EDIT_ACTIONS.has(action)) {
+      const copied = backupProjectFiles(session.project);
+      if (!copied.ok) return { isError: true, content: copied.reason ?? "could not back up the project; nothing was edited", display: "backup failed" };
+      lines.push(`backed up: ${copied.backups.join(", ")}`);
+    }
     // A project operation that the debugger refused is a failed call, not a
     // successful one with a sad sentence in it.
     let failure: string | undefined;
