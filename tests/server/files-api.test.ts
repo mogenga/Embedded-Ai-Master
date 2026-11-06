@@ -151,11 +151,14 @@ describe("listDirectory", () => {
       isSymbolicLink: () => false,
     }));
     // 只对目标目录返回构造的条目；其它路径（`realpath` 内部等）仍走真实实现。
-    // 用「按参数过滤」而不是 `mockImplementationOnce`：`listDirectory` 之前的
-    // 解析步骤也会走 readdir，`Once` 会被那一步吃掉。
+    //
+    // 判据用 **basename** 而不是完整路径比较：Windows 上 `path.resolve` 的盘符
+    // 大小写、8.3 短名、以及 CI 临时目录的形式都可能与本地不同，完整路径比较
+    // 在本地过、CI 上不等（实测：`expected [] to have a length of 500`）。
+    // 这个用例的目录名 `many` 是这条用例独占的，按 basename 判不会误伤。
     const actualReaddir = vi.mocked(readdir).getMockImplementation();
     vi.mocked(readdir).mockImplementation(async (target: unknown, options: unknown) => {
-      if (path.resolve(String(target)) === path.resolve(root)) {
+      if (path.basename(String(target)) === "many") {
         return fakeDirents as never;
       }
       return actualReaddir!(target as never, options as never);
