@@ -755,11 +755,19 @@ describe("createSessionRunner", () => {
         });
 
         const outcome = await runner.start({ text: "串口没输出" });
-        // 让 generator 跑完（400 不可重试，几毫秒内结束）。
-        await new Promise((resolve) => setTimeout(resolve, 50));
 
+        // 等真实信号，不等固定延时：全量并行跑时 50ms 可能不够，而这条用例
+        // 断言的正是「日志里有完整事件流」——用固定延时会让它变成「机器多快
+        // 能跑完一轮」的测试。轮询到出现 interrupted（本轮终局）再读。
         const source = createLogTailEventSource({ sessionsRoot: path.join(home, "sessions") });
-        const { events } = await source.read(outcome.sessionId, -1);
+        let events: { type: string; seq: number }[] = [];
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline) {
+          const read = await source.read(outcome.sessionId, -1);
+          events = read.events as { type: string; seq: number }[];
+          if (events.some((event) => event.type === "interrupted")) break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
         expect(events.length).toBeGreaterThan(0);
         expect(events.map((event) => event.type)).toContain("user");
         expect(events.at(-1)?.type).toBe("interrupted");
