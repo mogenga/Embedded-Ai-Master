@@ -22,6 +22,7 @@ export const STATUS: { OK: "ok"; WARN: "warn"; FAIL: "fail" };
 
 export const REPOSITORY: { owner: string; repo: string };
 export const INSTALLER_DIR: string;
+export const DEFAULT_ARTIFACT_NAME: string;
 export const GH_CANDIDATES: string[];
 export const USAGE: string;
 
@@ -91,10 +92,17 @@ export function checkTagArgument(tag: unknown): {
   detail: string;
 };
 
+export function expandArtifactName(input: {
+  artifactName: string;
+  version: string;
+  ext: string;
+}): string;
+
 export function renderSteps(input: {
   version: string;
   tag: string;
   repoRoot?: string;
+  artifactName?: string;
 }): string;
 
 export function scrubTokens(text: string): string;
@@ -116,6 +124,11 @@ export function detectGh(): Promise<{
 
 export function readDesktopVersion(repoRoot?: string): Promise<{
   version: unknown;
+  path: string;
+}>;
+
+export function readDesktopArtifactName(repoRoot?: string): Promise<{
+  artifactName: unknown;
   path: string;
 }>;
 
