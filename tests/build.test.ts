@@ -41,6 +41,22 @@ describe("buildMessages 投影重组", () => {
     ]);
   });
 
+  /**
+   * 空的 `tool_calls` 原样投影（D-025）。
+   *
+   * 官方 OpenAI 允许 assistant 消息携带空数组；少数严格兼容网关可能拒绝。
+   * 这是一个**决定**（不剥离），此前没有任何断言守着——改写 `projectAssistant`
+   * 的人无从知道「省略空数组」是不是被修掉了一个 bug。
+   *
+   * 若将来接真实网关出现消息 400 且定位到空 `tool_calls`，改这条断言的同时按
+   * D-025 的修复建议在空数组时省略该键。
+   */
+  it("空的 tool_calls 原样保留为空数组（D-025 的有意决定）", () => {
+    const messages = buildMessages([mk(0, "assistant", { content: "done", toolCalls: [] })]);
+
+    expect(messages).toStrictEqual([{ role: "assistant", content: "done", tool_calls: [] }]);
+  });
+
   it("assistant 同时含 content 与 tool_calls 都保留", () => {
     const messages = buildMessages([
       mk(0, "assistant", {

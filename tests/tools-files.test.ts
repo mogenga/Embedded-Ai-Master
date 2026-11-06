@@ -306,6 +306,36 @@ describe("multiedit 换行风格", () => {
   });
 });
 
+/**
+ * `edit` 的唯一性按**非重叠**匹配计数（D-072）。
+ *
+ * 这个语义写在 design §4.2 里，但此前没有任何断言守着——任何一次改写查找
+ * 循环的实现都会悄悄改掉它。用例直接锁住设计里给出的那个例子。
+ */
+describe("edit 唯一性按非重叠匹配计数（D-072）", () => {
+  it("'aaa' 里找 'aa' 只算一处，替换成功而不是报 edit_not_unique", async () => {
+    const workdir = makeWorkdir();
+    writeFileSync(path.join(workdir, "note.txt"), "aaa", "utf8");
+
+    const r = await run(editTool, workdir, { path: "note.txt", oldText: "aa", newText: "b" });
+
+    // 非重叠：只在索引 0 命中一次。若改成重叠计数，这里会得到 edit_not_unique。
+    expect(r.isError).toBe(false);
+    expect(readFileSync(path.join(workdir, "note.txt"), "utf8")).toBe("ba");
+  });
+
+  it("两处不重叠的命中仍然报 edit_not_unique", async () => {
+    const workdir = makeWorkdir();
+    const original = "aa aa\n";
+    writeFileSync(path.join(workdir, "note.txt"), original, "utf8");
+
+    const r = await run(editTool, workdir, { path: "note.txt", oldText: "aa", newText: "b" });
+
+    expect(r).toMatchObject({ isError: true, code: "edit_not_unique" });
+    expect(readFileSync(path.join(workdir, "note.txt"), "utf8")).toBe(original);
+  });
+});
+
 describe("multiedit 错误路径", () => {
   it("文件不存在 → not_found", async () => {
     const workdir = makeWorkdir();

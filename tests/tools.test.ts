@@ -213,6 +213,23 @@ describe("toModelToolSchemas", () => {
     expect(parameters.required).toBeUndefined();
   });
 
+  /**
+   * `$schema` 原样保留（D-019）。
+   *
+   * 这是一个**决定**，不是疏忽：官方 OpenAI 与多数兼容网关接受该关键字，
+   * 剥离会多一层改写。但此前没有任何断言表明这是有意的——任何一次升级 zod
+   * 或改写 `toModelToolSchemas` 都可能悄悄改变它，而没人知道那是不是回归。
+   *
+   * 若将来接真实网关出现工具 schema 400，改这条断言的同时按 D-019 的修复建议
+   * 在 `toModelToolSchemas` 里剥离顶层 `$schema`。
+   */
+  it("保留 zod 生成的顶层 $schema（D-019 的有意决定）", () => {
+    const parameters = toModelToolSchemas([echoTool])[0].function.parameters as Record<string, unknown>;
+
+    expect(Object.hasOwn(parameters, "$schema")).toBe(true);
+    expect(parameters.$schema).toBe("https://json-schema.org/draft/2020-12/schema");
+  });
+
   it("modelSchema 优先透传且不调用 z.toJSONSchema", () => {
     const spy = vi.mocked(z.toJSONSchema);
     spy.mockClear();
