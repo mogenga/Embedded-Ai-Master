@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 对 `desktop/` 与 `scripts/` 下的每个 JS 文件跑一次 `node --check`。
+ * 对 `desktop/` 与 `scripts/` 下的每个 JS 文件做一次语法检查。
  *
  * **为什么需要它**：`tsconfig.json` 只 include `src` / `tests` / `mcp-servers`，
  * 而 `allowJs` 未开启——`desktop/renderer/app.js`（7561 行）与 `settings.js`
@@ -76,10 +76,20 @@ export async function collect(dir) {
  *
  * `new vm.Script()` 不能替代：它不接受 ESM 语法，而 `desktop/` 与 `scripts/`
  * 下绝大多数文件是 ESM（`export` 会被判成语法错误）。
+ *
+ * **`.cjs` 例外，仍走 `node --check`**：`SourceTextModule` 一律按 ESM 解析，
+ * 而 `.cjs` 是 CommonJS——两边规则正好相反。顶层 `await` 在 ESM 合法、在 CJS
+ * 非法（会漏报）；顶层 `return` 在 CJS 合法、在 ESM 非法（会误报）。`vm.Script`
+ * 也不是 CJS 的等价物：它按裸脚本编译，顶层 `return` 同样判非法，而
+ * `node --check` 按 CJS 包装函数解析。`desktop/preload.cjs` 正是这个脚本要
+ * 保护的那类文件，承担一次进程启动换回与旧实现一致的判据。
+ *
+ * `.js` 与 `.mjs` 按 ESM 解析是有依据的：仓库根与 `desktop/package.json`
+ * 都声明了 `"type": "module"`，这两个根下没有 CJS 的 `.js`。
  */
 export async function checkFile(file) {
   const SourceTextModule = vm.SourceTextModule;
-  if (typeof SourceTextModule === "function") {
+  if (typeof SourceTextModule === "function" && path.extname(file).toLowerCase() !== ".cjs") {
     let source;
     try {
       source = await readFile(file, "utf8");
@@ -95,7 +105,7 @@ export async function checkFile(file) {
       return `${path.relative(ROOT, file)}: ${message}`;
     }
   }
-  // 回退：与旧实现逐字等价。
+  // 回退：与旧实现逐字等价。`.cjs` 与拿不到构造器时都走这里。
   try {
     await execFileAsync(process.execPath, ["--check", file], { cwd: ROOT });
     return undefined;

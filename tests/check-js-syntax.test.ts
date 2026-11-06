@@ -1,8 +1,13 @@
+import { spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { checkRoots } from "../scripts/check-js-syntax.mjs";
+
+/** 子进程里要 import 的同一个实现，绝对 URL。 */
+const SCRIPT_URL = pathToFileURL(path.join(import.meta.dirname, "..", "scripts", "check-js-syntax.mjs")).href;
 
 /**
  * `scripts/check-js-syntax.mjs` 的行为锁定。
@@ -102,5 +107,65 @@ describe("checkRoots", () => {
 
     expect(files).toStrictEqual([]);
     expect(failures).toStrictEqual([]);
+  });
+
+  /**
+   * `.cjs` 必须按 CommonJS 判，不能按 ESM 判。
+   *
+   * 这条用例守的是 2026-11-06 换 `vm.SourceTextModule` 时引入的回归：它在
+   * 单进程里解析，但一律按 ESM，于是 `.cjs` 的两类文件判错方向相反——
+   *  - 顶层 `await`：ESM 合法 / CJS 非法 → 旧的 `node --check` 报错，新路径放过；
+   *  - 顶层 `return`：CJS 合法 / ESM 非法 → 旧路径放过，新路径误报。
+   * `desktop/preload.cjs`（Electron 预加载桥）正是这类文件，语法错会让应用
+   * 打不开——恰好是这个脚本存在的理由。
+   *
+   * 这一条在 vitest 里只会走回退分支（构造器为 `undefined`，见下一条），
+   * 覆盖的是「拿不到构造器」时的判据。
+   */
+  it(".cjs 按 CommonJS 判：顶层 return 合法、顶层 await 非法", async () => {
+    const dir = await tempTree();
+    // CJS 里 `return` 位于模块包装函数内，合法；ESM 里非法。
+    await writeFile(path.join(dir, "top-level-return.cjs"), "return 1;\n");
+    // CJS 里没有顶层 await，非法；ESM 里合法。
+    await writeFile(path.join(dir, "top-level-await.cjs"), "await Promise.resolve(1);\n");
+
+    const { files, failures } = await checkRoots([dir], dir);
+
+    expect(files).toHaveLength(2);
+    expect(failures.map((entry) => entry.file)).toStrictEqual(["top-level-await.cjs"]);
+  });
+
+  /**
+   * 同一条 `.cjs` 判据，但**强制走 `vm.SourceTextModule` 快路径**。
+   *
+   * 上面那条用例在 vitest 里跑时 `vm.SourceTextModule` 是 `undefined`（实测），
+   * 于是走的是回退分支——它证明不了快路径。这里起一个带
+   * `--experimental-vm-modules` 的子进程，让构造器真的存在，再断言 `.cjs` 仍按
+   * CommonJS 判。没有这条，快路径对 `.cjs` 的判错会在全绿中复发。
+   */
+  it("快路径下 .cjs 仍按 CommonJS 判（子进程开实验特性）", async () => {
+    const dir = await tempTree();
+    await writeFile(path.join(dir, "top-level-return.cjs"), "return 1;\n");
+    await writeFile(path.join(dir, "top-level-await.cjs"), "await Promise.resolve(1);\n");
+    await writeFile(path.join(dir, "esm.js"), "export const ok = 1;\n");
+
+    const script = [
+      "import vm from 'node:vm';",
+      "import { checkRoots } from " + JSON.stringify(SCRIPT_URL) + ";",
+      "if (typeof vm.SourceTextModule !== 'function') { console.log('SKIP_NO_STM'); process.exit(0); }",
+      "const r = await checkRoots([process.argv[1]], process.argv[1]);",
+      "console.log(JSON.stringify(r.failures.map((f) => f.file)));",
+    ].join("\n");
+    const result = spawnSync(
+      process.execPath,
+      ["--experimental-vm-modules", "--disable-warning=ExperimentalWarning", "--input-type=module", "-e", script, dir],
+      { encoding: "utf8" },
+    );
+
+    expect(result.status).toBe(0);
+    const out = result.stdout.trim().split("\n").at(-1);
+    // 构造器不可用的运行时（理论上）不把这条判成失败，但不允许静默通过。
+    if (out === "SKIP_NO_STM") return;
+    expect(JSON.parse(out!)).toStrictEqual(["top-level-await.cjs"]);
   });
 });
