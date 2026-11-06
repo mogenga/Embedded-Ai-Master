@@ -1776,6 +1776,39 @@ export async function flashInIde(session: KeilSession, timeoutMs = 5 * 60_000): 
   return { ok: false, lines: text() };
 }
 
+/** The default comparison window: the start of the image, 64 bytes. */
+export const FLASH_VERIFY_SPOT_BYTES = 64;
+
+/**
+ * The most one comparison can read back.
+ *
+ * `DBG_MEM_READ` reads at most 0x2000 bytes per request (`readMemory` clamps
+ * to it), so a larger request would compare a short reply against a long
+ * expectation. Whole-image read-back needs segmentation, which is a separate
+ * task — until then this is the ceiling and the result says so.
+ */
+export const FLASH_VERIFY_MAX_BYTES = 0x2000;
+
+export interface FlashVerifyResult {
+  ok: boolean;
+  /**
+   * `spot` = only a window at the start of the image was compared; `full` =
+   * every byte the image contains was compared; `none` = the comparison
+   * never ran (unreadable file, no records, the debugger refused the read).
+   * Never report a spot check as if it covered the image.
+   */
+  scope: "spot" | "full" | "none";
+  /** Bytes actually compared; 0 when no comparison could run. */
+  bytes: number;
+  /** Bytes the image contains (compared + not compared). */
+  imageBytes: number;
+  /** What the caller asked for (the default is 64, capped at 0x2000). */
+  requestedBytes: number;
+  detail: string;
+  expected?: string;
+  got?: string;
+}
+
 /**
  * Read the image back from flash and compare it with the file that was built.
  *
@@ -1784,11 +1817,20 @@ export async function flashInIde(session: KeilSession, timeoutMs = 5 * 60_000): 
  * image's load address match the `.hex` record byte for byte, which is what
  * turns "the log said OK" into "the flash holds this image".
  *
+ * **This is a spot check by default.** Only `bytes` bytes from the image's
+ * start are read back and compared; the rest of the image is not verified.
+ * The result says which of the two it did through `scope` and `bytes`, and
+ * the detail repeats it, so a caller cannot mistake 64 compared bytes for a
+ * whole-image verification. `scope` is `full` only when every byte the image
+ * contains was compared.
+ *
  * The comparison starts at the image's own start address (from the `.hex`
  * record), not at byte zero of the file — an `.axf` is an ELF and its first
  * bytes are `7f 45 4c 46`, not the vector table.
  */
-export async function verifyFlash(session: KeilSession, hexPath: string, bytes = 64): Promise<{ ok: boolean; detail: string; expected?: string; got?: string }> {
+export async function verifyFlash(session: KeilSession, hexPath: string, bytes = FLASH_VERIFY_SPOT_BYTES): Promise<FlashVerifyResult> {
+  const requestedBytes = Math.max(1, Math.trunc(bytes));
+  const failed = (detail: string): FlashVerifyResult => ({ ok: false, scope: "none", bytes: 0, imageBytes: 0, requestedBytes, detail });
   let records: { address: number; bytes: number[] }[] = [];
   try {
     const raw = readFileSync(hexPath);
@@ -1797,21 +1839,21 @@ export async function verifyFlash(session: KeilSession, hexPath: string, bytes =
     // than skipping the chip comparison entirely.
     if (/\.(axf|elf|out)$/i.test(hexPath) || (raw[0] === 0x7f && raw.subarray(1, 4).toString("ascii") === "ELF")) {
       const fromelf = fromelfFor(session.client.programPath);
-      if (!fromelf) return { ok: false, detail: `this image is an ELF and fromelf was not found to convert it to Intel HEX` };
+      if (!fromelf) return failed(`this image is an ELF and fromelf was not found to convert it to Intel HEX`);
       const converted = await new Promise<{ code: number | null; out: string }>((resolveRun) => {
         execFile(fromelf, ["--i32", "--output", `${hexPath}.verify.hex`, hexPath], { windowsHide: true, timeout: 120_000 }, (error, stdout) =>
           resolveRun({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, out: `${stdout ?? ""}` }),
         );
       });
       if (converted.code === 0) records = parseIntelHex(readFileSync(`${hexPath}.verify.hex`, "latin1"));
-      if (records.length === 0) return { ok: false, detail: `could not convert ${hexPath} to Intel HEX to compare against flash` };
+      if (records.length === 0) return failed(`could not convert ${hexPath} to Intel HEX to compare against flash`);
     } else {
       records = parseIntelHex(raw.toString("latin1"));
     }
   } catch {
-    return { ok: false, detail: `could not read ${hexPath} to compare against flash` };
+    return failed(`could not read ${hexPath} to compare against flash`);
   }
-  if (records.length === 0) return { ok: false, detail: `${hexPath} has no data records` };
+  if (records.length === 0) return failed(`${hexPath} has no data records`);
   const image = new Map<number, number>();
   for (const record of records) record.bytes.forEach((byte, index) => image.set(record.address + index, byte));
   // Compare a contiguous run from the lowest address; the image is laid out
@@ -1819,27 +1861,60 @@ export async function verifyFlash(session: KeilSession, hexPath: string, bytes =
   const all = [...image.keys()].sort((a, b) => a - b);
   const start = all[0];
   const addresses: number[] = [];
-  for (let offset = 0; offset < Math.min(bytes, all.length); offset++) {
+  const window = Math.min(requestedBytes, FLASH_VERIFY_MAX_BYTES, all.length);
+  for (let offset = 0; offset < window; offset++) {
     if (!image.has(start + offset)) break;
     addresses.push(start + offset);
   }
+  if (addresses.length === 0) {
+    return { ok: false, scope: "none", bytes: 0, imageBytes: all.length, requestedBytes, detail: `${hexPath} has no data records at its start address` };
+  }
   const memory = await readMemory(session, addresses[0], addresses[addresses.length - 1] - addresses[0] + 1);
-  if (!memory) return { ok: false, detail: `the debugger could not read flash at 0x${addresses[0].toString(16)}` };
+  if (!memory) {
+    return {
+      ok: false,
+      scope: "none",
+      bytes: 0,
+      imageBytes: all.length,
+      requestedBytes,
+      detail: `the debugger could not read flash at 0x${addresses[0].toString(16)}`,
+    };
+  }
+  // The image's bytes are not necessarily one contiguous run from `start`; a
+  // gap means some bytes past it were never in the compared window. The scope
+  // reflects what was actually covered, not what was asked for.
+  const contiguous = addresses.length;
+  const full = contiguous === all.length && requestedBytes >= all.length;
+  const scope: FlashVerifyResult["scope"] = full ? "full" : "spot";
   const got = memory.bytes;
   const mismatched = addresses.findIndex((address, index) => got[index] !== image.get(address));
   const expectedText = addresses.map((address) => image.get(address)!.toString(16).padStart(2, "0")).join(" ");
   const gotText = addresses.map((_, index) => (got[index] ?? -1).toString(16).padStart(2, "0")).join(" ");
+  const coverage =
+    scope === "full"
+      ? `every byte of the image (${all.length})`
+      : `the first ${addresses.length} of ${all.length} image byte(s) from 0x${addresses[0].toString(16)} — ` +
+        `the rest of the image was NOT compared`;
   if (mismatched >= 0) {
     return {
       ok: false,
-      detail: `flash differs from ${hexPath} at 0x${addresses[mismatched].toString(16)} (byte ${mismatched + 1} of ${addresses.length})`,
+      scope,
+      bytes: addresses.length,
+      imageBytes: all.length,
+      requestedBytes,
+      detail: `flash differs from ${hexPath} at 0x${addresses[mismatched].toString(16)} ` +
+        `(byte ${mismatched + 1} of ${addresses.length} compared; ${scope === "full" ? "whole image" : "spot check only"})`,
       expected: expectedText,
       got: gotText,
     };
   }
   return {
     ok: true,
-    detail: `flash at 0x${addresses[0].toString(16)} matches ${hexPath} for ${addresses.length} byte(s)`,
+    scope,
+    bytes: addresses.length,
+    imageBytes: all.length,
+    requestedBytes,
+    detail: `flash at 0x${addresses[0].toString(16)} matches ${hexPath}: ${coverage}`,
     expected: expectedText,
     got: gotText,
   };

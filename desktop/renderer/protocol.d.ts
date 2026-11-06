@@ -28,6 +28,8 @@ export interface PublicMessage {
   done?: boolean;
   images?: number;
   index?: number;
+  /** The kernel's own verdict on a tool result; absent means "not declared". */
+  evidence?: boolean;
 }
 
 export interface HostEvent {
@@ -43,6 +45,16 @@ export interface ProtocolContext {
   lastAssistantText: string;
   lastSeq: number;
   openTool: string;
+  /**
+   * callId → tool name for every call still executing, in start order. The
+   * newest entry is what `turn_progress` names.
+   */
+  runningTools: Map<string, string>;
+  /**
+   * Epoch ms of the `user` event that opened this turn, or 0 before one was
+   * seen. `turn_progress.elapsedMs` is measured from it.
+   */
+  turnStartedAt: number;
   startedTools: Set<string>;
   pendingApprovals: Set<string>;
   streamedText: string;

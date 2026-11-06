@@ -113,6 +113,14 @@
               <svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>
               <span data-i18n="menuExport">Export conversation</span>
             </button>
+            <!-- The artifact pane lists what the kernel's pipeline wrote to
+                 `artifacts/` for oversized tool output. Until this row existed
+                 the pane could only be opened by previewing an artifact, and
+                 previewing required the pane to be open — a closed loop. -->
+            <button class="menu-row" id="menu-artifacts" role="menuitem">
+              <svg class="icon" aria-hidden="true"><use href="#i-file"></use></svg>
+              <span data-i18n="menuOpenArtifacts">Open artifacts</span>
+            </button>
             <!-- New window and split view both need a second BrowserWindow.
                  This shell holds a single-instance lock and one window, so a
                  row here could only fail; the hosts are one per window and the
@@ -202,6 +210,17 @@
             </div>
 
             <section class="composer-region" id="composer-region">
+              <!-- The evidence filter's empty state. A filter that hides
+                   everything must say so, or a transcript emptied by a toggle
+                   reads as a conversation that lost its content (R3). It lives
+                   beside the composer rather than in the transcript so a
+                   session switch, which removes every transcript block, cannot
+                   delete the one sentence explaining the blank page. -->
+              <div class="evidence-empty" id="evidence-empty" hidden role="status">
+                <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>
+                <span data-i18n="evidenceFilterEmpty">No tool output in this session is marked as evidence yet.</span>
+              </div>
+
               <!-- The same plan the transcript card draws, kept in view while
                    that card scrolls away. One line until opened: the header
                    carries how far along the plan is and which step is running,
@@ -253,6 +272,22 @@
               <div class="composer-status-tab" id="composer-status-tab">
                 <span class="status-tab-branch" id="status-tab-branch" hidden></span>
                 <span class="status-tab-cwd" id="status-tab-cwd"></span>
+                <!-- The transcript's evidence filter. It sits on the composer
+                     caption because that caption is the one row that is always
+                     on screen: a filter that hides most of the transcript must
+                     leave its own switch visible, or the reader cannot tell
+                     an empty conversation from a filtered one. -->
+                <button
+                  type="button"
+                  class="status-tab-filter"
+                  id="evidence-filter"
+                  aria-pressed="false"
+                  data-i18n-title="evidenceFilterHint"
+                >
+                  <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>
+                  <span data-i18n="evidenceFilter">Evidence</span>
+                  <span class="evidence-filter-count" id="evidence-filter-count"></span>
+                </button>
                 <button
                   type="button"
                   class="status-tab-context"
@@ -379,7 +414,6 @@
                       <div class="effort-menu" id="effort-menu" role="menu" hidden></div>
                     </div>
                     <div class="composer-actions">
-                      <span class="queued-badge" id="queued-badge" hidden></span>
                       <button class="stop-button" id="stop-button" data-i18n="stop" data-i18n-title="stopTitle" hidden>Stop</button>
                       <button class="send-button" id="send-button" data-i18n-title="sendTitle">
                         <svg class="icon" aria-hidden="true"><use href="#i-arrow-up"></use></svg>

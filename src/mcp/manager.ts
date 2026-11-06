@@ -199,7 +199,9 @@ export class McpManager {
   private readonly states: Map<string, ServerState>;
   private readonly connectTimeoutMs: number;
   private readonly terminateTimeoutMs: number;
-  private readonly logger?: (event: McpStatusEvent) => void;
+  // 非 readonly：会话级复用时，每条消息所属的会话日志不同，logger 必须能重绑
+  // （否则第二条消息的 mcp_status 会写进上一条已关闭的会话）。
+  private logger?: (event: McpStatusEvent) => void;
   private readonly listeners = new Set<(server: string) => void>();
   private closed = false;
 
@@ -244,8 +246,17 @@ export class McpManager {
     );
   }
 
-  onToolsChanged(listener: (server: string) => void): void {
+  /** 重绑状态事件的去处；会话级复用时每条消息换一个会话句柄。 */
+  setLogger(logger: (event: McpStatusEvent) => void): void {
+    this.logger = logger;
+  }
+
+  /** 返回取消订阅函数：跨消息复用时旧 listener 会累积，并写进已经没人读的注册表。 */
+  onToolsChanged(listener: (server: string) => void): () => void {
     this.listeners.add(listener);
+    return () => {
+      this.listeners.delete(listener);
+    };
   }
 
   async call(

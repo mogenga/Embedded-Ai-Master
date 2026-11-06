@@ -9,8 +9,9 @@ export const dictionaries = {
     placeholder: "Ask the agent to change, explain, or build something…",
     composerPlaceholder: "Ask the agent to change, explain, or build something…",
     sendTitle: "Send (Enter)",
-    sendLabel: "Send",
-    queueSend: "Queue for this turn (Enter)",
+    /** The turn is running; the host refuses a second prompt, so the composer
+     *  says so and keeps the draft instead of pretending it was queued. */
+    busyThisTurn: "This turn is still running. Wait for it to finish, or stop it first.",
     stopTitle: "Stop (Esc)",
     changesTitle: "Changes",
     terminalTitle: "Terminal",
@@ -152,10 +153,21 @@ export const dictionaries = {
     subagentFailed: "failed",
     tabArtifacts: "Artifacts",
     paneArtifact: "Artifact",
-    noArtifacts: "No previewable artifacts in this session yet.",
+    /* The artifact list's empty state names what was looked for rather than
+       asserting "there are none": an empty list is also what a session with
+       no artifacts folder returns, and the two are not the same fact (R3). */
+    noArtifacts: "No previewable artifacts in this session yet — oversized tool output is written to the session's artifacts folder and appears here afterwards.",
     emptyFile: "The file is empty.",
     fileBinary: "This file is binary; it has no text preview.",
     fileReadFailed: "Could not read this file.",
+    /* The evidence filter, beside the context figure. `evidenceFilterHint`
+       is the tooltip; it says what the switch does, not what it will find. */
+    evidenceFilter: "Evidence",
+    evidenceFilterHint: "Show only tool output marked as evidence",
+    evidenceFilterEmpty: "No tool output in this session is marked as evidence yet.",
+    artifactPreview: "Preview",
+    artifactPreviewHint: "Preview in the artifact panel:",
+    artifactLoadFailed: "Could not open this artifact. It may be outside the current session's artifacts folder.",
     paneBrowser: "Browser",
     commentHint: "Click a line to comment",
     commentPlaceholder: "What should change on this line?",
@@ -217,8 +229,6 @@ export const dictionaries = {
     serialFollowLabel: "Follow",
     serialClear: "Clear",
     serialExport: "Export as .log",
-    queuedTag: "queued",
-    queuedCount: (count) => `${count} queued`,
     notifyTurnDone: "Turn finished",
     notifyNeedsInput: "The agent needs your input",
     commitAll: "Commit all",
@@ -286,7 +296,9 @@ export const dictionaries = {
     attachmentUnsupported: "That file cannot be attached from the browser; drop it from your file manager instead.",
     attachmentTooLarge: "That image is larger than 4 MB.",
     attachmentRemove: "Remove image",
-    imageOnlyPrompt: "(describe the attached image)",
+    /** An image cannot reach the model in this kernel, so a message carrying
+     *  one is not sent at all and the strip keeps the image (D-188, R3). */
+    attachmentNotSent: "This kernel cannot send images yet. Remove the attached image to send the message.",
     imageCount: (n) => `${n} image${n === 1 ? "" : "s"} attached`,
     paletteEmpty: "No matching commands.",
     /* Slash-command notices. The commands' own descriptions live in
@@ -317,6 +329,7 @@ export const dictionaries = {
     menuSplitView: "Open this session in split view",
     menuShortcuts: "Keyboard shortcuts",
     menuOpenSerial: "Open tools panel",
+    menuOpenArtifacts: "Open artifacts",
     settingsProvider: "Provider",
     providerNoKey: "no key",
     providerCustom: "Custom endpoint",
@@ -456,8 +469,8 @@ export const dictionaries = {
     placeholder: "让 Agent 修改、解释或构建点什么…",
     composerPlaceholder: "让 Agent 修改、解释或构建点什么…",
     sendTitle: "发送（Enter）",
-    sendLabel: "发送",
-    queueSend: "排队到本轮（Enter）",
+    /** 本轮仍在运行；宿主会拒绝第二条 prompt，所以这里如实说明并保留草稿。 */
+    busyThisTurn: "本轮还在运行，请等它结束或先停止。",
     stopTitle: "停止（Esc）",
     changesTitle: "改动",
     terminalTitle: "终端",
@@ -591,10 +604,16 @@ export const dictionaries = {
     subagentFailed: "失败",
     tabArtifacts: "产物",
     paneArtifact: "产物",
-    noArtifacts: "本会话还没有可预览的产物。",
+    noArtifacts: "本会话还没有可预览的产物。超大工具输出会写进会话的 artifacts 目录，产生之后就会出现在这里。",
     emptyFile: "文件为空。",
     fileBinary: "这是二进制文件，没有文本预览。",
     fileReadFailed: "读取失败，未拿到文件内容。",
+    evidenceFilter: "证据",
+    evidenceFilterHint: "只看被标记为证据的工具输出",
+    evidenceFilterEmpty: "本会话还没有被标记为证据的工具输出。",
+    artifactPreview: "预览",
+    artifactPreviewHint: "在产物面板中预览：",
+    artifactLoadFailed: "无法打开该产物：它可能不在当前会话的 artifacts 目录内。",
     paneBrowser: "浏览器",
     commentHint: "点击行添加评论",
     commentPlaceholder: "这一行需要怎么改？",
@@ -651,8 +670,6 @@ export const dictionaries = {
     serialClear: "清空",
     serialExport: "导出为 .log",
     terminalLabel: "终端",
-    queuedTag: "排队中",
-    queuedCount: (count) => `${count} 条排队`,
     notifyTurnDone: "本轮已完成",
     notifyNeedsInput: "Agent 需要你的确认",
     commitAll: "提交全部",
@@ -720,7 +737,8 @@ export const dictionaries = {
     attachmentUnsupported: "这个文件无法从浏览器里附加，请从文件管理器拖进来。",
     attachmentTooLarge: "图片超过 4 MB。",
     attachmentRemove: "移除图片",
-    imageOnlyPrompt: "（请看附带的图片）",
+    /** 当前内核不能发送图片：带图的这条消息不会被发出，附件条保留（D-188，R3）。 */
+    attachmentNotSent: "当前内核还不支持发送图片，请先移除附件再发送。",
     imageCount: (n) => `附带 ${n} 张图片`,
     paletteEmpty: "没有匹配的命令。",
     /* 斜杠命令的提示文案。命令自身的描述在 ./commands.js 里与目录放在一起；
@@ -745,6 +763,7 @@ export const dictionaries = {
     menuSplitView: "把这个会话放到分屏",
     menuShortcuts: "键盘快捷键",
     menuOpenSerial: "打开工具面板",
+    menuOpenArtifacts: "打开产物",
     settingsProvider: "服务商",
     providerNoKey: "未配置密钥",
     providerCustom: "自定义接入",

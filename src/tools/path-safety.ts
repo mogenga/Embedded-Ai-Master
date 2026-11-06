@@ -1,7 +1,7 @@
 import { lstatSync, realpathSync } from "node:fs";
 import path from "node:path";
 
-export type ToolPathErrorCode = "path_outside_workdir" | "path_invalid";
+export type ToolPathErrorCode = "path_outside_workdir" | "path_outside_root" | "path_invalid";
 
 export class ToolPathError extends Error {
   readonly code: ToolPathErrorCode;
@@ -53,21 +53,42 @@ function nearestExistingRealpath(target: string, input: string): string {
 }
 
 export function resolveInWorkdir(workdir: string, input: string): string {
-  if (typeof workdir !== "string" || workdir.length === 0) {
-    throw new ToolPathError("path_invalid", "workdir is required");
+  return resolveBounded(workdir, input, "workdir", "path_outside_workdir");
+}
+
+/**
+ * 同形的「根内路径」校验，供 artifact 工具使用：`ToolPathErrorCode` 仍会区分
+ * 越界与非法路径，但越界码是 `path_outside_root`——调用方不能把它误当成
+ * workdir 越界（两者根不同，修复建议也不同）。
+ *
+ * 与 `resolveInWorkdir` 共用同一套实现（词法 + realpath 双重判定），因此
+ * symlink / junction 逃逸、Windows 大小写与 8.3 短名等行为完全一致。
+ */
+export function resolveUnder(root: string, input: string): string {
+  return resolveBounded(root, input, "artifact root", "path_outside_root");
+}
+
+function resolveBounded(
+  root: string,
+  input: string,
+  rootLabel: string,
+  outsideCode: ToolPathErrorCode,
+): string {
+  if (typeof root !== "string" || root.length === 0) {
+    throw new ToolPathError("path_invalid", `${rootLabel} is required`);
   }
   if (typeof input !== "string" || input.length === 0 || input.includes("\0")) {
     throw new ToolPathError("path_invalid", `invalid path: ${JSON.stringify(input)}`);
   }
-  const base = path.resolve(workdir);
+  const base = path.resolve(root);
   const target = path.resolve(base, input);
   if (!isWithin(base, target)) {
-    throw new ToolPathError("path_outside_workdir", `path escapes workdir: ${input}`);
+    throw new ToolPathError(outsideCode, `path escapes ${rootLabel}: ${input}`);
   }
-  const realBase = comparable(nearestExistingRealpath(base, workdir));
+  const realBase = comparable(nearestExistingRealpath(base, root));
   const realTarget = comparable(nearestExistingRealpath(target, input));
   if (!isWithin(realBase, realTarget)) {
-    throw new ToolPathError("path_outside_workdir", `path escapes workdir via symlink: ${input}`);
+    throw new ToolPathError(outsideCode, `path escapes ${rootLabel} via symlink: ${input}`);
   }
   return target;
 }

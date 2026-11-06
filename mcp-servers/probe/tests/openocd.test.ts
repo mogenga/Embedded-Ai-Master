@@ -465,6 +465,14 @@ describe("OpenOcdBackend 错误传播", () => {
     expect(backend.status().probe).toBe("detached");
   });
 
+  it("loadFirmware 返回 not_supported，不伪造烧录证据", async () => {
+    const { backend, transport } = setup(() => "");
+    await backend.attach();
+
+    expect(await codeOf(() => backend.loadFirmware("C:/fake/fw.elf"))).toBe("not_supported");
+    expect(transport.commands).toEqual([]);
+  });
+
   it("串口方法返回 not_supported", async () => {
     const { backend } = setup(() => "");
     await backend.attach();

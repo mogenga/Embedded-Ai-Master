@@ -6,6 +6,7 @@ import type { ModelCfg } from "../src/config/providers.js";
 import { buildMessages } from "../src/context/build.js";
 import { compactSession, SUMMARY_PROMPT } from "../src/context/compact.js";
 import type { CompactOptions } from "../src/context/compact.js";
+import { createTokenMeter } from "../src/context/token-meter.js";
 import { heuristicCountTokens } from "../src/model/count.js";
 import type { CompletionResult, ModelChatMessage, ModelProtocol } from "../src/model/protocol.js";
 import { createSession } from "../src/session/session.js";
@@ -936,6 +937,47 @@ describe("compactSession", () => {
       .filter((event) => event.type === "compaction" && event.payload.kind === "summary");
     expect(summaries).toHaveLength(1);
     expect(summaries[0].payload.summary).toBe("SUMMARY_FORCED");
+  });
+
+  it("尾界与软阈值用同一把尺子：meter 比例变了，裁掉的量也跟着变（D-093）", async () => {
+    // 修复前 `computeTailBoundary` 自己 `/4`，而软阈值走 meter——两套口径。
+    // 现在两者都经过 meter：把比例推到 2 之后，同一段会话的尾部预算只装得下
+    // 一半的历史，尾界必须前移（覆盖更多）。
+    const seed = async (): Promise<SessionHandle> => {
+      const session = await makeSession();
+      await addUser(session, "start");
+      for (let i = 0; i < 6; i += 1) {
+        await addUser(session, `${i}:` + "x".repeat(1200));
+      }
+      return session;
+    };
+    const coversFor = async (meter: ReturnType<typeof createTokenMeter> | undefined) => {
+      const session = await seed();
+      const model = createFakeModel(async () => ok("SUM"));
+      await compactSession(
+        makeOptions(session, model.model, cfg(10_000), {
+          force: true,
+          ...(meter === undefined ? {} : { meter }),
+        }),
+      );
+      const summary = session
+        .events()
+        .find((event) => event.type === "compaction" && event.payload.kind === "summary");
+      return summary?.payload.coversUpToSeq as number | undefined;
+    };
+
+    const plain = await coversFor(undefined);
+    // 把比例推到上界 2：同样的字符数现在算两倍 token。
+    const doubled = createTokenMeter(heuristicCountTokens);
+    for (let i = 0; i < 30; i += 1) {
+      doubled.observe(600, [{ role: "user", content: "x".repeat(300) }]);
+    }
+    const scaled = await coversFor(doubled);
+
+    expect(plain).toBeDefined();
+    expect(scaled).toBeDefined();
+    // 更贵 → 尾部预算装得更少 → 边界更靠后（覆盖得更多）。
+    expect(scaled!).toBeGreaterThan(plain!);
   });
 
   // microcompact 是「超预算时先廉价回收」：把工具结果换成一行标记就结束，

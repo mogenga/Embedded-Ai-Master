@@ -11,6 +11,8 @@ import {
   resolveReasoningEffort,
 } from "./config/providers.js";
 import { checkBudgetForModel, checkBudgetTokensForModel } from "./context/budget.js";
+import { renderEnvironmentSection } from "./context/system-sections.js";
+import type { SystemSections } from "./context/system-sections.js";
 import {
   assertCompactionRatios,
   assertKeepRecentTurns,
@@ -25,6 +27,7 @@ import { loadMcpConfig } from "./mcp/config.js";
 import { McpConfigError } from "./mcp/errors.js";
 import { McpManager } from "./mcp/manager.js";
 import type { McpStatusEvent } from "./mcp/manager.js";
+import type { McpRegistry } from "./mcp/registry.js";
 import { createMcpTools } from "./mcp/tools.js";
 import type { McpToolAdapterStatus } from "./mcp/tools.js";
 import { heuristicCountTokens } from "./model/count.js";
@@ -67,6 +70,14 @@ export interface RunOptions {
   cwd?: string;
   timeoutMs?: number;
   /**
+   * 整跑墙钟上限（毫秒），从本次运行开始算到结束，**不是**单次工具超时（那是
+   * `timeoutMs`）。缺省或 `<= 0` 表示不限制（D-189）。
+   *
+   * 与 `maxTurns` 同一原则：不填默认值。取消默认轮数上限之后，这是无人值守
+   * 场景里唯一还能保证「一次 run 不会无限期占着会话锁」的边界。
+   */
+  deadlineMs?: number;
+  /**
    * 本次运行的推理强度覆盖；缺省表示用 `providers.json` 里该模型的默认值。
    *
    * 显式写成 `undefined` 与不写同义。注意它**不能**表达「不发这个字段而忽略
@@ -87,6 +98,13 @@ export interface RunOptions {
     projectConfigPath?: string;
     trustProjectConfig?: boolean;
   };
+  /**
+   * 会话级 MCP 连接表（内部接线）。
+   *
+   * 不传时行为与从前完全一致：本轮自己建 manager、本轮关闭。传了则由表持有，
+   * 同一会话的后续 run 复用它，直到调用方 release/closeSession。
+   */
+  mcpRegistry?: McpRegistry;
   permissions?: RunPermissionOptions;
 }
 
@@ -295,6 +313,28 @@ interface ResumePlan {
   session: SessionHandle;
   systemPromptToAppend?: string;
   cwd: string;
+}
+
+/**
+ * 组装 P0 期唯一的系统提示词节：`environment`（设计稿 v0.2 §8）。
+ *
+ * 四个字段全部来自运行期，**在会话内恒定**：`workdir` 与会话日期来自会话本身，
+ * 平台在进程内是常量，shell 由环境变量给出。日期取会话创建日而不是当前时刻——
+ * 时刻每轮都变，写进前缀会让 prompt cache 全部失效（§2.2）。
+ *
+ * `base` / `tools` / `instructions` / `memory` 属于 P1 之后的分期，措辞是产品
+ * 决定，不在本函数内凭空补写（D-221 的教训：不要在未定措辞时先写一段）。
+ */
+function buildSystemSections(workdir: string, createdAt: string): SystemSections {
+  const shell = process.platform === "win32" ? process.env.COMSPEC : process.env.SHELL;
+  return {
+    environment: renderEnvironmentSection({
+      workdir,
+      platform: process.platform,
+      shell,
+      createdDate: createdAt,
+    }),
+  };
 }
 
 function sameWorkdir(left: string, right: string): boolean {
@@ -548,9 +588,18 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     });
   }
 
+  // 系统提示词只做**投影期注入**，不写会话日志（设计稿 v0.2 §3.1，D-221）：
+  // 写日志会让所有历史会话在续聊时撞 `system_prompt_mismatch`，且「改提示词 =
+  // 改历史事实」。环境事实全部可从运行期与 `header.createdAt` 重建。
+  const systemSections = buildSystemSections(runCwd, session.header.createdAt);
+
   let hasPrimaryError = false;
   let queryStarted = false;
   let mcpManager: McpManager | undefined;
+  // 是否由本轮创建并负责关闭。不能用 `mcpRegistry === undefined` 推断：两种
+  // 来源都可能存在，注册表持有的 manager 不该由某一轮关掉。
+  let ownsMcpManager = false;
+  let unsubscribeMcpTools: (() => void) | undefined;
   let statusQueue: Promise<void> = Promise.resolve();
   const seenMcpStatuses = new Set<string>();
   // 串行化写入,避免并发 append 打乱 seq;helper 内部已决定失败语义(降级、不抛)。
@@ -603,6 +652,7 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
           signal,
           meter: tokenMeter,
           softRatio,
+          systemSections,
           ...(compaction?.keepRecentTurns !== undefined
             ? { keepRecentTurns: compaction.keepRecentTurns }
             : {}),
@@ -650,10 +700,27 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
             : {}),
         });
         if (servers.length > 0) {
-          const manager = new McpManager(servers, {
-            logger: (event) => enqueueMcpStatus(event),
-          });
-          mcpManager = manager;
+          let manager: McpManager;
+          if (opts.mcpRegistry !== undefined) {
+            // 会话级复用：同一会话的后续消息等到的是同一个已连接的 manager。
+            // 连接阶段的事件属于触发这次连接的那一轮，所以 logger 在建好后、
+            // connectAll 之前就绑上本轮队列；复用轮次在 acquire 返回后重绑。
+            manager = await opts.mcpRegistry.acquire(session.dir, async () => {
+              const created = new McpManager(servers);
+              created.setLogger((event) => enqueueMcpStatus(event));
+              await created.connectAll();
+              return created;
+            });
+          } else {
+            manager = new McpManager(servers, {
+              logger: (event) => enqueueMcpStatus(event),
+            });
+            mcpManager = manager;
+            ownsMcpManager = true;
+          }
+          // 无论 manager 来自本轮还是注册表，事件都要进"这一轮"的会话日志：
+          // 复用旧的闭包会把状态写进上一轮已关闭的 session。
+          manager.setLogger((event) => enqueueMcpStatus(event));
           const emitAdapterStatus = (status: McpToolAdapterStatus): void => {
             if (status.kind === "mcp_tool_invalid_schema") {
               appendMcpStatusOnce(`invalid:${status.server}\u0000${status.tool}`, {
@@ -694,8 +761,13 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
             }
             for (const status of pendingStatuses) emitAdapterStatus(status);
           };
-          manager.onToolsChanged(() => rebuildMcpTools());
+          unsubscribeMcpTools = manager.onToolsChanged(() => rebuildMcpTools());
+          // 无注册表时沿用原路径（本轮连接、本轮关闭）。有注册表时连接已在
+          // acquire 的 factory 里完成；这里再调一次是幂等的（connected 的
+          // server 直接跳过），失败过的 server 也会给本轮一次重试机会。
           await manager.connectAll();
+          // 复用的 manager 工具表属于上一轮（本轮 registry 是新建的），必须
+          // 再填一次，否则模型这一轮看不到任何 MCP 工具。
           rebuildMcpTools();
         }
       } catch (error) {
@@ -719,6 +791,8 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       timeoutMs: opts.timeoutMs,
       pricePerMillion: provider.pricePerMillion,
       permissionGate,
+      systemSections,
+      ...(opts.deadlineMs !== undefined ? { deadlineMs: opts.deadlineMs } : {}),
       ...(meter !== undefined ? { meter } : {}),
       ...(compactor !== undefined ? { compactor } : {}),
     };
@@ -741,10 +815,16 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     throw error;
   } finally {
     let closeError: unknown;
-    // 先关闭 MCP(停止 list_changed 通知与 refresh),再 flush status 队列,
-    // 最后关闭 session;避免 refresh 在 flush 之后写入已关闭的会话(D-101)。
+    // 先退订本轮的工具表重建：注册表持有的 manager 活到下一条消息，旧 listener
+    // 会继续往已经没人读的 ToolRegistry 里写，并跨 run 累积。
+    unsubscribeMcpTools?.();
     try {
-      await mcpManager?.close();
+      // 先关闭 MCP(停止 list_changed 通知与 refresh),再 flush status 队列,
+      // 最后关闭 session;避免 refresh 在 flush 之后写入已关闭的会话(D-101)。
+      // 只有本轮自己建的 manager 才关；注册表持有的一直活到 release。
+      if (ownsMcpManager) {
+        await mcpManager?.close();
+      }
     } catch (error) {
       if (!hasPrimaryError) closeError = error;
     }

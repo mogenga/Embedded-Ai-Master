@@ -50,6 +50,15 @@
 - `tests/background-terminal.test.ts`
 - `tests/mcp-manager.test.ts`
 - `mcp-servers/keil/tests/exit-settle.test.ts`
+- `tests/server/files-api.test.ts` 的截断用例（2026-11-06 实测）
+- `tests/glob.test.ts` 的 200 条上限用例（2026-11-06 实测）
+
+**2026-11-06 复核**：全量默认并行度下每次红的具体用例都不一样（4 次全量分别是
+`[killAll, 别的会话]`、`[kill, killAll]`、`[killAll, 别的会话, 不带 id]`、
+`[files-api, glob, killAll]`），而 `npx vitest run --maxWorkers=4` **稳定全绿**
+（3782 passed / 111s）。因此这些是**并行度 + 本机负载**的产物，不是代码缺陷；
+`--maxWorkers=4` 可作为 CI 与本地的稳定口径。未改 `vitest.config.ts`（会改变全仓
+测试行为），留作可选命令。
 
 **这不是要你「把超时调大」了事。** 先判断每一处是「测试写得脆」还是「真实的竞态」。写脆的（依赖墙钟、依赖调度顺序、轮询间隔太粗）改成事件驱动；真竞态的记进报告，不要掩盖。
 

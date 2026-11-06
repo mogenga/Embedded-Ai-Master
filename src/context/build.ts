@@ -1,6 +1,16 @@
+/**
+ * 会话日志 → 模型消息投影。
+ *
+ * 系统提示词分节走**投影期注入**，不写会话日志：可选的 `systemSections` 在
+ * 投影时拼进固定位置，与压缩摘要同一套机制。理由见
+ * `docs/system-prompt-design.md` §3.1——写日志会让全部历史会话在续聊时触发
+ * `system_prompt_mismatch`，且「改提示词 = 改历史事实」。
+ */
 import type { ModelChatMessage } from "../model/protocol.js";
 import type { SessionEvent } from "../session/types.js";
 import { elidedContent } from "./microcompact.js";
+import { renderSections } from "./system-sections.js";
+import type { SystemSections } from "./system-sections.js";
 
 interface InvalidJsonMarker {
   error: "invalid_json";
@@ -147,7 +157,15 @@ function findEffectiveSummary(events: readonly SessionEvent[]): SummaryDirective
   return accepted;
 }
 
-export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage[] {
+export interface BuildMessagesOptions {
+  /** 投影期注入的系统提示词分节；缺省时行为与不传完全一致。 */
+  systemSections?: SystemSections;
+}
+
+export function buildMessages(
+  events: readonly SessionEvent[],
+  options?: BuildMessagesOptions,
+): ModelChatMessage[] {
   const bySeq = new Map<number, SessionEvent>();
   let previousSeq: number | undefined;
   for (const event of events) {
@@ -319,12 +337,26 @@ export function buildMessages(events: readonly SessionEvent[]): ModelChatMessage
       `assistant event ${activeBatch.assistantSeq} has ${activeBatch.remaining.length} missing tool_result events`,
     );
   }
-  if (effectiveSummary !== undefined) {
+  // 投影期注入: 分节与压缩摘要都不来自会话日志，但都进最前面的 system 区间。
+  // 顺序固定为 [日志 system…] [节: base…summary] [压缩摘要]——节在最后一条日志
+  // system 之后、摘要之前。不能追加到数组尾部：那会触发「system 必须在
+  // 非 system 之前」的守卫，也会让模型中段收到一条 system。
+  const sectionMessages: ModelChatMessage[] =
+    options?.systemSections === undefined
+      ? []
+      : renderSections(options.systemSections).map((section) => ({
+          role: "system",
+          content: section.content,
+        }));
+  if (sectionMessages.length > 0 || effectiveSummary !== undefined) {
     const lastSystemIndex = messages.findLastIndex((message) => message.role === "system");
-    messages.splice(lastSystemIndex + 1, 0, {
-      role: "system",
-      content: `[Conversation summary]\n${effectiveSummary.summary}`,
-    });
+    if (effectiveSummary !== undefined) {
+      sectionMessages.push({
+        role: "system",
+        content: `[Conversation summary]\n${effectiveSummary.summary}`,
+      });
+    }
+    messages.splice(lastSystemIndex + 1, 0, ...sectionMessages);
   }
   return messages;
 }

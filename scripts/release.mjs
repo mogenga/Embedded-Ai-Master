@@ -65,6 +65,15 @@ export const USAGE = `用法: node scripts/release.mjs [--check] [--tag <tag>]
 export const INSTALLER_DIR = "desktop/dist-installer";
 
 /**
+ * `desktop/package.json` 的 `build.win.artifactName` 的当前值。
+ *
+ * 只作为 `renderSteps` 的**默认参数**存在（让只传 version/tag 的旧调用方继续可用）。
+ * 打印步骤的真实来源是 `main()` 从 `desktop/package.json` 读到的值；
+ * `tests/release-check.test.ts` 有一条断言钉住二者相等——改了配置却忘了这里会红。
+ */
+export const DEFAULT_ARTIFACT_NAME = "Embedded-AI-Master-Setup-${version}.${ext}";
+
+/**
  * `gh` 的候选位置。
  *
  * 为什么要列候选：Windows 的 GUI 安装器（winget / msi）不保证把 `GitHub CLI`
@@ -214,19 +223,25 @@ export function checkInstaller({ entries, dirPath }) {
  * `latest.yml` 里会写成的名字。
  *
  * **为什么需要这个换算**：GitHub 只接受 `[0-9A-Za-z._-]` 的文件名
- * （`app-builder-lib/out/platformPackager.js` 的 `isSafeGithubName`）。当前产物叫
- * `Embedded AI Master Setup 0.1.0.exe`（含空格），于是
+ * （`app-builder-lib/out/platformPackager.js` 的 `isSafeGithubName`）。默认产物名
+ * 由 `productName` 拼出，是 `Embedded AI Master Setup 0.1.0.exe`（含空格），于是
  * `computeSafeArtifactNameIfNeeded` 会把空格换成 `-`，得到
  * `Embedded-AI-Master-Setup-0.1.0.exe`，并把这个值写进 `latest.yml` 的
  * `files[0].url` 与 `path`。
+ *
+ * **本仓库的 `artifactName` 已经显式写成连字符形式**（`desktop/package.json` 的
+ * `build.win.artifactName`），所以 `computeSafeArtifactNameIfNeeded` 的第一分支
+ * （`isSafeGithubName(suggestedName)` 为真）直接返回 `null`，electron-builder 用
+ * basename 原样上传/写清单——**不会被二次改写**。本函数对这类名字也原样返回。
  *
  * 走 `--publish always` 时没问题：`GitHubPublisher` 构造 `super(context, true)`，
  * 上传用的是 `safeArtifactName`，远端资产名与 `latest.yml` 一致。
  *
  * **但走 `gh release create` / 网页手动上传时，上传用的是磁盘上的原名**
  * （带空格），而 `latest.yml` 里写的是带连字符的名字——两者对不上，
- * 将来接了 `electron-updater` 就会去下载一个不存在的资产。这是一个真实存在的
- * 不一致，不是猜测：换算规则逐行对照过源码。
+ * `electron-updater` 就会去下载一个不存在的资产。这是一个真实存在的不一致，
+ * 不是猜测：换算规则逐行对照过源码。`artifactName` 显式配置之后这条不一致
+ * 已从源头消除，本函数保留作 `--check` 的守门。
  *
  * @param {string} fileName 磁盘上的文件名
  * @returns {string} `latest.yml` 里会出现的名字
@@ -511,14 +526,41 @@ export function checkTagArgument(tag) {
 }
 
 /**
- * 组装发布步骤文本。纯函数：只拼字符串，不做任何检查。
+ * 把 electron-builder 的 `artifactName` 模板展开成具体文件名。
  *
- * @param {{ version: string, tag: string, repoRoot?: string }} input
+ * 模板里只有两个宏会被替换：`${version}` 与 `${ext}`（与 electron-builder 的
+ * `expandMacro` 对这两个宏的行为一致）。`${productName}` / `${arch}` 等其它宏
+ * 一概**不做替换**——做不到就不要编，让调用方看到原样的模板。
+ *
+ * 纯函数：不读文件、不碰 I/O。模板由调用方传入（`main()` 从
+ * `desktop/package.json` 的 `build.win.artifactName` 读）。
+ *
+ * @param {{ artifactName: string, version: string, ext: string }} input
  * @returns {string}
  */
-export function renderSteps({ version, tag, repoRoot = REPO_ROOT }) {
+export function expandArtifactName({ artifactName, version, ext }) {
+  return artifactName.split("${version}").join(version).split("${ext}").join(ext);
+}
+
+/**
+ * 组装发布步骤文本。纯函数：只拼字符串，不做任何检查。
+ *
+ * `artifactName` 是 `desktop/package.json` 的 `build.win.artifactName`，由调用方
+ * 传入；省略时退回 `DEFAULT_ARTIFACT_NAME`（保持旧调用方可用的默认值）。installer
+ * 与 blockmap 两个文件名都从它派生，不再各自硬编码——硬编码正是它们与
+ * electron-builder 实际产物漂移的来源。
+ *
+ * @param {{ version: string, tag: string, repoRoot?: string, artifactName?: string }} input
+ * @returns {string}
+ */
+export function renderSteps({
+  version,
+  tag,
+  repoRoot = REPO_ROOT,
+  artifactName = DEFAULT_ARTIFACT_NAME,
+}) {
   const installerDir = path.join(repoRoot, INSTALLER_DIR);
-  const exeName = `Embedded AI Master Setup ${version}.exe`;
+  const exeName = expandArtifactName({ artifactName, version, ext: "exe" });
   const blockmapName = `${exeName}.blockmap`;
   const exePath = path.posix.join(INSTALLER_DIR, exeName);
   const ymlPath = path.posix.join(INSTALLER_DIR, "latest.yml");
@@ -618,8 +660,12 @@ release；而且它不会在发布前跑签名 / 工作区检查。gh 那条路�
 - 版本号的唯一来源是 desktop/package.json 的 version。根 package.json 也有一个
   version，两者不一致时**以 desktop/ 那份为准**（安装包用它），但这个不一致本身
   是隐患，见 docs/release.md。
-- latest.yml 现在只有 electron-updater 能消费；本项目**尚未接入**，所以用户收不到
-  应用内更新提醒，只能手动下载新版（D-212）。
+- latest.yml 由 electron-updater 消费；应用内自动更新**已接入**（desktop/updater.js，
+  desktop/package.json 的 dependencies 里有 electron-updater ^6.8.11），所以每次发布
+  都必须上传它，否则用户会看到「该 release 缺少更新清单」（docs/release.md §12.2）。
+  但「一次真实的更新」至今未跑过，残余边界见 D-212 与 docs/release.md §12.6。
+- 安装包名由 desktop/package.json 的 build.win.artifactName 决定；本脚本打印的名字
+  与它取自同一份配置，不要在这里另写常量。
 - 未签名的 release，用户双击安装包会看到 SmartScreen 警告，见 docs/code-signing.md。
 `;
 }
@@ -793,6 +839,24 @@ export async function readDesktopVersion(repoRoot = REPO_ROOT) {
   const text = await readFile(packagePath, "utf8");
   const parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
   return { version: parsed?.version, path: packagePath };
+}
+
+/**
+ * 读 `desktop/package.json` 的 `build.win.artifactName`。
+ *
+ * 这是安装包文件名的**唯一来源**：electron-builder 用它给产物命名，本脚本用它
+ * 拼 `gh release create` 的附件路径。两边各写一份常量就会漂移——2026-10-25
+ * 把 `artifactName` 改成连字符后，`renderSteps` 仍打印带空格的老名字，就是那次
+ * 漂移的实例。
+ *
+ * @param {string} [repoRoot]
+ * @returns {Promise<{ artifactName: unknown, path: string }>}
+ */
+export async function readDesktopArtifactName(repoRoot = REPO_ROOT) {
+  const packagePath = path.join(repoRoot, "desktop", "package.json");
+  const text = await readFile(packagePath, "utf8");
+  const parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
+  return { artifactName: parsed?.build?.win?.artifactName, path: packagePath };
 }
 
 /**
@@ -994,7 +1058,24 @@ async function main(argv) {
     tag = tagCheck.tag;
   }
 
-  process.stdout.write(`${renderSteps({ version: versionCheck.version, tag, repoRoot: REPO_ROOT })}`);
+  // 产物名从配置里读，不在这里另写一份常量 —— 两份迟早对不上（R3：说不出来就报错，
+  // 不要悄悄退回一个可能已经过期的默认名）。
+  const artifact = await readDesktopArtifactName(REPO_ROOT);
+  if (typeof artifact.artifactName !== "string" || artifact.artifactName.trim() === "") {
+    process.stderr.write(
+      `失败：${artifact.path} 缺少 build.win.artifactName，无法推出安装包文件名\n`,
+    );
+    return 1;
+  }
+
+  process.stdout.write(
+    `${renderSteps({
+      version: versionCheck.version,
+      tag,
+      repoRoot: REPO_ROOT,
+      artifactName: artifact.artifactName,
+    })}`,
+  );
   return 0;
 }
 

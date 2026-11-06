@@ -7,6 +7,7 @@ import type { SessionHandle } from "../session/session.js";
 import type { SessionEvent } from "../session/types.js";
 import { buildMessages } from "./build.js";
 import { elidedContent } from "./microcompact.js";
+import type { SystemSections } from "./system-sections.js";
 import { truncateSurrogateSafe } from "./text.js";
 import type { TokenMeter } from "./token-meter.js";
 
@@ -29,6 +30,14 @@ export interface CompactOptions {
    */
   force?: boolean;
   signal: AbortSignal;
+  /**
+   * 投影期的系统提示词分节（不写会话日志）。
+   *
+   * 压缩必须看见它们：`measure()` 量的就是「这次请求会带多少」，漏掉固定前缀会
+   * 低估占用、让压缩触发过晚（设计稿 §5.2）。摘要输入也走同一份投影，保证
+   * 「压缩后重发的消息」与「压缩时看到的消息」口径一致。
+   */
+  systemSections?: SystemSections;
 }
 
 export function assertCompactionRatios(keepTailRatio: number, softRatio: number): void {
@@ -121,16 +130,29 @@ function estimateEventTokens(event: SessionEvent): number {
   }
 }
 
+/**
+ * 尾部边界的预算估算。
+ *
+ * **不再自己除以 4**（D-093）：裸 `/4` 与预算路径（`TokenMeter`，用真实 usage
+ * 锚定过比例）是两套口径，中文日志下偏差可达数倍，结果就是「保留 16%」实际
+ * 保留得远多于或远少于 16%，而压缩阈值又是按另一套口径算的。传进来的
+ * `estimate` 由调用方给（有 meter 时就是 `meter.measure`），两处口径一致。
+ */
 function computeTailBoundary(
   events: readonly SessionEvent[],
   contextWindow: number,
   keepTailRatio: number,
+  scale: number,
 ): number {
   const tailBudget = contextWindow * keepTailRatio;
   let accumulated = 0;
   let tailStart = 0;
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    accumulated += estimateEventTokens(events[index]);
+    // 逐条估算，最后乘同一个比例——**不是**对每条各调一次 `meter.measure`：
+    // 后者的 `Math.ceil` 会放大到每条消息上，N 条就多算 N 次舍入，尾部预算
+    // 被系统性高估、边界前移，压缩该触发时不触发（实测：自定义 keepTailRatio
+    // 的集成用例因此少了压缩）。
+    accumulated += estimateEventTokens(events[index]) * scale;
     if (accumulated >= tailBudget) {
       tailStart = index;
       break;
@@ -190,6 +212,21 @@ function failureReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * 带系统提示词分节投影日志事件。
+ *
+ * 分节缺省时与 `buildMessages(events)` 逐字节相同——这条捷径让「没有分节」的
+ * 调用方（大多数测试与脚本）不必改，也保证行为向后兼容。
+ */
+function projectWith(
+  sections: SystemSections | undefined,
+  events: readonly SessionEvent[],
+): ModelChatMessage[] {
+  return sections === undefined
+    ? buildMessages(events)
+    : buildMessages(events, { systemSections: sections });
+}
+
 export async function compactSession(opts: CompactOptions): Promise<void> {
   const {
     session,
@@ -201,6 +238,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
     meter,
     force = false,
     signal,
+    systemSections,
   } = opts;
   assertCompactionRatios(keepTailRatio, softRatio);
   assertKeepRecentTurns(keepRecentTurns);
@@ -210,7 +248,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   const maxOutput = resolveMaxOutput(modelCfg);
   const softLimit = Math.floor(contextWindow * softRatio);
   const measure = () => {
-    const messages = buildMessages(session.events());
+    const messages = projectWith(systemSections, session.events());
     return { messages, tokens: measureWith(meter, messages) };
   };
 
@@ -253,7 +291,15 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   }
 
   const latest = session.events();
-  let coversUpToSeq = computeTailBoundary(latest, contextWindow, keepTailRatio);
+  // 尾部边界的尺子与预算路径一致（D-093）：`meter.ratio()` 是 usage 锚定出来的
+  // 全局比例，套在同一条启发式估算上。没有 meter 时比例就是 1，与压缩前的
+  // 行为逐字节相同。
+  let coversUpToSeq = computeTailBoundary(
+    latest,
+    contextWindow,
+    keepTailRatio,
+    meter?.ratio() ?? 1,
+  );
   coversUpToSeq = adjustSummaryBoundary(latest, coversUpToSeq);
   const previousSummary = lastSummaryEvent(latest);
   if (previousSummary !== undefined && coversUpToSeq <= previousSummary.seq) {
@@ -277,7 +323,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
 
   let prefixMessages: ModelChatMessage[];
   try {
-    prefixMessages = buildMessages(prefix);
+    prefixMessages = projectWith(systemSections, prefix);
   } catch (error) {
     await session.append({
       type: "compaction",

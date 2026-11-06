@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   aggregateExitCode,
@@ -14,13 +15,16 @@ import {
   checkTag,
   checkTagArgument,
   checkVersion,
+  DEFAULT_ARTIFACT_NAME,
   defaultTag,
+  expandArtifactName,
   findInstallers,
   formatChecks,
   githubSafeArtifactName,
   inspectDir,
   parseArgs,
   pickAccount,
+  readDesktopArtifactName,
   renderSteps,
   scrubTokens,
   STATUS,
@@ -387,6 +391,30 @@ describe("defaultTag / checkTagArgument", () => {
   });
 });
 
+describe("expandArtifactName", () => {
+  it("替换 ${version} 与 ${ext}", () => {
+    expect(
+      expandArtifactName({
+        artifactName: "Embedded-AI-Master-Setup-${version}.${ext}",
+        version: "0.1.5",
+        ext: "exe",
+      }),
+    ).toBe("Embedded-AI-Master-Setup-0.1.5.exe");
+  });
+
+  it("同一个宏出现多次时全部替换", () => {
+    expect(
+      expandArtifactName({ artifactName: "${version}-x-${version}.${ext}", version: "1.2.3", ext: "exe" }),
+    ).toBe("1.2.3-x-1.2.3.exe");
+  });
+
+  it("认不出的宏原样保留（不编造做不到的展开）", () => {
+    expect(
+      expandArtifactName({ artifactName: "${productName}-${version}.${ext}", version: "1.0.0", ext: "exe" }),
+    ).toBe("${productName}-1.0.0.exe");
+  });
+});
+
 describe("renderSteps", () => {
   const text = renderSteps({ version: "0.1.0", tag: "v0.1.0", repoRoot: "/repo" });
 
@@ -395,11 +423,30 @@ describe("renderSteps", () => {
     expect(text).toContain("git push origin v0.1.0");
   });
 
-  it("推荐路径是 gh release create，并带齐三个附件", () => {
+  it("推荐路径是 gh release create，并带齐三个附件（名字由 artifactName 派生）", () => {
+    const exeName = expandArtifactName({
+      artifactName: DEFAULT_ARTIFACT_NAME,
+      version: "0.1.0",
+      ext: "exe",
+    });
     expect(text).toContain("gh release create v0.1.0");
-    expect(text).toContain("Embedded AI Master Setup 0.1.0.exe");
+    expect(text).toContain(exeName);
     expect(text).toContain("latest.yml");
-    expect(text).toContain("Embedded AI Master Setup 0.1.0.exe.blockmap");
+    expect(text).toContain(`${exeName}.blockmap`);
+    // 旧硬编码（带空格）不得再出现——那是 electron-builder 产物名的漂移来源。
+    expect(text).not.toContain("Embedded AI Master Setup 0.1.0.exe");
+  });
+
+  it("artifactName 变化时三个附件名随之变化", () => {
+    const custom = renderSteps({
+      version: "0.1.5",
+      tag: "v0.1.5",
+      repoRoot: "/repo",
+      artifactName: "My-Setup-${version}.${ext}",
+    });
+    expect(custom).toContain("My-Setup-0.1.5.exe");
+    expect(custom).toContain("My-Setup-0.1.5.exe.blockmap");
+    expect(custom).not.toContain("Embedded-AI-Master-Setup-0.1.5.exe");
   });
 
   it("保留 --publish always + GH_TOKEN 的备选路径", () => {
@@ -415,6 +462,44 @@ describe("renderSteps", () => {
     expect(text).toContain("<your-gh-token>");
     expect(text).not.toMatch(/github_pat_[A-Za-z0-9]/);
     expect(text).not.toMatch(/ghp_[A-Za-z0-9]{16,}/);
+  });
+});
+
+describe("readDesktopArtifactName", () => {
+  it("从 desktop/package.json 的 build.win.artifactName 读出模板", async () => {
+    const root = await tempDir("release-artifact-");
+    await mkdir(path.join(root, "desktop"), { recursive: true });
+    await writeFile(
+      path.join(root, "desktop", "package.json"),
+      JSON.stringify({ build: { win: { artifactName: "X-${version}.${ext}" } } }),
+      "utf8",
+    );
+    const result = await readDesktopArtifactName(root);
+    expect(result.artifactName).toBe("X-${version}.${ext}");
+    expect(result.path).toBe(path.join(root, "desktop", "package.json"));
+  });
+
+  it("配置里没有该字段时返回 undefined（由调用方报错，不在这里兜底）", async () => {
+    const root = await tempDir("release-artifact-");
+    await mkdir(path.join(root, "desktop"), { recursive: true });
+    await writeFile(path.join(root, "desktop", "package.json"), JSON.stringify({ build: {} }), "utf8");
+    expect((await readDesktopArtifactName(root)).artifactName).toBeUndefined();
+  });
+
+  it("仓库里 desktop/package.json 的 artifactName 与 DEFAULT_ARTIFACT_NAME 一致", async () => {
+    // 单一事实源守卫：main() 打印用的是配置文件里的值，这里确认脚本里的默认值
+    // 没有在配置改名后悄悄过期（旧实现就是这样与磁盘产物漂移的）。
+    const repoDesktop = fileURLToPath(new URL("../desktop/package.json", import.meta.url));
+    const parsed = JSON.parse(await readFile(repoDesktop, "utf8"));
+    expect(parsed.build.win.artifactName).toBe(DEFAULT_ARTIFACT_NAME);
+    // 显式无空格 ⇒ computeSafeArtifactNameIfNeeded 第一分支（isSafeGithubName）命中、
+    // 返回 null，electron-builder 用 basename 原样，不会被二次改写。
+    const expanded = expandArtifactName({
+      artifactName: parsed.build.win.artifactName,
+      version: "0.1.5",
+      ext: "exe",
+    });
+    expect(githubSafeArtifactName(expanded)).toBe(expanded);
   });
 });
 

@@ -2,6 +2,7 @@ import { resolveContextWindow, resolveMaxOutput } from "../config/providers.js";
 import type { ModelCfg } from "../config/providers.js";
 import { buildContextBreakdown } from "../context/breakdown.js";
 import { buildMessages } from "../context/build.js";
+import type { SystemSections } from "../context/system-sections.js";
 import type { TokenMeter } from "../context/token-meter.js";
 import type {
   CompletionResult,
@@ -38,9 +39,23 @@ export interface LoopCtx {
   artifactDir: string;
   cwd?: string;
   timeoutMs?: number;
+  /**
+   * 整跑墙钟上限（毫秒）：从 query 开始到结束的总时长，**不是**单次工具超时
+   * （后者是 `timeoutMs`）。到点后按 `deadline` 收尾，与用户取消的 `aborted`
+   * 分开——两者界面文案不同。
+   *
+   * 缺省或 `<= 0` 表示不限制：与 `maxTurns` 同一原则，刻意不填默认值，
+   * 任何隐式上限都会在一次本来能跑完的长诊断里静默截断（D-183）。
+   */
+  deadlineMs?: number;
   systemPrompt?: string;
   pricePerMillion?: PricePerMillion;
   permissionGate?: PermissionGate;
+  /**
+   * 投影期注入的系统提示词分节（不写会话日志，见 `context/system-sections.ts`）。
+   * 缺省时不注入任何节——与实现该机制之前的行为逐字节一致。
+   */
+  systemSections?: SystemSections;
 }
 
 export interface LoopConfig extends BreakerLimits {}
@@ -129,6 +144,38 @@ function abortedToolResult(): ToolResult {
   };
 }
 
+// 连续截断达到此次数就停(KERNEL-4)。坏网关持续返回 finish_reason:"length"
+// 且内容为空时,主循环会无限自续;计数是**连续**的,一次正常响应即清零。
+// 常量而不是配置项:再开一个没人调的旋钮只会让"为什么停了"更难解释。
+const MAX_CONSECUTIVE_TRUNCATIONS = 3;
+
+// 服务端说"这次请求太长"的几种说法。各家措辞不同且会变,用一组大小写不敏感
+// 的正则覆盖已知形态,而不是只盯某一个厂商的字符串(KERNEL-5)。
+const CONTEXT_OVERFLOW_PATTERNS: readonly RegExp[] = [
+  /context_length_exceeded/i,
+  /maximum context length/i,
+  /too many tokens/i,
+  /context window/i,
+];
+
+/**
+ * 抛出来的错误是不是"本次请求超出了服务端上下文窗口"。
+ *
+ * 用 `name` 而不是 `instanceof ModelFatalError` 判断:这里的错误对象来自模型
+ * 适配层,直接 import 那个类会把 loop 绑到具体适配器上(适配层是可替换的),
+ * 也存在循环依赖的风险;适配器已经用 `this.name = "ModelFatalError"` 明确
+ * 声明了可辨别的契约。
+ */
+function isContextOverflowError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const candidate = error as { name?: unknown; status?: unknown; bodyPreview?: unknown };
+  if (candidate.name !== "ModelFatalError") return false;
+  if (candidate.status !== 400) return false;
+  const preview = candidate.bodyPreview;
+  if (typeof preview !== "string") return false;
+  return CONTEXT_OVERFLOW_PATTERNS.some((pattern) => pattern.test(preview));
+}
+
 function lostToolResult(): ToolResult {
   return {
     isError: true,
@@ -136,6 +183,23 @@ function lostToolResult(): ToolResult {
     message: "tool result not recorded due to error",
     text: "tool result not recorded due to error",
   };
+}
+
+/**
+ * 投影与本次请求有关的消息：日志事件 + 投影期的系统提示词分节。
+ *
+ * 分节来自 `ctx.systemSections`，**不写会话日志**（见 `context/system-sections.ts`）。
+ * 与压缩摘要走同一个入口位置：两者都在 `buildMessages` 内部插到最前面的 system
+ * 区间里，调用方只管传，不必关心顺序。
+ *
+ * 单独抽成函数是为了让两处调用（发请求前、压缩后）共用同一份参数，避免一处
+ * 传了节、另一处忘了——那会让压缩后的那一轮突然丢掉环境事实。
+ */
+function projectMessages(ctx: LoopCtx): ModelChatMessage[] {
+  const events = ctx.session.events();
+  return ctx.systemSections === undefined
+    ? buildMessages(events)
+    : buildMessages(events, { systemSections: ctx.systemSections });
 }
 
 /**
@@ -230,6 +294,16 @@ async function* emitInterrupted(
   yield { kind: "done", finishReason: reason };
 }
 
+// 连续截断到顶:这是**正常结束**,不是失败也不是用户取消,所以不写 interrupted,
+// 只把"内容确实没写完"如实落在 status 与 done 上(KERNEL-4)。
+async function* emitTruncatedDone(session: SessionHandle): AsyncGenerator<LoopEvent> {
+  await session.append({
+    type: "status",
+    payload: { status: "done", finishReason: "truncated" },
+  });
+  yield { kind: "done", finishReason: "truncated" };
+}
+
 // checkpoint.turn 必须在会话内单调递增;resume 后从最后一条 checkpoint 续编,
 // 否则同一目录会出现重复 turn,未来按 turn 定位断点会歧义(D-045)。
 function lastCheckpointTurn(session: SessionHandle): number {
@@ -267,6 +341,18 @@ export async function* query(
 
 
   const costTracked = ctx.pricePerMillion !== undefined;
+
+  // `maxCostUsd` 设了但 provider 没有定价时，成本熔断永远不会触发（KERNEL-8）。
+  // 静默失效比报错更坏：操作者以为设了上限，实际没有。这里在开跑前就说清楚，
+  // 并且**不阻止运行**——上限失效是配置问题，不是本次请求的错误，直接拒绝会
+  // 让一次本来能跑的诊断跑不了。
+  const costCapUntracked = cfg.maxCostUsd !== undefined && !costTracked;
+  if (costCapUntracked) {
+    await session.append({
+      type: "status",
+      payload: { status: "cost_cap_untracked", message: "maxCostUsd 已设置，但该模型没有配置价格，成本上限不会生效" },
+    });
+  }
   // `turn` 与 `runTurn` 是两件事，曾经被合并成一个变量：
   //
   // - `turn` 是会话级检查点序号，跨消息单调递增（D-045：同一目录出现重复 turn
@@ -288,6 +374,18 @@ export async function* query(
   let costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
   let pending: PendingBatch | undefined;
   let exitReason: ExitReason | undefined;
+  // 连续截断计数(KERNEL-4):每次截断响应 +1,任何非截断响应清零。
+  let consecutiveTruncations = 0;
+  // 本次运行是否已因服务端上下文超限强制压缩过(KERNEL-5):同一运行只重试一次。
+  let overflowCompacted = false;
+
+  // 整跑墙钟(D-189)用时间比较而不是 timer:不需要清理句柄,generator 被消费者
+  // 提前关闭时也不会留下悬挂的 setTimeout。`<= 0`(含 NaN)与缺省同样表示不限制。
+  const deadlineLimit =
+    ctx.deadlineMs !== undefined && ctx.deadlineMs > 0 ? ctx.deadlineMs : undefined;
+  const startedAt = Date.now();
+  const deadlineReached = (): boolean =>
+    deadlineLimit !== undefined && Date.now() - startedAt >= deadlineLimit;
 
   const removePending = (id: string): void => {
     if (pending === undefined) return;
@@ -367,6 +465,12 @@ export async function* query(
         yield* emitInterrupted(session, "aborted");
         return;
       }
+      // 墙钟先于熔断器:到点就是一个更基本的事实,不该被报成"达到最大轮数"。
+      if (deadlineReached()) {
+        exitReason = "normal";
+        yield* emitInterrupted(session, "deadline");
+        return;
+      }
 
       try {
         assertBreakers(cfg, runTurn, costUsd, costTracked);
@@ -381,7 +485,7 @@ export async function* query(
 
       await session.append({ type: "checkpoint", payload: { turn } });
 
-      let messages = buildMessages(session.events());
+      let messages = projectMessages(ctx);
       const budget = ctx.budget(messages);
       if (budget.over && ctx.compactor !== undefined) {
         try {
@@ -395,7 +499,7 @@ export async function* query(
           throw error;
         }
         yield { kind: "compacted" };
-        messages = buildMessages(session.events());
+        messages = projectMessages(ctx);
         costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
       }
 
@@ -433,9 +537,45 @@ export async function* query(
           yield* emitInterrupted(session, "aborted");
           return;
         }
+        // 服务端说这次请求超长(KERNEL-5):压缩一次再重发。没有压缩器时保持
+        // 原样上抛——无恢复手段却报一个 `context_overflow` 收尾,会让"为什么停"
+        // 与实际能力不符(R3)。同一运行只重试一次,否则压缩无效时会死循环。
+        if (ctx.compactor !== undefined && isContextOverflowError(error)) {
+          if (overflowCompacted) {
+            exitReason = "normal";
+            yield* emitInterrupted(session, "context_overflow");
+            return;
+          }
+          overflowCompacted = true;
+          try {
+            await ctx.compactor(session);
+          } catch (compactError) {
+            if (isAbortError(compactError) || ctx.signal.aborted) {
+              exitReason = "normal";
+              yield* emitInterrupted(session, "aborted");
+              return;
+            }
+            // 压缩本身失败:本次超限已无法恢复,如实报 context_overflow,
+            // 不要伪装成通用的 error。
+            exitReason = "normal";
+            yield* emitInterrupted(session, "context_overflow");
+            return;
+          }
+          yield { kind: "compacted" };
+          costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
+          // `continue` 回到循环顶部:重建消息、再发一次请求。它确实会多走一轮
+          // checkpoint 与 turn 计数,但 `maxTurns` 仍按本次运行的模型调用数计,
+          // 恢复重试也计入——这与"每次请求都算一轮"的既有语义一致。
+          continue;
+        }
         throw error;
       }
       await deltaWriter.flush();
+
+      // 两处 `truncatedByMaxTokens` 的 continue 共享这一个计数器(KERNEL-4):
+      // 截断 +1,任何非截断响应清零——"连续"才有意义,偶发一次截断后正常重试
+      // 仍保留既有行为。
+      consecutiveTruncations = response.truncatedByMaxTokens ? consecutiveTruncations + 1 : 0;
 
       assertUniqueToolCallIds(response.toolCalls);
       const assistantEvent = await session.append({
@@ -500,7 +640,13 @@ export async function* query(
         yield { kind: "tool_use", id: call.id, name: call.name, input: call.arguments };
       }
 
-      if (ctx.signal.aborted) {
+      // 墙钟在这一轮模型调用期间跑穿、且还有工具要执行时,走与 abort 相同的
+      // 收尾路径(D-189):已声明的 toolCalls 全部补 tool_aborted,再如实报
+      // deadline。没有待执行的工具调用时不在这里判超时——这一轮已经拿到终局
+      // 答案(或即将因截断进入下一轮、由循环顶部判),把一份完整答案改写成
+      // "超时"只会失真。abort 保持原有语义:不论有没有工具调用都立即收尾。
+      const deadlineAfterCall = deadlineReached() && response.toolCalls.length > 0;
+      if (ctx.signal.aborted || deadlineAfterCall) {
         for (const call of response.toolCalls) {
           const result = abortedToolResult();
           await appendToolResult(call, result, assistantEvent.seq);
@@ -508,12 +654,19 @@ export async function* query(
         }
         pending = undefined;
         exitReason = "normal";
-        yield* emitInterrupted(session, "aborted");
+        yield* emitInterrupted(session, ctx.signal.aborted ? "aborted" : "deadline");
         return;
       }
 
       if (response.toolCalls.length === 0) {
-        if (response.truncatedByMaxTokens) continue;
+        if (response.truncatedByMaxTokens) {
+          if (consecutiveTruncations >= MAX_CONSECUTIVE_TRUNCATIONS) {
+            exitReason = "normal";
+            yield* emitTruncatedDone(session);
+            return;
+          }
+          continue;
+        }
         await session.append({
           type: "status",
           payload: { status: "done", finishReason: "no_tool_calls" },
@@ -608,7 +761,22 @@ export async function* query(
       }
       pending = undefined;
 
-      if (response.truncatedByMaxTokens) continue;
+      // 工具批次跑完再查一次墙钟(D-189):一批慢工具足以把预算跑穿,
+      // 等下一轮顶部再查会多耗一次模型调用。
+      if (deadlineReached()) {
+        exitReason = "normal";
+        yield* emitInterrupted(session, "deadline");
+        return;
+      }
+
+      if (response.truncatedByMaxTokens) {
+        if (consecutiveTruncations >= MAX_CONSECUTIVE_TRUNCATIONS) {
+          exitReason = "normal";
+          yield* emitTruncatedDone(session);
+          return;
+        }
+        continue;
+      }
     }
   } catch (error) {
     exitReason = "error";

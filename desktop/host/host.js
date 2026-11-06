@@ -708,6 +708,7 @@ let runLimits = {
   maxTurns: null,
   maxCostUsd: null,
   timeoutMs: null,
+  deadlineMs: null,
   systemPrompt: "",
   reasoningEffortByModel: {},
 };
@@ -785,6 +786,11 @@ function runLimitOptions() {
       : {}),
     ...(runLimits.maxCostUsd === null ? {} : { maxCostUsd: runLimits.maxCostUsd }),
     ...(runLimits.timeoutMs === null ? {} : { timeoutMs: runLimits.timeoutMs }),
+    // Wall-clock cap for the whole run, not the per-call `timeoutMs`. Unset is
+    // the common case; the kernel treats a missing field as "no limit".
+    ...(runLimits.deadlineMs === null || runLimits.deadlineMs === undefined
+      ? {}
+      : { deadlineMs: runLimits.deadlineMs }),
     ...(runLimits.systemPrompt === "" ? {} : { systemPrompt: runLimits.systemPrompt }),
     // Omitted for "auto": the runner would turn it into "no override" anyway,
     // and a field that never travels is one less thing to misread downstream.
@@ -936,6 +942,17 @@ function createRunner() {
     ...(modelRef === "" ? {} : { model: modelRef }),
     cwd,
     permissions: { preset: mode },
+    // OPT-15 / D-134: the kernel is in this same process, so every event it
+    // commits is handed to us as soon as it is on disk — instead of waiting
+    // up to one 200 ms poll of the log. This is an accelerator, not a second
+    // protocol: `handleLiveEvent` translates through the same protocol context
+    // the file pump uses, and that context's `lastSeq` cursor is what keeps an
+    // event from being drawn twice. File following stays (crash recovery,
+    // out-of-process writers, replay after reconnect), and a kernel that does
+    // not know this option simply never calls it.
+    onSessionEvent: (session, event) => {
+      handleLiveEvent(session, event);
+    },
   });
 }
 
@@ -1396,19 +1413,7 @@ function startFollow(id, since) {
       const reader = eventSource.follow(id, since, signal);
       for await (const event of reader) {
         if (signal.aborted) return;
-        // Keep the cached measure current: a later `state` (a settings change,
-        // a session switch back) reads it rather than the log.
-        if (event.type === "usage" && typeof event.payload === "object" && event.payload !== null) {
-          if (typeof event.payload.context === "object" && event.payload.context !== null) {
-            lastSessionMeasure = { ...lastSessionMeasure, context: event.payload.context };
-          }
-          if (typeof event.payload.costUsd === "number" && Number.isFinite(event.payload.costUsd)) {
-            lastSessionMeasure = { ...lastSessionMeasure, costUsd: event.payload.costUsd };
-          }
-        }
-        for (const message of kernel.protocol.sessionEventToHostEvents(event, ctx)) {
-          send(message);
-        }
+        deliverKernelEvent(event);
       }
       if (signal.aborted) return;
       // Stream ended without an explicit run_end (a crash or an aborted run
@@ -1436,6 +1441,85 @@ function startFollow(id, since) {
   followTask = task;
 }
 
+/**
+ * Translate one kernel event with the current protocol context and send it.
+ *
+ * Shared by the file pump and the in-process channel (`handleLiveEvent`) so
+ * the transcript is drawn the same way whichever path got there first. The
+ * dedupe is the context's own `lastSeq`: `sessionEventToHostEvents` drops any
+ * event whose seq has already been translated, and this is the single cursor
+ * both paths advance — there is no second ledger to disagree with it.
+ */
+function deliverKernelEvent(event) {
+  // Keep the cached measure current: a later `state` (a settings change,
+  // a session switch back) reads it rather than the log.
+  if (event.type === "usage" && typeof event.payload === "object" && event.payload !== null) {
+    if (typeof event.payload.context === "object" && event.payload.context !== null) {
+      lastSessionMeasure = { ...lastSessionMeasure, context: event.payload.context };
+    }
+    if (typeof event.payload.costUsd === "number" && Number.isFinite(event.payload.costUsd)) {
+      lastSessionMeasure = { ...lastSessionMeasure, costUsd: event.payload.costUsd };
+    }
+  }
+  for (const message of kernel.protocol.sessionEventToHostEvents(event, ctx)) {
+    send(message);
+  }
+}
+
+/**
+ * The in-process accelerator's half of the event pump (OPT-15 / D-134).
+ *
+ * The kernel hands us every event right after it is committed to the log, so
+ * the transcript no longer waits out the 200 ms poll. This is *only* an
+ * accelerator: the file pump stays, and it is still the one that recovers
+ * after a crash, reads what another process wrote, and replays on reconnect.
+ *
+ * Two rules make the two paths coexist without drawing anything twice:
+ *
+ * 1. Only the current run is accepted. Events from a finished run (or from a
+ *    session the operator has since switched away from) are the file pump's
+ *    business; translating them here would talk over the transcript.
+ * 2. Only a *contiguous* seq is translated (`lastSeq + 1`). A gap means the
+ *    accelerator missed something the log has — the only such case today is
+ *    crash-recovery events, which are appended before this run attaches — and
+ *    the event is deliberately left to the pump, which replays the log in
+ *    order from the same cursor. Skipping keeps the cursor honest: it never
+ *    jumps over an event nobody has drawn.
+ *
+ * The reverse order needs no rule of its own: if the pump got there first,
+ * `ctx.lastSeq` has already passed the seq and `sessionEventToHostEvents`
+ * drops the live copy.
+ */
+function handleLiveEvent(session, event) {
+  if (!ctx.running) return;
+  // A brand-new run has no id until `start` returns; while the id is empty
+  // there is nothing else in flight, so the event can only belong to it.
+  if (sessionId !== "" && session !== sessionId) return;
+  if (typeof event !== "object" || event === null) return;
+  if (!Number.isSafeInteger(event.seq)) return;
+  if (event.seq !== ctx.lastSeq + 1) return;
+  const before = ctx.lastSeq;
+  try {
+    deliverKernelEvent(event);
+  } catch (error) {
+    // R3 / failure semantics: the accelerator reports its own failure and the
+    // pump still carries every event from the log. Rewinding the cursor is
+    // what lets the pump re-deliver this one instead of treating it as a
+    // duplicate of something that never reached the screen.
+    //
+    // The translation may have already sent part of this event's messages
+    // before it threw, so that one event can be drawn twice. That is the
+    // deliberate trade: this path is an accelerator, and a duplicated frame is
+    // recoverable by the reader while a silently dropped one is not.
+    ctx.lastSeq = before;
+    send({
+      type: "notice",
+      level: "warn",
+      text: `实时事件通道出错，已回退到日志轮询：${messageOf(error)}`,
+    });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Skills and the slash-command catalogue
 // ---------------------------------------------------------------------------
@@ -1459,6 +1543,20 @@ function builtinCommands() {
 
 /** What the settings page and the transcript show when the store is absent. */
 const SKILLS_MISSING = "内核未导出技能存储，请重新执行 npm run build";
+
+/**
+ * A settings-page refusal, tagged so the renderer can route it to that page.
+ *
+ * The save handlers below are called while the settings dialog is open, and
+ * the dialog is a `showModal()` on top of the transcript: a bare `notice`
+ * drawn behind it is a failure the user never sees — the click looks like it
+ * did nothing at all (R3). `page` names the settings page that owns the form,
+ * so the renderer can put the sentence beside the field that was saved and
+ * leave every other notice in the transcript.
+ */
+function settingsNotice(page, text) {
+  send({ type: "notice", level: "warn", text, domain: "settings", page });
+}
 
 /**
  * A skill failure, tagged so the renderer can route it to the settings page.
@@ -1627,6 +1725,7 @@ function persistEffort() {
     maxTurns: runLimits.maxTurns,
     maxCostUsd: runLimits.maxCostUsd,
     timeoutMs: runLimits.timeoutMs,
+    deadlineMs: runLimits.deadlineMs ?? null,
     systemPrompt: runLimits.systemPrompt,
     reasoningEffortByModel: { ...effortTable() },
   };
@@ -1676,6 +1775,10 @@ async function handlePrompt(text) {
   }
 
   ctx = kernel.protocol.createContext({ sessionId, cwd });
+  // Everything up to `since` is already on screen (or belongs to a previous
+  // turn); the pump below starts at the same cursor. Seeding it is also what
+  // lets `handleLiveEvent` recognise a contiguous seq on a resumed session.
+  ctx.lastSeq = since;
   ctx.running = true;
   running = true;
   send({ type: "run_start" });
@@ -1992,11 +2095,36 @@ async function handleCompact() {
   }
 }
 
+/**
+ * Release the MCP connections held for a conversation we are leaving.
+ *
+ * The kernel keeps one connection set per session, so switching away without
+ * releasing would keep the probe/serial child processes alive for a
+ * conversation nobody is looking at. Only called when no turn is in flight —
+ * the running check is the caller's (a live run still needs its tools), and
+ * this guard repeats it so a future call site cannot drop them mid-turn.
+ *
+ * A failure is reported, never silent (R3), and never blocks the switch: the
+ * new session is already what the operator asked for, and the leftover process
+ * will still be reaped when the runner is rebuilt or the host exits.
+ */
+function releaseSessionMcp(target) {
+  if (target === "" || ctx.running || typeof runner?.closeSession !== "function") return;
+  runner.closeSession(target).catch((error) => {
+    send({
+      type: "notice",
+      level: "warn",
+      text: `释放会话 MCP 连接失败：${messageOf(error)}`,
+    });
+  });
+}
+
 function handleNewSession() {
   if (ctx.running) {
     send({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
     return;
   }
+  releaseSessionMcp(sessionId);
   stopFollow();
   sessionId = "";
   lastSessionId = "";
@@ -2113,6 +2241,11 @@ async function handleLoadSession(id) {
     send({ type: "notice", level: "error", text: `会话读取失败：${messageOf(error)}` });
     return;
   }
+  // Switching conversations releases the MCP connections of the one being left
+  // (same act as in `handleNewSession`). Reopening the current session is not
+  // a switch and keeps them. Done here, after the read succeeded: a failed
+  // load leaves the operator where they were, still needing those tools.
+  if (id !== sessionId) releaseSessionMcp(sessionId);
   sessionId = id;
   running = false;
   // Follow the conversation's own project before the context and the `state`
@@ -3059,7 +3192,7 @@ const handlers = {
   async savePermissions(payload) {
     const wanted = payload.permissions;
     if (typeof wanted !== "object" || wanted === null) {
-      send({ type: "notice", level: "warn", text: "缺少 permissions 对象" });
+      settingsNotice("behavior", "缺少 permissions 对象");
       return;
     }
     const presets = ["read-only", "workspace-write", "diagnose", "danger-full-access"];
@@ -3071,7 +3204,7 @@ const handlers = {
     try {
       await kernel.writePermissionConfig(harnessHome, wanted);
     } catch (error) {
-      send({ type: "notice", level: "warn", text: `权限配置未保存：${messageOf(error)}` });
+      settingsNotice("behavior", `权限配置未保存：${messageOf(error)}`);
       return;
     }
     if (switchesMode && !ctx.running) {
@@ -3361,7 +3494,7 @@ const handlers = {
     const existing = config?.mcpServers ?? [];
     const wanted = payload.server;
     if (typeof wanted !== "object" || wanted === null) {
-      send({ type: "notice", level: "warn", text: "缺少 server 对象" });
+      settingsNotice("mcp", "缺少 server 对象");
       return;
     }
     const name = String(wanted.name ?? "").trim();
@@ -3381,7 +3514,7 @@ const handlers = {
     try {
       await kernel.writeMcpServers(harnessHome, next);
     } catch (error) {
-      send({ type: "notice", level: "warn", text: `MCP 配置未保存：${messageOf(error)}` });
+      settingsNotice("mcp", `MCP 配置未保存：${messageOf(error)}`);
       return;
     }
     configEvent();
@@ -3394,13 +3527,13 @@ const handlers = {
     const name = String(payload.name ?? "");
     const next = (config?.mcpServers ?? []).filter((entry) => entry.name !== name);
     if (next.length === (config?.mcpServers ?? []).length) {
-      send({ type: "notice", level: "warn", text: `没有名为 ${name} 的 MCP server` });
+      settingsNotice("mcp", `没有名为 ${name} 的 MCP server`);
       return;
     }
     try {
       await kernel.writeMcpServers(harnessHome, next);
     } catch (error) {
-      send({ type: "notice", level: "warn", text: `MCP 配置未保存：${messageOf(error)}` });
+      settingsNotice("mcp", `MCP 配置未保存：${messageOf(error)}`);
       return;
     }
     configEvent();
@@ -3409,7 +3542,7 @@ const handlers = {
   async saveRunLimits(payload) {
     const wanted = payload.run;
     if (typeof wanted !== "object" || wanted === null) {
-      send({ type: "notice", level: "warn", text: "缺少 run 对象" });
+      settingsNotice("behavior", "缺少 run 对象");
       return;
     }
     // The settings page writes the file whole and does not know about the
@@ -3423,7 +3556,7 @@ const handlers = {
     try {
       runLimits = await kernel.writeRunLimits(harnessHome, merged);
     } catch (error) {
-      send({ type: "notice", level: "warn", text: `运行参数未保存：${messageOf(error)}` });
+      settingsNotice("behavior", `运行参数未保存：${messageOf(error)}`);
       return;
     }
     if (ctx.running) {
@@ -3444,13 +3577,13 @@ const handlers = {
   async saveProviders(payload = {}) {
     const wanted = payload.providers;
     if (typeof wanted !== "object" || wanted === null || Array.isArray(wanted)) {
-      send({ type: "notice", level: "warn", text: "缺少 providers 对象" });
+      settingsNotice("connection", "缺少 providers 对象");
       return;
     }
     try {
       await kernel.writeProviders(harnessHome, wanted);
     } catch (error) {
-      send({ type: "notice", level: "warn", text: `模型配置未保存：${messageOf(error)}` });
+      settingsNotice("connection", `模型配置未保存：${messageOf(error)}`);
       return;
     }
     // Re-read rather than reuse `wanted`: the file is the source of truth, and
@@ -3465,7 +3598,7 @@ const handlers = {
       providersError = messageOf(error);
       modelList = [];
       modelRef = "";
-      send({ type: "notice", level: "warn", text: `模型配置已写入但无法读回：${providersError}` });
+      settingsNotice("connection", `模型配置已写入但无法读回：${providersError}`);
       configEvent();
       return;
     }

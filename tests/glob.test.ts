@@ -142,10 +142,25 @@ describe("matchesGlob", () => {
     expect(matchesGlob("src/nested/a.ts", "src\\**\\*.ts")).toBe(true);
   });
 
+  /**
+   * `*` 与 `**` 都匹配点开头的隐藏文件（D-081）。
+   *
+   * 这与常见 shell glob 的默认行为相反，是**有意保留**的：`description` 已写明，
+   * 忽略的是 `.git` / `.harness` 这类整个目录（走忽略表），而根级 `.env` 这类
+   * 文件应该能被模型看到。
+   *
+   * 若将来要对齐 shell 语义（增加 `dot` 选项或默认排除），改这条断言的同时按
+   * D-081 的修复建议同步 `description` 与 design。
+   */
   it("* 匹配隐藏文件且大小写敏感", () => {
     expect(matchesGlob(".env", "*")).toBe(true);
     expect(matchesGlob("src/.env", "*")).toBe(false);
     expect(matchesGlob("A.TS", "*.ts")).toBe(false);
+  });
+
+  it("** 也匹配点开头的目录与文件（D-081 的有意决定）", () => {
+    expect(matchesGlob(".hidden/x.ts", "**/*.ts")).toBe(true);
+    expect(matchesGlob("src/.env", "**/*")).toBe(true);
   });
 
   it("pattern 长度超过 256 返回 false", () => {

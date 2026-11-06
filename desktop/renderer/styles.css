@@ -2677,6 +2677,69 @@ mark.find-hit.current {
   color: var(--success, var(--accent));
 }
 
+/* ---------- evidence filter (transcript) ----------
+   The filter is one rule on the root instead of a DOM walk per event: while
+   it is on, the transcript shows the tool rows the kernel marked as evidence
+   and their output blocks, and nothing else. That is what the switch says it
+   does, so that is what it does — prose, notices and unmarked tool calls all
+   step aside, and the note above the composer explains the result.
+
+   `[data-evidence]` is written only from `tool_result.evidence`: absent
+   means the log never judged this call (it is still running, or the log
+   predates the producer), and only `true` keeps a row. Absent is therefore
+   filtered out too — but it is never *written* as `false`, so the attribute
+   still carries the kernel's answer rather than this rule's guess.
+
+   Only transcript *content* blocks are hidden by name. The find bar, the
+   scroll button and the live progress line are transcript children too, and
+   none of them is conversation content: hiding them would take away the two
+   controls a filtered view needs most.
+
+   A group with no evidence row collapses as a whole; otherwise every emptied
+   group would leave its 24 px block margins behind as a run of blank bands.
+   The `> .tool-row` rule alone cannot do this: a group whose only rows are
+   wrapped in `.tool-item` still occupies its margins unless the group itself
+   is hidden. */
+:root.evidence-only .transcript > .turn,
+:root.evidence-only .transcript > .thinking,
+:root.evidence-only .transcript > .notice,
+:root.evidence-only .transcript > .plan,
+:root.evidence-only .transcript > .subagent,
+:root.evidence-only .transcript > .background-report,
+:root.evidence-only .transcript > .goal-summary,
+:root.evidence-only .transcript > .recovery,
+:root.evidence-only .transcript > .compact-marker,
+:root.evidence-only .tool-group:not(:has(.tool-row[data-evidence="true"])),
+:root.evidence-only .tool-group > .tool-row:not([data-evidence="true"]),
+:root.evidence-only .tool-group > .inline-diff,
+:root.evidence-only .tool-item:not(:has(.tool-row[data-evidence="true"])) {
+  display: none;
+}
+
+/* The note that explains an empty result. It sits above the composer rather
+   than inside the transcript because a session switch removes every
+   transcript block, and a filter left on across sessions would otherwise
+   present a literally blank page with nothing to click. */
+.evidence-empty {
+  max-width: var(--column-width);
+  margin: 0 auto 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  font-size: var(--text-sm);
+  color: var(--text-faint);
+}
+
+.evidence-empty svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
 /* The name and its badges share the name track, so a badge does not push the
    summary into a column of its own (that would move the summary only on rows
    that happen to carry a badge). The label elides; the badges do not. */
@@ -3809,6 +3872,42 @@ mark.find-hit.current {
   min-width: 0;
 }
 
+/* The transcript's evidence filter. It reads as a state, not a button: at
+   rest it is quiet text like the folder name beside it, and `aria-pressed`
+   is what turns it into a filled chip. The count rides along so the reader
+   can see there is something to filter before turning it on. */
+.status-tab-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+.status-tab-filter svg {
+  width: 11px;
+  height: 11px;
+  opacity: 0.75;
+}
+
+.status-tab-filter:hover {
+  background: var(--surface-hover);
+  color: var(--text-secondary);
+}
+
+.status-tab-filter[aria-pressed="true"] {
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.evidence-filter-count {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  opacity: 0.85;
+}
+
 /* Pushed to the far edge: the left half says where, the right half says how
    full, and they are read in that order. */
 .status-tab-context {
@@ -3986,28 +4085,6 @@ mark.find-hit.current {
 .stop-button:hover {
   color: var(--text);
   background: var(--surface-hover);
-}
-
-.queued-badge {
-  font-size: var(--text-sm);
-  color: var(--text-faint);
-  padding: 0 4px;
-  white-space: nowrap;
-}
-
-.turn.user.queued .user-bubble {
-  opacity: 0.62;
-  border-style: dashed;
-}
-
-.queued-tag {
-  margin-left: 8px;
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 0 4px;
-  vertical-align: 1px;
 }
 
 /* The composer is the positioning context and the box is at the bottom of

@@ -23,6 +23,14 @@ export interface SerialStatus {
   bytesWritten: number;
 }
 
+export interface FirmwareLoadResult {
+  declaration: Declaration;
+  file: { path: string; name: string; sizeBytes: number };
+  monitorOutput: string;
+  pausedFirst: boolean;
+  warning?: string;
+}
+
 export interface DeviceStatus {
   backend: ProbeBackendKind | "none";
   probe: "attached" | "detached";
@@ -73,6 +81,7 @@ export interface ProbeBackend {
     bytes: number[],
     signal?: AbortSignal,
   ): Promise<{ declaration: Declaration; verified: MemoryReadResult }>;
+  loadFirmware(elfPath: string, signal?: AbortSignal): Promise<FirmwareLoadResult>;
   serialOpen(host: string, port: number): Promise<SerialStatus>;
   serialRead(
     maxBytes: number,

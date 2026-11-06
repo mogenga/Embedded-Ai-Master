@@ -17,11 +17,16 @@ import { readSessionHeader } from "./persistence.js";
 export const SESSION_META_FILE = "meta.json";
 export const SESSION_TITLE_MAX_LENGTH = 200;
 
+/** 系统提示词某一节的哈希与长度（设计稿 §3.1，写 `meta.json` 不写会话日志）。 */
+export type PromptSectionDigest = { hash: string; chars: number };
+export type PromptSections = Record<string, PromptSectionDigest>;
+
 export interface SessionMeta {
   title?: string;
   pinned?: boolean;
   archived?: boolean;
   updatedAt: string;
+  promptSections?: PromptSections;
 }
 
 export interface SessionMetaPatch {
@@ -29,10 +34,37 @@ export interface SessionMetaPatch {
   title?: string | null;
   pinned?: boolean;
   archived?: boolean;
+  promptSections?: PromptSections;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSectionDigest(value: unknown): value is PromptSectionDigest {
+  return (
+    isRecord(value)
+    && typeof value.hash === "string"
+    && value.hash !== ""
+    && typeof value.chars === "number"
+    && Number.isInteger(value.chars)
+    && value.chars >= 0
+  );
+}
+
+/**
+ * 校验并拷贝 `promptSections`。
+ *
+ * 读侧对坏项保持宽容（与 title 一致：坏字段不该让整个 meta 读不出来），
+ * 这里**逐项丢弃**坏形状而不是整块作废。
+ */
+function parsePromptSections(value: unknown): PromptSections | undefined {
+  if (!isRecord(value)) return undefined;
+  const sections: PromptSections = {};
+  for (const [key, digest] of Object.entries(value)) {
+    if (isSectionDigest(digest)) sections[key] = { hash: digest.hash, chars: digest.chars };
+  }
+  return Object.keys(sections).length > 0 ? sections : undefined;
 }
 
 function fallbackUpdatedAt(dir: string): string {
@@ -72,6 +104,8 @@ export function readSessionMeta(dir: string): SessionMeta {
   }
   if (typeof parsed.pinned === "boolean") meta.pinned = parsed.pinned;
   if (typeof parsed.archived === "boolean") meta.archived = parsed.archived;
+  const promptSections = parsePromptSections(parsed.promptSections);
+  if (promptSections !== undefined) meta.promptSections = promptSections;
   return meta;
 }
 
@@ -88,7 +122,12 @@ function assertPatch(patch: unknown): asserts patch is SessionMetaPatch {
     throw new TypeError("会话元数据 patch 必须是对象");
   }
   for (const field of Object.keys(patch)) {
-    if (field !== "title" && field !== "pinned" && field !== "archived") {
+    if (
+      field !== "title"
+      && field !== "pinned"
+      && field !== "archived"
+      && field !== "promptSections"
+    ) {
       throw new TypeError(`会话元数据不支持字段 ${JSON.stringify(field)}`);
     }
   }
@@ -101,6 +140,44 @@ function assertPatch(patch: unknown): asserts patch is SessionMetaPatch {
   if (patch.archived !== undefined && typeof patch.archived !== "boolean") {
     throw new TypeError("会话元数据 archived 必须是布尔值");
   }
+  if (patch.promptSections !== undefined) {
+    if (!isRecord(patch.promptSections)) {
+      throw new TypeError("会话元数据 promptSections 必须是对象");
+    }
+    for (const [key, digest] of Object.entries(patch.promptSections)) {
+      if (!isRecord(digest) || typeof digest.hash !== "string" || digest.hash === "") {
+        throw new TypeError(`会话元数据 promptSections[${JSON.stringify(key)}].hash 必须是非空字符串`);
+      }
+      if (
+        typeof digest.chars !== "number"
+        || !Number.isInteger(digest.chars)
+        || digest.chars < 0
+      ) {
+        throw new TypeError(`会话元数据 promptSections[${JSON.stringify(key)}].chars 必须是非负整数`);
+      }
+    }
+  }
+}
+
+/**
+ * 两组节哈希是否等价（纯函数，用于「没变就不重写」）。
+ *
+ * 每次运行都重写 `meta.json` 会 bump `updatedAt`，让「最近使用」排序被无意义地
+ * 刷新；调用方应先用本函数比较，相等则跳过写入。`undefined` 与空对象都表示
+ * 「没有节」，视为相等；键顺序不影响结果。
+ */
+export function promptSectionsEqual(a: PromptSections | undefined, b: PromptSections | undefined): boolean {
+  const left = a ?? {};
+  const right = b ?? {};
+  const leftKeys = Object.keys(left);
+  if (leftKeys.length !== Object.keys(right).length) return false;
+  for (const key of leftKeys) {
+    const leftDigest = left[key]!;
+    const rightDigest = right[key];
+    if (rightDigest === undefined) return false;
+    if (leftDigest.hash !== rightDigest.hash || leftDigest.chars !== rightDigest.chars) return false;
+  }
+  return true;
 }
 
 export async function writeSessionMeta(dir: string, patch: SessionMetaPatch): Promise<SessionMeta> {
@@ -114,6 +191,12 @@ export async function writeSessionMeta(dir: string, patch: SessionMetaPatch): Pr
   }
   if (patch.pinned !== undefined) next.pinned = patch.pinned;
   if (patch.archived !== undefined) next.archived = patch.archived;
+  // patch 没给 promptSections 时必须保留原值：`{...current}` 已带上它，这里只在
+  // 显式写入时覆盖——与 title 不同，它没有「清除」语义。
+  if (patch.promptSections !== undefined) {
+    next.promptSections = parsePromptSections(patch.promptSections);
+    if (next.promptSections === undefined) delete next.promptSections;
+  }
 
   const file = path.join(dir, SESSION_META_FILE);
   const tmpPath = `${file}.${randomUUID()}.tmp`;

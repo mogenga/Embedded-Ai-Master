@@ -7,6 +7,7 @@ import type {
   AttachOptions,
   Declaration,
   DeviceStatus,
+  FirmwareLoadResult,
   MemoryReadResult,
   ProbeBackend,
   SerialStatus,
@@ -470,6 +471,15 @@ export class OpenOcdBackend implements ProbeBackend {
     }
 
     return { declaration, verified };
+  }
+
+  async loadFirmware(_elfPath: string, _signal?: AbortSignal): Promise<FirmwareLoadResult> {
+    // 真硬件烧录走 Keil / 各家工程链路，probe 的 OpenOCD 后端只做「连接已运行的
+    // telnet」；在这里静默成功会伪造一次烧录证据（R3）。
+    throw new ProbeBackendError(
+      "not_supported",
+      "OpenOCD 后端不负责固件装载，请使用 Renode 后端或 Keil 烧录",
+    );
   }
 
   async serialOpen(_host: string, _port: number): Promise<SerialStatus> {

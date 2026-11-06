@@ -92,6 +92,8 @@ const state = {
   selectedFile: null,
   /** Pending "the preview never arrived" timeout; cleared on the reply. */
   fileLoadTimer: null,
+  /** The same, for an artifact preview opened from a tool row. */
+  artifactLoadTimer: null,
   cwd: "",
   /**
    * Occupancy of the current transcript, or null when nothing measured it.
@@ -134,6 +136,13 @@ const state = {
   artifacts: [],
   selectedArtifact: null,
   /**
+   * Whether the transcript shows only tool output the kernel marked as
+   * evidence. Renderer-local state: it filters what is drawn, it is not a host
+   * preference, and it is not persisted — a restart opens on the full
+   * transcript, which is the thing the filter is a view of.
+   */
+  evidenceOnly: false,
+  /**
    * The last update state the main process reported, or null before the first
    * answer. Kept here so the About page can draw immediately when it is built,
    * and so an `update_status` that arrives while Settings is closed is not
@@ -142,7 +151,6 @@ const state = {
   updateStatus: null,
   /** The version whose "available" banner was already announced, if any. */
   updateAnnounced: "",
-  queuedCount: 0,
   sessionQuery: "",
   showArchived: false,
   /** Sidebar filter: all | working | needs-input | error | cwd. */
@@ -287,7 +295,7 @@ function applyLocale(locale, { announce = false } = {}) {
   $("terminal-restart").textContent = t.terminalRestart;
   const terminalTab = workbenchTabs.querySelector('[data-pane="terminal"]');
   if (terminalTab) terminalTab.textContent = t.paneTerminal;
-  setControlTitle(sendButton, state.busy ? t.queueSend : t.sendTitle);
+  setControlTitle(sendButton, t.sendTitle);
   setControlTitle(stopButton, t.stopTitle);
   // The sidebar workspace entry is written by renderTopbarLocation, and its
   // "no folder" text and tooltip are language-dependent, so redraw it here
@@ -346,6 +354,10 @@ function applyLocale(locale, { announce = false } = {}) {
     fillSerialControls();
     renderSerialStatus();
   }
+  // The evidence filter's count and its empty note are derived text with no
+  // `data-i18n` to sweep; the note's sentence was repainted above, and the
+  // visibility rule has to be re-applied so it agrees with the new copy.
+  renderEvidenceFilter();
   // Last, after the sweep: this caption's name follows the window's state, and
   // the sweep just painted the resting one.
   applyWindowState();
@@ -552,31 +564,12 @@ function startProgressTicker() {
 }
 
 function addUserTurn(text, imageCount = 0) {
-  const queued = state.busy;
   const images = imageCount > 0 ? `<span class="user-images">${t.imageCount(imageCount)}</span>` : "";
-  const node = addNode(
-    `<div class="turn user${queued ? " queued" : ""}">` +
-      `<div class="user-bubble">${escapeHtml(text)}${images}${queued ? `<span class="queued-tag">${escapeHtml(t.queuedTag)}</span>` : ""}</div>` +
+  return addNode(
+    `<div class="turn user">` +
+      `<div class="user-bubble">${escapeHtml(text)}${images}</div>` +
       `</div>`,
   );
-  node.dataset.queued = queued ? "1" : "";
-  return node;
-}
-
-function markQueuedDelivered() {
-  const pending = transcript.querySelector('.turn.user.queued');
-  if (!pending) return;
-  pending.classList.remove("queued");
-  pending.dataset.queued = "";
-  pending.querySelector(".queued-tag")?.remove();
-}
-
-function setQueuedBadge(count) {
-  state.queuedCount = count;
-  const badge = $("queued-badge");
-  if (!badge) return;
-  badge.hidden = count <= 0;
-  badge.textContent = t.queuedCount(count);
 }
 
 function addAssistantTurn() {
@@ -741,9 +734,14 @@ function toolAnnotationBadges(annotations) {
   return badges.join("");
 }
 
-function addToolRow(name, summary, annotations) {
+function addToolRow(name, summary, annotations, id = "") {
   const row = document.createElement("div");
   row.className = "tool-row running";
+  // The call id is what `tool_end` looks the row up by. Read-only calls run
+  // concurrently and their results can land in any order; without it the
+  // evidence verdict below would be written onto whichever row finished
+  // last. Not rendered, not announced.
+  if (id !== "") row.dataset.callId = id;
   row.innerHTML =
     `<span class="tool-glyph">${icon(toolGlyph(name))}</span>` +
     // The label gets its own element inside the name cell: the cell lays the
@@ -761,6 +759,10 @@ function addToolRow(name, summary, annotations) {
     `${icon("chevron-down")}</button>`;
   row.dataset.path = summary || "";
   toolGroup().appendChild(row);
+  // No filter repaint here: a new row has no verdict yet (the kernel writes
+  // `evidence` on the result, not on the start), so the count cannot change.
+  // The root class already hides it under an active filter, and `tool_end`
+  // repaints once the verdict lands.
   // The summary of a file tool is its path; clicking opens it in the
   // workbench, like clicking a path in an editor's output pane.
   if (FILE_TOOLS.has(name) && summary) {
@@ -774,6 +776,73 @@ function addToolRow(name, summary, annotations) {
   state.currentTool = { node: row, name, summary };
   state.lastToolNode = row;
   return row;
+}
+
+/* ---------- evidence filter ---------- */
+
+/**
+ * Paint the evidence filter's own controls and keep the count honest.
+ *
+ * The filtering itself is one CSS rule on `html.evidence-only` (see
+ * `styles.css`): every row the kernel marked `evidence: true` stays, and so
+ * does the output block wrapped around it. Doing it in CSS means there is no
+ * DOM walk to keep in sync on every streamed event, and no second place where
+ * "is this evidence" is decided.
+ *
+ * Only `true` survives. A missing attribute is a result the kernel has not
+ * judged yet (its row is created at `tool_started`, before the verdict), and
+ * `false` is a result that was judged and did not qualify; neither is
+ * evidence, and the filter says so by drawing nothing.
+ */
+function renderEvidenceFilter() {
+  document.documentElement.classList.toggle("evidence-only", state.evidenceOnly);
+  const button = $("evidence-filter");
+  if (button) button.setAttribute("aria-pressed", String(state.evidenceOnly));
+  const count = transcript.querySelectorAll('.tool-row[data-evidence="true"]').length;
+  const badge = $("evidence-filter-count");
+  if (badge) {
+    // The count is a fact about the session, not about the filter, so it is
+    // shown whether or not the filter is on — that is how a reader learns
+    // there is anything to filter before turning it on.
+    badge.textContent = count === 0 ? "" : String(count);
+    badge.hidden = count === 0;
+  }
+  const note = $("evidence-empty");
+  if (note) note.hidden = !(state.evidenceOnly && count === 0);
+}
+
+/**
+ * Open the output block of every evidence row.
+ *
+ * The filter says "show me the evidence", and an evidence row whose result is
+ * still folded behind a chevron shows only its name and argument summary —
+ * the one part of it that is not evidence. Opening them is a side effect of
+ * turning the filter on and is left in place when it is turned off: the
+ * reader asked to read these results, and collapsing them again would undo
+ * the request.
+ */
+function revealEvidenceOutput() {
+  for (const row of transcript.querySelectorAll('.tool-row[data-evidence="true"]')) {
+    const output = row.parentElement?.querySelector(":scope > .tool-output");
+    if (!output || !output.hidden) continue;
+    output.hidden = false;
+    const toggle = row.querySelector(".tool-expand");
+    if (toggle) {
+      toggle.hidden = false;
+      toggle.setAttribute("aria-expanded", "true");
+    }
+    row.classList.add("open");
+  }
+}
+
+function setEvidenceFilter(on) {
+  state.evidenceOnly = Boolean(on);
+  if (state.evidenceOnly) revealEvidenceOutput();
+  renderEvidenceFilter();
+  // What remains after the filter may be above the scroll position the reader
+  // was at; landing at the bottom puts them at the newest evidence rather
+  // than at blank space.
+  if (state.evidenceOnly) scrollToBottom();
 }
 
 /**
@@ -857,22 +926,29 @@ function lastToolRow() {
 }
 
 /**
- * A "show in file manager" button for a tool result whose full text was
- * written to disk.
+ * The two actions a tool result whose full text was written to disk offers.
  *
- * It lives inside the `<pre>` that holds the output, so it opens and closes
- * with the details block instead of floating above a collapsed row. The click
- * goes through the preload's `revealArtifact`: the renderer cannot open a
- * `file://` URL itself (Electron blocks it), and a window that has no file
- * manager answers with a notice, which is the honest degradation.
+ * They live inside the `<pre>` that holds the output, so they open and close
+ * with the details block instead of floating above a collapsed row.
+ *
+ *   - "show in file manager" goes through the preload's `revealArtifact`:
+ *     the renderer cannot open a `file://` URL itself (Electron blocks it),
+ *     and a window that has no file manager answers with a notice, which is
+ *     the honest degradation.
+ *   - "preview in the panel" opens the artifact pane on this file. The pane
+ *     asks the host for the file by path (`getArtifact`), so the preview is
+ *     the kernel's own read, not a second copy of the text that is already in
+ *     the transcript.
  */
 function attachArtifactLink(container, artifactPath) {
   // The details arrive after the block is built (and a later `tool_output`
-  // reuses it), so an existing button is updated rather than stacked.
+  // reuses it), so existing buttons are updated rather than stacked.
   const existing = container.querySelector(".artifact-open");
   if (existing) {
     existing.dataset.path = artifactPath;
     existing.title = `${t.artifactRevealHint} ${artifactPath}`;
+    const preview = container.querySelector(".artifact-preview");
+    if (preview) preview.dataset.path = artifactPath;
     return existing;
   }
   const button = document.createElement("button");
@@ -894,11 +970,73 @@ function attachArtifactLink(container, artifactPath) {
     }
     api.send({ cmd: "revealArtifact", path: target });
   });
-  // A leading newline puts the button on its own line at the end of the
-  // output; the container is a `<pre>` with pre-wrap, so without it the
-  // button would sit on the same line as the last line of text.
-  container.append("\n", button);
+  const preview = document.createElement("button");
+  preview.type = "button";
+  preview.className = "btn btn-quiet small artifact-preview";
+  preview.dataset.path = artifactPath;
+  preview.textContent = t.artifactPreview;
+  preview.title = `${t.artifactPreviewHint} ${artifactPath}`;
+  preview.addEventListener("click", (event) => {
+    event.stopPropagation();
+    previewArtifact(preview.dataset.path);
+  });
+  // A leading newline puts the buttons on their own line at the end of the
+  // output; the container is a `<pre>` with pre-wrap, so without it they
+  // would sit on the same line as the last line of text.
+  container.append("\n", button, " ", preview);
   return button;
+}
+
+/**
+ * Open one artifact in the workbench pane, by path.
+ *
+ * This is the second way into the artifact pane (the ⋯ menu is the first).
+ * It does not wait for the list: `getArtifact` answers with the file itself,
+ * and `renderArtifact` opens the pane and reveals the tab on the way through.
+ */
+function previewArtifact(path) {
+  if (typeof path !== "string" || path === "") return;
+  state.selectedArtifact = path;
+  // The answer is a host round trip; say so in the pane instead of showing
+  // the previous artifact while the new one loads.
+  openWorkbench("artifact");
+  const root = $("artifact-root");
+  root.hidden = false;
+  root.innerHTML = `<div class="diff-empty">…</div>`;
+  // A refusal (a path outside this session's artifacts folder) arrives as a
+  // transcript notice only, so the pane would sit on the ellipsis forever.
+  // `openFile` uses the same guard for the same reason; the timer is separate
+  // because the two panes can be loading different things.
+  const wanted = path;
+  clearTimeout(state.artifactLoadTimer);
+  state.artifactLoadTimer = setTimeout(() => {
+    if (state.selectedArtifact !== wanted) return;
+    if (root.textContent.trim() !== "…") return;
+    root.innerHTML = `<div class="diff-empty">${escapeHtml(t.artifactLoadFailed)}</div>`;
+  }, 5000);
+  api.send({ cmd: "getArtifact", path });
+}
+
+/**
+ * Open the artifact pane on its list.
+ *
+ * The list is the pane's home: `openWorkbench("artifact")` alone would keep
+ * whatever artifact was selected last, because `state.selectedArtifact` is
+ * remembered while the window is open. Reaching the pane from the ⋯ menu means
+ * "show me what was produced", not "show me the file I happened to look at
+ * before".
+ */
+function openArtifactPane({ opener = null } = {}) {
+  state.selectedArtifact = null;
+  // A preview opened from a tool row may have a load still in flight; its
+  // failure guard reads `state.selectedArtifact`, which was just cleared, so
+  // it will not paint over the list. Clearing the timer is the belt to that
+  // brace.
+  clearTimeout(state.artifactLoadTimer);
+  openWorkbench("artifact", { opener });
+  // The caption still describes the artifact that was open; the pane below it
+  // now shows the list.
+  workbenchMeta.textContent = "";
 }
 
 function attachToolOutput(node, name, output, artifactPath) {
@@ -1269,11 +1407,12 @@ function setBusy(busy) {
     clearProgress();
   }
   stopButton.hidden = !busy;
-  // Enter has always queued a message mid-turn; the button was disabled, so
-  // the two ways to send disagreed. The button now queues as well, and says so.
+  // The send button is never disabled: a greyed button explains nothing, and
+  // pressing it mid-turn is answered (`submit()` says "wait or stop" and keeps
+  // the draft). The host has no queue either — a second prompt mid-turn is
+  // refused there — so the renderer says the same thing before the message
+  // ever leaves the window (R3).
   sendButton.disabled = false;
-  sendButton.classList.toggle("queues", busy);
-  setControlTitle(sendButton, busy ? t.queueSend : t.sendLabel);
   // Finishing a turn must not paint "ready" over a stopped host or a config
   // error that is still the actual state.
   if (busy) setStatus("statusWorking");
@@ -1606,6 +1745,15 @@ const RUNNABLE_COMMANDS = new Set(["clear", "context", "compact"]);
  * user has to see before retyping, so erasing their text would be the loss.
  */
 function runSlashCommand({ name, args }, rawText = `/${name}`) {
+  // Only the palette reaches this while a turn runs (`submit()` refuses
+  // earlier for a typed command). The kernel refuses these verbs mid-turn too,
+  // so the window answers with the same sentence — and "kept" restores the
+  // draft the palette took out of the box.
+  if (state.busy) {
+    addNotice("warn", t.busyThisTurn);
+    scrollToBottom();
+    return "kept";
+  }
   const available = commandList();
   const command = available.find((entry) => entry.name === name);
   if (command !== undefined && command.source === "skill") {
@@ -1685,6 +1833,15 @@ function runSkillCommand(command, args, rawText = `/${command.name}${args ? ` ${
   // about a message that cannot be empty. Say it here, where the command is.
   if (expanded === null || expanded === "") {
     addNotice("warn", t.skillEmptyPrompt(name));
+    scrollToBottom();
+    return "kept";
+  }
+  // A skill expands to a prompt, and a prompt cannot carry the image on the
+  // strip (see `submit()`). Refusing keeps the same rule for every way a
+  // prompt is sent — a drop that only happened on the palette path would be
+  // the harder bug to notice (D-188, R3).
+  if (state.attachments.length > 0) {
+    addNotice("warn", t.attachmentNotSent);
     scrollToBottom();
     return "kept";
   }
@@ -2203,6 +2360,10 @@ $("usage-reset").addEventListener("click", () => {
   state.usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   renderUsage();
   setUsagePopover(false);
+});
+
+$("evidence-filter").addEventListener("click", () => {
+  setEvidenceFilter(!state.evidenceOnly);
 });
 
 document.addEventListener("click", (event) => {
@@ -3346,16 +3507,6 @@ function handleEvent(message) {
       break;
     }
 
-    case "queued":
-      setQueuedBadge(message.count ?? 0);
-      break;
-
-    case "user_queued_delivered":
-      // The host echoed the message when it reached the model, so the bubble
-      // can lose its "queued" marker.
-      markQueuedDelivered();
-      break;
-
     case "settings":
       settings.handleEvent(message);
       break;
@@ -3476,7 +3627,9 @@ function handleEvent(message) {
     case "run_start":
       setBusy(true);
       endThinking();
-      // Keep typing possible while the turn runs; the message is queued.
+      // Typing stays possible while the turn runs (the next draft can be
+      // prepared), but sending does not: `submit()` refuses while busy instead
+      // of pretending the message was queued for this turn.
       input.focus();
       break;
 
@@ -3595,7 +3748,7 @@ function handleEvent(message) {
         setStatus("statusWorking");
       }
       if (state.currentAssistant) flushAssistant();
-      addToolRow(message.name, message.summary, message.annotations);
+      addToolRow(message.name, message.summary, message.annotations, message.id);
       break;
 
     case "tool_detail":
@@ -3610,11 +3763,21 @@ function handleEvent(message) {
       break;
 
     case "tool_end": {
-      const row = state.currentTool?.node;
+      // Prefer the row with this call's id: several read-only calls can be in
+      // flight, and `state.currentTool` is only whichever started last. The
+      // fallback keeps the transcript working with a host built before ids
+      // travelled on `tool_end`.
+      const row =
+        (message.id ? transcript.querySelector(`.tool-row[data-call-id="${CSS.escape(message.id)}"]`) : null) ??
+        state.currentTool?.node;
       if (row) {
         row.classList.remove("running");
         row.classList.add("done");
         if (!message.ok) row.classList.add("failed");
+        // The kernel's evidence verdict for this result. Absent means it did
+        // not judge the call (an older log), and nothing is written — a
+        // `false` there would be this layer's claim rather than the kernel's.
+        if (typeof message.evidence === "boolean") row.dataset.evidence = String(message.evidence);
         const summaryEl = row.querySelector(".tool-summary");
         if (message.summary) summaryEl.textContent = message.summary;
         // 失败色走类名，与同行的 .failed 同源；内联样式会绕开主题令牌。
@@ -3632,13 +3795,24 @@ function handleEvent(message) {
               `<span class="add">+${parts[1]}</span> <span class="del">−${parts[2]}</span>`;
           }
         }
-        state.currentTool = null;
+        if (state.currentTool?.node === row) state.currentTool = null;
+        // A result that just arrived while the filter is on is evidence the
+        // reader asked to see; its output block is still folded because the
+        // filter was turned on before this call existed.
+        if (state.evidenceOnly && row.dataset.evidence === "true") revealEvidenceOutput();
+        renderEvidenceFilter();
       }
       break;
     }
 
     case "tool_output": {
-      const row = lastToolRow();
+      // The id picks the row that produced this output. Concurrent read-only
+      // calls finish in any order, and `state.lastToolNode` is only whichever
+      // started last — under the evidence filter the wrong pairing would hide
+      // the output block the filter is meant to keep.
+      const row =
+        (message.id ? transcript.querySelector(`.tool-row[data-call-id="${CSS.escape(message.id)}"]`) : null) ??
+        lastToolRow();
       if (row) attachToolOutput(row, message.name, message.content, message.artifactPath);
       scrollToBottom();
       break;
@@ -3758,12 +3932,18 @@ function handleEvent(message) {
 
     case "notice":
       // A `domain` tag routes the message to the surface that asked for it.
-      // Skill failures are answered while the settings dialog is open, and a
-      // `showModal()` sits on top of the transcript: the notice would be
-      // complete and still invisible (R3). Everything else stays in the
+      // Skill failures and refused settings saves are answered while the
+      // settings dialog is open, and a `showModal()` sits on top of the
+      // transcript: the notice would be complete and still invisible (R3).
+      // `settings` is consumed only by the page that owns the refusal — a
+      // notice for a page the user is not on stays in the transcript rather
+      // than appearing under an unrelated form. Everything else stays in the
       // transcript, where it has always been.
       if (message.domain === "skills") {
         settings.handleEvent(message);
+        break;
+      }
+      if (message.domain === "settings" && settings.handleEvent(message) === true) {
         break;
       }
       addNotice(message.level, message.text);
@@ -3968,6 +4148,11 @@ function handleEvent(message) {
         .forEach((node) => node.remove());
       state.currentAssistant = null;
       state.currentThinking = null;
+      // 附件条属于**上一个**会话（D-224）。
+      clearAttachments();
+      // The filter belongs to the transcript that just left the screen. Left
+      // on, it would silently hide most of the session the user just opened.
+      setEvidenceFilter(false);
       state.currentTool = null;
       state.lastToolNode = null;
       state.currentThinkingText = null;
@@ -4006,6 +4191,10 @@ function handleEvent(message) {
           // after a reload, which is exactly the dishonesty R3 forbids. The
           // protocol layer already carries `ok`; it was being dropped here.
           row.className = item.ok === false ? "tool-row failed done" : "tool-row done";
+          // The evidence verdict survives a reopen: it is the same field the
+          // live `tool_end` writes, so the filter is not a mode that only
+          // works on turns run in this window.
+          if (typeof item.evidence === "boolean") row.dataset.evidence = String(item.evidence);
           row.innerHTML =
             `<span class="tool-glyph">${icon(toolGlyph(item.name))}</span>` +
             `<span class="tool-name"><span class="tool-label">${escapeHtml(toolLabel(item.name))}</span></span>` +
@@ -4038,6 +4227,18 @@ function handleEvent(message) {
         renderTopbarLocation();
         api.send({ cmd: "listSessions", includeArchived: state.showArchived });
       }
+      // The evidence count belongs to this transcript, and the rows for it
+      // were just rebuilt; recomputing here keeps the badge from counting the
+      // previous conversation's evidence.
+      renderEvidenceFilter();
+      // The artifact pane belongs to the session that produced it. It became
+      // reachable from the menu, so a list left over from the previous
+      // conversation would now be presented as this one's; clear it, and ask
+      // again when the pane is the one on screen.
+      state.artifacts = [];
+      state.selectedArtifact = null;
+      renderArtifacts();
+      if (!workbench.hidden && state.pane === "artifact") openArtifactPane();
       scrollToBottom(true);
       break;
     }
@@ -5485,6 +5686,7 @@ function renderArtifact(artifact) {
   // Open the artifact's own tab through the normal path so every other pane
   // is hidden consistently; `openWorkbench` reveals the tab on first reach.
   state.selectedArtifact = artifact.path;
+  clearTimeout(state.artifactLoadTimer);
   openWorkbench("artifact");
   $("artifact-list-pane").hidden = true;
   const root = $("artifact-root");
@@ -5619,7 +5821,24 @@ function startSessionIn(target) {
     api.send({ cmd: "setCwd", cwd: target });
     return;
   }
+  // The evidence filter is a view of one transcript. Carrying it across a
+  // session boundary would open the new conversation looking empty, and the
+  // switch that explains why is a corner of the composer.
+  setEvidenceFilter(false);
+  clearAttachments();
   api.send({ cmd: "newSession" });
+}
+
+/**
+ * 清空附件条。会话边界（新建 / 打开另一条会话）都要调它。
+ *
+ * 内核没有图片输入，`submit()` 只要看到附件就拒绝发送；把上一条会话的图留到
+ * 新会话上，用户会撞上一个来路不明的阻塞（D-224）。
+ */
+function clearAttachments() {
+  if (state.attachments.length === 0) return;
+  state.attachments = [];
+  renderAttachments();
 }
 
 /**
@@ -6064,6 +6283,15 @@ function rememberInHistory(text) {
 
 function submit() {
   const text = input.value.trim();
+  // A turn already running refuses this message at the host (`session_busy`),
+  // so say it here before anything leaves the window. The draft stays in the
+  // box and no bubble is drawn: a bubble for a message the host never received
+  // is the transcript claiming a turn that did not happen (D-186, R3).
+  if (state.busy) {
+    addNotice("warn", t.busyThisTurn);
+    scrollToBottom();
+    return;
+  }
   // A slash command is not a prompt. Reading it before anything else keeps
   // `/clear` out of the model's inbox; an unknown name is named and left in
   // the box instead of being sent, so a typo costs a notice, not a turn.
@@ -6094,11 +6322,26 @@ function submit() {
     reportUnknownCommand(slash.name, commandList());
     return;
   }
-  // Attachments and @-mentions have no upload path in this kernel. An image
-  // stays in the strip and is not sent; a picked path is not uploaded either,
-  // but it costs nothing to tell the model which paths the user meant: the
-  // path list is appended to the text, so the promise made when the path was
-  // added ("this is part of your message") is kept without a kernel change.
+  // This kernel has no image input (`ModelChatMessage.content` is a string and
+  // the adapter never sends `image_url`), so an attached image cannot travel
+  // with the message. Sending the text anyway would leave a thumbnail on the
+  // strip and a model that never saw it — the failure this check exists to
+  // stop (D-188, R3). The strip keeps its images and its remove buttons, and
+  // the draft stays put until the user decides.
+  //
+  // It sits after the slash branch on purpose: `/clear` and `/context` send no
+  // prompt, so an image on the strip is not part of them. A skill command does
+  // send one, and `runSkillCommand` enforces the same rule.
+  if (state.attachments.length > 0) {
+    addNotice("warn", t.attachmentNotSent);
+    scrollToBottom();
+    input.focus();
+    return;
+  }
+  // A picked path is not uploaded either, but it costs nothing to tell the
+  // model which paths the user meant: the path list is appended to the text,
+  // so the promise made when the path was added ("this is part of your
+  // message") is kept without a kernel change.
   const mentions = state.mentionFiles.filter((path) => typeof path === "string" && path !== "");
   if (!text && mentions.length === 0) return;
   const withMentions =
@@ -7527,8 +7770,22 @@ $("terminal-button").addEventListener("click", () => {
 });
 
 
+/**
+ * Reaching the Artifact tab by hand — a click or the arrow keys — always lands
+ * on the list.
+ *
+ * The pane has two roots: the list and one artifact's preview. A preview
+ * leaves the list hidden, so without this the only way back to it would be
+ * closing and reopening the pane. Reaching the tab is a request to browse what
+ * was produced, not to revisit the file that happened to be open last.
+ */
+function openWorkbenchPane(pane) {
+  if (pane === "artifact") openArtifactPane();
+  else openWorkbench(pane);
+}
+
 workbenchTabs.querySelectorAll("button").forEach((button) => {
-  button.addEventListener("click", () => openWorkbench(button.dataset.pane));
+  button.addEventListener("click", () => openWorkbenchPane(button.dataset.pane));
   button.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
@@ -7544,7 +7801,7 @@ workbenchTabs.querySelectorAll("button").forEach((button) => {
     const step = event.key === "ArrowRight" ? 1 : -1;
     const next = tabs[(index + step + tabs.length) % tabs.length];
     next.focus();
-    openWorkbench(next.dataset.pane);
+    openWorkbenchPane(next.dataset.pane);
   });
 });
 
@@ -7769,6 +8026,7 @@ topbarMenu.addEventListener("click", (event) => {
   if (!row) return;
   setTopbarMenu(false);
   if (row.id === "menu-export") api.send({ cmd: "exportSession" });
+  else if (row.id === "menu-artifacts") openArtifactPane({ opener: $("more-button") });
   else if (row.id === "menu-shortcuts") openShortcuts();
   else if (row.id === "menu-open-serial") openWorkbench("serial", { opener: $("more-button") });
   else if (row.id === "menu-clear") clearConversation();

@@ -1300,7 +1300,12 @@ describe("executeBatch 工具上下文", () => {
       artifactDir: artifactDir(),
     });
 
-    expect(received).toStrictEqual({ sessionId: "sess-1", cwd: sessionDir });
+    // artifactDir 与落盘用的是同一个 BatchOptions 值，不是第二个来源。
+    expect(received).toStrictEqual({
+      sessionId: "sess-1",
+      cwd: sessionDir,
+      artifactDir: artifactDir(),
+    });
   });
 
   it("显式 cwd 覆盖 session.dir", async () => {
@@ -1320,6 +1325,6 @@ describe("executeBatch 工具上下文", () => {
       cwd,
     });
 
-    expect(received).toStrictEqual({ sessionId: "sess-1", cwd });
+    expect(received).toStrictEqual({ sessionId: "sess-1", cwd, artifactDir: artifactDir() });
   });
 });

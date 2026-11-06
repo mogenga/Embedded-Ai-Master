@@ -58,6 +58,10 @@ const memWriteSchema = z.object({
   bytes: z.array(z.number().int().min(0).max(255)).min(1).max(MAX_MEMORY_LENGTH),
 });
 
+const firmwareLoadSchema = z.object({
+  elfPath: z.string().min(1),
+});
+
 const serialOpenSchema = z.object({
   host: z.string().min(1).optional().default("127.0.0.1"),
   port: z.number().int().min(1).max(65535),
@@ -277,6 +281,24 @@ export function probeTools(backends: ProbeBackends): ProbeToolSpec[] {
         return ok({
           declaration: result.declaration,
           verified: result.verified,
+          deviceStatus: deviceStatus(),
+        });
+      }),
+    },
+    {
+      name: "renode_load",
+      description:
+        "把 ELF 固件装载进 Renode 仿真目标（运行中先 pause，再发 sysbus LoadELF）；加载会覆盖目标内存",
+      inputSchema: firmwareLoadSchema,
+      annotations: { destructiveHint: true },
+      handler: withSchema(firmwareLoadSchema, async (args, signal) => {
+        const result = await requireActive().loadFirmware(args.elfPath, signal);
+        return ok({
+          declaration: result.declaration,
+          file: result.file,
+          monitorOutput: result.monitorOutput,
+          pausedFirst: result.pausedFirst,
+          ...(result.warning === undefined ? {} : { warning: result.warning }),
           deviceStatus: deviceStatus(),
         });
       }),
