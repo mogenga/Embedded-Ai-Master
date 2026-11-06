@@ -415,7 +415,13 @@ async function executeAuthorized(
   const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = AbortSignal.any([opts.signal, timeoutSignal]);
-  const ctx: ToolCtx = { sessionId: session.id, cwd: opts.cwd ?? session.dir };
+  // artifactDir 与 finalizeResult 落盘用的是同一个值：只有同源，artifact 工具
+  // 才可能读回本会话写下的产物（不再有第二个来源）。
+  const ctx: ToolCtx = {
+    sessionId: session.id,
+    cwd: opts.cwd ?? session.dir,
+    artifactDir: opts.artifactDir,
+  };
 
   let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
   let abortListener: (() => void) | undefined;
