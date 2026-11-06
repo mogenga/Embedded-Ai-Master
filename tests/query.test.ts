@@ -17,6 +17,7 @@ import type {
   ModelProtocol,
   ModelToolSchema,
 } from "../src/model/protocol.js";
+import { ModelFatalError } from "../src/model/openai.js";
 import type { SessionHandle } from "../src/session/session.js";
 import { createSession } from "../src/session/session.js";
 import type { TodoItem } from "../src/session/types.js";
@@ -80,6 +81,29 @@ function scriptedProvider(
       index += 1;
       onServe?.(callIndex);
       const item = sequence[callIndex];
+      if (item instanceof Error) throw item;
+      return item;
+    },
+    countTokens() {
+      return 0;
+    },
+  };
+}
+
+// 墙钟用例需要「一轮真实耗时」：deadline 的判据是 Date.now() 的差，
+// 只能让真实的模型调用花掉时间。毫秒级延迟足够，不需要 mock 时钟。
+function slowProvider(
+  delayMs: number,
+  item: CompletionResult | Error,
+): ModelProtocol & { calls: number } {
+  let calls = 0;
+  return {
+    get calls() {
+      return calls;
+    },
+    async complete() {
+      calls += 1;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
       if (item instanceof Error) throw item;
       return item;
     },
@@ -1896,5 +1920,245 @@ describe("query 主循环", () => {
     expect(session.events().filter((event) => event.type === "system")).toHaveLength(0);
     expect(session.events().map((event) => event.type)).toStrictEqual(["user"]);
     expect(provider.calls).toHaveLength(0);
+  });
+});
+
+describe("整跑墙钟上限（D-189）", () => {
+  it("deadlineMs 到点后在下一轮前停止，且不再调用模型", async () => {
+    // 一轮真实耗时 600ms，远大于 200ms 的整跑上限（留出机器抖动的余量）：
+    // 这一轮结束后必须停，不再发第二次请求。
+    const provider = slowProvider(600, reply("用 echo", [echoCall("c1")]));
+    const { ctx, session } = await makeCtx(provider, { deadlineMs: 200 });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(provider.calls).toBe(1);
+    expect(events.at(-2)).toEqual({ kind: "interrupted", reason: "deadline" });
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "deadline" });
+    // 墙钟在模型调用期间跑穿：已声明的 toolCalls 必须像 abort 那样补 tool_aborted,
+    // 不能留下一条没有结果的 assistant 批次（日志将无法投影）。
+    const result = events.find((event) => event.kind === "tool_result");
+    expect(result).toMatchObject({ kind: "tool_result", id: "c1", code: "tool_aborted" });
+    const interrupted = session.events().find((event) => event.type === "interrupted");
+    expect(interrupted?.payload).toStrictEqual({ reason: "deadline" });
+  });
+
+  it("工具批次跑穿墙钟 → 已执行的真实结果保留，下一轮前停止", async () => {
+    const slowTool: ToolDef<{}> = {
+      name: "slow",
+      description: "慢工具",
+      schema: z.object({}),
+      annotations: { readOnly: true },
+      execute: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 600));
+        return { isError: false, code: "ok", message: "", text: "late" };
+      },
+    };
+    const provider = scriptedProvider([reply("", [{ id: "s1", name: "slow", arguments: {} }])]);
+    const { ctx } = await makeCtx(provider, {
+      tools: new ToolRegistry([slowTool]),
+      deadlineMs: 200,
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(provider.calls).toHaveLength(1);
+    // 工具已经跑完：结果是真实结果，不是 tool_aborted。
+    expect(events.find((event) => event.kind === "tool_result")).toMatchObject({
+      kind: "tool_result",
+      id: "s1",
+      ok: true,
+      code: "ok",
+    });
+    expect(events.at(-2)).toEqual({ kind: "interrupted", reason: "deadline" });
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "deadline" });
+  });
+
+  it("终局答案在墙钟内到达但耗时跑穿上限 → 仍按 no_tool_calls 结束，不改写成超时", async () => {
+    const provider = slowProvider(400, reply("最终答案"));
+    const { ctx } = await makeCtx(provider, { deadlineMs: 150 });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(provider.calls).toBe(1);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(events.some((event) => event.kind === "interrupted")).toBe(false);
+  });
+
+  it("deadlineMs 未到时不干扰正常结束；0 表示不限制", async () => {
+    const first = scriptedProvider([reply("完成")]);
+    const a = await makeCtx(first, { deadlineMs: 10_000 });
+    const eventsA = await collect(query(a.ctx, "x", { maxTurns: 10 }));
+    expect(eventsA.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(eventsA.some((event) => event.kind === "interrupted")).toBe(false);
+
+    const second = scriptedProvider([reply("完成")]);
+    const b = await makeCtx(second, { deadlineMs: 0 });
+    const eventsB = await collect(query(b.ctx, "x", { maxTurns: 10 }));
+    expect(eventsB.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(eventsB.some((event) => event.kind === "interrupted")).toBe(false);
+  });
+});
+
+describe("截断续写上限（KERNEL-4）", () => {
+  it("连续 3 次截断后停止，落 done(truncated)，不再发请求", async () => {
+    const provider = scriptedProvider([
+      reply("part-1", [], true),
+      reply("part-2", [], true),
+      reply("part-3", [], true),
+      reply("never"),
+    ]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(provider.calls).toHaveLength(3);
+    expect(events.map((event) => event.kind)).toEqual([
+      "model_message",
+      "model_message",
+      "model_message",
+      "done",
+    ]);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "truncated" });
+    // 截断停靠不是失败、也不是用户取消：不写 interrupted，但状态要如实。
+    expect(events.some((event) => event.kind === "interrupted")).toBe(false);
+    expect(session.events().some((event) => event.type === "interrupted")).toBe(false);
+    expect(
+      session
+        .events()
+        .filter((event) => event.type === "status")
+        .map((event) => event.payload),
+    ).toContainEqual({ status: "done", finishReason: "truncated" });
+  });
+
+  it("计数按连续算：中间夹一次正常响应会清零", async () => {
+    // 中间那次正常响应必须带工具调用，否则主循环按既有语义正常结束，
+    // 测不到"清零"。累计口径会在第 4 次调用时就停；连续口径要等后半段
+    // 的三次连续截断。
+    const provider = scriptedProvider([
+      reply("part-1", [], true),
+      reply("ok", [echoCall("c1")]),
+      reply("part-2", [], true),
+      reply("part-3", [], true),
+      reply("part-4", [], true),
+      reply("never"),
+    ]);
+    const { ctx } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(provider.calls).toHaveLength(5);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "truncated" });
+  });
+});
+
+describe("服务端上下文超限恢复（KERNEL-5）", () => {
+  const overflowError = (message = "context_length_exceeded"): ModelFatalError =>
+    new ModelFatalError(400, JSON.stringify({ error: { code: "invalid_request", message } }));
+
+  it("400 超限 → 强压一次后重发并成功", async () => {
+    let compactions = 0;
+    const provider = scriptedProvider([overflowError(), reply("完成")]);
+    const { ctx, session } = await makeCtx(provider, {
+      compactor: async (target) => {
+        compactions += 1;
+        await target.append({
+          type: "compaction",
+          payload: { kind: "microcompact", elidedSeqs: [], note: "forced" },
+        });
+      },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(provider.calls).toHaveLength(2);
+    expect(compactions).toBe(1);
+    expect(events.map((event) => event.kind)).toEqual(["compacted", "model_message", "done"]);
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+    expect(session.events().some((event) => event.type === "interrupted")).toBe(false);
+  });
+
+  it("连续两次 400 超限 → 第二次不再压缩，落 interrupted(context_overflow)", async () => {
+    let compactions = 0;
+    const provider = scriptedProvider([overflowError(), overflowError()]);
+    const { ctx, session } = await makeCtx(provider, {
+      compactor: async (target) => {
+        compactions += 1;
+        await target.append({
+          type: "compaction",
+          payload: { kind: "microcompact", elidedSeqs: [], note: "forced" },
+        });
+      },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(provider.calls).toHaveLength(2);
+    expect(compactions).toBe(1);
+    expect(events.at(-2)).toEqual({ kind: "interrupted", reason: "context_overflow" });
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "context_overflow" });
+    expect(
+      session.events().find((event) => event.type === "interrupted")?.payload,
+    ).toStrictEqual({ reason: "context_overflow" });
+  });
+
+  it("压缩自身抛错 → 落 interrupted(context_overflow)，不伪装成 error", async () => {
+    const provider = scriptedProvider([overflowError()]);
+    const { ctx, session } = await makeCtx(provider, {
+      compactor: async () => {
+        throw new Error("compactor blew up");
+      },
+    });
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(provider.calls).toHaveLength(1);
+    expect(events.at(-2)).toEqual({ kind: "interrupted", reason: "context_overflow" });
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "context_overflow" });
+    expect(
+      session.events().find((event) => event.type === "interrupted")?.payload,
+    ).toStrictEqual({ reason: "context_overflow" });
+  });
+
+  it("非 400 的 4xx（如鉴权失败）即便正文含超限字样也不压缩", async () => {
+    let compactions = 0;
+    const fatal = new ModelFatalError(401, "maximum context length: unauthorized");
+    const provider = scriptedProvider([fatal]);
+    const { ctx } = await makeCtx(provider, {
+      compactor: async () => {
+        compactions += 1;
+      },
+    });
+
+    await expect(collect(query(ctx, "x", { maxTurns: 10 }))).rejects.toBe(fatal);
+    expect(compactions).toBe(0);
+  });
+
+  it("compactor 缺省时 400 超限原样上抛", async () => {
+    const fatal = overflowError();
+    const provider = scriptedProvider([fatal]);
+    const { ctx, session } = await makeCtx(provider);
+
+    await expect(collect(query(ctx, "x", { maxTurns: 10 }))).rejects.toBe(fatal);
+
+    expect(provider.calls).toHaveLength(1);
+    expect(
+      session.events().find((event) => event.type === "interrupted")?.payload,
+    ).toStrictEqual({ reason: "error" });
+  });
+
+  it("400 但不是超限特征 → 不压缩，原样上抛", async () => {
+    let compactions = 0;
+    const fatal = new ModelFatalError(400, JSON.stringify({ error: { message: "bad tool schema" } }));
+    const provider = scriptedProvider([fatal]);
+    const { ctx } = await makeCtx(provider, {
+      compactor: async () => {
+        compactions += 1;
+      },
+    });
+
+    await expect(collect(query(ctx, "x", { maxTurns: 10 }))).rejects.toBe(fatal);
+    expect(compactions).toBe(0);
+    expect(provider.calls).toHaveLength(1);
   });
 });

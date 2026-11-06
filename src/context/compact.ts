@@ -7,6 +7,7 @@ import type { SessionHandle } from "../session/session.js";
 import type { SessionEvent } from "../session/types.js";
 import { buildMessages } from "./build.js";
 import { elidedContent } from "./microcompact.js";
+import type { SystemSections } from "./system-sections.js";
 import { truncateSurrogateSafe } from "./text.js";
 import type { TokenMeter } from "./token-meter.js";
 
@@ -29,6 +30,14 @@ export interface CompactOptions {
    */
   force?: boolean;
   signal: AbortSignal;
+  /**
+   * 投影期的系统提示词分节（不写会话日志）。
+   *
+   * 压缩必须看见它们：`measure()` 量的就是「这次请求会带多少」，漏掉固定前缀会
+   * 低估占用、让压缩触发过晚（设计稿 §5.2）。摘要输入也走同一份投影，保证
+   * 「压缩后重发的消息」与「压缩时看到的消息」口径一致。
+   */
+  systemSections?: SystemSections;
 }
 
 export function assertCompactionRatios(keepTailRatio: number, softRatio: number): void {
@@ -190,6 +199,21 @@ function failureReason(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * 带系统提示词分节投影日志事件。
+ *
+ * 分节缺省时与 `buildMessages(events)` 逐字节相同——这条捷径让「没有分节」的
+ * 调用方（大多数测试与脚本）不必改，也保证行为向后兼容。
+ */
+function projectWith(
+  sections: SystemSections | undefined,
+  events: readonly SessionEvent[],
+): ModelChatMessage[] {
+  return sections === undefined
+    ? buildMessages(events)
+    : buildMessages(events, { systemSections: sections });
+}
+
 export async function compactSession(opts: CompactOptions): Promise<void> {
   const {
     session,
@@ -201,6 +225,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
     meter,
     force = false,
     signal,
+    systemSections,
   } = opts;
   assertCompactionRatios(keepTailRatio, softRatio);
   assertKeepRecentTurns(keepRecentTurns);
@@ -210,7 +235,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   const maxOutput = resolveMaxOutput(modelCfg);
   const softLimit = Math.floor(contextWindow * softRatio);
   const measure = () => {
-    const messages = buildMessages(session.events());
+    const messages = projectWith(systemSections, session.events());
     return { messages, tokens: measureWith(meter, messages) };
   };
 
@@ -277,7 +302,7 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
 
   let prefixMessages: ModelChatMessage[];
   try {
-    prefixMessages = buildMessages(prefix);
+    prefixMessages = projectWith(systemSections, prefix);
   } catch (error) {
     await session.append({
       type: "compaction",

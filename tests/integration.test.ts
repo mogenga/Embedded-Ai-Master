@@ -233,6 +233,52 @@ async function collect(generator: AsyncGenerator<LoopEvent>): Promise<LoopEvent[
   return events;
 }
 
+/**
+ * 拆出请求体里的「投影期系统节」与其余消息。
+ *
+ * `runSession` 现在总会注入 `environment` 节（设计稿 v0.2 §8 P0），所以任何
+ * 「请求体精确等于某几条消息」的断言都必须先把它摘出来。这不是放宽断言：
+ * 调用方仍对剩余消息做**精确**比较，并且下面 `expectEnvironmentSection` 单独
+ * 断言环境节确实存在且内容正确——两件事分开验，比一个 `arrayContaining` 更能
+ * 说明问题。
+ */
+function splitSections(body: { messages?: unknown }): {
+  logSystems: unknown[];
+  sections: string[];
+  rest: unknown[];
+} {
+  const messages = (body.messages ?? []) as { role?: string; content?: unknown }[];
+  const logSystems: unknown[] = [];
+  const sections: string[] = [];
+  let index = 0;
+  // 最终顺序是 [日志 system…] [投影节…] [压缩摘要] [对话…]，前三者都是 system。
+  for (; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (message?.role !== "system") break;
+    const content = typeof message.content === "string" ? message.content : "";
+    if (/^# (Environment|Base|Tools|Instructions|Memory|Summary)\n/.test(content)) {
+      sections.push(content);
+    } else {
+      // 日志里的 system 事件（例如用户 systemPrompt）或压缩摘要，按原样留下。
+      logSystems.push(message);
+    }
+  }
+  // 日志 system 与摘要属于「对话内容」的一部分，按原顺序放回 rest；只有投影节
+  // 被单独摘出来。这样调用方对 rest 的精确比较表达的是「除投影节外一字不差」。
+  return { logSystems, sections, rest: [...logSystems, ...messages.slice(index)] };
+}
+
+/** 断言环境节存在且四个字段都如实：路径、平台、shell、日期。 */
+function expectEnvironmentSection(sections: string[], workdir = process.cwd()): void {
+  const environment = sections.find((text) => text.startsWith("# Environment\n"));
+  expect(environment, `请求里应含环境节，实际节：${JSON.stringify(sections.map((s) => s.split("\n")[0]))}`).toBeDefined();
+  // runCwd 来自 `opts.cwd ?? process.cwd()`，与会话目录无关——没传 cwd 的用例
+  // 就是进程当前目录。
+  expect(environment).toContain(`Working directory: ${workdir.replace(/\\/g, "/")}`);
+  expect(environment).toContain(`Platform: ${process.platform}`);
+  expect(environment).toMatch(/^Date: \d{4}-\d{2}-\d{2}$/m);
+}
+
 describe("runSession 端到端装配", () => {
   it("注入 providersText 与 mock fetch 后闭环终止、请求体正确并落日志", async () => {
     const home = await tempDir();
@@ -290,8 +336,12 @@ describe("runSession 端到端装配", () => {
         }),
       ]),
     );
-    expect(calls[0].body.messages).toEqual([{ role: "user", content: "hi" }]);
-    expect(calls[1].body.messages).toEqual([
+    // 请求体首位是投影期环境节（不写日志），其余消息仍按原顺序精确比较。
+    const first = splitSections(calls[0].body);
+    expectEnvironmentSection(first.sections);
+    expect(first.rest).toEqual([{ role: "user", content: "hi" }]);
+    const second = splitSections(calls[1].body);
+    expect(second.rest).toEqual([
       { role: "user", content: "hi" },
       expect.objectContaining({ role: "assistant" }),
       { role: "tool", content: "hello", tool_call_id: "call-1" },
@@ -467,7 +517,10 @@ describe("runSession 端到端装配", () => {
     expect(log[0]).toMatchObject({ type: "system", payload: { content: "be brief" } });
     expect(log[1]).toMatchObject({ type: "user", payload: { content: "hi" } });
     expect(log.filter((event) => event.type === "system")).toHaveLength(1);
-    expect(calls[0].body.messages).toEqual([
+    // 日志里的 system 事件（用户提示词）仍在最前；环境节是投影期注入、不落日志。
+    const body = splitSections(calls[0].body);
+    expectEnvironmentSection(body.sections);
+    expect(body.rest).toEqual([
       { role: "system", content: "be brief" },
       { role: "user", content: "hi" },
     ]);
@@ -1004,7 +1057,9 @@ describe("runSession resume", () => {
       "again",
     ]);
     expect(secondFetch.calls).toHaveLength(1);
-    expect(secondFetch.calls[0].body.messages).toEqual([
+    const second = splitSections(secondFetch.calls[0].body);
+    expectEnvironmentSection(second.sections);
+    expect(second.rest).toEqual([
       { role: "user", content: "hi" },
       { role: "assistant", content: "done", tool_calls: [] },
       { role: "user", content: "again" },
@@ -1266,7 +1321,9 @@ describe("runSession resume", () => {
     const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
     expect(log[0]).toMatchObject({ type: "system", payload: { content: "be brief" } });
     expect(log[1]).toMatchObject({ type: "user", payload: { content: "hi" } });
-    expect(calls[0].body.messages).toEqual([
+    const body = splitSections(calls[0].body);
+    expectEnvironmentSection(body.sections);
+    expect(body.rest).toEqual([
       { role: "system", content: "be brief" },
       { role: "user", content: "hi" },
     ]);
@@ -1585,7 +1642,9 @@ describe("runSession 内置工具装配", () => {
     expect(result).toMatchObject({ kind: "tool_result", id: "call-fs", ok: true, code: "ok" });
     expect((result as { text: string }).text).toContain("hello fs");
     expect((await readHeader(sessionDir)).workdir).toBe(workdir);
-    expect(calls[1].body.messages).toEqual([
+    const secondCall = splitSections(calls[1].body);
+    expectEnvironmentSection(secondCall.sections, workdir);
+    expect(secondCall.rest).toEqual([
       { role: "user", content: "read" },
       expect.objectContaining({ role: "assistant" }),
       { role: "tool", tool_call_id: "call-fs", content: expect.stringContaining("hello fs") },
@@ -1967,7 +2026,9 @@ describe("runSession resume systemPrompt 幂等", () => {
 
     const log = readSessionFile(path.join(sessionDir, "session.v1.jsonl"));
     expect(log.filter((event) => event.type === "system")).toHaveLength(1);
-    expect(secondFetch.calls[0].body.messages).toEqual([
+    const body = splitSections(secondFetch.calls[0].body);
+    expectEnvironmentSection(body.sections);
+    expect(body.rest).toEqual([
       { role: "system", content: "be brief" },
       { role: "user", content: "hi" },
       { role: "assistant", content: "done", tool_calls: [] },
