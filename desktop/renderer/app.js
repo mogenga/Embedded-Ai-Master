@@ -142,7 +142,6 @@ const state = {
   updateStatus: null,
   /** The version whose "available" banner was already announced, if any. */
   updateAnnounced: "",
-  queuedCount: 0,
   sessionQuery: "",
   showArchived: false,
   /** Sidebar filter: all | working | needs-input | error | cwd. */
@@ -287,7 +286,7 @@ function applyLocale(locale, { announce = false } = {}) {
   $("terminal-restart").textContent = t.terminalRestart;
   const terminalTab = workbenchTabs.querySelector('[data-pane="terminal"]');
   if (terminalTab) terminalTab.textContent = t.paneTerminal;
-  setControlTitle(sendButton, state.busy ? t.queueSend : t.sendTitle);
+  setControlTitle(sendButton, t.sendTitle);
   setControlTitle(stopButton, t.stopTitle);
   // The sidebar workspace entry is written by renderTopbarLocation, and its
   // "no folder" text and tooltip are language-dependent, so redraw it here
@@ -552,31 +551,12 @@ function startProgressTicker() {
 }
 
 function addUserTurn(text, imageCount = 0) {
-  const queued = state.busy;
   const images = imageCount > 0 ? `<span class="user-images">${t.imageCount(imageCount)}</span>` : "";
-  const node = addNode(
-    `<div class="turn user${queued ? " queued" : ""}">` +
-      `<div class="user-bubble">${escapeHtml(text)}${images}${queued ? `<span class="queued-tag">${escapeHtml(t.queuedTag)}</span>` : ""}</div>` +
+  return addNode(
+    `<div class="turn user">` +
+      `<div class="user-bubble">${escapeHtml(text)}${images}</div>` +
       `</div>`,
   );
-  node.dataset.queued = queued ? "1" : "";
-  return node;
-}
-
-function markQueuedDelivered() {
-  const pending = transcript.querySelector('.turn.user.queued');
-  if (!pending) return;
-  pending.classList.remove("queued");
-  pending.dataset.queued = "";
-  pending.querySelector(".queued-tag")?.remove();
-}
-
-function setQueuedBadge(count) {
-  state.queuedCount = count;
-  const badge = $("queued-badge");
-  if (!badge) return;
-  badge.hidden = count <= 0;
-  badge.textContent = t.queuedCount(count);
 }
 
 function addAssistantTurn() {
@@ -1269,11 +1249,12 @@ function setBusy(busy) {
     clearProgress();
   }
   stopButton.hidden = !busy;
-  // Enter has always queued a message mid-turn; the button was disabled, so
-  // the two ways to send disagreed. The button now queues as well, and says so.
+  // The send button is never disabled: a greyed button explains nothing, and
+  // pressing it mid-turn is answered (`submit()` says "wait or stop" and keeps
+  // the draft). The host has no queue either — a second prompt mid-turn is
+  // refused there — so the renderer says the same thing before the message
+  // ever leaves the window (R3).
   sendButton.disabled = false;
-  sendButton.classList.toggle("queues", busy);
-  setControlTitle(sendButton, busy ? t.queueSend : t.sendLabel);
   // Finishing a turn must not paint "ready" over a stopped host or a config
   // error that is still the actual state.
   if (busy) setStatus("statusWorking");
@@ -1606,6 +1587,15 @@ const RUNNABLE_COMMANDS = new Set(["clear", "context", "compact"]);
  * user has to see before retyping, so erasing their text would be the loss.
  */
 function runSlashCommand({ name, args }, rawText = `/${name}`) {
+  // Only the palette reaches this while a turn runs (`submit()` refuses
+  // earlier for a typed command). The kernel refuses these verbs mid-turn too,
+  // so the window answers with the same sentence — and "kept" restores the
+  // draft the palette took out of the box.
+  if (state.busy) {
+    addNotice("warn", t.busyThisTurn);
+    scrollToBottom();
+    return "kept";
+  }
   const available = commandList();
   const command = available.find((entry) => entry.name === name);
   if (command !== undefined && command.source === "skill") {
@@ -1685,6 +1675,15 @@ function runSkillCommand(command, args, rawText = `/${command.name}${args ? ` ${
   // about a message that cannot be empty. Say it here, where the command is.
   if (expanded === null || expanded === "") {
     addNotice("warn", t.skillEmptyPrompt(name));
+    scrollToBottom();
+    return "kept";
+  }
+  // A skill expands to a prompt, and a prompt cannot carry the image on the
+  // strip (see `submit()`). Refusing keeps the same rule for every way a
+  // prompt is sent — a drop that only happened on the palette path would be
+  // the harder bug to notice (D-188, R3).
+  if (state.attachments.length > 0) {
+    addNotice("warn", t.attachmentNotSent);
     scrollToBottom();
     return "kept";
   }
@@ -3346,16 +3345,6 @@ function handleEvent(message) {
       break;
     }
 
-    case "queued":
-      setQueuedBadge(message.count ?? 0);
-      break;
-
-    case "user_queued_delivered":
-      // The host echoed the message when it reached the model, so the bubble
-      // can lose its "queued" marker.
-      markQueuedDelivered();
-      break;
-
     case "settings":
       settings.handleEvent(message);
       break;
@@ -3476,7 +3465,9 @@ function handleEvent(message) {
     case "run_start":
       setBusy(true);
       endThinking();
-      // Keep typing possible while the turn runs; the message is queued.
+      // Typing stays possible while the turn runs (the next draft can be
+      // prepared), but sending does not: `submit()` refuses while busy instead
+      // of pretending the message was queued for this turn.
       input.focus();
       break;
 
@@ -3758,12 +3749,18 @@ function handleEvent(message) {
 
     case "notice":
       // A `domain` tag routes the message to the surface that asked for it.
-      // Skill failures are answered while the settings dialog is open, and a
-      // `showModal()` sits on top of the transcript: the notice would be
-      // complete and still invisible (R3). Everything else stays in the
+      // Skill failures and refused settings saves are answered while the
+      // settings dialog is open, and a `showModal()` sits on top of the
+      // transcript: the notice would be complete and still invisible (R3).
+      // `settings` is consumed only by the page that owns the refusal — a
+      // notice for a page the user is not on stays in the transcript rather
+      // than appearing under an unrelated form. Everything else stays in the
       // transcript, where it has always been.
       if (message.domain === "skills") {
         settings.handleEvent(message);
+        break;
+      }
+      if (message.domain === "settings" && settings.handleEvent(message) === true) {
         break;
       }
       addNotice(message.level, message.text);
@@ -6064,6 +6061,15 @@ function rememberInHistory(text) {
 
 function submit() {
   const text = input.value.trim();
+  // A turn already running refuses this message at the host (`session_busy`),
+  // so say it here before anything leaves the window. The draft stays in the
+  // box and no bubble is drawn: a bubble for a message the host never received
+  // is the transcript claiming a turn that did not happen (D-186, R3).
+  if (state.busy) {
+    addNotice("warn", t.busyThisTurn);
+    scrollToBottom();
+    return;
+  }
   // A slash command is not a prompt. Reading it before anything else keeps
   // `/clear` out of the model's inbox; an unknown name is named and left in
   // the box instead of being sent, so a typo costs a notice, not a turn.
@@ -6094,11 +6100,26 @@ function submit() {
     reportUnknownCommand(slash.name, commandList());
     return;
   }
-  // Attachments and @-mentions have no upload path in this kernel. An image
-  // stays in the strip and is not sent; a picked path is not uploaded either,
-  // but it costs nothing to tell the model which paths the user meant: the
-  // path list is appended to the text, so the promise made when the path was
-  // added ("this is part of your message") is kept without a kernel change.
+  // This kernel has no image input (`ModelChatMessage.content` is a string and
+  // the adapter never sends `image_url`), so an attached image cannot travel
+  // with the message. Sending the text anyway would leave a thumbnail on the
+  // strip and a model that never saw it — the failure this check exists to
+  // stop (D-188, R3). The strip keeps its images and its remove buttons, and
+  // the draft stays put until the user decides.
+  //
+  // It sits after the slash branch on purpose: `/clear` and `/context` send no
+  // prompt, so an image on the strip is not part of them. A skill command does
+  // send one, and `runSkillCommand` enforces the same rule.
+  if (state.attachments.length > 0) {
+    addNotice("warn", t.attachmentNotSent);
+    scrollToBottom();
+    input.focus();
+    return;
+  }
+  // A picked path is not uploaded either, but it costs nothing to tell the
+  // model which paths the user meant: the path list is appended to the text,
+  // so the promise made when the path was added ("this is part of your
+  // message") is kept without a kernel change.
   const mentions = state.mentionFiles.filter((path) => typeof path === "string" && path !== "");
   if (!text && mentions.length === 0) return;
   const withMentions =

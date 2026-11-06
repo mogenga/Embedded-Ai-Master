@@ -1461,6 +1461,20 @@ function builtinCommands() {
 const SKILLS_MISSING = "内核未导出技能存储，请重新执行 npm run build";
 
 /**
+ * A settings-page refusal, tagged so the renderer can route it to that page.
+ *
+ * The save handlers below are called while the settings dialog is open, and
+ * the dialog is a `showModal()` on top of the transcript: a bare `notice`
+ * drawn behind it is a failure the user never sees — the click looks like it
+ * did nothing at all (R3). `page` names the settings page that owns the form,
+ * so the renderer can put the sentence beside the field that was saved and
+ * leave every other notice in the transcript.
+ */
+function settingsNotice(page, text) {
+  send({ type: "notice", level: "warn", text, domain: "settings", page });
+}
+
+/**
  * A skill failure, tagged so the renderer can route it to the settings page.
  *
  * Every one of these is answered while the settings dialog is open, and the
@@ -3059,7 +3073,7 @@ const handlers = {
   async savePermissions(payload) {
     const wanted = payload.permissions;
     if (typeof wanted !== "object" || wanted === null) {
-      send({ type: "notice", level: "warn", text: "缺少 permissions 对象" });
+      settingsNotice("behavior", "缺少 permissions 对象");
       return;
     }
     const presets = ["read-only", "workspace-write", "diagnose", "danger-full-access"];
@@ -3071,7 +3085,7 @@ const handlers = {
     try {
       await kernel.writePermissionConfig(harnessHome, wanted);
     } catch (error) {
-      send({ type: "notice", level: "warn", text: `权限配置未保存：${messageOf(error)}` });
+      settingsNotice("behavior", `权限配置未保存：${messageOf(error)}`);
       return;
     }
     if (switchesMode && !ctx.running) {
@@ -3361,7 +3375,7 @@ const handlers = {
     const existing = config?.mcpServers ?? [];
     const wanted = payload.server;
     if (typeof wanted !== "object" || wanted === null) {
-      send({ type: "notice", level: "warn", text: "缺少 server 对象" });
+      settingsNotice("mcp", "缺少 server 对象");
       return;
     }
     const name = String(wanted.name ?? "").trim();
@@ -3381,7 +3395,7 @@ const handlers = {
     try {
       await kernel.writeMcpServers(harnessHome, next);
     } catch (error) {
-      send({ type: "notice", level: "warn", text: `MCP 配置未保存：${messageOf(error)}` });
+      settingsNotice("mcp", `MCP 配置未保存：${messageOf(error)}`);
       return;
     }
     configEvent();
@@ -3394,13 +3408,13 @@ const handlers = {
     const name = String(payload.name ?? "");
     const next = (config?.mcpServers ?? []).filter((entry) => entry.name !== name);
     if (next.length === (config?.mcpServers ?? []).length) {
-      send({ type: "notice", level: "warn", text: `没有名为 ${name} 的 MCP server` });
+      settingsNotice("mcp", `没有名为 ${name} 的 MCP server`);
       return;
     }
     try {
       await kernel.writeMcpServers(harnessHome, next);
     } catch (error) {
-      send({ type: "notice", level: "warn", text: `MCP 配置未保存：${messageOf(error)}` });
+      settingsNotice("mcp", `MCP 配置未保存：${messageOf(error)}`);
       return;
     }
     configEvent();
@@ -3409,7 +3423,7 @@ const handlers = {
   async saveRunLimits(payload) {
     const wanted = payload.run;
     if (typeof wanted !== "object" || wanted === null) {
-      send({ type: "notice", level: "warn", text: "缺少 run 对象" });
+      settingsNotice("behavior", "缺少 run 对象");
       return;
     }
     // The settings page writes the file whole and does not know about the
@@ -3423,7 +3437,7 @@ const handlers = {
     try {
       runLimits = await kernel.writeRunLimits(harnessHome, merged);
     } catch (error) {
-      send({ type: "notice", level: "warn", text: `运行参数未保存：${messageOf(error)}` });
+      settingsNotice("behavior", `运行参数未保存：${messageOf(error)}`);
       return;
     }
     if (ctx.running) {
@@ -3444,13 +3458,13 @@ const handlers = {
   async saveProviders(payload = {}) {
     const wanted = payload.providers;
     if (typeof wanted !== "object" || wanted === null || Array.isArray(wanted)) {
-      send({ type: "notice", level: "warn", text: "缺少 providers 对象" });
+      settingsNotice("connection", "缺少 providers 对象");
       return;
     }
     try {
       await kernel.writeProviders(harnessHome, wanted);
     } catch (error) {
-      send({ type: "notice", level: "warn", text: `模型配置未保存：${messageOf(error)}` });
+      settingsNotice("connection", `模型配置未保存：${messageOf(error)}`);
       return;
     }
     // Re-read rather than reuse `wanted`: the file is the source of truth, and
@@ -3465,7 +3479,7 @@ const handlers = {
       providersError = messageOf(error);
       modelList = [];
       modelRef = "";
-      send({ type: "notice", level: "warn", text: `模型配置已写入但无法读回：${providersError}` });
+      settingsNotice("connection", `模型配置已写入但无法读回：${providersError}`);
       configEvent();
       return;
     }

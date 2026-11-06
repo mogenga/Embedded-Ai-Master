@@ -3988,28 +3988,6 @@ mark.find-hit.current {
   background: var(--surface-hover);
 }
 
-.queued-badge {
-  font-size: var(--text-sm);
-  color: var(--text-faint);
-  padding: 0 4px;
-  white-space: nowrap;
-}
-
-.turn.user.queued .user-bubble {
-  opacity: 0.62;
-  border-style: dashed;
-}
-
-.queued-tag {
-  margin-left: 8px;
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  padding: 0 4px;
-  vertical-align: 1px;
-}
-
 /* The composer is the positioning context and the box is at the bottom of
    the window, so `bottom: 100%` put the menu above the top edge — it existed
    in the DOM with 15 rows and was never on screen. Anchored below the input

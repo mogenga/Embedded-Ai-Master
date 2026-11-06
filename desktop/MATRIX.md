@@ -13,7 +13,7 @@
 | 命令 | 说明 |
 |---|---|
 | `init` | 握手：providers、模型列表、runner、事件源 |
-| `prompt` | 走 `runner.start`，权限与审批在内核 |
+| `prompt` | 走 `runner.start`，权限与审批在内核。渲染层先拦：`state.busy` 时 `submit()` / `runSlashCommand()` 直接给 warn 并保留草稿，不发给宿主（宿主仍保留 `session_busy` 拒绝作兜底）；有附件时同样拒绝发送（内核无图片输入） |
 | `abort` | 走 `runner.abort` |
 | `permission` | `yes`/`no` → allow/deny；`always` 降级为本次 allow 并显式提示 |
 | `newSession` | 清空转录，会话 id 留到首个 prompt 才产生 |
@@ -22,10 +22,10 @@
 | `getSettings` | UI 偏好 + 三份配置文件（`mcpServers` / `permissions` / `run`）及其路径，外加模型服务的两种形状：`providers`（选单用的扁平列表）与 `providerConfig`（`providers.json` 本身，设置页整份写回）。`providersError` 在文件读坏时给出原因，页面据此说明为什么表单是空的 |
 | `saveProviders` | 整份写 `providers.json`，直写后从磁盘重新 `loadProviders`（不信任入参）。模型引用失效时自动回退到首个可用引用并重建 runner。设置页每张服务卡片第一行的**厂商下拉**只是填表（`desktop/renderer/provider-presets.js` 的静态数据 + `vendor-marks.js` 的图标），走的仍是这条命令——没有第二套保存路径；旧的页顶七张「快速添加」卡片已删除。**显示名称与厂商归属不走这条命令**：内核 schema 会剥掉未知键，两者存在渲染层 localStorage（`desktop/renderer/provider-meta.js` 的 `prometheus.providerMeta`），`providers.json` 里只有服务名——因此宿主与内核都没有对应字段，模型面板的按服务分组也完全在渲染层完成 |
 | `testProvider` | 探测一个模型服务：调内核 `probeProvider`（`dist/model/probe.js`，缺失时回「未编译，请先 build」而不是崩宿主）。回 `provider_test{ok, baseUrl, models?, error?, code?, latencyMs?}`；`models` 拿不到时字段不存在。**不进命令队列**，探测可能占用 10s，不能把 abort 堵在后面 |
-| `saveMcpServer` | 合并同名项后整份写 `mcp.json` |
-| `removeMcpServer` | 按 name 删除 |
-| `savePermissions` | 整份写 `permissions.json`（`preset` / `approvalTimeoutMs` / `rules`） |
-| `saveRunLimits` | 整份写 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`），下一回合生效。`maxTurns: null` 表示**不限制轮数**（2026-10-22 起默认值就是 `null`，见 D-183 补充）；`0` / 负数 / 非整数仍会被拒绝——把笔误当「不限」会让用户以为上限生效了。**2026-11-05 起渲染层只剩系统提示一个调用方**：行为页的「运行上限」三个控件已删，宿主 handler 保留；渲染层整份写回时把 `state.runLimits` 里的旧值原样带回，不重置 |
+| `saveMcpServer` | 合并同名项后整份写 `mcp.json`；失败 notice 带 `domain:"settings"` + `page:"mcp"`，设置页就地显示 |
+| `removeMcpServer` | 按 name 删除；失败同上 |
+| `savePermissions` | 整份写 `permissions.json`（`preset` / `approvalTimeoutMs` / `rules`）；失败 notice 带 `domain:"settings"` + `page:"behavior"` |
+| `saveRunLimits` | 整份写 `run.json`（`maxTurns` / `maxCostUsd` / `timeoutMs` / `systemPrompt`），下一回合生效；失败 notice 带 `domain:"settings"` + `page:"behavior"`，设置页就地显示。`maxTurns: null` 表示**不限制轮数**（2026-10-22 起默认值就是 `null`，见 D-183 补充）；`0` / 负数 / 非整数仍会被拒绝——把笔误当「不限」会让用户以为上限生效了。**2026-11-05 起渲染层只剩系统提示一个调用方**：行为页的「运行上限」三个控件已删，宿主 handler 保留；渲染层整份写回时把 `state.runLimits` 里的旧值原样带回，不重置 |
 | `sessionFlags` | 改名/置顶/归档，写旁挂 `meta.json`（header 校验会丢弃未知字段） |
 | `archiveSessions` | 批量归档 `{ids: string[]}`，回 `sessions_archived{archived, failed:[{id, reason}]}` 并推一份 `sessions`。侧栏「移除工作区」就是它：工作区是渲染层按 `cwd` 分组**派生**的概念，没有独立清单，所以「移除」只能是「归档其中的会话」——**不删任何文件，也不删项目文件夹**。收 **id 列表而不是 cwd**：分组键 `normalizeCwd` 归渲染层所有，宿主再算一遍就是同一事实的第二份定义。逐个处理，某个失败不回滚其余，失败项带原因如实回报（R3） |
 | `deleteSession` | 删除会话目录；锁被占用时 409。拒绝删除当前打开的会话 |
@@ -82,7 +82,7 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 | `tool_result` | `tool_end{name, ok, summary, id}` +（成功时）`tool_output{name, content, artifactPath?}`；未被 `tool_started` 覆盖时先补一行 `tool_start`（被拒的调用也要留痕）。`artifactPath` 存在时输出块底部出现「打开产物」按钮 |
 | `approval_request` | `permission_request{id, question, detail}` |
 | `permission_decision` | `permission_closed{id}`（审批超时/中止时收起审批条）+ 拒绝时 `notice{warn}` |
-| `device_status` | `device_status{device, server, tool}`（板卡面板的「设备」段与 chip；不再伪装成 `board_state`，两者字段集不同） |
+| `device_status` | `device_status{device, server, tool}`。**事件保留、当前无 UI 消费者**：板卡面板于 2026-10-26 删除，渲染器 `case "device_status"` 刻意不画任何东西（`app.js:3085-3091`），设备信息改由所调用工具的那一行与输出承载 |
 | `mcp_status` | `notice{dim\|warn}` |
 | `usage` | `usage{usage, context?, contextBreakdown?, costUsd?}`——`context` 是上下文占用（tokens/percent/window），`contextBreakdown` 是同一份测量的按类别拆分（`{used, window, percent, compactAt, parts:[{key,tokens}]}`，key ∈ `systemPrompt`/`messages`/`toolResults`/`mcpTools`，`sum(parts.tokens) === used`），`costUsd` 是会话累计成本；缺失时字段不存在，渲染器据此隐藏而不是显示 0。**占用率在发请求之前测量**（D-195：原先在 `usage` 落盘时重新投影日志，那一刻工具批次未闭合、必然抛错被吞，导致每条带工具调用的回合都没有占用率）。**`state` 事件里的 `context` 用 `null` 表示「未知」**（`protocol.measuredContext()`），`undefined`（字段缺席）表示「这条事件不带占用，别动屏幕上的数字」——两者语义不同，不得互换。`contextBreakdown` 走 `protocol.measuredBreakdown()`，语义与 `context` 一致 |
 | `status{done}` | `run_end` |
@@ -94,6 +94,8 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 | `system` / `user` / `checkpoint` / `tool_call` | 不产出（用户消息在提交时已回显） || 未知类型 | `notice{warn}`（R3，不静默） |
 
 宿主另发：`hello`、`ready`、`state`、`sessions`、`session_loaded`、`session_matches`、`sessions_archived`、`commands`、`skills`、`setup_checklist`、`settings`、`usage_summary`、`models`、`locale`、`ui_preference`、`tree`、`file_matches`、`export_ready`、`notice`、`error`、`fatal`、`run_start`、`run_end`、`permission_closed`。
+
+**`notice` 按 `domain` 路由**：`domain:"skills"` → 技能设置页；`domain:"settings"` + `page`（`mcp` / `behavior` / `connection`）→ 对应设置页就地显示 `role="alert"` 错误条（`settingsFailure` 纯函数判定；页面已切走或不在该页时返回 `false`，落回转录）。无 `domain` 的一律进转录。宿主侧由 `settingsNotice(page, text)` 统一发出（`host.js:1463-1475`），用于 `saveMcpServer` / `removeMcpServer` / `savePermissions` / `saveRunLimits` / `saveProviders` 的失败路径——设置页是模态对话框，转录在它后面，不归页的提示等于看不见（D-198 同类，R3）。
 
 **启动不再自动打开上次的会话。** 用户明确要求「开启时应该默认无会话」。原先 `ready` 会读 `localStorage` 的 `prometheus.lastSession` 发 `loadSession`，上次那个会话被删或 header 损坏时，这条自动请求会把一条报错推到刚打开、用户还没做任何事的空界面上（D-214）。现在启动停在空会话，打开会话只能从侧栏点；`prometheus.lastSession` / `prometheus.restartSession` 两个键与设置页的「恢复上次会话」开关一并删除，避免留下只写不读的死键与假控件。
 

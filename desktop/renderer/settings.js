@@ -97,6 +97,34 @@ export function providerProbePayload(kind, target) {
   };
 }
 
+/** Settings pages that own a config file and can answer a refused save. */
+const SETTINGS_SAVE_PAGES = new Set(["mcp", "behavior", "connection"]);
+
+/**
+ * The page a `notice{domain:"settings"}` refusal belongs to, or null.
+ *
+ * The host tags a failed save with the page that sent it, because the settings
+ * dialog is a `showModal()` over the transcript: the notice it used to send
+ * was drawn behind the dialog, so a refused save looked exactly like a click
+ * that did nothing (R3). Only a failure is a candidate — `info` is "nothing
+ * happened", and a page this build does not know is left in the transcript
+ * rather than drawn on the wrong form.
+ *
+ * Pure on purpose: the routing decision is what a test can assert without a
+ * DOM. `handleEvent` only decides whether the *currently open* page consumes
+ * the answer.
+ */
+export function settingsFailure(message) {
+  if (typeof message !== "object" || message === null) return null;
+  if (message.domain !== "settings") return null;
+  if (message.level !== "warn" && message.level !== "error") return null;
+  const page = typeof message.page === "string" ? message.page : "";
+  if (!SETTINGS_SAVE_PAGES.has(page)) return null;
+  const text = typeof message.text === "string" ? message.text : "";
+  if (text.trim() === "") return null;
+  return { page, text };
+}
+
 /**
  * One `provider_test` answer, split into the three outcomes the page draws.
  *
@@ -900,6 +928,33 @@ function sHint(text) {
   return el("p", "setting-note", text);
 }
 
+/**
+ * The page-scoped line for a refused save.
+ *
+ * The host tags a failed save with the page that sent it (`domain:"settings"`,
+ * `page`), because the settings dialog is a `showModal()` over the transcript:
+ * a notice drawn behind it is a failure the user never sees, and the click
+ * looks like it did nothing (R3). This is the treatment the skills page
+ * already gives its refusals — the danger-coloured `pack-problem` note,
+ * `role="alert"` so a screen reader hears it — reused rather than restyled.
+ *
+ * `state.showSaveError` is the in-place updater: the page is not rebuilt on a
+ * refusal (a rebuild would take the edited form with it), so the line is
+ * created hidden and filled when the answer arrives. The `isConnected` guard
+ * covers a page that was left before the host answered.
+ */
+function saveErrorLine() {
+  const line = el("p", "setting-note pack-problem", "");
+  line.setAttribute("role", "alert");
+  line.hidden = true;
+  state.showSaveError = (message) => {
+    if (!line.isConnected) return;
+    line.textContent = message;
+    line.hidden = message === "";
+  };
+  return line;
+}
+
 function sButton(label, onClick, { primary = false, quiet = false, danger = false } = {}) {
   // danger 表示破坏性操作，需要在视觉上可辨识（不能被 quiet 弱化成链接
   // 样式——删除和编辑长得一样，是在邀请误点）。同时给出时 danger 优先。
@@ -1422,6 +1477,9 @@ function buildConnectionPage() {
   const s = S();
   const pane = sPage(s.pageConnection, s.pageConnectionDesc);
   pane.classList.add("page-wide");
+  // A refused save answers beside the form, not in the transcript the dialog
+  // covers (R3). First, because it describes the click that just happened.
+  pane.appendChild(saveErrorLine("connection"));
 
   // A fresh build starts from the host's snapshot; whatever the user had typed
   // belonged to the DOM that is being replaced. `fillSettings` does not rebuild
@@ -2867,6 +2925,9 @@ function buildConnectionPage() {
 function buildBehaviorPage() {
   const s = S();
   const pane = sPage(s.pageBehavior, s.pageBehaviorDesc);
+  // Both config files this page writes answer here: a refused `permissions.json`
+  // or `run.json` save lands beside the form instead of behind the dialog.
+  pane.appendChild(saveErrorLine("behavior"));
   const permissions = {
     ...DEFAULT_PERMISSIONS,
     ...(state.permissions ?? {}),
@@ -3201,6 +3262,9 @@ function buildSessionsPage() {
 function buildMcpPage() {
   const s = S();
   const pane = sPage(s.pageMcp, s.pageMcpDesc);
+  // A refused `mcp.json` write lands here: the add/edit cards live below, and
+  // the line is visible without scrolling back to the top of the form.
+  pane.appendChild(saveErrorLine("mcp"));
   // A plain container, like the model-services list: the cards carry their own
   // spacing, and a flex gap on top of it would space them twice as far apart
   // as the cards on the other page.
@@ -5394,10 +5458,26 @@ function basename(path) {
         state.renderSkillsPage?.();
         break;
       case "notice": {
-        // Only the skills page is routed here (see `app.js`): the settings
-        // dialog is a modal, so a transcript notice would never be read. Update
-        // the line in place — re-rendering would take the open form, and the
-        // draft it holds, down with it.
+        // Two domains arrive here (see `app.js`), both because the settings
+        // dialog is a modal and a transcript notice would never be read.
+        // Update the line in place — re-rendering would take the open form,
+        // and the draft it holds, down with it.
+        //
+        // `settings`: a refused config write, tagged with the page that sent
+        // it. Only the page on screen consumes it; a refusal for another page
+        // is answered by returning `false`, and `app.js` puts it in the
+        // transcript rather than under a form that has nothing to do with it.
+        if (message.domain === "settings") {
+          const failure = settingsFailure(message);
+          // A tagged notice that fails the mapping must not fall through to
+          // the skills branch below: that would paint an MCP refusal on the
+          // skills page and clear its error on nothing. It goes to the
+          // transcript instead, by returning `false`.
+          if (failure === null) return false;
+          const current = !settingsDialog.hidden && state.settingsTab === failure.page;
+          if (current) state.showSaveError?.(failure.text);
+          return current;
+        }
         // warn 和 error 都是失败，都要显示——把 error 丢掉等于把保存失败
         // 伪装成成功（R3）。只有 info 才是「什么也没发生」。
         const text = message.level === "info" ? "" : String(message.text ?? "");

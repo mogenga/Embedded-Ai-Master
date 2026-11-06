@@ -961,6 +961,34 @@ describe("desktop host", () => {
     ).toBe(0);
   }, HOST_TIMEOUT_MS);
 
+  it("设置页保存失败带 domain:\"settings\" 与页面名，转录不会只留一条看不见的提示", async () => {
+    const home = await tempHome();
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        // Four refusals, one per save handler: the dialog is a `showModal()`
+        // over the transcript, so the renderer needs the page name to put each
+        // sentence beside the form that sent it (OPT-08 / R3).
+        { cmd: "saveProviders", providers: { gw: { baseUrl: "not-a-url", models: {} } } },
+        { cmd: "savePermissions" },
+        { cmd: "saveRunLimits" },
+        { cmd: "saveMcpServer" },
+        { cmd: "listSessions" },
+      ],
+      { until: (all) => all.some((event) => event.type === "sessions") },
+    );
+    const failures = events
+      .filter((event) => event.type === "notice" && event.domain === "settings")
+      .map((event) => ({ level: event.level, page: event.page, text: event.text }));
+    expect(failures).toStrictEqual([
+      { level: "warn", page: "connection", text: expect.stringContaining("模型配置未保存") },
+      { level: "warn", page: "behavior", text: "缺少 permissions 对象" },
+      { level: "warn", page: "behavior", text: "缺少 run 对象" },
+      { level: "warn", page: "mcp", text: "缺少 server 对象" },
+    ]);
+  }, HOST_TIMEOUT_MS);
+
   it("refreshModels 重读 providers.json 并广播 models", async () => {
     const home = await tempHome();
     const events = await runHost(
