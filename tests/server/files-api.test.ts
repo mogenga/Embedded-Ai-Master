@@ -7,7 +7,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { realpath } from "node:fs/promises";
+import { readdir, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,6 +23,13 @@ import {
 import { createSessionRunner, RunnerError } from "../../src/server/runner.js";
 import type { SessionRunner } from "../../src/server/runner.js";
 import { readSessionHeader } from "../../src/session/persistence.js";
+
+// 只包一层 readdir，供「单层超过上限」那条用例注入构造的目录项；其余 fs API
+// 全部走真实实现。ESM 的命名空间不能 spy，所以用模块级 mock（与 glob.test.ts 同一写法）。
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, readdir: vi.fn(actual.readdir) };
+});
 
 const tempDirs: string[] = [];
 const runners: SessionRunner[] = [];
@@ -127,18 +134,42 @@ describe("listDirectory", () => {
     const home = makeHome();
     const root = path.join(home, "sessions", "many");
     mkdirSync(root, { recursive: true });
-    const total = MAX_DIRECTORY_ENTRIES + 2;
-    for (let index = 0; index < total; index += 1) {
-      writeFileSync(path.join(root, `f${String(index).padStart(4, "0")}.txt`), "x");
-    }
+
+    // 造 502 个**虚拟**目录项而不是真写 502 个文件：这条用例要验的是「排序后
+    // 截断到前 N 个」，与磁盘无关。CI 的 Windows runner 磁盘比开发机慢得多，
+    // 真写 502 个文件曾让它在默认 5s 里超时（2026-11-06 的 CI 失败）。
+    // 只 mock `readdir` 这一个导出，`lstat`/`realpath` 仍走真实实现——目录本身
+    // 是真的，所以路径校验与后续逻辑都是真的，只有目录项列表是构造的。
+    // 断言与构造都用**字面量** 500，不用 `MAX_DIRECTORY_ENTRIES`：否则改常量
+    // 时两边同步变化，用例恒真（实测：把常量改成 600 后这条仍然绿）。
+    expect(MAX_DIRECTORY_ENTRIES).toBe(500);
+    const total = 502;
+    const fakeDirents = Array.from({ length: total }, (_, index) => ({
+      name: `f${String(index).padStart(4, "0")}.txt`,
+      isFile: () => true,
+      isDirectory: () => false,
+      isSymbolicLink: () => false,
+    }));
+    // 只对目标目录返回构造的条目；其它路径（`realpath` 内部等）仍走真实实现。
+    // 用「按参数过滤」而不是 `mockImplementationOnce`：`listDirectory` 之前的
+    // 解析步骤也会走 readdir，`Once` 会被那一步吃掉。
+    const actualReaddir = vi.mocked(readdir).getMockImplementation();
+    vi.mocked(readdir).mockImplementation(async (target: unknown, options: unknown) => {
+      if (path.resolve(String(target)) === path.resolve(root)) {
+        return fakeDirents as never;
+      }
+      return actualReaddir!(target as never, options as never);
+    });
 
     const result = await listDirectory(home, root);
 
-    expect(result.entries).toHaveLength(MAX_DIRECTORY_ENTRIES);
+    expect(result.entries).toHaveLength(500);
     expect(result.truncated).toBe(true);
     // 截断的是排序后的尾部，不是随机的一批。
     expect(result.entries[0]?.name).toBe("f0000.txt");
-    expect(result.entries.at(-1)?.name).toBe(`f${String(MAX_DIRECTORY_ENTRIES - 1).padStart(4, "0")}.txt`);
+    expect(result.entries.at(-1)?.name).toBe("f0499.txt");
+    // 还原为真实实现，后续用例不受影响。
+    vi.mocked(readdir).mockImplementation(actualReaddir!);
   });
 
   it("越界路径返回 400 invalid_path", async () => {
