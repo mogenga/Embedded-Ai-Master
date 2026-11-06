@@ -523,6 +523,46 @@ describe("McpManager 工具调用", () => {
   });
 });
 
+describe("McpManager 会话级复用支持", () => {
+  it("onToolsChanged 返回的取消函数生效：取消后不再收到通知", async () => {
+    const manager = track(new McpManager([config("echo")]));
+    await manager.connectAll();
+    const changed: string[] = [];
+    const off = manager.onToolsChanged((server) => changed.push(server));
+    const kept: string[] = [];
+    manager.onToolsChanged((server) => kept.push(server));
+
+    await manager.call("echo", "grow", {}, signal());
+    await waitFor(() => changed.length > 0);
+    off();
+
+    await manager.call("echo", "grow", {}, signal());
+    await waitFor(() => kept.length >= 2);
+    // 取消之后的那次通知只到留下的 listener。
+    expect(changed).toEqual(["echo"]);
+    expect(kept.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("setLogger 重绑后新事件走新 logger", async () => {
+    const first: McpStatusEvent[] = [];
+    const second: McpStatusEvent[] = [];
+    const manager = track(
+      new McpManager([config("echo")], { logger: (event) => first.push(event) }),
+    );
+    await manager.connectAll();
+    expect(first).toContainEqual(expect.objectContaining({ kind: "connected" }));
+
+    manager.setLogger((event) => second.push(event));
+    await manager.call("echo", "grow", {}, signal());
+    await waitFor(() => second.some((event) => event.kind === "tools_changed"));
+
+    expect(second).toContainEqual(expect.objectContaining({ kind: "tools_changed" }));
+    // 重绑之后旧 sink 不再收到任何事件。
+    expect(first.some((event) => event.kind === "tools_changed")).toBe(false);
+  });
+
+});
+
 describe("McpManager 断线与重连", () => {
   it("断线后 call 自动重连一次并通知 onToolsChanged", async () => {
     const root = tempRoot();

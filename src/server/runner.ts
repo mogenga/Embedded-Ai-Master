@@ -13,6 +13,8 @@ import type { ProvidersConfig, ReasoningEffort } from "../config/providers.js";
 import type { PermissionPreset } from "../permissions/types.js";
 import { runSession } from "../index.js";
 import type { RunOptions, RunPermissionOptions } from "../index.js";
+import { createMcpRegistry } from "../mcp/registry.js";
+import type { McpRegistry } from "../mcp/registry.js";
 import { SessionCorruptionError } from "../session/errors.js";
 import { isValidSessionId } from "../session/handle.js";
 import { readSessionHeader } from "../session/persistence.js";
@@ -44,7 +46,18 @@ export interface ActionInput {
   maxTurns?: number | null;
   maxCostUsd?: number;
   timeoutMs?: number;
-  /** Replaces the built-in system prompt for this run. */
+  /**
+   * 整跑墙钟上限（毫秒）；null / 缺省表示不限。
+   *
+   * 与 `timeoutMs`（单次工具调用）不是一回事，见 `RunOptions.deadlineMs`。
+   */
+  deadlineMs?: number | null;
+  /**
+   * 操作者自己写的系统提示词，作为日志里的 `system` 事件随会话保存。
+   *
+   * **内核没有内置提示词**：`environment` 等内置节由投影期注入、不写日志。
+   * 这个字段只是把用户写的那一段交给内核（D-221）。
+   */
   systemPrompt?: string;
   /**
    * 本次运行的推理强度覆盖；`"auto"` 与缺省同义（用模型配置里的默认值）。
@@ -71,6 +84,7 @@ interface RunLimits {
   maxTurns?: number;
   maxCostUsd?: number;
   timeoutMs?: number;
+  deadlineMs?: number;
   systemPrompt?: string;
   reasoningEffort?: ReasoningEffort;
 }
@@ -96,6 +110,12 @@ function readRunLimits(input: ActionInput): RunLimits {
       throw new RunnerError("invalid_run_limits", `timeoutMs 必须是正整数: ${String(input.timeoutMs)}`);
     }
     limits.timeoutMs = input.timeoutMs;
+  }
+  if (input.deadlineMs !== undefined && input.deadlineMs !== null) {
+    if (!Number.isInteger(input.deadlineMs) || input.deadlineMs < 1) {
+      throw new RunnerError("invalid_run_limits", `deadlineMs 必须是正整数: ${String(input.deadlineMs)}`);
+    }
+    limits.deadlineMs = input.deadlineMs;
   }
   if (input.systemPrompt !== undefined) {
     if (typeof input.systemPrompt !== "string") {
@@ -214,6 +234,14 @@ export interface SessionRunner {
   ): Promise<RunnerDecideOutcome>;
   /** Abort the run in flight. Returns false when there is nothing to abort. */
   abort(sessionId: string): boolean;
+  /**
+   * Release the MCP connections held for this session.
+   *
+   * The kernel keeps one MCP connection set per conversation, so a session that
+   * is no longer on screen would otherwise hold its probe/serial child
+   * processes. A session unknown to this runner is a no-op.
+   */
+  closeSession(sessionId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -281,7 +309,18 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
   const readyTimeoutMs = opts.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
   const runSessionImpl = opts.runSessionImpl ?? runSession;
   const registry = new Map<string, RunnerEntry>();
+  // MCP 连接按会话持有：一个会话的多条消息复用同一份连接（不再每条消息重新
+  // 握手），会话切换或被 runner 关闭时释放。惰性创建，没跑过就没有连接表。
+  let mcpRegistry: McpRegistry | undefined;
+  // sessionId → 会话目录，就是连接表的 key。onSession 是唯一能拿到目录的时机
+  // （`start` 的返回值只有 id）。
+  const sessionDirs = new Map<string, string>();
   let closed = false;
+
+  function ensureMcpRegistry(): McpRegistry {
+    mcpRegistry ??= createMcpRegistry();
+    return mcpRegistry;
+  }
 
   function assertText(text: unknown): asserts text is string {
     if (typeof text !== "string" || text.trim().length === 0) {
@@ -420,8 +459,12 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
         ...(input.mode === undefined ? {} : { preset: input.mode }),
         prompter: bridge,
       },
+      mcpRegistry: ensureMcpRegistry(),
       onSession: (session) => {
         bridge.bindSession(session);
+        // The only place the session's directory is visible; the MCP registry
+        // is keyed by it (`closeSession` maps id → dir).
+        sessionDirs.set(sessionId, session.dir);
         if (readySettled) return;
         readySettled = true;
         readyResolve();
@@ -517,6 +560,15 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
     return true;
   }
 
+  async function closeSession(sessionId: string): Promise<void> {
+    const dir = sessionDirs.get(sessionId);
+    if (dir === undefined || mcpRegistry === undefined) {
+      return;
+    }
+    sessionDirs.delete(sessionId);
+    await mcpRegistry.release(dir);
+  }
+
   async function close(): Promise<void> {
     closed = true;
     const entries = [...registry.values()];
@@ -535,8 +587,16 @@ export function createSessionRunner(opts: SessionRunnerOptions): SessionRunner {
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       registry.clear();
+      sessionDirs.clear();
+    }
+    // 会话都结束后才释放连接表：运行中的 run 还在用它们。释放失败照样让
+    // close 完成（进程已经在退出路径上），但把第一个错误抛给调用方。
+    if (mcpRegistry !== undefined) {
+      const releasing = mcpRegistry;
+      mcpRegistry = undefined;
+      await releasing.releaseAll();
     }
   }
 
-  return { start, decide, abort, close };
+  return { start, decide, abort, closeSession, close };
 }

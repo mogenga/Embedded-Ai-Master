@@ -708,6 +708,7 @@ let runLimits = {
   maxTurns: null,
   maxCostUsd: null,
   timeoutMs: null,
+  deadlineMs: null,
   systemPrompt: "",
   reasoningEffortByModel: {},
 };
@@ -785,6 +786,11 @@ function runLimitOptions() {
       : {}),
     ...(runLimits.maxCostUsd === null ? {} : { maxCostUsd: runLimits.maxCostUsd }),
     ...(runLimits.timeoutMs === null ? {} : { timeoutMs: runLimits.timeoutMs }),
+    // Wall-clock cap for the whole run, not the per-call `timeoutMs`. Unset is
+    // the common case; the kernel treats a missing field as "no limit".
+    ...(runLimits.deadlineMs === null || runLimits.deadlineMs === undefined
+      ? {}
+      : { deadlineMs: runLimits.deadlineMs }),
     ...(runLimits.systemPrompt === "" ? {} : { systemPrompt: runLimits.systemPrompt }),
     // Omitted for "auto": the runner would turn it into "no override" anyway,
     // and a field that never travels is one less thing to misread downstream.
@@ -1641,6 +1647,7 @@ function persistEffort() {
     maxTurns: runLimits.maxTurns,
     maxCostUsd: runLimits.maxCostUsd,
     timeoutMs: runLimits.timeoutMs,
+    deadlineMs: runLimits.deadlineMs ?? null,
     systemPrompt: runLimits.systemPrompt,
     reasoningEffortByModel: { ...effortTable() },
   };
@@ -2006,11 +2013,36 @@ async function handleCompact() {
   }
 }
 
+/**
+ * Release the MCP connections held for a conversation we are leaving.
+ *
+ * The kernel keeps one connection set per session, so switching away without
+ * releasing would keep the probe/serial child processes alive for a
+ * conversation nobody is looking at. Only called when no turn is in flight —
+ * the running check is the caller's (a live run still needs its tools), and
+ * this guard repeats it so a future call site cannot drop them mid-turn.
+ *
+ * A failure is reported, never silent (R3), and never blocks the switch: the
+ * new session is already what the operator asked for, and the leftover process
+ * will still be reaped when the runner is rebuilt or the host exits.
+ */
+function releaseSessionMcp(target) {
+  if (target === "" || ctx.running || typeof runner?.closeSession !== "function") return;
+  runner.closeSession(target).catch((error) => {
+    send({
+      type: "notice",
+      level: "warn",
+      text: `释放会话 MCP 连接失败：${messageOf(error)}`,
+    });
+  });
+}
+
 function handleNewSession() {
   if (ctx.running) {
     send({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
     return;
   }
+  releaseSessionMcp(sessionId);
   stopFollow();
   sessionId = "";
   lastSessionId = "";
@@ -2127,6 +2159,11 @@ async function handleLoadSession(id) {
     send({ type: "notice", level: "error", text: `会话读取失败：${messageOf(error)}` });
     return;
   }
+  // Switching conversations releases the MCP connections of the one being left
+  // (same act as in `handleNewSession`). Reopening the current session is not
+  // a switch and keeps them. Done here, after the read succeeded: a failed
+  // load leaves the operator where they were, still needing those tools.
+  if (id !== sessionId) releaseSessionMcp(sessionId);
   sessionId = id;
   running = false;
   // Follow the conversation's own project before the context and the `state`
