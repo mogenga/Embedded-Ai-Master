@@ -187,3 +187,18 @@
 - `_inbox.md` 的 13 处旧工具名与两处 front matter 触发词：按「本地沉淀、不参与检索」保留。
 
 **语料 OTA（D-222）已闭环（2026-11-06 稍晚）**：`corpusVersion=2` 已签名并上传，桶上清单与本地产物逐字节相同，108/108 文件 sha256 在桶上实测匹配；`package-prepare` 不带 `--manifest` 已能端到端装配 v2 随包语料（109 文件）。详见 `docs/deferred-issues.md` D-222 状态段。
+
+---
+
+## 11. OPT-20 落地记录（2026-11-06）
+
+**固件装载**：新增 `renode_load`（`mcp-servers/probe/tools.ts`），后端 `RenodeBackend.loadFirmware`（`renode-backend.ts`）。
+- 实发 `sysbus LoadELF @<绝对路径>`；只接受绝对路径、必须存在且为普通文件（`stat().isFile()`）。
+- 路径按 monitor 的 `path` 类型转换：Windows 反斜杠改成正斜杠、空格转义为 `\ `（Renode 文档 `monitor-syntax.md` 的 path 类型只文档化了这一种写法）。控制字符、引号、反引号、`#` 直接拒绝，避免路径被解析成额外命令。
+- 标 `destructiveHint`：装载会覆盖目标内存。返回 `declaration` + 加载的文件名/大小 + monitor 原文；monitor 输出为空时附 `renode_load_no_monitor_output` 警告，不把静默当成功；输出含加载失败措辞时抛 `backend_error`。
+- 仅当本后端确实 `resume` 过（`cpu === "running"`）时先发 `pause`；attach 后的机器本来就未启动，没有依赖「pause 在未启动时是否幂等」。
+- OpenOCD 后端的 `loadFirmware` 显式 `not_supported`（真硬件烧录走 Keil），不发任何命令。
+
+**最小故障注入**：不新增工具。`mem_write` 已经是逐字节写 + 回读校验 + `declaration`（`renode-backend.ts` 的 `writeMemory`），足以表达位翻转：`mem_read` 读字节 → 与 `1 << bit` 异或 → `mem_write` 写回。README「探针」一节给出可直接照做的参数示例；探针权限模板新增 `renode_load` 的目录 glob 规则示例。
+
+**待真机验证**（代码里没有臆造语法，按 KB 语料与官方文档实现）：Renode 1.16 上 `sysbus LoadELF` 的成功/失败输出文案未实测，`LOAD_FAILURE_PATTERN` 是保守措辞匹配；`pause` 在已暂停机器上的行为也未实测（当前实现只在 running 时发）。`npm run probe:e2e` 未在本轮执行（需要真实 Renode 与构建产物）。
