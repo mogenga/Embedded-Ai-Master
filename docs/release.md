@@ -66,6 +66,8 @@ gh auth status
 node scripts/release.mjs --check
 
 # 1) 构建内核与 MCP 产物
+#    两条命令各自先删除自己的输出目录（scripts/clean.mjs dist / dist-mcp），
+#    顺序任意、互不影响。不要手动交叉清理，也不要一次清两个。
 npm run build
 npm run build:mcp
 

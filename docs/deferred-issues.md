@@ -1464,7 +1464,8 @@
 - **影响**: 桌面形态的启动、窗口标题栏与文件对话框未确证。**2026-10-22 更新**：浏览器形态已下线，原先「浏览器形态不受影响」的退路不复存在——桌面是唯一形态，本条目从「另一形态可用」变成整个前端都未实机验证。
 - **触发升级条件**: 用户安装 Electron 后即可验证；或需要把桌面形态作为交付形态。
 - **修复建议**: 执行 `npm --prefix desktop install && npm run build && npm --prefix desktop run desktop`,按 `desktop/MATRIX.md` 的清单逐项核对。
-- **状态**: 未解决。
+- **状态**: **部分解决（2026-11-03）**。发布形态已实机验证：`README.md:771` 记录 v0.1.5 NSIS 安装在干净机器上通过并启动（同日 D-208 关闭），因此「Electron 窗口 + preload + 宿主」这条交付路径不再是零证据。
+  - **仍未覆盖**：开发形态 `npm --prefix desktop run desktop` 的逐项手动核对（本条修复建议的那份清单）没有执行记录；本会话也因依赖安装禁令未运行 Electron。条目保留跟踪这一半。
 
 ### D-164 · 内核无 token 级流式事件,回答整段出现
 
@@ -1552,6 +1553,8 @@
 - **状态**: 大部分解决（2026-10-22 第十四轮后：第 3 项 `@` 提及已接通、第 4 项已完成；第 1、2 项仍是内核/外壳能力缺口）。第十四轮另把**斜杠命令**接上（`/clear` `/context` `/compact`），此前它在本条清单里只被笼统写作「无后端」。**2026-10-22 补充**：本条记录的是当时那一轮的修复清单，其中涉及 bridge / 浏览器下载 / `PUT /api/config` 的描述均已随浏览器形态下线失去对象（`/compact` 现在三个命令在桌面全部可用）；保留原文以便追溯，未逐句改写。**同日第十六轮追加**：本条从未把 skills 写进「未接」清单（当时内核没有这个能力），本轮补上后 `listCommands` 与 `init` 返回的目录不再只有 `clear` / `context` / `compact` 三条——技能以 `source: "skill"` 追加在其后。此处只作指引，技能自身的边界见 **D-198**。
 
 ### D-193 · Board 面板是唯一可见的工作台页签，但它发的 `getBoardState` 两端都没有 handler
+
+> **2026-11-06 复核：本条已失效。** Board 面板于 2026-10-26 随目标板页面整体删除（`desktop/renderer/app.js` 的 `SUPPORTED_PANES` 现为 `file / artifact / serial`，`dev-notes/M3-发布.md:1148-1174` 记录了删除决定）。全仓 grep `getBoardState` 为 0 处；`device_status` 事件仍在内核产出，但渲染器 `case "device_status"` 刻意不画任何东西（`app.js:3085-3091` 有注释说明「事件保留、当前无 UI 消费者」）。以下保留原始记录。
 
 - **发现**: 2026-10-22（第十四轮复核「还有什么没做完」时逐个命令交叉核对）。
 - **现象**: `app.js:116` 只允许恢复 `board` 一个 pane（`pane: ["board"].includes(savedPane) ? savedPane : "board"`），Board 页签是 `aria-selected="true"` 且不隐藏；打开它就会执行 `app.js:3518` 的 `api.send({ cmd: "getBoardState" })`。`grep getBoardState desktop/host/host.js` 为 0 处，`bridge.js` 也没有 —— 用户点开唯一可见的面板，收到的是一条「桌面宿主暂不支持该命令：getBoardState」。扳手、刷新按钮（`app.js:4068`/`4083`）与 `embed_build` 之后的自动刷新（`app.js:2886`）发的是同一条死命令。
@@ -1643,16 +1646,21 @@
 - **影响**: 用户以为图片发出去了；模型只收到文字，回答与图片无关。这是 R3 意义上的「把失败伪装成成功」——而且丢的是用户输入。
 - **触发升级条件**: 用户贴图提问；或需要视觉诊断（示波器截图、PCB 照片）。
 - **修复建议**: 短期按 R3 在 `addAttachment` 处就拒绝并说明「内核不支持图片输入」（或直接删掉附件条与 `handleImageFiles` 的图片分支）；长期在内核加多模态消息（`content: string | ContentPart[]`），成本远高于短期方案，须单独立项。
-- **状态**: 未解决（已登记）。
+- **状态**: **短期方案已落地（2026-11-06，批次 1 / OPT-07）**，长期多模态仍未做。
+  - 有附件时 `submit()` 与 `runSkillCommand()` 拒绝发送，给 `warn`（`attachmentNotSent`，中英），不清输入框、附件条保留（含移除按钮）；`slash` 分支排在附件判断之前，`/clear`、`/context` 不被附件挡住。
+  - 删除误导文案 `imageOnlyPrompt`（中英）。
+  - `#plus-control`（`index.html:335`）**仍隐藏**：入口不放开，只修「已附加图片之后」的行为。
+  - **未登记的新发现**：`state.attachments` 在 `session_loaded` 时不清空，切换会话后附件条上的图片仍在并继续阻止发送（既有行为，本次未改）。
 
 ### D-187 · About 页的「检查更新」按钮调用一个两个宿主都不提供的 API
 
 - **发现**: 2026-10-22（同上）。
 - **现象**: `settings.js:3321` 直接 `await api.checkUpdate()`，没有存在性判断。`grep -c checkUpdate desktop/preload.cjs desktop/renderer/bridge.js` 为 **0 / 0**。`app.js` 的启动检查有 `if (!api.checkUpdate ...) return;` 保护，所以启动时安静；About 页这一处没有，点击即 TypeError，提示行永远停在「正在检查…」。
 - **影响**: 一个按钮点下去必崩，且失败方式与「没有更新」在界面上无法区分（都停在检查中）。
-- **触发升级条件**: 用户点它；或需要真正的版本检查。
+- **触发升级条件**: 用户点它；或需要真正的版本检查。（已满足：2026-10-25 加入真实更新检查。）
 - **修复建议**: 二选一——①删掉这个按钮与 `updateCheck` 偏好项（没有更新源，留着就是死控件）；②按 `app.js` 启动检查的写法加保护并如实显示「当前构建不提供更新检查」。按 R3 建议 ①。
-- **状态**: 未解决（已登记）。同类还有 `api.browserOpen`（四处无保护调用，preload 没有该成员；`bridge.js` 已随浏览器形态删除，此处原本是「两端都没有」），只是那四个入口目前被 `SUPPORTED_PANES` 挡住，暂不可达。
+- **状态**: **已解决（2026-10-25，应用内自动更新接入）**。`desktop/preload.cjs:45-48` 提供 `updateStatus` / `updateCheck` / `updateDownload` / `updateInstall`，`desktop/main.js:98-101` 注册同名 IPC，`desktop/renderer/settings.js:4906-4920` 用 `updateStatusView(status)` 按状态画文案与唯一可用动作（无动作时为 `null`，不画禁用按钮）。开发形态显示 `unsupported/dev` 并说明原因。
+- **同类残余**: `api.browserOpen` 等四个无保护调用仍存在，但入口被 `SUPPORTED_PANES` 挡住、暂不可达（见 D-185 / D-192）。
 
 ### D-186 · 「排队」是假的：气泡显示「排队中」，消息实际被两端拒绝并丢弃
 
@@ -1661,7 +1669,11 @@
 - **影响**: 界面承诺「排队」，实际是**丢弃**。用户以为自己说的话会在本轮结束后被处理，而它永远不会被投递——丢的是用户输入，且事后没有任何痕迹。
 - **触发升级条件**: 用户在运行中追加消息；或实现中断式追加（内核 `session_busy` 的语义改动）。
 - **修复建议**: 二选一——①删掉排队标签与 `queueSend` 文案，运行中发送即如实提示「回合结束再发」（最小、最诚实）；②在渲染器实现真正的队列：`run_end` 后自动投递下一条，队列非空时显示计数。内核 `session_busy` 的约束不改也能做，队列放在渲染器侧。按 R3 建议先做 ①，把 ② 作为独立功能。
-- **状态**: 未解决（已登记）。
+- **状态**: **已解决（2026-11-06，批次 1 / OPT-07）**，采用建议 ①。
+  - 删除：`addUserTurn` 的 `queued` 分支与 `queued-tag`、`markQueuedDelivered` / `setQueuedBadge`、`case "queued"` / `case "user_queued_delivered"`、`queueSend` / `queuedTag` / `queuedCount` / `sendLabel` 文案、`.queued-badge` / `.queued-tag` 样式与 `#queued-badge` DOM。
+  - 新增拦截：`submit()` 与 `runSlashCommand()` 在 `state.busy` 时给 `warn`（`busyThisTurn`，中英）并保留草稿，不发宿主、不清输入框、不插气泡；宿主的「当前回合尚未结束」保留为 `session_busy` 兜底。
+  - 回归：`tests/desktop/composer-copy.test.js`（静态断言 8 个符号在渲染层四处均不存在 + 两条 i18n 键非空）。
+  - **未做**：真正的渲染器队列（建议 ②）仍作为独立功能待立项。
 
 ### D-185 · 图片附件之外的两处「死 UI 大块」：goals / subagents / 检查点
 
@@ -1905,9 +1917,11 @@
 - **影响**: ① 只装了 MDK、没装 STM32CubeProgrammer 的机器无法整片擦除；② 擦除会结束调试会话，断点与观察点丢失，调用方需要重新 `open`；③ 该 CLI 只覆盖 STM32，其他厂商的芯片没有等价的整片擦除路径。
 - **触发升级条件**: ① 用户在非 ST 芯片上要求整片擦除；② Keil 新版本修复 `PRJ_FLASH_ERASE`（需重新实测）；③ 擦除后丢失断点被反馈为缺陷。
 - **修复建议**: 非 ST 芯片走各厂商 CLI（如 nRF 的 `nrfjprog --eraseall`、NXP 的 `blhost`），或在能力报告里明确「整片擦除仅 STM32」；会话恢复做成「擦除前记录断点列表，完成后重放」。
-- **状态**: 未解决。
+- **状态**: **本条现象已过时（2026-11-06 复核）**。当前实现不再走 `STM32_Programmer_CLI`：`eraseFlash`（`mcp-servers/keil/keilSession.ts:2339`）直接发 `PRJ_FLASH_ERASE` 并等待 20s，超时后返回 `FLASH_ERASE_LIMITATION`——如实说明「5.43.1 从不回应此命令」且「下载只擦除自己占用的扇区，不是整片擦除」。因此**整片擦除不可用**，而不是「依赖外部 CLI 且需先关会话」。条目仍需保留：它记录的是**能力缺口**（无整片擦除）而非旧实现细节，原「修复建议」仍适用。
 
 ### D-202 · CubeIDE 后端的工程编辑动作未实现
+
+> **2026-11-06 复核：已作废。** CubeIDE 后端已随 `f03473b` 从产品移除（`mcp-servers/cubeide/` 不存在，`docs/cubeide-headless.md` 已删），本条描述的能力在仓库里没有对应代码。以下保留原始记录。
 
 - **发现**: 2026-10-23，CubeIDE 接入（用户决策方案 A：统一门面按工程类型路由）。
 - **现象**: `cubeide_build` 只有 `info` 读工程概要；keil 侧的 `add_group` / `add_file` / `set_option` 一类编辑动作没有对应实现。`.cproject` 是带构建插件配置的嵌套 XML，直接改写需要理解 CDT managed build 的 option 结构，不能照 keil 的经-uVision-落盘模式做。
@@ -1918,6 +1932,8 @@
 
 ### D-203 · CubeIDE 的 J-Link 与 OpenOCD gdbserver 路线未接入
 
+> **2026-11-06 复核：已作废。** CubeIDE 后端已随 `f03473b` 从产品移除。以下保留原始记录。
+
 - **发现**: 2026-10-23，CubeIDE 接入。
 - **现象**: 插件里已定位 `openocd.win32_*` 与 `jlink.win32_*` 二进制，但 `gdbserver.ts` 只实现 ST-LINK_gdbserver 启动；J-Link/OpenOCD 探针的用户需要先用 probe MCP 的 openocd 后端。
 - **影响**: 非 ST-Link 探针在 cubeide 后端上不可用（keil 侧按 `.uvoptx` 配置走，反而没有这个限制）。
@@ -1927,6 +1943,8 @@
 
 ### D-204 · ESP-IDF 串口监控输出流未接入
 
+> **2026-11-06 复核：已作废。** ESP-IDF 后端已随 `f03473b` 从产品移除（`mcp-servers/espidf/` 不存在）。串口能力现由 `mcp-servers/serial/` 的 `embed_serial` 承担，与厂商后端解耦。以下保留原始记录。
+
 - **发现**: 2026-10-23，ESP-IDF 接入。
 - **现象**: `esp_build` 只有构建/烧录/擦除/探测；`idf.py monitor` 的持续串口输出（固件日志）没有等价动作。probe MCP 已有串口后端，但那是裸串口，没有 IDF 的 ELF 解码（backtrace → 行号）。
 - **影响**: 调 ESP32 固件日志仍要自己开串口工具；backtrace 解码缺位。
@@ -1935,6 +1953,8 @@
 - **状态**: 未解决。
 
 ### D-205 · ESP-IDF menuconfig / sdkconfig 编辑未做
+
+> **2026-11-06 复核：已作废。** ESP-IDF 后端已随 `f03473b` 从产品移除。以下保留原始记录。
 
 - **发现**: 2026-10-23，ESP-IDF 接入。
 - **现象**: 换 target 走 `-DIDF_TARGET`（rebuild），但 sdkconfig 的选项编辑没有动作面。IDF 的 menuconfig 是交互式 TUI，headless 等价物是 `idf.py set-target` + 直接改 sdkconfig 文件（有 Kconfig 语义，不能盲改）。
@@ -1969,7 +1989,7 @@
 - **影响**: 无运行时代码问题——实现是对的，测试是旧的。但它让「全量绿」这个信号永久失效，任何人跑 `npm test` 都会看到一个红叉，长期会养成忽略它的习惯（D-156 / D-161 那类抖动被容忍的原因之一）。
 - **触发升级条件**: 已触发（当前就是红的）；任何人再动串口动作时。
 - **修复建议**: 把断言补成六项，并**同时**决定 `open` / `close` 是否属于「证据动作」（目前 `SERIAL_EVIDENCE_ACTIONS` 只有三项，`write` 与新增两项都不在内）与「破坏性动作」。这不是纯改数字：`open` / `close` 会改变串口状态，若它们不进 `destructiveActions` 白名单，`diagnose` 预设下的行为需要重新确认。
-- **状态**: 未解决（本次改动未触碰该文件与其被测源码）。
+- **状态**: **已解决（2026-11-06 核验）**。测试文件随串口能力迁到 `mcp-servers/serial/tests/embed-serial.test.ts:62`，断言已是六项（`read/write/ports/status/open/close`），并同时断言 `SERIAL_EVIDENCE_ACTIONS`（read/ports/status）与 `SERIAL_DESTRUCTIVE_ACTIONS`（write/open/close）——正是本条要求的那两项决定。本条原文的 `mcp-servers/cubeide/...` 路径已随 `f03473b` 不存在。
 
 ### D-194 · `corpus.example.json` 的占位值能通过结构校验，把配置错误伪装成网络错误
 
@@ -2238,6 +2258,40 @@
   3. **内置提示词本身**走决策点 #8：分节组装 + persona 注入 + 冲突消解，并在写进内核时定好老会话的迁移（最省事的做法是把内置段记为**投影期注入**而非日志事件——`build.ts` 在处理 `effectiveSummary` 时已经有「不进日志、投影时插入」的先例，走同一条路就绕开了 `system_prompt_mismatch`）。
 
 - **状态**: 未修。**这是当前 Agent 行为的上限所在**——它解释了为什么模型有时要人喊着才去 `read` 原文、为什么多步任务不会主动列计划。
+
+### D-222 · KB 语料已改，但已签名的 OTA 清单 `latest.json` 仍是旧版
+
+- **发现**: 2026-11-06，批次 1 / OPT-05（语料工具名对齐）落地时。
+- **现象**: `mcp-servers/kb/kb/` 的 39 个 `.md` 被修改（工具名对齐真实工具面），`manifest.sha256` 已按新内容重算（108/108 通过），但 `desktop/build/corpus/latest.json` 仍是 2026-10-23 签名、`corpusVersion: 1` 的清单——其中 108 条 sha256 与新语料逐字节不符。
+- **影响**: 下一次装配安装包或 OTA 发布在重新签名前会失败，且失败点分散在两条路径：① `node scripts/corpus-stage.mjs --manifest desktop/build/corpus/latest.json` 报 `sha256 不符`；② `node scripts/package-prepare.mjs` 不带 `--manifest` 时联网拉已发布清单，同样对不上。现有 `desktop/build/corpus/` 与 `desktop/dist-installer/win-unpacked/resources/corpus/` 都是旧内容，不能代表当前源目录。
+- **触发升级条件**: 下一次打包或 OTA 发布（必然触发）。
+- **修复建议**: 发布侧用 `scripts/corpus-publish.mjs --corpus mcp-servers/kb/kb --version 2 …` 重新签名（需 Ed25519 私钥，agent 不持有），再跑 `corpus-stage`；并把「改语料 → 必须重签」写进 `docs/corpus-ota.md`。
+- **状态**: **已解决（2026-11-06）**。
+  - 私钥在 `~/.corpus-signing/corpus-signing.key`，与 `config/corpus.json` 的公钥同对（SPKI 指纹 `cee221f0832c6db4`，只比对指纹、未打印私钥）。
+  - `corpus-publish --version 2` 产出 `corpusVersion=2`、108 文件、`publishedAt=2026-11-06T04:51:51Z`，输出在 `~/corpus-publish/v2`（与 `v1` 同约定）。
+  - 本地两道校验通过：`corpus-stage --verify-only` 报「108 个文件与清单逐字节一致」；用 `config/corpus.json` 的公钥验签 OK。
+  - **已上传并由本机实测复核**（只读 HTTP）：桶上 `latest.json` 现为 `corpusVersion=2`，与本地签名产物**逐字节相同**（15905 字节，canonical 与 signature 均相等），用配置公钥验签 OK；清单点名的 **108/108 个文件**逐个下载后 sha256 全部匹配。
+  - 端到端：不带 `--manifest` 的 `package-prepare` 现在从桶上取到 15905 字节清单，`desktop/build/corpus/` 装配为 `corpusVersion=2`（107 个 `.md` + `index.yaml` = 109 文件），108/108 sha256 与清单一致。
+  - 回滚副本：`.tmp/corpus-v1-backup`（本地临时，不进版本库）。
+  - **遗留提醒**：以后每次改语料都必须重签并上传，否则改动只会留在源目录与本地暂存里。
+
+### D-223 · Keil `flash` 的整镜像回读未实现，只做镜像起始处抽检
+
+- **发现**: 2026-11-06，批次 1 / OPT-06（把「回读校验」改成如实标注）时。
+- **现象**: `verifyFlash` 从镜像最低地址起比对，默认 64 字节（`FLASH_VERIFY_SPOT_BYTES`），调用方可用 `count` 请求更大窗口，但受单次 `DBG_MEM_READ` 上限钳制在 `0x2000`（`FLASH_VERIFY_MAX_BYTES`）。`scope` 只在镜像每一字节都比过时才为 `full`；大于 8192 字节的镜像永远是 `spot`。
+- **影响**: 抽检通过只证明镜像开头正确。镜像后段损坏（例如烧录中途掉电、flash 坏块）不会被发现——这一层以前被「回读校验」的措辞掩盖，现在至少如实标注，但能力缺口本身仍在。
+- **触发升级条件**: ① 出现「抽检通过但镜像后段损坏」的实测；② 用户要求整镜像校验。
+- **修复建议**: `verifyFlash` 按 `0x2000` 分段循环并合并结果，`scope` 增 `segmented-full`；补分段、超时预算与中途失败三组测试。
+- **状态**: 未解决（措辞与结构化范围已如实，能力未做）。
+
+### D-224 · 切换会话不清附件条，旧图片继续阻止发送
+
+- **发现**: 2026-11-06，批次 1 / OPT-07 实现时顺带发现。
+- **现象**: `state.attachments` 只在用户点移除时收缩，`session_loaded` 分支不清空。切换会话后，上一会话的缩略图仍留在输入框上方。
+- **影响**: OPT-07 之后「有附件即拒绝发送」，于是这个残留会把新会话的每一次发送都挡下来，而图片本属于上一个会话——用户看到的是一个不知道自己从哪来的阻塞。
+- **触发升级条件**: 已触发（OPT-07 落地后即成立）。
+- **修复建议**: `session_loaded` 与 `newSession` 时清空 `state.attachments` 并重绘附件条；若有真实的多模态上传路径，再按会话归属保存。
+- **状态**: 未解决（既有行为，本批次未改）。
 
 ## 变更记录
 
