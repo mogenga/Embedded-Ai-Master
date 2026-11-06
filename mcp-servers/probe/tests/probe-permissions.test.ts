@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import { loadPermissionConfig } from "../../../src/permissions/config.js";
+import type { InlinePermissionConfig } from "../../../src/permissions/config.js";
 import { createPermissionGate } from "../../../src/permissions/gate.js";
 import { evaluatePolicy } from "../../../src/permissions/policy.js";
 import type { ToolDef, ToolResult } from "../../../src/tools/types.js";
@@ -36,7 +40,7 @@ function permissionTool(
 }
 
 describe("probe 工具权限策略", () => {
-  it.each(["mem_write", "reset", "serial_write"])(
+  it.each(["mem_write", "reset", "serial_write", "renode_load"])(
     "diagnose 预设下 %s 映射为 write/ask",
     (name) => {
       const execute = vi.fn(async () => okResult);
@@ -63,6 +67,38 @@ describe("probe 工具权限策略", () => {
 
     expect(evaluation.access).toBe("read");
     expect(evaluation.action).toBe("allow");
+  });
+});
+
+describe("permissions.example.json 的 renode_load 规则", () => {
+  const template = JSON.parse(
+    readFileSync(path.join(import.meta.dirname, "../permissions.example.json"), "utf8"),
+  ) as InlinePermissionConfig;
+
+  function evaluateWithTemplate(args: unknown) {
+    const loaded = loadPermissionConfig({
+      home: path.join(import.meta.dirname, ".no-home"),
+      workdir: path.join(import.meta.dirname, ".no-workdir"),
+      inline: { preset: template.preset, rules: template.rules },
+    });
+    return evaluatePolicy({
+      preset: loaded.preset,
+      rules: loaded.rules,
+      tool: permissionTool(findTool("renode_load"), async () => okResult),
+      args,
+    });
+  }
+
+  it("模板目录内的固件被允许", () => {
+    const evaluation = evaluateWithTemplate({ elfPath: "C:/firmware/app/build/fw.elf" });
+
+    expect(evaluation.action).toBe("allow");
+    expect(evaluation.source).toBe("inline");
+  });
+
+  it("模板目录外的固件回落到 ask", () => {
+    expect(evaluateWithTemplate({ elfPath: "D:/elsewhere/fw.elf" }).action).toBe("ask");
+    expect(evaluateWithTemplate({}).action).toBe("ask");
   });
 });
 

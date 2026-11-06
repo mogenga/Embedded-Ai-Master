@@ -24,6 +24,12 @@
       "reason": "示例：仅允许本机 3456/3457 两个仿真串口目标"
     },
     {
+      "tool": "mcp__probe__renode_load",
+      "params": [{ "key": "elfPath", "glob": "C:/firmware/**" }],
+      "action": "allow",
+      "reason": "示例：仅允许装载指定固件目录下的 ELF；装载会覆盖目标内存，默认按写工具走审批"
+    },
+    {
       "tool": "mcp__probe__reset",
       "action": "deny",
       "reason": "示例默认禁止复位；需要复位时人工改为 ask 或 allow"

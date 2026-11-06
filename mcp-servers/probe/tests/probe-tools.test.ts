@@ -7,6 +7,7 @@ import type {
   AttachOptions,
   Declaration,
   DeviceStatus,
+  FirmwareLoadResult,
   MemoryReadResult,
   ProbeBackend,
   ProbeBackendKind,
@@ -23,6 +24,7 @@ const EXPECTED_TOOL_NAMES = [
   "halt",
   "mem_read",
   "mem_write",
+  "renode_load",
   "reset",
   "resume",
   "serial_close",
@@ -64,6 +66,8 @@ class FakeBackend implements ProbeBackend {
   private attached = false;
   private cpu: DeviceStatus["cpu"] = "unknown";
   private failing = new Map<string, Error>();
+
+  loadFirmwareResult: FirmwareLoadResult | undefined;
 
   constructor(kind: ProbeBackendKind) {
     this.kind = kind;
@@ -144,6 +148,23 @@ class FakeBackend implements ProbeBackend {
     };
   }
 
+  async loadFirmware(elfPath: string): Promise<FirmwareLoadResult> {
+    this.calls.push(`load_firmware:${elfPath}`);
+    this.throwIfFailing("loadFirmware");
+    this.requireAttached();
+    return (
+      this.loadFirmwareResult ?? {
+        declaration: {
+          operation: "load_firmware",
+          effect: "load ELF sections into target memory (overwrites overlapping memory)",
+        },
+        file: { path: elfPath, name: "fw.elf", sizeBytes: 64 },
+        monitorOutput: "Loading ELF",
+        pausedFirst: false,
+      }
+    );
+  }
+
   async serialOpen(host: string, port: number): Promise<SerialStatus> {
     this.calls.push(`serial_open:${host}:${port}`);
     this.throwIfFailing("serialOpen");
@@ -207,10 +228,10 @@ class FakeBackend implements ProbeBackend {
 }
 
 describe("probeTools 工具面", () => {
-  it("注册 14 个工具且名称集合稳定", () => {
+  it("注册 15 个工具且名称集合稳定", () => {
     const tools = probeTools({ renode: new FakeBackend("renode") });
 
-    expect(tools).toHaveLength(14);
+    expect(tools).toHaveLength(15);
     expect(tools.map((tool) => tool.name).sort()).toEqual(EXPECTED_TOOL_NAMES);
   });
 
@@ -230,7 +251,7 @@ describe("probeTools 工具面", () => {
     ]) {
       expect(findTool(tools, name).annotations?.readOnlyHint, name).toBe(true);
     }
-    for (const name of ["reset", "mem_write", "serial_write"]) {
+    for (const name of ["reset", "mem_write", "serial_write", "renode_load"]) {
       expect(findTool(tools, name).annotations?.destructiveHint, name).toBe(true);
     }
     expect(findTool(tools, "serial_open").annotations?.readOnlyHint, "serial_open").toBe(false);
@@ -323,6 +344,7 @@ describe("probeTools 工具面", () => {
       ["reset", {}],
       ["mem_read", { address: 0x20000000, length: 4 }],
       ["mem_write", { address: 0x20000000, bytes: [1] }],
+      ["renode_load", { elfPath: "/fake/fw.elf" }],
       ["serial_status", {}],
     ] as const) {
       const result = await findTool(tools, name).handler(args);
@@ -367,6 +389,7 @@ describe("probeTools 工具面", () => {
       ["mem_read", { address: -1, length: 1 }],
       ["mem_write", { address: 0x20000000, bytes: [256] }],
       ["mem_write", { address: 0x20000000, bytes: [] }],
+      ["renode_load", { elfPath: "" }],
       ["serial_open", { host: "127.0.0.1", port: 0 }],
       ["attach", { backend: "jlink" }],
     ] as const) {
@@ -409,6 +432,63 @@ describe("probeTools 工具面", () => {
       code: "verification_failed",
       message: "回读不一致",
     });
+  });
+
+  it("renode_load 返回 declaration、文件名与 monitor 输出", async () => {
+    const renode = new FakeBackend("renode");
+    const tools = probeTools({ renode });
+    await findTool(tools, "attach").handler({});
+
+    const result = await findTool(tools, "renode_load").handler({ elfPath: "/fake/fw.elf" });
+
+    expect(result.isError).toBeUndefined();
+    expect(renode.calls).toContain("load_firmware:/fake/fw.elf");
+    expect(result.structuredContent).toMatchObject({
+      declaration: {
+        operation: "load_firmware",
+        effect: "load ELF sections into target memory (overwrites overlapping memory)",
+      },
+      file: { path: "/fake/fw.elf", name: "fw.elf", sizeBytes: 64 },
+      monitorOutput: "Loading ELF",
+      pausedFirst: false,
+    });
+    expect((result.structuredContent as { deviceStatus: DeviceStatus }).deviceStatus.probe).toBe(
+      "attached",
+    );
+  });
+
+  it("renode_load 的静默 warning 原样透传", async () => {
+    const renode = new FakeBackend("renode");
+    renode.loadFirmwareResult = {
+      declaration: { operation: "load_firmware", effect: "load ELF" },
+      file: { path: "/fake/fw.elf", name: "fw.elf", sizeBytes: 1 },
+      monitorOutput: "",
+      pausedFirst: false,
+      warning: "renode_load_no_monitor_output",
+    };
+    const tools = probeTools({ renode });
+    await findTool(tools, "attach").handler({});
+
+    const result = await findTool(tools, "renode_load").handler({ elfPath: "/fake/fw.elf" });
+
+    expect((result.structuredContent as { warning?: string }).warning).toBe(
+      "renode_load_no_monitor_output",
+    );
+  });
+
+  it("renode_load 后端失败原样透传错误码", async () => {
+    const renode = new FakeBackend("renode");
+    const tools = probeTools({ renode });
+    await findTool(tools, "attach").handler({});
+    renode.failOn(
+      "loadFirmware",
+      new ProbeBackendError("invalid_argument", "固件文件不存在: /fake/fw.elf"),
+    );
+
+    const result = await findTool(tools, "renode_load").handler({ elfPath: "/fake/fw.elf" });
+
+    expect(result.isError).toBe(true);
+    expect(errorCode(result)).toBe("invalid_argument");
   });
 
   it("mem_read 成功返回内存与十六进制，reset/mem_write 返回 declaration", async () => {

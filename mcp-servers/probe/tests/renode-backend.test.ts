@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { resolve } from "node:path";
 import { ProbeBackendError } from "../backend.js";
 import type { SerialStatus } from "../backend.js";
 import { RenodeBackend } from "../renode-backend.js";
@@ -8,6 +9,12 @@ import type { RenodeMonitorOptions } from "../renode.js";
 
 const DEFAULT_PLATFORM_COMMAND =
   "machine LoadPlatformDescription @platforms/boards/stm32f4_discovery-kit.repl";
+const FIRMWARE = resolve("/fake/fw.elf");
+
+// monitor 的 path 类型要求空格转义；Windows 反斜杠统一改成正斜杠。
+function toMonitorPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/ /g, "\\ ");
+}
 
 type CommandHandler = (command: string, signal?: AbortSignal) => string | Promise<string>;
 
@@ -92,15 +99,27 @@ interface Harness {
   options: RenodeMonitorOptions[];
 }
 
+interface FakeFile {
+  fileSize?: number;
+  fileExists?: boolean;
+  isFile?: boolean;
+}
+
 function createHarness(
   handler: CommandHandler,
   serialFactory?: () => SerialClientLike,
+  file: FakeFile = {},
 ): Harness {
   const monitors: FakeMonitor[] = [];
   const options: RenodeMonitorOptions[] = [];
   const backend = new RenodeBackend({
     renodePath: "C:/fake/Renode.exe",
     serialFactory,
+    existsImpl: () => file.fileExists ?? true,
+    statImpl: () => ({
+      isFile: () => file.isFile ?? true,
+      size: file.fileSize ?? 0,
+    }),
     monitorFactory: (monitorOptions) => {
       options.push(monitorOptions);
       const monitor = new FakeMonitor(handler, monitorOptions);
@@ -340,6 +359,175 @@ describe("RenodeBackend", () => {
 
     expect(error).toBeInstanceOf(ProbeBackendError);
     expect((error as ProbeBackendError).code).toBe("verification_failed");
+  });
+
+  describe("loadFirmware", () => {
+    it("发送 sysbus LoadELF @<绝对路径> 并如实返回加载的文件信息", async () => {
+      const harness = createHarness((command) => {
+        if (command.startsWith("sysbus LoadELF")) return "Loading ELF file: fw.elf";
+        return "";
+      }, undefined, { fileSize: 4096, fileExists: true });
+      await harness.backend.attach();
+
+      const result = await harness.backend.loadFirmware(FIRMWARE);
+
+      expect(harness.monitors[0].commands.at(-1)).toBe(
+        `sysbus LoadELF @${toMonitorPath(FIRMWARE)}`,
+      );
+      expect(result.declaration).toEqual({
+        operation: "load_firmware",
+        effect: "load ELF sections into target memory (overwrites overlapping memory)",
+      });
+      expect(result.file).toEqual({
+        path: FIRMWARE,
+        name: "fw.elf",
+        sizeBytes: 4096,
+      });
+      expect(result.monitorOutput).toBe("Loading ELF file: fw.elf");
+      expect(result.pausedFirst).toBe(false);
+      expect(result.warning).toBeUndefined();
+    });
+
+    it("运行中的机器先 pause 再 LoadELF，并更新 CPU 状态", async () => {
+      const harness = createHarness(() => "Loading ELF file", undefined, { fileSize: 16 });
+      await harness.backend.attach();
+      await harness.backend.resume();
+
+      const result = await harness.backend.loadFirmware(FIRMWARE);
+
+      expect(harness.monitors[0].commands.slice(-2)).toEqual([
+        "pause",
+        `sysbus LoadELF @${toMonitorPath(FIRMWARE)}`,
+      ]);
+      expect(harness.backend.status().cpu).toBe("halted");
+      expect(result.pausedFirst).toBe(true);
+      expect(result.declaration.effect).toContain("pause");
+    });
+
+    it("未运行过 resume 时不发 pause，只发 LoadELF", async () => {
+      const harness = createHarness(() => "Loading ELF file", undefined, { fileSize: 16 });
+      await harness.backend.attach();
+
+      await harness.backend.loadFirmware(FIRMWARE);
+
+      expect(harness.monitors[0].commands.slice(-1)).toEqual([
+        `sysbus LoadELF @${toMonitorPath(FIRMWARE)}`,
+      ]);
+    });
+
+    it("路径按 monitor 语法转换：反斜杠与空格转义", async () => {
+      const harness = createHarness(() => "ok", undefined, { fileSize: 16 });
+      await harness.backend.attach();
+
+      await harness.backend.loadFirmware("C:\\Program Files\\fw\\app.elf");
+
+      expect(harness.monitors[0].commands.at(-1)).toBe(
+        "sysbus LoadELF @C:/Program\\ Files/fw/app.elf",
+      );
+    });
+
+    it("含换行的路径被拒绝，避免把路径变成额外的 monitor 命令", async () => {
+      const harness = createHarness(() => "", undefined, { fileSize: 16 });
+      await harness.backend.attach();
+      const before = harness.monitors[0].commands.length;
+
+      const error = await harness.backend
+        .loadFirmware(`${FIRMWARE}\nquit`)
+        .catch((caught: unknown) => caught);
+
+      expect((error as ProbeBackendError).code).toBe("invalid_argument");
+      expect(harness.monitors[0].commands).toHaveLength(before);
+    });
+
+    it("monitor 无输出时不把静默当成功：保留 warning 由工具层披露", async () => {
+      const harness = createHarness(() => "", undefined, { fileSize: 16 });
+      await harness.backend.attach();
+
+      const result = await harness.backend.loadFirmware(FIRMWARE);
+
+      expect(result.monitorOutput).toBe("");
+      expect(result.warning).toBe("renode_load_no_monitor_output");
+    });
+
+    it("monitor 报错时显式失败（R3），不返回成功", async () => {
+      const boom = new RenodeCommandError(
+        `sysbus LoadELF @${FIRMWARE}`,
+        "Could not find file",
+      );
+      const harness = createHarness((command) => {
+        if (command.startsWith("sysbus LoadELF")) throw boom;
+        return "";
+      }, undefined, { fileSize: 16 });
+      await harness.backend.attach();
+
+      const error = await harness.backend
+        .loadFirmware(FIRMWARE)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBe(boom);
+    });
+
+    it.each([
+      "Could not find file",
+      "Cannot open 'C:/fake/fw.elf'",
+      "Failed to load ELF",
+      "No such file or directory",
+    ])("monitor 静默返回失败文案 %s 时抛 backend_error", async (text) => {
+      const harness = createHarness(() => text, undefined, { fileSize: 16 });
+      await harness.backend.attach();
+
+      const error = await harness.backend
+        .loadFirmware(FIRMWARE)
+        .catch((caught: unknown) => caught);
+
+      expect(error).toBeInstanceOf(ProbeBackendError);
+      expect((error as ProbeBackendError).code).toBe("backend_error");
+      expect((error as ProbeBackendError).message).toContain(text);
+    });
+
+    it("非绝对路径 / 空路径在发命令前就报 invalid_argument", async () => {
+      const harness = createHarness(() => "");
+      await harness.backend.attach();
+      const before = harness.monitors[0].commands.length;
+
+      for (const path of ["relative/fw.elf", "", "   "]) {
+        const error = await harness.backend
+          .loadFirmware(path)
+          .catch((caught: unknown) => caught);
+        expect(error, path).toBeInstanceOf(ProbeBackendError);
+        expect((error as ProbeBackendError).code, path).toBe("invalid_argument");
+      }
+
+      expect(harness.monitors[0].commands).toHaveLength(before);
+    });
+
+    it("文件不存在或不是普通文件时在发命令前报 invalid_argument", async () => {
+      const missing = createHarness(() => "", undefined, { fileExists: false });
+      await missing.backend.attach();
+      const missingError = await missing.backend
+        .loadFirmware(FIRMWARE)
+        .catch((caught: unknown) => caught);
+      expect((missingError as ProbeBackendError).code).toBe("invalid_argument");
+      expect(missing.monitors[0].commands).toHaveLength(2);
+
+      const directory = createHarness(() => "", undefined, { isFile: false, fileSize: 0 });
+      await directory.backend.attach();
+      const directoryError = await directory.backend
+        .loadFirmware(FIRMWARE)
+        .catch((caught: unknown) => caught);
+      expect((directoryError as ProbeBackendError).code).toBe("invalid_argument");
+      expect(directory.monitors[0].commands).toHaveLength(2);
+    });
+
+    it("未 attach 时抛 not_attached", async () => {
+      const harness = createHarness(() => "", undefined, { fileSize: 16 });
+
+      const error = await harness.backend
+        .loadFirmware(FIRMWARE)
+        .catch((caught: unknown) => caught);
+
+      expect((error as ProbeBackendError).code).toBe("not_attached");
+    });
   });
 
   it("monitor 报错时原样 reject，不吞错", async () => {

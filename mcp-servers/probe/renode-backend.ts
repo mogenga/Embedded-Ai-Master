@@ -1,9 +1,11 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
+import { basename, isAbsolute } from "node:path";
 import { ProbeBackendError } from "./backend.js";
 import type {
   AttachOptions,
   Declaration,
   DeviceStatus,
+  FirmwareLoadResult,
   MemoryReadResult,
   ProbeBackend,
   SerialStatus,
@@ -16,6 +18,7 @@ import type { SerialReadResult } from "./serial.js";
 export const DEFAULT_RENODE_PLATFORM = "platforms/boards/stm32f4_discovery-kit.repl";
 export const ALL_ZERO_WARNING = "renode_all_zero_or_unmapped";
 export const RENODE_UART_WARNING = "renode_uart_uninitialized";
+export const RENODE_LOAD_SILENT_WARNING = "renode_load_no_monitor_output";
 export const MAX_MEMORY_LENGTH = 256;
 
 const MAX_ADDRESS = 0xffff_ffff;
@@ -35,15 +38,37 @@ export interface SerialClientLike {
   status(): SerialStatus;
 }
 
+export interface FileStatLike {
+  isFile(): boolean;
+  size: number;
+}
+
 export interface RenodeBackendEnv {
   renodePath?: string;
   existsImpl?: (path: string) => boolean;
+  statImpl?: (path: string) => FileStatLike;
   monitorFactory?: (options: RenodeMonitorOptions) => RenodeMonitorLike;
   serialFactory?: () => SerialClientLike;
 }
 
 function normalizePlatform(platform: string): string {
   return platform.startsWith("@") ? platform : `@${platform}`;
+}
+
+// monitor 的 path 类型只文档化了「空格用反斜杠转义」这一种写法；反斜杠在
+// Windows 路径里同时是分隔符，统一改成 Renode 文档使用的正斜杠。
+// 控制字符、引号、反引号（命令替换）与 #（注释）无法确定转义方式，直接拒绝，
+// 避免路径被解析成额外的 monitor 语法。
+const UNSAFE_MONITOR_PATH = /[\u0000-\u001f\u007f"`#]/;
+
+// RenodeMonitor 只认识一组固定的错误前缀；LoadELF 的失败文案不在其中时，
+// 静默通过会把「没加载成功」说成成功（R3）。这里只匹配明确的文件/ELF 加载
+// 失败措辞，避免把正常输出的单词（如符号表缺失提示）误判成失败。
+const LOAD_FAILURE_PATTERN =
+  /(no such file|could not (?:find|open|load)|cannot (?:find|open|load)|failed to (?:find|open|load)|not a valid elf|invalid elf)/i;
+
+function toMonitorPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/ /g, "\\ ");
 }
 
 function assertAddress(address: number): void {
@@ -74,7 +99,7 @@ function throwIfAborted(signal?: AbortSignal): void {
   }
 }
 
-async function sendMemoryCommand(
+async function sendMonitorCommand(
   monitor: RenodeMonitorLike,
   command: string,
   signal?: AbortSignal,
@@ -131,7 +156,7 @@ async function readAlignedWords(
   for (let offset = 0; offset < length; offset += 4) {
     throwIfAborted(signal);
     const current = address + offset;
-    const output = await sendMemoryCommand(
+    const output = await sendMonitorCommand(
       monitor,
       `sysbus ReadDoubleWord 0x${current.toString(16)}`,
       signal,
@@ -159,6 +184,7 @@ export class RenodeBackend implements ProbeBackend {
 
   readonly renodePath?: string;
   private readonly existsImpl: (path: string) => boolean;
+  private readonly statImpl: (path: string) => FileStatLike;
   private readonly monitorFactory: (options: RenodeMonitorOptions) => RenodeMonitorLike;
   private readonly serialFactory: () => SerialClientLike;
 
@@ -171,6 +197,7 @@ export class RenodeBackend implements ProbeBackend {
   constructor(env: RenodeBackendEnv = {}) {
     this.renodePath = env.renodePath;
     this.existsImpl = env.existsImpl ?? ((path) => existsSync(path));
+    this.statImpl = env.statImpl ?? ((path) => statSync(path));
     this.monitorFactory = env.monitorFactory ?? ((options) => new RenodeMonitor(options));
     this.serialFactory = env.serialFactory ?? (() => new TcpSerial());
   }
@@ -286,7 +313,7 @@ export class RenodeBackend implements ProbeBackend {
     for (let offset = 0; offset < length; offset += 1) {
       throwIfAborted(signal);
       const current = address + offset;
-      const output = await sendMemoryCommand(
+      const output = await sendMonitorCommand(
         monitor,
         `sysbus ReadByte 0x${current.toString(16)}`,
         signal,
@@ -321,7 +348,7 @@ export class RenodeBackend implements ProbeBackend {
     for (let offset = 0; offset < length; offset += 1) {
       throwIfAborted(signal);
       const current = address + offset;
-      await sendMemoryCommand(
+      await sendMonitorCommand(
         monitor,
         `sysbus WriteByte 0x${current.toString(16)} 0x${bytes[offset].toString(16)}`,
         signal,
@@ -424,6 +451,73 @@ export class RenodeBackend implements ProbeBackend {
       cpu: attached ? this.cpu : "unknown",
       serial: this.serial?.status().open === true ? "open" : "closed",
     };
+  }
+
+  async loadFirmware(elfPath: string, signal?: AbortSignal): Promise<FirmwareLoadResult> {
+    const file = this.resolveFirmwarePath(elfPath);
+    throwIfAborted(signal);
+    const monitor = this.requireAttached();
+
+    // KB 语料记录「LoadELF 需要先 pause」：在运行中的机器上改内存可能被取指
+    // 追上。只有本后端确实 resume 过（cpu === "running"）才发 pause；attach
+    // 后的机器本来就处于未启动状态，没必要依赖 pause 在未启动时是否幂等
+    // （该点在 1.16 上待真机验证）。
+    const pausedFirst = this.cpu === "running";
+    if (pausedFirst) {
+      await sendMonitorCommand(monitor, "pause", signal);
+      this.cpu = "halted";
+    }
+
+    const command = `sysbus LoadELF @${toMonitorPath(file.path)}`;
+    const monitorOutput = await sendMonitorCommand(monitor, command, signal);
+
+    const failure = LOAD_FAILURE_PATTERN.exec(monitorOutput);
+    if (failure) {
+      throw new ProbeBackendError(
+        "backend_error",
+        `sysbus LoadELF 报告失败(${failure[0]}): ${monitorOutput.trim()}`,
+      );
+    }
+
+    return {
+      declaration: {
+        operation: "load_firmware",
+        effect: pausedFirst
+          ? "pause emulation, then load ELF sections into target memory (overwrites overlapping memory)"
+          : "load ELF sections into target memory (overwrites overlapping memory)",
+      },
+      file,
+      monitorOutput,
+      pausedFirst,
+      // Renode 的 LoadELF 在部分版本/失败路径下可能没有可识别的输出；
+      // 静默不是成功的证据（R3），由调用方把 warning 披露出去。
+      ...(monitorOutput.trim() === "" ? { warning: RENODE_LOAD_SILENT_WARNING } : {}),
+    };
+  }
+
+  private resolveFirmwarePath(elfPath: string): FirmwareLoadResult["file"] {
+    const path = elfPath.trim();
+    if (path === "" || !isAbsolute(path)) {
+      throw new ProbeBackendError(
+        "invalid_argument",
+        `elfPath 必须是绝对路径: ${JSON.stringify(elfPath)}`,
+      );
+    }
+    if (UNSAFE_MONITOR_PATH.test(path)) {
+      throw new ProbeBackendError(
+        "invalid_argument",
+        `elfPath 含无法安全传给 monitor 的字符（控制字符/引号/反引号/#）: ${JSON.stringify(elfPath)}`,
+      );
+    }
+    if (!this.existsImpl(path)) {
+      throw new ProbeBackendError("invalid_argument", `固件文件不存在: ${path}`);
+    }
+    // 目录也能通过 existsSync；必须显式排除，否则会把目录交给 Renode。
+    const stat = this.statImpl(path);
+    if (!stat.isFile()) {
+      throw new ProbeBackendError("invalid_argument", `固件路径不是普通文件: ${path}`);
+    }
+    return { path, name: basename(path), sizeBytes: stat.size };
   }
 
   private requireSerial(): SerialClientLike {
