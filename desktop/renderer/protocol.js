@@ -795,6 +795,14 @@ export function sessionEventToHostEvents(event, ctx) {
         out.push({ type: "run_end" });
       } else if (status === "usage_missing") {
         out.push({ type: "notice", level: "dim", text: "本轮未返回用量统计" });
+      } else if (status === "cost_cap_untracked") {
+        // 设了上限却没配价格：上限永远不会触发。warn 而不是 dim——这是一条
+        // 「你以为的保护不存在」，不是普通的缺数据。
+        out.push({
+          type: "notice",
+          level: "warn",
+          text: "已设置成本上限，但该模型没有配置每百万 token 价格，上限不会生效",
+        });
       } else if (status === "device_status_invalid") {
         out.push({
           type: "notice",

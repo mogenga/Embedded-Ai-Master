@@ -341,6 +341,18 @@ export async function* query(
 
 
   const costTracked = ctx.pricePerMillion !== undefined;
+
+  // `maxCostUsd` 设了但 provider 没有定价时，成本熔断永远不会触发（KERNEL-8）。
+  // 静默失效比报错更坏：操作者以为设了上限，实际没有。这里在开跑前就说清楚，
+  // 并且**不阻止运行**——上限失效是配置问题，不是本次请求的错误，直接拒绝会
+  // 让一次本来能跑的诊断跑不了。
+  const costCapUntracked = cfg.maxCostUsd !== undefined && !costTracked;
+  if (costCapUntracked) {
+    await session.append({
+      type: "status",
+      payload: { status: "cost_cap_untracked", message: "maxCostUsd 已设置，但该模型没有配置价格，成本上限不会生效" },
+    });
+  }
   // `turn` 与 `runTurn` 是两件事，曾经被合并成一个变量：
   //
   // - `turn` 是会话级检查点序号，跨消息单调递增（D-045：同一目录出现重复 turn

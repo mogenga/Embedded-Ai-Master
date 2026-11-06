@@ -928,6 +928,37 @@ describe("query 主循环", () => {
     expect(provider.calls).toHaveLength(1);
   });
 
+  it("设了 maxCostUsd 但模型无定价 → 如实披露上限不会生效", async () => {
+    const provider = scriptedProvider([reply("done", [], false)]);
+    const { ctx, session } = await makeCtx(provider);
+
+    const events = await collect(query(ctx, "x", { maxTurns: 10, maxCostUsd: 5 }));
+
+    // 静默失效比报错更坏：操作者以为设了上限，实际没有。
+    const disclosed = session.events().find(
+      (event) => event.type === "status" && event.payload.status === "cost_cap_untracked",
+    );
+    expect(disclosed).toBeDefined();
+    expect(String(disclosed?.payload.message)).toContain("成本上限不会生效");
+    // 披露不阻止运行：这一次照样跑完。
+    expect(events.at(-1)).toEqual({ kind: "done", finishReason: "no_tool_calls" });
+  });
+
+  it("有定价时不披露 cost_cap_untracked", async () => {
+    const provider = scriptedProvider([reply("done", [], false)]);
+    const { ctx, session } = await makeCtx(provider, {
+      pricePerMillion: { input: 1, output: 1 },
+    });
+
+    await collect(query(ctx, "x", { maxTurns: 10, maxCostUsd: 5 }));
+
+    expect(
+      session.events().some(
+        (event) => event.type === "status" && event.payload.status === "cost_cap_untracked",
+      ),
+    ).toBe(false);
+  });
+
   it("price 缺省 → 只计 token 不熔断", async () => {
     const usage = { promptTokens: 10_000_000, completionTokens: 10_000_000 };
     const provider = scriptedProvider([
