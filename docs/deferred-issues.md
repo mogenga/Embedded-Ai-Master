@@ -2293,6 +2293,19 @@
 - **修复建议**: `session_loaded` 与 `newSession` 时清空 `state.attachments` 并重绘附件条；若有真实的多模态上传路径，再按会话归属保存。
 - **状态**: 未解决（既有行为，本批次未改）。
 
+### D-225 · MCP 正常关闭不回收进程树，只对直接子进程发信号
+
+- **发现**: 2026-11-06，批次 2 / OPT-03（MCP 连接改会话级持有）时。
+- **现象**: `McpManager.close()` 走 `disposeClient()` → SDK 的 `client.close()`，后者只对**直接子进程**发 stdin.end / SIGTERM / SIGKILL。真正的进程树回收（Windows `taskkill /pid <p> /T /F`、POSIX `kill(-pid)`）只存在于 `terminateAndWait`，而它只被 `beginDispose` 调用——那是超时、取消、断线这类**异常**路径。正常收尾不经过它，于是 `mcp-servers/probe` 里 Renode/OpenOCD 拉起的孙进程可能活过宿主。
+- **影响**: 与设计稿 V6「OpenOCD / 串口句柄泄漏 = 真实事故」直接冲突。会话级持有（本批次已落地）把关闭次数从「每条消息一次」降到「切换会话 / 退出各一次」，但没有改变**关不干净**这个事实。
+- **为什么本轮没做（实测数据，不是估计）**:
+  - `taskkill /T /F` 在装了杀软的本机上**单次 500–850 ms**（探针：`spawnEvent` 6 ms，进程到 810 ms 才消失）。
+  - **顺序不可省**：先 `taskkill` 再关 client → 孙进程死；先关 client 再 `taskkill` → 孙进程三种姿态全部存活；fire-and-forget（不等待）→ 孙进程 10 s 仍在。因为 `taskkill /T` 靠**活着的父进程**遍历子进程，SDK 的 `client.close()` 会先把父进程收掉。
+  - 把它接进 `close()` 后，`mcp-manager.test.ts` 从 ~26 s 涨到 ~49 s，全量并行下把 `background-terminal` 里本就贴着 10 s 超时的用例挤过线（单跑必绿、全量稳定红、`--maxWorkers=4` 全绿）。
+- **触发升级条件**: ① 出现宿主退出后残留 `openocd` / `renode` / 串口相关进程的实测；② 真机验收（D-157）开始跑，探针进程生命周期被纳入检查；③ 有成本更低的回收手段（例如给 MCP 子进程建独立进程组 / Job Object，让父进程退出即带走整组）。
+- **修复建议**: 不要简单地把 `await terminateAndWait` 塞回 `close()`——那只是把 850 ms 摊到每次关闭上。优先方向是**让 OS 替我们回收**：Windows 上 `spawn` 时用 Job Object（`CREATE_BREAKAWAY_FROM_JOB` 之外的做法需实测），POSIX 上用 `detached: true` + 进程组；两者都能做到「父死子随」，不需要关闭路径等待。实现在 `src/mcp/manager.ts` 的 transport 构造处（`new StdioClientTransport`），不在 close 路径上。
+- **状态**: 未解决。本批次只做了会话级持有；回收语义与 HEAD 一致（未改善，也未退化）。
+
 ## 变更记录
 
 | 日期 | 变更 |
