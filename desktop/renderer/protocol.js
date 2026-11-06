@@ -374,13 +374,19 @@ export function sessionEventsToMessages(events) {
     if (event.type === "tool_result") {
       const callId = textOf(payload.id);
       const call = calls.get(callId);
-      out.push({
+      const row = {
         role: "tool",
         name: call?.name ?? textOf(payload.toolName),
         summary: summarizeToolCall(call?.name, call?.arguments),
         ok: payload.ok !== false,
         done: true,
-      });
+      };
+      // The replayed row carries the same evidence verdict the live one has.
+      // Without it, turning on the transcript's evidence filter after
+      // reopening a conversation would hide rows that are in fact evidence,
+      // and the two views of one log would disagree.
+      if (typeof payload.evidence === "boolean") row.evidence = payload.evidence;
+      out.push(row);
     }
   }
   return out;
@@ -405,6 +411,26 @@ export function createContext(options = {}) {
     lastSeq: -1,
     /** Tool name being started, so `tool_end` knows which row to close. */
     openTool: "",
+    /**
+     * callId → tool name for every call still executing, in start order.
+     *
+     * `openTool` above is a single slot, which is enough to close the row a
+     * result belongs to but not enough to name what is running when several
+     * read-only calls were dispatched in one batch. The progress line shows
+     * the most recently started call that has not finished, which is why this
+     * is a map rather than a counter.
+     */
+    runningTools: new Map(),
+    /**
+     * Epoch milliseconds of the `user` event that opened the current turn, or
+     * 0 before one has been seen.
+     *
+     * The turn_progress readout carries how long the turn has run. That
+     * figure is measured from the log's own timestamp of the user message, so
+     * the protocol layer never consults a clock of its own and cannot invent
+     * one — a stream with no user event simply omits the field.
+     */
+    turnStartedAt: 0,
     /** callIds that already produced a `tool_start` row. */
     startedTools: new Set(),
     /** requestIds the renderer is currently showing an approval bar for. */
@@ -464,6 +490,55 @@ function closeThinking(ctx, out) {
 function toolNameFor(ctx, callId, fallback) {
   const call = ctx.pendingCalls.get(callId);
   return call?.name ?? textOf(fallback);
+}
+
+/**
+ * A `turn_progress` message naming the tool that is executing, or `null`.
+ *
+ * There used to be no producer for this event at all: the renderer's handler
+ * was written against "the host's once-a-second heartbeat" that no host ever
+ * sent, so the progress line could only ever show the local clock. This is the
+ * cheap honest half of that idea — the event is emitted when a tool starts and
+ * when it ends, never on a timer, so the figure it carries is measured rather
+ * than guessed:
+ *
+ *   - `tool` is the name of the most recently started call that has not
+ *     finished. Read-only calls run concurrently, so a single "current" slot
+ *     would be a lie the moment two of them overlap; the map is ordered by
+ *     insertion, and the last entry is the one that started most recently.
+ *     An empty string means "nothing is running now" — the renderer clears the
+ *     tool half of the line and keeps its clock, which is the truth between
+ *     two calls. It is emitted on every result, so a finished call cannot
+ *     leave its name on screen while the model is answering.
+ *   - `elapsedMs` is derived from the log's own `ts` of the opening `user`
+ *     event. No clock is read here, and a log without one omits the field
+ *     instead of inventing a zero. `0` would paint "0s" as if the turn had
+ *     just begun, which is the same lie as a fabricated percentage.
+ *   - `retry` is never reported: the kernel does not publish retry attempts
+ *     to this layer, and a constant 0 would look like a measurement of "no
+ *     retries". Omitted means "not known here".
+ *
+ * Nothing is emitted outside a running turn. `ctx.running` is the host's own
+ * statement that a turn is in flight; a tool event projected from a log
+ * without one (a replay of history, the compaction command's own pass) is
+ * describing something that already finished, and a progress line for it
+ * would report a turn nobody is waiting on. The renderer ignores those
+ * anyway — this keeps the protocol from emitting them at all.
+ */
+function turnProgress(ctx, now) {
+  if (!ctx.running) return null;
+  const running = [...ctx.runningTools.values()];
+  const message = { type: "turn_progress", tool: running.at(-1) ?? "" };
+  if (now > 0 && ctx.turnStartedAt > 0) {
+    message.elapsedMs = Math.max(0, now - ctx.turnStartedAt);
+  }
+  return message;
+}
+
+/** Epoch ms for an event's ISO timestamp, or 0 when it is unusable. */
+function eventTime(event) {
+  const parsed = Date.parse(textOf(event.ts));
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 /**
@@ -544,7 +619,10 @@ export function sessionEventToHostEvents(event, ctx) {
       break;
 
     case "user":
-      // The renderer already echoed the text when it sent the prompt.
+      // The renderer already echoed the text when it sent the prompt. The
+      // event's timestamp is the turn's opening moment: `turnProgress` measures
+      // the elapsed figure from it rather than from a clock of its own.
+      ctx.turnStartedAt = eventTime(event) || ctx.turnStartedAt;
       break;
 
     case "assistant_delta": {
@@ -605,6 +683,7 @@ export function sessionEventToHostEvents(event, ctx) {
       const name = toolNameFor(ctx, callId, payload.tool);
       ctx.openTool = name;
       ctx.startedTools.add(callId);
+      ctx.runningTools.set(callId, name);
       const message = {
         type: "tool_start",
         name,
@@ -618,6 +697,14 @@ export function sessionEventToHostEvents(event, ctx) {
       const annotations = toolAnnotations(payload.annotations);
       if (annotations !== undefined) message.annotations = annotations;
       out.push(message);
+      // The progress line names the call that is executing. Emitted here, at
+      // the moment the kernel recorded the start, so the readout cannot drift
+      // ahead of what actually ran. A call whose name is unusable contributes
+      // nothing: announcing it would blank a name that is still running.
+      if (name !== "") {
+        const started = turnProgress(ctx, eventTime(event));
+        if (started !== null) out.push(started);
+      }
       break;
     }
 
@@ -638,16 +725,30 @@ export function sessionEventToHostEvents(event, ctx) {
           id: callId,
         });
       }
-      out.push({
+      const ended = {
         type: "tool_end",
         name,
         ok,
         summary: summarizeToolCall(name, call?.arguments),
         id: callId,
-      });
+      };
+      // `evidence` is the kernel's own verdict on this result, written by the
+      // pipeline from the tool's annotation and the result's success. It is
+      // carried only when the payload has the field: a log from before the
+      // producer existed has none, and "not declared" must not be written out
+      // as `false` — the renderer's evidence filter treats only an explicit
+      // `true` as evidence, but the export and the row badges must be able to
+      // tell the two apart.
+      if (typeof payload.evidence === "boolean") ended.evidence = payload.evidence;
+      out.push(ended);
       if (ok) {
         const content = truncateUtf8(textOf(payload.text), MAX_TOOL_OUTPUT_BYTES);
-        const output = { type: "tool_output", name, content };
+        // The id lets the renderer hang the output under the row that
+        // produced it. Read-only calls run concurrently and their results can
+        // land in any order; without it the output (and the evidence wrapper
+        // the transcript filter keys on) would attach to whichever row
+        // finished last.
+        const output = { type: "tool_output", name, content, id: callId };
         // The kernel writes the artifact file for oversized output; the text
         // is a summary. Passing the path through gives the renderer something
         // to open instead of only something to read.
@@ -657,7 +758,18 @@ export function sessionEventToHostEvents(event, ctx) {
         if (content !== "" || output.artifactPath !== undefined) out.push(output);
       }
       ctx.pendingCalls.delete(callId);
+      const wasRunning = ctx.runningTools.delete(callId);
       if (ctx.openTool === name) ctx.openTool = "";
+      // Only a call that had been announced leaves a progress line to update:
+      // one that never started (a denial) announced no tool, so there is
+      // nothing to correct. A call that did start now leaves the line naming
+      // whatever is still running, or empty when nothing is — the renderer
+      // keeps drawing the last named tool otherwise, and the line would still
+      // say `grep` while the model writes its answer.
+      if (wasRunning) {
+        const remaining = turnProgress(ctx, eventTime(event));
+        if (remaining !== null) out.push(remaining);
+      }
       break;
     }
 
@@ -1139,7 +1251,15 @@ export function sessionMarkdown(events, options = {}) {
       case "tool_result": {
         const text = textOf(payload.text).trim();
         const name = textOf(payload.toolName);
-        lines.push(`### ${name === "" ? "tool" : name} ${payload.ok === false ? "(failed)" : ""}`.trimEnd());
+        const heading = `### ${name === "" ? "tool" : name} ${payload.ok === false ? "(failed)" : ""}`.trimEnd();
+        // Evidence is the product's central claim about a result, and an
+        // export is where a diagnosis is read by someone who was not watching
+        // the screen. The marker goes on the heading, so it survives even
+        // when the output itself was capped. Only an explicit `true` is
+        // marked: an old log without the field says nothing about evidence,
+        // and a `[evidence]` tag there would be this layer's verdict, not the
+        // kernel's.
+        lines.push(payload.evidence === true ? `${heading} [evidence]` : heading);
         if (text !== "") {
           const capped =
             text.length > outputLimit ? `${text.slice(0, outputLimit)}\n…[truncated]` : text;

@@ -321,10 +321,14 @@ describe("tool_result", () => {
       ev(1, "tool_started", { callId: "c1", tool: "read_file" }, 0),
       ev(2, "tool_result", { id: "c1", ok: true, text: "file body", toolName: "read_file" }, 0),
     ]);
+    // No `turn_progress` here: this context is not in a running turn, and the
+    // progress line is only emitted for one that is (asserted separately).
     const tail = out.slice(out.findIndex((item) => item.type === "tool_end"));
     expect(tail).toStrictEqual([
       { type: "tool_end", name: "read_file", ok: true, summary: "a.ts", id: "c1" },
-      { type: "tool_output", name: "read_file", content: "file body" },
+      // The id lets the renderer hang the output under the row that produced
+      // it when several read-only calls are in flight.
+      { type: "tool_output", name: "read_file", content: "file body", id: "c1" },
     ]);
   });
 
@@ -380,6 +384,116 @@ describe("tool_result", () => {
       ev(0, "tool_result", { id: "c1", ok: true, text: "ok", toolName: "fs" }),
     ]).out.find((item) => item.type === "tool_output");
     expect(plain).not.toHaveProperty("artifactPath");
+  });
+
+  it("tool_output 带 callId，并发只读调用才不会把输出挂到别人的行上", () => {
+    const { out } = translate([
+      ev(0, "tool_result", { id: "c1", ok: true, text: "第一份", toolName: "read" }),
+      ev(1, "tool_result", { id: "c2", ok: true, text: "第二份", toolName: "grep" }),
+    ]);
+    const outputs = out.filter((item) => item.type === "tool_output");
+    expect(outputs.map((item) => [item.id, item.content])).toStrictEqual([
+      ["c1", "第一份"],
+      ["c2", "第二份"],
+    ]);
+  });
+
+  it("tool_end 透传 evidence，缺省时不写该字段（与 false 不混）", () => {
+    const declared = translate([
+      ev(0, "tool_result", { id: "c1", ok: true, text: "读回 0x2", toolName: "mcp__probe__mem_read", evidence: true }),
+      ev(1, "tool_result", { id: "c2", ok: true, text: "普通", toolName: "fs", evidence: false }),
+    ]).out.filter((item) => item.type === "tool_end");
+
+    // 只有内核写下的布尔值才带出去；`true` 与 `false` 都是「内核说过」。
+    expect(declared[0].evidence).toBe(true);
+    expect(declared[1].evidence).toBe(false);
+
+    // 旧日志没有这个字段：缺省 = 未声明，不能补成 false。
+    const legacy = translate([
+      ev(0, "tool_result", { id: "c1", ok: true, text: "ok", toolName: "fs" }),
+    ]).out.find((item) => item.type === "tool_end");
+    expect(legacy).not.toHaveProperty("evidence");
+    // 非布尔的垃圾值也不转发，否则会伪造一个内核从未给出的判断。
+    const junk = translate([
+      ev(0, "tool_result", { id: "c1", ok: true, text: "ok", toolName: "fs", evidence: "yes" }),
+    ]).out.find((item) => item.type === "tool_end");
+    expect(junk).not.toHaveProperty("evidence");
+  });
+});
+
+describe("turn_progress：工具开始/结束时点名正在跑的工具", () => {
+  /** A context for a turn that is in flight, which is when progress is real. */
+  const runningContext = () => {
+    const ctx = createContext({ sessionId: "s1" });
+    ctx.running = true;
+    return ctx;
+  };
+
+  it("tool_started 产出一条带工具名的 turn_progress", () => {
+    const { out } = translate(
+      [ev(0, "tool_started", { callId: "c1", tool: "mcp__probe__mem_read" })],
+      runningContext(),
+    );
+    const progress = out.filter((item) => item.type === "turn_progress");
+    expect(progress).toStrictEqual([{ type: "turn_progress", tool: "mcp__probe__mem_read" }]);
+    // 工具行本身必须先到：进度行说的是「正在跑哪一行」，行不在就无从对照。
+    expect(out.map((item) => item.type)).toStrictEqual(["tool_start", "turn_progress"]);
+  });
+
+  it("多个并发调用时点名最近开始的那个；结束时回落到仍在跑的", () => {
+    const { out } = translate(
+      [
+        ev(0, "tool_started", { callId: "c1", tool: "read_file" }),
+        ev(1, "tool_started", { callId: "c2", tool: "grep" }),
+        ev(2, "tool_result", { id: "c2", ok: true, text: "hit", toolName: "grep" }),
+        ev(3, "tool_result", { id: "c1", ok: true, text: "body", toolName: "read_file" }),
+      ],
+      runningContext(),
+    );
+    const named = out.filter((item) => item.type === "turn_progress").map((item) => item.tool);
+    // 空字符串是「当前没有工具在跑」：渲染器据此清掉工具名、保留计时，
+    // 而不是让最后一个名字一直挂在进度行上。
+    expect(named).toStrictEqual(["read_file", "grep", "read_file", ""]);
+  });
+
+  it("没有工具在跑时不伪造进度行", () => {
+    const { out } = translate(
+      [
+        ev(0, "assistant", { content: "答", toolCalls: [] }),
+        ev(1, "tool_result", { id: "c9", ok: false, text: "denied", toolName: "shell" }),
+      ],
+      runningContext(),
+    );
+    // 被拒的调用有 tool_start 补行，但它从未开始执行，也就没有「正在跑」。
+    expect(out.filter((item) => item.type === "turn_progress")).toStrictEqual([]);
+  });
+
+  it("回合没在跑（历史回放 / 压缩自检）时不发进度行", () => {
+    const { out } = translate([
+      ev(0, "tool_started", { callId: "c1", tool: "mcp__probe__mem_read" }),
+      ev(1, "tool_result", { id: "c1", ok: true, text: "0x2", toolName: "mcp__probe__mem_read" }),
+    ]);
+    // `ctx.running` 是宿主「这一回合正在进行」的唯一声明；没有它，一个旧
+    // 工具事件描述的是一件早就结束的事，进度行会报告一个没人在等的回合。
+    expect(out.filter((item) => item.type === "turn_progress")).toStrictEqual([]);
+  });
+
+  it("elapsedMs 从日志里那条 user 事件的时间算起，没有用户事件就不编造", () => {
+    const user = ev(0, "user", { content: "读一下 RCC" });
+    user.ts = "2026-11-06T10:00:00.000Z";
+    const started = ev(1, "tool_started", { callId: "c1", tool: "mcp__probe__mem_read" });
+    started.ts = "2026-11-06T10:00:07.500Z";
+    const { out } = translate([user, started], runningContext());
+    const progress = out.find((item) => item.type === "turn_progress");
+    expect(progress.elapsedMs).toBe(7500);
+
+    // 缺 user 事件（例如从日志中段开始投影）时字段缺席，不写成 0。
+    const orphan = translate(
+      [ev(0, "tool_started", { callId: "c1", tool: "shell" })],
+      runningContext(),
+    ).out.find((item) => item.type === "turn_progress");
+    expect(orphan).not.toHaveProperty("elapsedMs");
+    expect(orphan).toStrictEqual({ type: "turn_progress", tool: "shell" });
   });
 });
 
@@ -704,6 +818,16 @@ describe("其他事件", () => {
     const again = sessionEventToHostEvents(ev(3, "assistant", { content: "a", toolCalls: [] }), ctx);
     expect(again).toStrictEqual([]);
     expect(ctx.lastSeq).toBe(3);
+  });
+
+  it("乱序到达的旧 seq 被游标丢弃（文件轮询先到时进程内通道不会重画）", () => {
+    // OPT-15 / D-134：两条通道共用一个游标。文件轮询先拿到 seq 5 时，
+    // 随后从进程内通道赶到的 seq 4 不能再画一遍——哪怕它更小。
+    const ctx = createContext({ sessionId: "s1" });
+    translate([ev(5, "assistant", { content: "a", toolCalls: [] })], ctx);
+    const late = sessionEventToHostEvents(ev(4, "assistant", { content: "b", toolCalls: [] }), ctx);
+    expect(late).toStrictEqual([]);
+    expect(ctx.lastSeq).toBe(5);
   });
 });
 
@@ -1121,6 +1245,25 @@ describe("导出", () => {
     expect(sessionExportName("s1", "a/b:c*?")).toBe("a-b-c-.md");
     expect(sessionExportName("s1", "")).toBe("s1.md");
     expect(sessionExportName("", "")).toBe("session.md");
+  });
+
+  it("evidence 结果在 Markdown 标题上带 [evidence]，未声明的旧日志不带", () => {
+    const md = sessionMarkdown([
+      ev(0, "tool_result", {
+        id: "c1",
+        ok: true,
+        text: "RCC->CR = 0x00000000",
+        toolName: "mcp__probe__mem_read",
+        evidence: true,
+      }),
+      ev(1, "tool_result", { id: "c2", ok: true, text: "ok", toolName: "fs" }),
+      ev(2, "tool_result", { id: "c3", ok: true, text: "no", toolName: "grep", evidence: false }),
+    ]);
+    expect(md).toContain("### mcp__probe__mem_read [evidence]");
+    // 缺省与 false 都不加标记：只有内核明说「这是证据」才算。
+    expect(md).toContain("### fs\n");
+    expect(md).toContain("### grep\n");
+    expect(md.match(/\[evidence\]/g)).toHaveLength(1);
   });
 });
 
