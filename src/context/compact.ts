@@ -130,16 +130,29 @@ function estimateEventTokens(event: SessionEvent): number {
   }
 }
 
+/**
+ * 尾部边界的预算估算。
+ *
+ * **不再自己除以 4**（D-093）：裸 `/4` 与预算路径（`TokenMeter`，用真实 usage
+ * 锚定过比例）是两套口径，中文日志下偏差可达数倍，结果就是「保留 16%」实际
+ * 保留得远多于或远少于 16%，而压缩阈值又是按另一套口径算的。传进来的
+ * `estimate` 由调用方给（有 meter 时就是 `meter.measure`），两处口径一致。
+ */
 function computeTailBoundary(
   events: readonly SessionEvent[],
   contextWindow: number,
   keepTailRatio: number,
+  scale: number,
 ): number {
   const tailBudget = contextWindow * keepTailRatio;
   let accumulated = 0;
   let tailStart = 0;
   for (let index = events.length - 1; index >= 0; index -= 1) {
-    accumulated += estimateEventTokens(events[index]);
+    // 逐条估算，最后乘同一个比例——**不是**对每条各调一次 `meter.measure`：
+    // 后者的 `Math.ceil` 会放大到每条消息上，N 条就多算 N 次舍入，尾部预算
+    // 被系统性高估、边界前移，压缩该触发时不触发（实测：自定义 keepTailRatio
+    // 的集成用例因此少了压缩）。
+    accumulated += estimateEventTokens(events[index]) * scale;
     if (accumulated >= tailBudget) {
       tailStart = index;
       break;
@@ -278,7 +291,15 @@ export async function compactSession(opts: CompactOptions): Promise<void> {
   }
 
   const latest = session.events();
-  let coversUpToSeq = computeTailBoundary(latest, contextWindow, keepTailRatio);
+  // 尾部边界的尺子与预算路径一致（D-093）：`meter.ratio()` 是 usage 锚定出来的
+  // 全局比例，套在同一条启发式估算上。没有 meter 时比例就是 1，与压缩前的
+  // 行为逐字节相同。
+  let coversUpToSeq = computeTailBoundary(
+    latest,
+    contextWindow,
+    keepTailRatio,
+    meter?.ratio() ?? 1,
+  );
   coversUpToSeq = adjustSummaryBoundary(latest, coversUpToSeq);
   const previousSummary = lastSummaryEvent(latest);
   if (previousSummary !== undefined && coversUpToSeq <= previousSummary.seq) {
