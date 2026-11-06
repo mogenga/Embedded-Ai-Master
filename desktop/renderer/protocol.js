@@ -786,6 +786,11 @@ export function sessionEventToHostEvents(event, ctx) {
     case "status": {
       const status = textOf(payload.status);
       if (status === "done") {
+        // `finishReason: "truncated"` 是一次**正常结束**（不是 interrupted），
+        // 但内容确实没写完：不说一句就等于把截断伪装成完整回答（R3）。
+        if (textOf(payload.finishReason) === "truncated") {
+          out.push({ type: "notice", level: "warn", text: "连续输出被截断，已停止续写；回答可能不完整" });
+        }
         ctx.running = false;
         out.push({ type: "run_end" });
       } else if (status === "usage_missing") {
@@ -808,6 +813,8 @@ export function sessionEventToHostEvents(event, ctx) {
 
     case "interrupted": {
       const reason = textOf(payload.reason);
+      // 每个 reason 说清楚是哪一类停止：兜底的「运行中断」在排障时什么也告诉
+      // 不了人，而这三类恰好各有明确的下一步（调超时 / 换网关 / 减小输入）。
       const label =
         reason === "aborted"
           ? "已中止"
@@ -819,7 +826,14 @@ export function sessionEventToHostEvents(event, ctx) {
                 ? "客户端断开"
                 : reason === "start_failed"
                   ? "启动失败"
-                  : "运行中断";
+                  : reason === "deadline"
+                    ? "达到整跑时长上限"
+                    : reason === "context_overflow"
+                      ? "上下文超出服务端窗口，压缩一次后仍超限"
+                      // 截断不走 interrupted（它是正常结束），所以这里**没有**
+                      // `truncated` 分支：那会是一个没有生产者的 handler。
+                      // 截断的提示在下面 `status:done` 的 finishReason 分支里。
+                      : "运行中断";
       out.push({ type: "notice", level: "warn", text: label });
       ctx.running = false;
       out.push({ type: "run_end" });

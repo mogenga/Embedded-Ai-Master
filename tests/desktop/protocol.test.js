@@ -481,6 +481,31 @@ describe("运行状态", () => {
     expect(ctx.running).toBe(false);
   });
 
+  it("interrupted 的三个新 reason 各有自己的文案，不落到兜底", () => {
+    const cases = [
+      ["deadline", "达到整跑时长上限"],
+      ["context_overflow", "上下文超出服务端窗口，压缩一次后仍超限"],
+    ];
+    for (const [reason, text] of cases) {
+      const { out } = translate([ev(0, "interrupted", { reason })]);
+      expect(out).toStrictEqual([
+        { type: "notice", level: "warn", text },
+        { type: "run_end" },
+      ]);
+    }
+  });
+
+  it("status done 且 finishReason=truncated 时如实提示回答可能不完整", () => {
+    const { out, ctx } = translate([
+      ev(0, "status", { status: "done", finishReason: "truncated" }),
+    ]);
+    expect(out).toStrictEqual([
+      { type: "notice", level: "warn", text: "连续输出被截断，已停止续写；回答可能不完整" },
+      { type: "run_end" },
+    ]);
+    expect(ctx.running).toBe(false);
+  });
+
   it("usage → usage 事件字段映射", () => {
     const { out } = translate([
       ev(0, "usage", { promptTokens: 10, completionTokens: 2, cachedTokens: 3 }),

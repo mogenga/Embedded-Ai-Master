@@ -34,9 +34,22 @@ export interface AppRunLimits {
   maxTurns: number | null;
   /** 成本上限（美元）；null 表示不限。 */
   maxCostUsd: number | null;
-  /** 模型请求超时（毫秒）；null 表示用内核默认。 */
+  /** 单次工具调用超时（毫秒）；null 表示用内核默认（120s 上限）。 */
   timeoutMs: number | null;
-  /** 系统提示词；"" 表示用内核默认提示词。 */
+  /**
+   * 整跑墙钟上限（毫秒）；null 表示不限。
+   *
+   * 与 `timeoutMs` 不是一回事：后者管单次工具调用，这个管「本次运行从开始到
+   * 结束一共允许多久」。取消默认轮数上限之后，它是无人值守场景唯一还能保证
+   * 一次运行不会无限期占着会话锁的边界（D-189）。
+   */
+  deadlineMs: number | null;
+  /**
+   * 附加到每段对话最前面的自定义系统提示词；"" 表示不加。
+   *
+   * **内核没有内置提示词**：内置的 `environment` 节由投影期注入（不写日志、
+   * 不受这里影响），这个字段只承载操作者自己写的那一段（D-221）。
+   */
   systemPrompt: string;
   /**
    * 操作者为每个模型选定的推理强度，键是 `provider/model`。
@@ -123,6 +136,7 @@ const DEFAULT_RUN_LIMITS: AppRunLimits = Object.freeze({
   maxTurns: null,
   maxCostUsd: null,
   timeoutMs: null,
+  deadlineMs: null,
   systemPrompt: "",
   reasoningEffortByModel: Object.freeze({}) as Record<string, ReasoningEffort>,
 });
@@ -131,6 +145,7 @@ const RUN_LIMIT_FIELDS = new Set([
   "maxTurns",
   "maxCostUsd",
   "timeoutMs",
+  "deadlineMs",
   "systemPrompt",
   "reasoningEffortByModel",
 ]);
@@ -396,6 +411,19 @@ function parseRunLimits(value: unknown, source: string): AppRunLimits {
       throw invalidConfig(`运行上限 timeoutMs 必须是正数或 null: ${source}`);
     }
     limits.timeoutMs = value.timeoutMs;
+  }
+  if (value.deadlineMs !== undefined) {
+    if (
+      value.deadlineMs !== null
+      && (
+        typeof value.deadlineMs !== "number"
+        || !Number.isFinite(value.deadlineMs)
+        || value.deadlineMs <= 0
+      )
+    ) {
+      throw invalidConfig(`运行上限 deadlineMs 必须是正数或 null: ${source}`);
+    }
+    limits.deadlineMs = value.deadlineMs;
   }
   if (value.systemPrompt !== undefined) {
     if (typeof value.systemPrompt !== "string") {

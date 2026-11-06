@@ -16,7 +16,7 @@ export const settingsStrings = {
     pageConnection: "Model services",
     pageConnectionDesc: "The endpoints the agent may call, and the models each one offers.",
     pageBehavior: "Behavior",
-    pageBehaviorDesc: "The permission preset and approval rules the next conversation starts with, plus its system prompt.",
+    pageBehaviorDesc: "The permission preset and approval rules the next conversation starts with, plus any custom system prompt.",
     pageSessions: "Sessions",
     pageSessionsDesc: "Notifications and how long inactive sessions are kept.",
     pageMcp: "MCP servers",
@@ -294,7 +294,7 @@ export const settingsStrings = {
     connProviderCustom: "Custom (fill in manually)",
 
     groupPermissions: "Permissions",
-    behaviorSystemPromptNote: "A custom system prompt is set in {path} and is still prepended to every conversation. Edit that file to change or remove it.",
+    behaviorSystemPromptNote: "A custom system prompt is set in {path} and is still sent with every conversation, after the built-in environment section. Edit that file to change or remove it.",
     behaviorPreset: "Permission preset",
     behaviorPresetDesc: "What the agent may do without asking.",
     behaviorPresetNote: "Switches the running mode as well as the saved one. A change made while a run is in flight is saved and takes effect on the next turn.",
@@ -492,7 +492,7 @@ export const settingsStrings = {
     remove: "Remove",
 
     instructionsPlaceholder: "For example: always use pnpm, never commit directly to main, reply in Chinese.",
-    instructionsNote: "Added to the system prompt of every conversation, before project instructions.",
+    instructionsNote: "Sent as ordinary user messages, not as part of the system prompt.",
     instructionsProject: "This build does not read project instruction files; put standing guidance in the system prompt instead.",
 
     launchAtLogin: "Open at login",
@@ -531,7 +531,7 @@ export const settingsStrings = {
     pageConnection: "模型服务",
     pageConnectionDesc: "Agent 可以调用的服务地址，以及每个服务提供的模型。",
     pageBehavior: "行为",
-    pageBehaviorDesc: "下一段对话开始时使用的权限预设、审批规则，以及它的系统提示词。",
+    pageBehaviorDesc: "下一段对话开始时使用的权限预设、审批规则，以及自定义系统提示词。",
     pageSessions: "会话",
     pageSessionsDesc: "通知，以及闲置会话的保留时长。",
     pageMcp: "MCP 服务器",
@@ -805,7 +805,7 @@ export const settingsStrings = {
     connProviderCustom: "自定义（手动填写）",
 
     groupPermissions: "权限",
-    behaviorSystemPromptNote: "{path} 里设置了自定义系统提示词，仍会加在每段对话最前面。要修改或删除请直接编辑该文件。",
+    behaviorSystemPromptNote: "{path} 里设置了自定义系统提示词，仍会随每段对话发出，位置在内置环境段之后。要修改或删除请直接编辑该文件。",
     behaviorPreset: "权限预设",
     behaviorPresetDesc: "Agent 不询问就能做到哪一步。",
     behaviorPresetNote: "会同时切换当前运行模式并保存；运行中改动只保存，下一轮生效。",
@@ -987,7 +987,7 @@ export const settingsStrings = {
     remove: "删除",
 
     instructionsPlaceholder: "例如：始终用 pnpm，不要直接提交到 main，用中文回复。",
-    instructionsNote: "会加到每段对话的系统提示词里，排在项目指令之前。",
+    instructionsNote: "作为普通用户消息发出，不属于系统提示词。",
     instructionsProject: "当前版本不读取项目里的指令文件；长期要求请写进系统提示词。",
 
     launchAtLogin: "开机自启",

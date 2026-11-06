@@ -179,6 +179,7 @@ const DEFAULT_RUN_LIMITS = {
   maxTurns: null,
   maxCostUsd: null,
   timeoutMs: null,
+  deadlineMs: null,
   systemPrompt: "",
   /**
    * The operator's effort choice, keyed by `provider/model`.
@@ -3199,6 +3200,7 @@ function buildBehaviorPage() {
     ["maxTurns", run.maxTurns],
     ["maxCostUsd", run.maxCostUsd],
     ["timeoutMs", run.timeoutMs],
+    ["deadlineMs", run.deadlineMs],
   ].filter(([, value]) => typeof value === "number" && Number.isFinite(value));
   if (setLimits.length > 0 && !configProblem) {
     const limitsText = setLimits.map(([name, value]) => `${name} = ${value}`).join(", ");

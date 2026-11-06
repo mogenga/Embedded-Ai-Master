@@ -308,6 +308,38 @@ describe("运行上限的 maxTurns 可缺省（null = 不限）", () => {
   });
 });
 
+describe("整跑墙钟 deadlineMs（D-189）", () => {
+  it("默认是 null：不存在默认时长上限", () => {
+    const home = makeHome();
+
+    expect(readAppConfig(home).run.deadlineMs).toBeNull();
+  });
+
+  it("写正整数能读回，且与 timeoutMs 各自独立", async () => {
+    const home = makeHome();
+
+    const written = await writeRunLimits(home, { deadlineMs: 600_000, timeoutMs: 30_000 });
+
+    expect(written.deadlineMs).toBe(600_000);
+    expect(written.timeoutMs).toBe(30_000);
+    const snapshot = readAppConfig(home).run;
+    expect(snapshot.deadlineMs).toBe(600_000);
+    expect(snapshot.timeoutMs).toBe(30_000);
+  });
+
+  it.each<[string, unknown]>([
+    ["0", 0],
+    ["负数", -1],
+    ["非数字", "600000"],
+  ])("deadlineMs 为 %s 被拒绝（正数或 null）", async (_label, deadlineMs) => {
+    const home = makeHome();
+
+    await expect(writeRunLimits(home, { deadlineMs: deadlineMs as number })).rejects.toMatchObject({
+      code: "invalid_config",
+    });
+  });
+});
+
 describe("run.json 的推理强度选择", () => {
   it("没有 run.json 时是一张空表，不是 undefined", () => {
     const home = makeHome();
