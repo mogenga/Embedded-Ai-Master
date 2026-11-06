@@ -999,3 +999,149 @@ describe("buildMessages 投影重组", () => {
     expect(events.map((event) => event.seq)).toEqual([0, 1, 2, 3, 4, 5]);
   });
 });
+
+describe("buildMessages 投影期注入 systemSections", () => {
+  it("不传 options 与显式传 {} 的结果逐字节相同", () => {
+    const events: SessionEvent[] = [
+      mk(0, "system", { content: "SYS" }),
+      mk(1, "user", { content: "hello" }),
+      mk(2, "assistant", { content: "hi", toolCalls: [] }),
+      mk(3, "user", { content: "again" }),
+    ];
+
+    expect(buildMessages(events, {})).toStrictEqual(buildMessages(events));
+    expect(JSON.stringify(buildMessages(events, {}))).toBe(JSON.stringify(buildMessages(events)));
+  });
+
+  it("没有日志 system 事件时，环境节成为 messages[0] 且含环境事实", () => {
+    const messages = buildMessages([mk(0, "user", { content: "hi" })], {
+      systemSections: { environment: "Platform: win32\nShell: cmd.exe" },
+    });
+
+    expect(messages[0]!.role).toBe("system");
+    expect(messages[0]!.content).toBe("# Environment\nPlatform: win32\nShell: cmd.exe");
+    expect(messages[1]).toStrictEqual({ role: "user", content: "hi" });
+  });
+
+  it("有日志 system 事件时，节在日志 system 之后、user 之前", () => {
+    const messages = buildMessages(
+      [
+        mk(0, "system", { content: "SYS" }),
+        mk(1, "user", { content: "hi" }),
+      ],
+      { systemSections: { base: "B", environment: "E" } },
+    );
+
+    expect(messages.map((message) => message.role)).toStrictEqual([
+      "system",
+      "system",
+      "system",
+      "user",
+    ]);
+    expect(messages[0]!.content).toBe("SYS");
+    expect(messages[1]!.content).toBe("# Base\nB");
+    expect(messages[2]!.content).toBe("# Environment\nE");
+    expect(messages[3]).toStrictEqual({ role: "user", content: "hi" });
+  });
+
+  it("有压缩摘要时摘要仍在最后一条 system，节插在摘要之前", () => {
+    const messages = buildMessages(
+      [
+        mk(0, "system", { content: "SYS" }),
+        mk(1, "user", { content: "old" }),
+        mk(2, "compaction", { kind: "summary", summary: "SUM", coversUpToSeq: 1 }),
+        mk(3, "user", { content: "new" }),
+      ],
+      { systemSections: { base: "B", environment: "E" } },
+    );
+
+    expect(messages.map((message) => message.role)).toStrictEqual([
+      "system",
+      "system",
+      "system",
+      "system",
+      "user",
+    ]);
+    expect(messages[0]!.content).toBe("SYS");
+    expect(messages[1]!.content).toBe("# Base\nB");
+    expect(messages[2]!.content).toBe("# Environment\nE");
+    expect(messages[3]!.content).toBe("[Conversation summary]\nSUM");
+    expect(messages[4]).toStrictEqual({ role: "user", content: "new" });
+  });
+
+  it("没有日志 system 事件但有摘要时，节仍在摘要之前、user 之前", () => {
+    const messages = buildMessages(
+      [
+        mk(0, "user", { content: "old" }),
+        mk(1, "compaction", { kind: "summary", summary: "SUM", coversUpToSeq: 0 }),
+        mk(2, "user", { content: "new" }),
+      ],
+      { systemSections: { environment: "E" } },
+    );
+
+    expect(messages.map((message) => message.role)).toStrictEqual([
+      "system",
+      "system",
+      "user",
+    ]);
+    expect(messages[0]!.content).toBe("# Environment\nE");
+    expect(messages[1]!.content).toBe("[Conversation summary]\nSUM");
+    expect(messages[2]).toStrictEqual({ role: "user", content: "new" });
+  });
+
+  it("空字符串节不产生任何额外消息", () => {
+    const events: SessionEvent[] = [mk(0, "user", { content: "hi" })];
+
+    const plain = buildMessages(events);
+    const withEmpty = buildMessages(events, {
+      systemSections: { base: "", environment: "  \n ", tools: undefined, summary: undefined },
+    });
+
+    expect(withEmpty).toStrictEqual(plain);
+    expect(withEmpty).toHaveLength(plain.length);
+  });
+
+  it("传空字符串节时消息条数与不传时相同（含日志 system 与摘要）", () => {
+    const events: SessionEvent[] = [
+      mk(0, "system", { content: "SYS" }),
+      mk(1, "user", { content: "old" }),
+      mk(2, "compaction", { kind: "summary", summary: "SUM", coversUpToSeq: 0 }),
+      mk(3, "user", { content: "new" }),
+    ];
+
+    const plain = buildMessages(events);
+    const withEmpty = buildMessages(events, { systemSections: { base: "" } });
+
+    expect(withEmpty).toStrictEqual(plain);
+    expect(withEmpty).toHaveLength(plain.length);
+  });
+
+  it("不修改入参事件数组", () => {
+    const events: SessionEvent[] = [
+      mk(0, "system", { content: "SYS" }),
+      mk(1, "user", { content: "hi" }),
+    ];
+    const snapshot = JSON.stringify(events);
+
+    buildMessages(events, {
+      systemSections: { base: "B", environment: "E" },
+    });
+
+    expect(JSON.stringify(events)).toBe(snapshot);
+    expect(events.map((event) => event.seq)).toEqual([0, 1]);
+  });
+
+  it("节不触发「system 必须在非 system 之前」守卫（插在最前面那段 system 区间内）", () => {
+    const events: SessionEvent[] = [
+      mk(0, "user", { content: "hi" }),
+      mk(1, "assistant", { content: "ok", toolCalls: [] }),
+    ];
+
+    expect(() =>
+      buildMessages(events, { systemSections: { base: "B" } }),
+    ).not.toThrow();
+    const messages = buildMessages(events, { systemSections: { base: "B" } });
+    expect(messages[0]!.role).toBe("system");
+    expect(messages[1]!.role).toBe("user");
+  });
+});
