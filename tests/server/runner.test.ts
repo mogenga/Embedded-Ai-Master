@@ -6,8 +6,10 @@ import type { RunOptions, runSession } from "../../src/index.js";
 import type { LoopEvent } from "../../src/loop/events.js";
 import { createSessionRunner, RunnerError } from "../../src/server/runner.js";
 import type { ActionInput, SessionRunner } from "../../src/server/runner.js";
+import { createLogTailEventSource } from "../../src/events/log-tail.js";
 import { createSession } from "../../src/session/session.js";
 import type { SessionHandle } from "../../src/session/session.js";
+import type { EventType } from "../../src/session/types.js";
 
 const headerOverride = vi.hoisted(() => ({
   impl: undefined as undefined | ((dir: string) => unknown),
@@ -45,7 +47,11 @@ function makeHome(): string {
 }
 
 function fakeHandle(dir = "test-session-dir"): SessionHandle {
-  const append = vi.fn(async () => ({ seq: 0, ts: "", type: "status" as const, payload: {} }));
+  let seq = 0;
+  const append = vi.fn(async (ev: { type: EventType }) => {
+    const event = { seq: seq++, ts: "", type: ev.type, payload: {} };
+    return event;
+  });
   // `dir` 是 runner 记录 MCP 连接 key 的唯一来源，每个会话给一个可区分的值。
   return { append, dir } as unknown as SessionHandle;
 }
@@ -59,6 +65,8 @@ interface FakeOptions {
   dir?: string;
   /** 在 run 内真的向 registry 取一个连接，用来观察 closeSession 的效果。 */
   acquireMcp?: boolean;
+  /** 就绪后按顺序写入这些事件类型（走句柄的 append，即进程内回调的来源）。 */
+  emit?: EventType[];
 }
 
 function createFakeRunSession(options: FakeOptions = {}): {
@@ -80,13 +88,19 @@ function createFakeRunSession(options: FakeOptions = {}): {
       if (options.delayMs !== undefined) {
         await new Promise((resolve) => setTimeout(resolve, options.delayMs));
       }
-      opts.onSession?.(fakeHandle(options.dir));
+      const handle = fakeHandle(options.dir);
+      opts.onSession?.(handle);
       if (options.acquireMcp === true && opts.mcpRegistry !== undefined) {
         const manager = { close: vi.fn(async () => undefined) };
         managers.push(manager);
         await opts.mcpRegistry.acquire(options.dir ?? "test-session-dir", async () => {
           return manager as never;
         });
+      }
+      // 真实内核在这一步之后才写 user/assistant……；假 run 用同样的句柄
+      // 写出几条事件，用来观察进程内回调。
+      for (const type of options.emit ?? []) {
+        await handle.append({ type, payload: {} });
       }
     }
     if (options.hang === true) {
@@ -666,6 +680,95 @@ describe("createSessionRunner", () => {
     expect(fake.managers[0]?.close).toHaveBeenCalledTimes(1);
     await expect(runner.closeSession(outcome.sessionId)).resolves.toBeUndefined();
     expect(fake.managers[0]?.close).toHaveBeenCalledTimes(1);
+  });
+
+  describe("进程内事件通道（OPT-15 / D-134）", () => {
+    it("每条落盘事件按顺序转给 onSessionEvent", async () => {
+      const home = makeHome();
+      const fake = createFakeRunSession({ emit: ["user", "assistant_delta", "assistant"] });
+      const received: Array<{ session: string; seq: number; type: string }> = [];
+      const runner = newRunner(home, {
+        runSessionImpl: fake.impl,
+        onSessionEvent: (session, event) => {
+          received.push({ session, seq: event.seq, type: event.type });
+        },
+      });
+
+      const outcome = await runner.start({ text: "hi" });
+      await nextTick();
+
+      expect(received.map((entry) => entry.type)).toEqual(["user", "assistant_delta", "assistant"]);
+      expect(received.map((entry) => entry.seq)).toEqual([0, 1, 2]);
+      // 会话 id 必须对得上：宿主用它判断这条事件是不是当前这一轮的。
+      expect(received.every((entry) => entry.session === outcome.sessionId)).toBe(true);
+    });
+
+    it("回调抛错不影响运行结果，也不冒泡到 start", async () => {
+      const home = makeHome();
+      const fake = createFakeRunSession({ emit: ["user", "assistant"] });
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const runner = newRunner(home, {
+          runSessionImpl: fake.impl,
+          onSessionEvent: () => {
+            throw new Error("render boom");
+          },
+        });
+
+        await expect(runner.start({ text: "hi" })).resolves.toMatchObject({ created: true });
+        await nextTick();
+
+        // 两次回调都真的被执行了：一次失败不能让后续事件也丢掉。
+        expect(stderr.mock.calls.filter((call) => String(call[0]).includes("事件回调失败"))).toHaveLength(1);
+        // 只记一次，不是每条事件一行。
+        expect(stderr).toHaveBeenCalledTimes(1);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it("没有回调时行为与从前一致", async () => {
+      const home = makeHome();
+      const fake = createFakeRunSession({ emit: ["user"] });
+      const runner = newRunner(home, { runSessionImpl: fake.impl });
+
+      await expect(runner.start({ text: "hi" })).resolves.toMatchObject({ created: true });
+      await nextTick();
+    });
+
+    it("加速通道坏了，事件仍在日志里（文件跟随仍能送到）", async () => {
+      // 真实 runSession + 400 网关：回调每次都抛错，但这一轮照常落盘。
+      // 之后用日志跟随读同一个会话，事件必须一条不少——加速是加速，不是
+      // 事实源（R3 / D-134：文件跟随承担崩溃恢复与重连补播）。
+      const home = makeHome();
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        const runner = newRunner(home, {
+          fetchImpl: (async () =>
+            new Response(JSON.stringify({ error: { message: "bad request (test)" } }), {
+              status: 400,
+              headers: { "Content-Type": "application/json" },
+            })) as typeof fetch,
+          onSessionEvent: () => {
+            throw new Error("live channel down");
+          },
+        });
+
+        const outcome = await runner.start({ text: "串口没输出" });
+        // 让 generator 跑完（400 不可重试，几毫秒内结束）。
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        const source = createLogTailEventSource({ sessionsRoot: path.join(home, "sessions") });
+        const { events } = await source.read(outcome.sessionId, -1);
+        expect(events.length).toBeGreaterThan(0);
+        expect(events.map((event) => event.type)).toContain("user");
+        expect(events.at(-1)?.type).toBe("interrupted");
+        // seq 从 0 连续，文件通道拿到的是一条完整事件流。
+        expect(events.map((event) => event.seq)).toEqual(events.map((_, index) => index));
+      } finally {
+        stderr.mockRestore();
+      }
+    });
   });
 
   it("就绪前被 close 中止时 start 抛 session_start_timeout", async () => {

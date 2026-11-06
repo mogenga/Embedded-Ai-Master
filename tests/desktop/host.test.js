@@ -167,6 +167,40 @@ function unreachableBaseUrl() {
   return "http://127.0.0.1:1/v1";
 }
 
+/**
+ * A local gateway that answers one chat completion as an SSE stream.
+ *
+ * The dedupe test needs the same event to have a chance to arrive twice: a
+ * prompt that produces several log events (user, checkpoint, deltas,
+ * assistant, usage, status) is what makes the file pump and the in-process
+ * channel overlap. A 400 like `tempHome()`'s gateway ends the turn after three
+ * events, which is too little to observe a double draw.
+ */
+async function streamingGateway(text = "你好，串口没输出通常是供电或时钟") {
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      if (req.url?.includes("/models")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ object: "list", data: [{ id: "flash" }] }));
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "text/event-stream" });
+      const frame = (payload) => `data: ${JSON.stringify(payload)}\n\n`;
+      res.write(frame({ choices: [{ delta: { content: text }, finish_reason: null }] }));
+      res.write(frame({ choices: [{ delta: {}, finish_reason: "stop" }] }));
+      res.write(
+        frame({ choices: [], usage: { prompt_tokens: 12, completion_tokens: 7 } }),
+      );
+      res.end("data: [DONE]\n\n");
+    });
+  });
+  servers.push(server);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  return `http://127.0.0.1:${port}/v1`;
+}
+
 async function tempHome() {
   const dir = await mkdtemp(path.join(tmpdir(), "eam-host-"));
   tempDirs.push(dir);
@@ -678,6 +712,51 @@ describe("desktop host", () => {
     const sessionsDir = path.join(home, "sessions");
     const dirs = await readdir(sessionsDir);
     expect(dirs).toHaveLength(1);
+  }, HOST_TIMEOUT_MS);
+
+  it("进程内事件通道与文件轮询共存时不重复投递同一条事件", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "eam-live-"));
+    tempDirs.push(home);
+    await writeFile(
+      path.join(home, "providers.json"),
+      JSON.stringify({
+        gw: {
+          protocol: "openai-chat-completions",
+          baseUrl: await streamingGateway(),
+          models: { flash: { contextWindow: 8192, maxOutput: 512 } },
+        },
+      }),
+    );
+
+    const events = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "prompt", text: "串口没输出" }],
+      {
+        // Wait past the turn, until the file pump has read the finished log
+        // and sent its closing `sessions`. That is the point where both paths
+        // have carried the same events: shutting down on `run_end` would stop
+        // the pump before it could ever deliver a second copy, and the case
+        // would pass without exercising anything.
+        until: (all) => {
+          const end = all.findIndex((event) => event.type === "run_end");
+          return end >= 0 && all.slice(end).some((event) => event.type === "sessions");
+        },
+        timeoutMs: 30_000,
+      },
+    );
+
+    // 这一轮确实产生了可被两条路径同时看到的流式事件（否则重复不可能发生，
+    // 断言就只是空转）。
+    const deltas = events.filter((event) => event.type === "assistant_delta");
+    expect(deltas.length).toBeGreaterThan(0);
+    // 内核把整段回答作为一个 `assistant` 事件写出、同时流式片段已经到达；
+    // 协议层补齐的是「没流式过的部分」。同一条片段被两条通道各画一次的话，
+    // 屏幕上会看到重复文字。把渲染器会追加的文本合起来，比对完整回答。
+    const streamed = deltas.map((event) => event.text).join("");
+    expect(streamed).toBe("你好，串口没输出通常是供电或时钟");
+
+    // 每个事件只处理一次：一轮里只有一条 run_end。
+    expect(events.filter((event) => event.type === "run_end")).toHaveLength(1);
   }, HOST_TIMEOUT_MS);
 
   it("prompt 把工作区 cwd 写进会话 header", async () => {

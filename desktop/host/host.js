@@ -942,6 +942,17 @@ function createRunner() {
     ...(modelRef === "" ? {} : { model: modelRef }),
     cwd,
     permissions: { preset: mode },
+    // OPT-15 / D-134: the kernel is in this same process, so every event it
+    // commits is handed to us as soon as it is on disk — instead of waiting
+    // up to one 200 ms poll of the log. This is an accelerator, not a second
+    // protocol: `handleLiveEvent` translates through the same protocol context
+    // the file pump uses, and that context's `lastSeq` cursor is what keeps an
+    // event from being drawn twice. File following stays (crash recovery,
+    // out-of-process writers, replay after reconnect), and a kernel that does
+    // not know this option simply never calls it.
+    onSessionEvent: (session, event) => {
+      handleLiveEvent(session, event);
+    },
   });
 }
 
@@ -1402,19 +1413,7 @@ function startFollow(id, since) {
       const reader = eventSource.follow(id, since, signal);
       for await (const event of reader) {
         if (signal.aborted) return;
-        // Keep the cached measure current: a later `state` (a settings change,
-        // a session switch back) reads it rather than the log.
-        if (event.type === "usage" && typeof event.payload === "object" && event.payload !== null) {
-          if (typeof event.payload.context === "object" && event.payload.context !== null) {
-            lastSessionMeasure = { ...lastSessionMeasure, context: event.payload.context };
-          }
-          if (typeof event.payload.costUsd === "number" && Number.isFinite(event.payload.costUsd)) {
-            lastSessionMeasure = { ...lastSessionMeasure, costUsd: event.payload.costUsd };
-          }
-        }
-        for (const message of kernel.protocol.sessionEventToHostEvents(event, ctx)) {
-          send(message);
-        }
+        deliverKernelEvent(event);
       }
       if (signal.aborted) return;
       // Stream ended without an explicit run_end (a crash or an aborted run
@@ -1440,6 +1439,85 @@ function startFollow(id, since) {
     }
   })();
   followTask = task;
+}
+
+/**
+ * Translate one kernel event with the current protocol context and send it.
+ *
+ * Shared by the file pump and the in-process channel (`handleLiveEvent`) so
+ * the transcript is drawn the same way whichever path got there first. The
+ * dedupe is the context's own `lastSeq`: `sessionEventToHostEvents` drops any
+ * event whose seq has already been translated, and this is the single cursor
+ * both paths advance — there is no second ledger to disagree with it.
+ */
+function deliverKernelEvent(event) {
+  // Keep the cached measure current: a later `state` (a settings change,
+  // a session switch back) reads it rather than the log.
+  if (event.type === "usage" && typeof event.payload === "object" && event.payload !== null) {
+    if (typeof event.payload.context === "object" && event.payload.context !== null) {
+      lastSessionMeasure = { ...lastSessionMeasure, context: event.payload.context };
+    }
+    if (typeof event.payload.costUsd === "number" && Number.isFinite(event.payload.costUsd)) {
+      lastSessionMeasure = { ...lastSessionMeasure, costUsd: event.payload.costUsd };
+    }
+  }
+  for (const message of kernel.protocol.sessionEventToHostEvents(event, ctx)) {
+    send(message);
+  }
+}
+
+/**
+ * The in-process accelerator's half of the event pump (OPT-15 / D-134).
+ *
+ * The kernel hands us every event right after it is committed to the log, so
+ * the transcript no longer waits out the 200 ms poll. This is *only* an
+ * accelerator: the file pump stays, and it is still the one that recovers
+ * after a crash, reads what another process wrote, and replays on reconnect.
+ *
+ * Two rules make the two paths coexist without drawing anything twice:
+ *
+ * 1. Only the current run is accepted. Events from a finished run (or from a
+ *    session the operator has since switched away from) are the file pump's
+ *    business; translating them here would talk over the transcript.
+ * 2. Only a *contiguous* seq is translated (`lastSeq + 1`). A gap means the
+ *    accelerator missed something the log has — the only such case today is
+ *    crash-recovery events, which are appended before this run attaches — and
+ *    the event is deliberately left to the pump, which replays the log in
+ *    order from the same cursor. Skipping keeps the cursor honest: it never
+ *    jumps over an event nobody has drawn.
+ *
+ * The reverse order needs no rule of its own: if the pump got there first,
+ * `ctx.lastSeq` has already passed the seq and `sessionEventToHostEvents`
+ * drops the live copy.
+ */
+function handleLiveEvent(session, event) {
+  if (!ctx.running) return;
+  // A brand-new run has no id until `start` returns; while the id is empty
+  // there is nothing else in flight, so the event can only belong to it.
+  if (sessionId !== "" && session !== sessionId) return;
+  if (typeof event !== "object" || event === null) return;
+  if (!Number.isSafeInteger(event.seq)) return;
+  if (event.seq !== ctx.lastSeq + 1) return;
+  const before = ctx.lastSeq;
+  try {
+    deliverKernelEvent(event);
+  } catch (error) {
+    // R3 / failure semantics: the accelerator reports its own failure and the
+    // pump still carries every event from the log. Rewinding the cursor is
+    // what lets the pump re-deliver this one instead of treating it as a
+    // duplicate of something that never reached the screen.
+    //
+    // The translation may have already sent part of this event's messages
+    // before it threw, so that one event can be drawn twice. That is the
+    // deliberate trade: this path is an accelerator, and a duplicated frame is
+    // recoverable by the reader while a silently dropped one is not.
+    ctx.lastSeq = before;
+    send({
+      type: "notice",
+      level: "warn",
+      text: `实时事件通道出错，已回退到日志轮询：${messageOf(error)}`,
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1697,6 +1775,10 @@ async function handlePrompt(text) {
   }
 
   ctx = kernel.protocol.createContext({ sessionId, cwd });
+  // Everything up to `since` is already on screen (or belongs to a previous
+  // turn); the pump below starts at the same cursor. Seeding it is also what
+  // lets `handleLiveEvent` recognise a contiguous seq on a resumed session.
+  ctx.lastSeq = since;
   ctx.running = true;
   running = true;
   send({ type: "run_start" });
