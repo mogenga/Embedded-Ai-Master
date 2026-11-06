@@ -3965,6 +3965,8 @@ function handleEvent(message) {
         .forEach((node) => node.remove());
       state.currentAssistant = null;
       state.currentThinking = null;
+      // 附件条属于**上一个**会话（D-224）。
+      clearAttachments();
       state.currentTool = null;
       state.lastToolNode = null;
       state.currentThinkingText = null;
@@ -5616,7 +5618,20 @@ function startSessionIn(target) {
     api.send({ cmd: "setCwd", cwd: target });
     return;
   }
+  clearAttachments();
   api.send({ cmd: "newSession" });
+}
+
+/**
+ * 清空附件条。会话边界（新建 / 打开另一条会话）都要调它。
+ *
+ * 内核没有图片输入，`submit()` 只要看到附件就拒绝发送；把上一条会话的图留到
+ * 新会话上，用户会撞上一个来路不明的阻塞（D-224）。
+ */
+function clearAttachments() {
+  if (state.attachments.length === 0) return;
+  state.attachments = [];
+  renderAttachments();
 }
 
 /**

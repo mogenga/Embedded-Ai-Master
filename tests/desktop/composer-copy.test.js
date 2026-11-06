@@ -49,4 +49,17 @@ describe("composer copy never promises what the kernel does not do", () => {
       }
     }
   });
+
+  it("会话边界清空附件条（D-224）：新建与打开会话两条路径都要清", () => {
+    const text = read("app.js");
+    // 新建会话：`startSessionIn` 发 `newSession` 之前清。
+    const newSessionIndex = text.indexOf('clearAttachments();\n  api.send({ cmd: "newSession" });');
+    expect(newSessionIndex).toBeGreaterThan(-1);
+    // 打开会话：`session_loaded` 分支里清（与清转录、清成本放在一起）。
+    const loadedStart = text.indexOf('case "session_loaded"');
+    expect(loadedStart).toBeGreaterThan(-1);
+    const nextCase = text.indexOf('case "', loadedStart + 10);
+    const loadedBlock = text.slice(loadedStart, nextCase === -1 ? undefined : nextCase);
+    expect(loadedBlock).toContain("clearAttachments()");
+  });
 });
