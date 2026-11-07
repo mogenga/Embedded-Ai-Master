@@ -2428,6 +2428,16 @@
 - **`detached` 后代仍然收不到**，用一条**显式断言「它仍然存活」**的测试把这条
   边界钉住，而不是让一条过时的「已知限制」悄悄绿着。真正的修法是让回收发生得
   比 taskkill 的 1 s 启动开销更早（Job Object 在 transport 构造处），属未来工作。
+- **终止时延优化**（`5d42e38`）：`terminateAndWait` 在 Windows 上原本只靠
+  `taskkill /T /F`，而它从 spawn 到父进程真的消失要 890–1160 ms（5 轮实测；
+  对不存在的 pid 也要 1.2–1.3 s，是进程启动 + 杀软扫描）。同一次测量里
+  `process.kill(pid, "SIGKILL")` 只要 **0–3 ms**。改为两条并列发出：taskkill
+  先起（`/T` 靠活着的父进程枚举子进程，顺序不能反），再立刻 `process.kill`
+  收掉父进程本身。轮询问的是「父进程死了没有」，于是从等满 1 s 变成毫秒级返回；
+  整棵树仍由 taskkill 在自己时间里收完。**连带效果**：全量 `--maxWorkers=4`
+  从 3 条偶发红（都是等真实子进程死的用例）变成 0 失败。
+  RED 证据：`git stash` 掉改动后 `tests/mcp-terminate-speed.test.ts` 的第二条
+  报 `expected true to be false`（200 ms 时进程还活着）。
 
 ### D-226 · 仿真故障注入复用 `mem_write`，权限层无法单独门禁「注入」这一动作
 
@@ -2438,10 +2448,30 @@
 - **修复建议**: 拆 `mem_flip`（或给 `mem_write` 加 `injection: true` 标记并由参数规则匹配），把「注入」变成可授权的独立动作；不要在没有门禁需求时提前拆——那会把同一套写内存语义固化成两份。
 - **状态**: **按用户决定保持现状（2026-11-06）**。用 `mem_write` 表达，不新增专用工具；本条记录的是「这个取舍的代价与重启条件」。
 
+### D-227 · 会话 Markdown 导出把工具调用原文原样写入，绕过审批摘要脱敏
+
+- **发现**: 2026-11-07，批次 6.6（审批摘要脱敏）时，由子代理顺带发现。
+- **现象**: `desktop/renderer/protocol.js` 的 `sessionMarkdown()` 导出会把 `assistant` 事件里的 `call.arguments` **原样 `JSON.stringify`** 写进 Markdown 文件。那是模型提交给工具的原始参数，不是 `paramsPreview`。
+- **影响**: D-113 / D-147 的脱敏只作用在 `summarizeParams` 这一层（审批卡片与 `approval_request` 事件），覆盖不到导出路径。用户把会话导出分享、存档或上传时，`apiKey` / `password` 之类的明文仍然在里面。与 D-113 描述的「日志被分享」是同一类风险，但走的是另一条路。
+- **触发升级条件**: 会话导出被用于分享、归档或跨团队交换；出现合规要求；用户反馈导出文件里有不该有的东西。
+- **修复建议**: 导出前对 `call.arguments` 过一遍与 `summarizeParams` 同一套键名判据（脱敏而非删除，保住工具调用的可读性）；或提供「导出时省略工具参数」选项。注意导出是**给用户自己看的**，与审批卡片的目标不同——这里可以更激进地省略。
+- **状态**: 未解决；2026-11-07 发现时只做了记录，没有改代码。
+
+### D-228 · 敏感键词表不可扩展，用户无法追加自己的敏感参数名
+
+- **发现**: 2026-11-07，批次 6.6（D-113 修复）落地时。
+- **现象**: 脱敏词表是 `src/permissions/audit.ts` 里的两个常量（`SENSITIVE_ANY_WORD` / `SENSITIVE_EDGE_WORD`）。用户的工具若用别的命名（比如 `machineToken` 已覆盖，但 `deviceSecretKey`、厂商私有的 `xyzAuth`），只能靠内置词表恰好命中。
+- **影响**: 扩展性缺口，不是安全漏洞——内置词表已覆盖 13 类常见命名，且对真实工具面 70 个参数名做过零误伤复核。但用户没法为自己的工具补一条。
+- **为什么当时没做**: `PermissionConfig` / `InlinePermissionConfig` 走 `z.strictObject`，加一个字段要同时改：两个 schema、`loadPermissionConfig` 的三层合并、`src/index.ts` 的 `PERMISSION_OPTION_KEYS` 与内联校验、`writePermissionConfig`、桌面设置页的 `DEFAULT_PERMISSIONS` 与 `savePermissions`、宿主的 `savePermissions`。**少改任何一处，用户写进 `permissions.json` 的字段都会被 strict schema 判为未知字段、整个会话启动失败。** 这是跨内核与桌面两端的改动，不是「加一行」。
+- **触发升级条件**: 用户报告自己的敏感参数没被脱敏；接入含厂商私有命名的工具；D-113 的残余被重新评估。
+- **修复建议**: 按上面那份清单一次改完，别只改内核侧（那会造出「配置能写但不生效」或「写了就启动失败」两种更糟的状态）。
+- **状态**: 未解决；已知扩展性缺口。
+
 ## 变更记录
 
 | 日期 | 变更 |
 |---|---|
+| 2026-11-07 | **批次 6（安全与资源回收）六项结案**（分支 `feat/batch6-safety`）。①D-225 **已解决**：`reapProcessTree` 在收父进程前起 `taskkill /T /F`，只等 spawn 不等 exit；未能确认时发 `dispose_incomplete`（同时补进了 `MCP_STATUS_PAYLOAD_KINDS` 白名单——**最初漏了，上报是假绿地**）。**修正原文因果**：原文「先关 client 再 taskkill → 孙进程存活」归因于顺序，实测真正的变量是后代是否 `detached`（非 detached 0/4 存活，detached 4/4 存活）；且本机 taskkill 要 ~1 s 才开始枚举，而 server 收 stdin EOF 后 0–109 ms 就退出，对 detached 后代结构性必输。台账原文不改，注记说明。附带终止时延优化（`5d42e38`）：再立刻 `process.kill(SIGKILL)` 收父进程，890–1160 ms → 0–3 ms。②D-116 **已解决**：`BatchOptions.permission` 与 `LoopCtx.permissionGate` 改为与 `unsafeSkipPermission: true` 互斥的联合，入口有 `assertPermissionLayerChoice` 运行时守卫。③D-113 / D-147 **已解决**：`summarizeParams` 按键名三档脱敏，值为 `[redacted:<类型>[:<规模>]]`；`paramsDigest` 与 `paramsKeys` 不变。④新增 **D-227**（会话 Markdown 导出绕过脱敏）与 **D-228**（敏感词表不可扩展）。⑤另有 OPT-13（长任务超时出口：硬顶 120s → 600s，`ToolDef.callTimeoutMs` 让工具抬高地板；**注意挡路的是两道 120s，管线层先触发**）、OPT-34（并发只读超时披露 `mayStillBeRunning`，不是屏障——并发分支没有后续调用可跳）、OPT-40（外链白名单与导航守卫）随本批落地，状态见 `optimization-and-new-features.md` §12。⑥留痕：`dev-notes/批次6-安全与资源回收.md`（含「我的探针错了」的完整复盘）。 |
 | 2026-11-07 | **文档事实源对齐**（用户「列出待实现功能」→ 逐条核对后「更新文档先」）。只改文档，不改代码。①**修掉 6 处状态行与正文矛盾**：D-134（桌面宿主的进程内加速通道已落地，内核 `LogTailEventSource` 仍轮询，改为「桌面侧已解决 / 内核侧未解决」）、D-149（随 D-134 桌面侧关闭，保留异常回退时泵补一帧的残余）、D-189（`deadlineMs` 已落地，改为已解决并列出证据与残余）、D-193（Board 面板已删、`getBoardState` 全仓 0 处，改为已失效）、D-202/203/204/205（CubeIDE / ESP-IDF 后端已随 `f03473b` 移除，状态行统一改为已作废）、D-224（`clearAttachments` 已落地，状态行仍写「未解决」）、D-221（三处文字已撤、`environment` 已落、四节未做、旧会话 mismatch 仍无友好文案、`promptSections` 无生产调用方，改为部分解决）。②**核对口径**：状态行不是单一事实源——`grep` 粗分类得到的「84 条未解决」里至少 6 条与条目顶部的复核注记矛盾，本轮按「正文证据优先于状态行」逐条改正。③其余文档同步见 `dev-notes/M2-阶段3.md` 的 2026-11-06 段。 |
 | 2026-11-07 | 清理无用与过时文件（用户「清理无用文件、过时文件」）：①删除 6 份已完成的一次性任务书，对应提交均已合入 `main` 且全仓零引用——`docs/ui-polish-shared.md`、`docs/ui-polish-task-{a,b,c,d}.md`（2026-11-05 界面优化轮，实现见 `e973aa7` / `7ef3769` / `48dd9d1`）与 `docs/test-optimization-brief.md`（测试优化轮，实现见 `e30b088` / `b666da6` / `941ff3a` / `09dd771` / `6cf7a55`）。**保留** `docs/page-optimization-task-{a..f}.md`：`dev-notes/页面优化.md` 逐轮引用它们作为需求留痕。②删除 `prototypes/index.html`（M1 的 HTML 原型，62 KB）：前端 v2.0 起以 `desktop/renderer/` 为准，令牌与版式已被 `docs/specs/frontend-design.md` 吸收；`dev-notes/原型-UI.md` 顶部加删除说明，历史行号保留为留痕。③`docs/ledgers/optimization-and-new-features.md` 的 OPT-41 证据列改为指向仍存在的 `styles.css` 行号，并注明原记录所在文件已删。④本地不可复现产物（均 gitignore）：`desktop/dist-installer/`（509 MB，v0.2.0 三件资产已在 GitHub Releases）、`desktop/build/{corpus,node_modules}/`（21 MB，打包脚本可重建）、`.tmp/corpus-v2`（与 `~/corpus-publish/v2` 逐字节相同）、`.tmp/skipcheck`（与 `mcp-servers/kb/tests/kb-tool-names.test.ts` 完全相同）、`.superpowers/sdd/`（10.7 MB 阶段产物）、空的 `.worktrees/feat-rag-experiment`。**保留** `dist/`、`dist-mcp/`（开发态宿主直接加载）与 `.tmp/corpus-v1-backup`（D-222 的回滚副本）、`.tmp/optimization-audit`。⑤验证：`npm run check:js` 39 文件通过、`npm run typecheck` 通过、`npm test` 141 files / 3787 passed / 5 skipped。 |
 | 2026-11-04 | 清理文档与勾选 todolist（用户「清理无用文档，不走pr」→「勾上 checkbox」）：①删除已移除后端的三份接入指南 `docs/{arduino,cubeide,espidf}-headless.md`（`f03473b` 已把三套后端移出产品，指南描述的能力在仓库里不存在；代码/配置/脚本零引用），README 同步改为删除说明。保留 `packs-porting-todolist.md`（T1–T15 验收清单）、`datasheet-mcp-todolist.md`（D6/D14/D16 设计取舍）、`embedded-defects-todolist.md`（仍有 1 条未结 + 复核驳回项存档）、`docs/archive/rag-experiment-report/`（5 张图无生成脚本）。②`docs/archive/datasheet-mcp-todolist.md` 的 20 个 checkbox 按实测对账后勾上 19 个，并补 §6 完工记录：D16「评估后不做」保持未勾并写明 spike 结论；验收标准两项按实测修正（用例 95 而非 ≥25；`USB_BCDR` 在两份手册中都不存在，改用 `USB_CNTR`/`AFIO_MAPR`）。③**修掉编号冲突**：`D-207` 被两个不同条目占用（同一天两批任务各自取号）。`corpus.example.json` 占位值那条改用唯一空号 **`D-194`**，Datasheet 那条保持 `D-207`；条目内加编号说明，`docs/operations/corpus-ota.md` §2 的引用同步。`dev-notes/datasheet-mcp.md` 两处指向 Datasheet 条，未动。④`docs/operations/datasheet-mcp.md`/`mcp-servers/datasheet/README.md` 里 D16 与 todolist 编号的引用核对无误。 |
