@@ -366,11 +366,16 @@ describe("checkPaths：当前仓库与历史文件", () => {
     expect(dirty[1]).toContain("D-1");
   });
 
-  it("真实台账的 CRLF 文件也被扫到（防止换行归一化回归成假绿）", () => {
-    // `embedded-defects-todolist.md` 是 CRLF；不归一化时它的 20 条状态行会整批消失。
+  it("真实台账的 20 条状态行一条不漏（内容漂移会被这条抓到）", () => {
+    // 这条**不**断言文件是 CRLF。上一版断言了，于是它只在本机绿：
+    // `.gitattributes` 写的是 `eol=lf`，index 里全是 LF，CI 全新检出拿到的是
+    // LF；而本机工作区有 353 个文件早于该属性、检出后没再重新检出，仍是 CRLF。
+    // 断言工作区换行符 = 断言「这台机器检出过什么」，不是断言代码行为。
+    //
+    // CRLF 的解析能力由上一个合成用例（`join("\r\n")`）覆盖，那里不依赖磁盘状态。
+    // 这条留下的是另一半价值：台账真的被解析出 20 条状态行，而不是零条。
     const file = path.join(root, "docs", "ledgers", "embedded-defects-todolist.md");
     const raw = readFileSync(file, "utf8");
-    expect(raw.includes("\r\n")).toBe(true);
 
     expect(checkText(raw, file).statusLines).toBe(20);
   });
