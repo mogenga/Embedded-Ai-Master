@@ -29,7 +29,7 @@
 | `sessionFlags` | 改名/置顶/归档，写旁挂 `meta.json`（header 校验会丢弃未知字段） |
 | `archiveSessions` | 批量归档 `{ids: string[]}`，回 `sessions_archived{archived, failed:[{id, reason}]}` 并推一份 `sessions`。侧栏「移除工作区」就是它：工作区是渲染层按 `cwd` 分组**派生**的概念，没有独立清单，所以「移除」只能是「归档其中的会话」——**不删任何文件，也不删项目文件夹**。收 **id 列表而不是 cwd**：分组键 `normalizeCwd` 归渲染层所有，宿主再算一遍就是同一事实的第二份定义。逐个处理，某个失败不回滚其余，失败项带原因如实回报（R3） |
 | `deleteSession` | 删除会话目录；锁被占用时 409。拒绝删除当前打开的会话 |
-| `forkSession` | `forkSession(dir, atSeq)`，分叉后直接打开新会话 |
+| `forkSession` | `forkSession(dir, atSeq?)`，分叉后直接打开新会话。`atSeq` 可选（2026-11-07，BACKLOG 5.6）：缺省＝在日志末尾分叉（原行为）；给了就原样交给内核 `admin.fork(id, atSeq)`，**上界由内核校验**（它持有日志最后一条 seq，报「atSeq 必须是 0..N 之间的整数」），宿主只在本地拒绝「存在但不是非负整数」的取值并说明原因，不静默退回末尾。渲染层目前只发 `{id}`（`app.js` 的会话菜单），入口待接 |
 | `exportSession` | 读日志渲染 Markdown，经 `saveFile` 存盘 |
 | `revealArtifact` | 经 preload 的 `revealArtifact` 在文件管理器中选中；没有 preload 时会退化成一条含路径的 notice |
 | `setUiPreference` | 回显，localStorage 是事实源 |
@@ -55,13 +55,17 @@
 | `checkCorpusUpdate` | 请求更新源。**会触网**，只由用户点「检查更新」触发。走内核 `checkForUpdate`（403/404 一律 `check_failed` 并说明 OBS 的 GetObject 语义，**绝不当成已是最新**）。宿主在 fetch 外套一层：`latest.json` 的 200 响应 `clone()` 一份留着，但**只在 check 自己得出 `update_available` 时**才用——即那串字节已经被内核解析并验签过。缓存按 `updateBaseUrl + publicKeyPem` 指纹失效：改了任一项，旧清单就是关于另一个源的断言。回 `corpus_status{status, configPath}` |
 | `applyCorpusUpdate` | 装上次检查到的版本。**会触网**（逐个下载变更文件），只由用户点「立即更新」触发（契约 §6：不自动应用）。manifest 来源两级：缓存命中就直接用（不重取 `latest.json`，「更新到你看到的那个版本」因此是字面意义）；缓存没有或配置变了就走一次**带捕获的** `checkForUpdate`，由内核判断有没有可装的版本，失败时把内核自己的状态原因转述回去。两条路径得到的文本都交给 `applyUpdate`，它会**再解析并再验签一次**才落盘。进度来自内核 `onProgress`，逐文件转成 `corpus_update_progress{completed,total,path,action}`——没有定时器、没有估算百分比。结果 `corpus_update_result{ok, corpusVersion?, reason?, corpusVersionUnchanged?}`，成功后再推一次 `corpus_status` 并重新 `getKb`（刚被换掉的语料，树也得重读）。三条命令**共用一条队列**串行执行（`enqueueCorpus`）：它们共用 `state.json` 与 manifest 缓存，「点检查、再点更新」是正常操作，排队而不是拒绝 |
 | `setWorkspace` | 宿主登记目录后委托给 `setCwd` 的全部语义（运行中拒绝、仅新建会话生效）。登记是进程内的，重启失效 |
-| `searchFiles` | `@` 提及的文件名搜索。内核 `searchFilesByName`（复用 `walkFiles` 的惰性 BFS / 24 项忽略清单 / 跳符号链接），根＝宿主当前 `cwd`。分层排序：基名全等 → 基名前缀 → 基名包含 → 路径包含，层内短路径优先，上限 20 条。回 `file_matches{query, files, truncated, scanned}`，`truncated` 取「命中超上限」与「遍历被预算截停」之或。**目录不在结果里**（walker 只访问文件，D-184）；边界拒绝发 warn notice，但**必回一条带 query 的 `file_matches`** —— 弹窗只在该事件上释放 |
+| `searchFiles` | `@` 提及的文件名搜索。内核 `searchFilesByName`（复用 `walkFiles` 的惰性 BFS / 24 项忽略清单 / 跳符号链接），根＝宿主当前 `cwd`。分层排序：基名全等 → 基名前缀 → 基名包含 → 路径包含，层内短路径优先，上限 20 条。**目录与文件都返回**（D-184 ①，2026-11-07）：`walkFiles` 的 `visitDirectory` 在目录入队时报告，不额外 readdir，**不占扫描预算**——预算单位仍是文件数，与 `glob` / `grep` 同一语义。回 `file_matches{query, files, truncated, scanned, unavailable?}`，`files` 是 `{path, kind?}` 数组（**不是**字符串数组）：`kind: "dir"` 只在目录条目上出现，缺省即文件——弹窗据它给目录画尾随 `/`。`truncated` 取「命中超上限」与「遍历被预算截停」之或。旧 `dist/` 缺该导出时：每进程一条 warn notice，**且每条应答都带 `unavailable: true`**，弹窗就地显示「不可用 + 怎么修」（D-184 ②；只靠一次 notice 会被错过，空列表会被读成「没有匹配」）。边界拒绝发 warn notice，但**必回一条带 query 的 `file_matches`** —— 弹窗只在该事件上释放 |
 | `searchSessions` | 按标题/工作目录/id 搜索 |
 | `shutdown` | 宿主退出 |
 
 ### 已隐藏（前端不渲染入口，宿主回显式 `notice`）
 
-git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi`）、终端（`terminalOpen`/`terminalRun`/`terminalInterrupt`/`terminalRestart`）、worktree（`worktreeStart`/`worktreeMerge`/`worktreeDiscard`/`worktreeDiff`；**顶栏与面板已在 2026-10-22 整块删除**，用户点它只得到「桌面宿主暂不支持该命令」）、browser（`browserOpen`/`browserNavigate`/…）、memory / instructions / hooks、subagents、goals、检查点（`getCheckpoints`/`restoreCheckpoint`/`restoreFile`）、板卡控制（`getBoardState`）。
+git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi`）、终端（`terminalOpen`/`terminalRun`/`terminalInterrupt`/`terminalRestart`）、worktree（`worktreeStart`/`worktreeMerge`/`worktreeDiscard`/`worktreeDiff`；**顶栏与面板已在 2026-10-22 整块删除**，用户点它只得到「桌面宿主暂不支持该命令」）、browser（`browserOpen`/`browserNavigate`/…）、memory / instructions / hooks、板卡控制（`getBoardState`）。
+
+> **2026-11-07：subagents / goals / 检查点已从本清单移出——不是「隐藏」，是整套删除。**
+> 这三项与上列的 git / 终端不同：宿主与内核从来没有对应命令或事件（`grep -rn 'goal_start|subagent_start|checkpoints' src/ desktop/host/host.js desktop/renderer/protocol.js` 零命中），所以「隐藏入口」没有意义——被隐藏的是一个不存在的后端。渲染器里约 400 行实现（`case "goal_start"/"goal_round"/"goal_end"`、`case "subagent_start"/"subagents"/"subagent_activity"/"subagent_end"`、`case "checkpoints"`、`renderGoalBadge` / `renderSubagents` / `renderCheckpoints` / `startAutonomous` / `stopGoal` / `stopSubagent`、`#goal-badge`、`#tasks-root`、`#history-root` 与对应 i18n 键、CSS）已整块删除，按 D-185 的原则「不要保留『以后可能用』的半成品」。若将来实现子代理或自主循环，按新功能立项、重新设计事件契约，不要从 git 历史里捡回这半套。
+> 另注：`state.subagents` / `state.currentSubagent` 是渲染器状态，同批删除；设置页「用量」按来源分组里的 `subagent` 标签**保留**——那是用量统计的类别名，与这三套 UI 无关。
 
 > **2026-11-07 复核，三处已移出本清单**：
 > - **packs** 已于 2026-10-25 接通（`getPacks` / `getPackCatalog` / `installPack` / `installFromManifest` / `removePack` / `verifyPack` / `prunePacks`，设置页「工具链」页可见）。
@@ -73,6 +77,10 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 > **`skills` 已于 2026-10-22 第十六轮移出本清单**（见下表 `getSkills` / `saveSkill` / `removeSkill`）。它当初在这里的原因和别的项不一样：git/终端/worktree 那些是「内核有能力、前端没接」，技能是**内核根本没有这个能力**，所以这一轮先补内核再加前端入口。
 
 串口监视器**已在 2026-10-23 接通**，宿主九个 handler：`serialOpen` / `serialClose` / `serialStatus` / `serialClear` / `serialWrite` / `serialLine` / `serialBaud` / `serialEncoding` / `listSerialPorts`，工作台 tab 条常驻 Serial tab。面板与 agent 双通道共享数据但不共享口：面板持口并镜像环形缓冲到 `$HARNESS_HOME/serial/ring.json`，agent 经 `embed_serial`（serial server，2026-10-25 从 cubeide 拆出独立挂载）读镜像或开一次性捕获；同口冲突诚实报错 `port_busy`。
+
+> **2026-11-07 复核（BACKLOG 5.6 ①②，OPT-37）——两处的实测结论，宿主侧不是缺口：**
+> - **环形缓冲替换的可见性**：宿主的 `RING_MAX_LINES = 500` 溢出时 `session.dropped` 累加，**每次** `serial_lines` 都带这个累计值（`serial-bridge.js` `#flushPending`），`serial_snapshot` 也带（`serialStatus`）。渲染层把它赋给 `state.serial.dropped` 并画进状态行（`serial-dropped.test.js` 钉住赋值而非累加）——**用户是被告知的**，只丢渲染层自己的 4000 行上限（`SERIAL_MAX_LINES`）里靠 `serial_lines` 追上来的那一小段时，只有 `serial_lines` 之后的 `appendSerialLines` 截断不单独计数。结论：宿主的丢弃有路径到达状态行；`SERIAL_MAX_LINES` 自身的截断没有独立计数器（在 `app.js`，本轮未改）。
+> - **运行中改波特率**：宿主 `serialBaud` 走 `setBaud` → `port.update({baudRate})`（serialport 13 对已开端口重配置，不关端口），会话与环形缓冲保留、发 `mode:"reconfigured"`，之后的数据继续解码（`tests/desktop/serial-opt37.test.js` 断言）。**缺口在渲染层**：`#serial-baud` 在 `state.serial.open` 时被禁用，change 事件只记 `selectedBaud`，从不发 `serialBaud`——要接线需改 `app.js`（不在本域），宿主无需改动。
 
 > **2026-11-07 复核：实现已从 PowerShell 泵换成 `serialport` 13（原生模块）。** `desktop/host/serial-bridge.js` 现在是进程内 `SerialPort` 实例（`import { SerialPort } from "serialport"`），不再 spawn PowerShell；agent 侧的一次性捕获（`mcp-servers/serial/serial.ts`）仍用 PowerShell 泵，被杀软拦截时如实报错（D-206）。清单里漏写的 `serialLine` / `serialBaud` / `serialEncoding` 一并补上。
 

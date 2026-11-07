@@ -62,12 +62,12 @@
 
 | # | 项 | 来源 | 验收 |
 |---|---|---|---|
-| 5.1 | Datasheet 三处静默截断披露：`search()` 丢弃 `walkPdfFiles().truncated`、`hits.slice()` 无标记、超深目录不置位 | OPT-22 | 三个场景各有一条断言；返回体带截断标记 |
+| ~~5.1~~ | ~~Datasheet 三处静默截断披露~~ **已落地** | OPT-22 | `count` / `truncated` / `scanTruncated` 三字段；深度截停也置位；各场景有断言 |
 | 5.2 | `system_prompt_mismatch` 的人话出路（宿主识别错误码，解释「旧会话不能补提示词」） | D-221 建议 ② | 旧会话 + `systemPrompt` 时报中文可读原因，不是英文原文 |
-| 5.3 | 设置页 Esc / 遮罩丢未保存草稿 | OPT-39 | 有未保存改动时 Esc 先确认或提示；有测试 |
-| 5.4 | `@` 搜索的两处限制：目录不进结果、`dist/` 过期只告警第一条 | D-184 | 要么补目录，要么在界面上说明；不能再静默 |
-| 5.5 | 死 UI 清理：goals / subagents / 检查点（约 400 行渲染器代码 + 数十 i18n 键） | D-185 / OPT-38 | 内核无对应能力，整块删除；`check:js` 与测试全绿 |
-| 5.6 | 串口三个未接：500 行替换提示、运行中改波特率、分叉 `atSeq` | OPT-37 | 三处各有行为或明确拒绝 |
+| ~~5.3~~ | ~~设置页 Esc / 遮罩丢未保存草稿~~ **已落地** | OPT-39 | `requestClose()` 三条关闭路径共用：无草稿直接关（不弹确认），有草稿走 `confirmAction`；确认框改为模态 `<dialog>`（原先画在 `showModal()` 的设置页后面）；`tests/desktop/settings-draft-guard.test.js` 7 例 |
+| ~~5.4~~ | ~~`@` 搜索的两处限制~~ **已落地** | D-184 | 目录进结果（`kind: "dir"`，不占扫描预算）；`unavailable: true` 随每条应答下发 |
+| ~~5.5~~ | ~~死 UI 清理：goals / subagents / 检查点~~ **已落地** | D-185 / OPT-38 | 复核后确认两端零生产者，整块删除（8 个事件分支 + 5 个函数 + 7 个 DOM 节点 + 62 个 i18n 键 + 343 行 CSS）；`tests/desktop/dead-ui-goals-subagents-checkpoints.test.js` 7 例 |
+| ~~5.6~~ | ~~串口三个未接~~ **已落地** | OPT-37 | ① 面板裁行单独计数并显示（`droppedLocal`），不并进宿主的 `dropped`；② 打开时波特率选择不再禁用，改变即发 `serialBaud`（宿主 `mode:"reconfigured"` 保留会话）；③ `forkSession` 透传 `atSeq`，上界交给内核 |
 
 ---
 

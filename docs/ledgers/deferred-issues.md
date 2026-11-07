@@ -1735,7 +1735,13 @@
 - **影响**: 目前不可达（入口已隐藏），但它们是**约 400 行渲染器代码 + 数十个 i18n 键**，且会误导后续维护者以为内核支持。上一轮删 worktree 时正是因为同类判断。
 - **触发升级条件**: 实现子代理或自主循环；或做一次前端死代码清理。
 - **修复建议**: 与 worktree 同一处理原则——先确认内核确实没有对应能力（`grep -rn "subagent\|goal" src/` 为空），然后整块删除 UI 与 i18n；若计划实现，则登记为功能项而不是缺陷。**不要**保留「以后可能用」的半成品。
-- **状态**: 未解决（已登记，未删）。
+- **状态**: **已解决（2026-11-07，BACKLOG 5.5）**，按建议整块删除。
+  - **删除前的复核**（2026-11-07 重跑，全文匹配）：`goal_start` / `goal_round` / `goal_end` / `subagent_start` / `subagent_activity` / `subagent_end` / `"subagents"` / `checkpoints` / `getCheckpoints` / `restoreCheckpoint` / `restoreFile` / `stopSubagent` / `startGoal` / `startTaskLoop` / `stopGoal` / `resumeGoal` 在 `src/`、`desktop/host/host.js`、`desktop/renderer/protocol.js`、`desktop/main.js`、`desktop/preload.cjs` 中**逐条零命中**；`src/` 里唯一的 "goal" 命中是压缩提示词里的英文单词 "user goals"，不是事件。（本条原登记说 `app.js:5609` 的 `startAutonomous` 只被自己调用——复核属实，它连入口都没有。）
+  - **删除内容**：`case "checkpoints"` / `subagent_*` / `subagents` / `goal_*` / `recovery` 八个事件分支（`recovery` 同批删除：它是「上次进程死在 goal 循环里」的恢复卡，`"recovery"` 类型在宿主与内核同样零生产者，属于同一套功能）；`renderGoalBadge` / `renderSubagents` / `renderCheckpoints` / `startAutonomous` / `stopGoal` 监听；`state.goalRun` / `subagents` / `currentSubagent` / `checkpoints` / `checkpointRedo`；`index.html` 的 `#goal-badge`+`#goal-badge-text`、`#tasks-root`+`#tasks-list`、`#history-root`+`#checkpoint-list`；`i18n.js` 中英共 62 个键（`tabTasks` / `tabHistory` / `noTasks` / `taskMeta` / `subagent*` ×6 / `recovery*` ×2 / `noCheckpoints` / `checkpointTurn` / `restoreStart` / `restoreFile` / `redoSafe` / `restoreConfirm` / `goal*` 与 `loop*` ×11）；`styles.css` 中 `.tasks-*` / `.task-*` / `.subagent*` / `.checkpoint-*` / `.restore-start` / `.history-root` / `.goal-badge` / `.goal-summary` / `.recovery-*` 共 343 行。
+  - **未删**（有真实生产者/消费者）：`.notice.setup`（首启检查单）、`.sidebar-empty`（产物列表与侧栏共用）、`tabFiles` / `tabChanges`、`restore`（窗口「还原」按钮）、`usageSourceSubagent`（设置页用量按来源分组）。
+  - **`desktop/MATRIX.md`** 同步：这三项从「已隐藏」清单移出，改为「已整套删除」，并说明它们与 git/终端那类的区别（前者是内核有能力、前端没接；这三项是两端都没有）。
+  - **回归**：`tests/desktop/dead-ui-goals-subagents-checkpoints.test.js`（7 例，静态断言：协议类型表、`case` 分支、符号、DOM id、双语字典键、CSS 选择器，外加一条「`todos` / `background_result` 未被误删」的守卫）。静态而非行为断言的理由写在测试头注释：要证明的是「这条线根本不存在」，行为测试只能证明「某个事件还能画卡片」，证不了内核从不发它。
+  - **D-185 描述里一处不准确**：原文把 `renderCheckpoints` 说成「只由 `case "checkpoints"` 调用」，同时又说 `restoreCheckpoint` / `restoreFile` / `redo` 无 handler——两点都对，但漏了 `history` 页签早在 2026-10-26 就随 Board 面板一起从 `index.html` 删除，所以 `renderCheckpoints` 实际连一次都跑不到，不是「跑不到正确结果」而是「根本没有调用路径」。
 
 ### D-184 · `@` 文件搜索的两处已知限制：目录不出现在结果里，`dist/` 过期时只有第一条请求告警
 
@@ -1744,7 +1750,13 @@
 - **影响**: ①目录不能用 `@` 引用（可用文件树代替）；②旧 `dist/` 下 `@` 搜索静默失效，与「真的没匹配」在界面上无法区分。
 - **触发升级条件**: 用户报告 `@` 搜不到某个目录；或出现「搜不到但文件确实存在」的反馈。
 - **修复建议**: ①给 `walkFiles` 加一个可选的 `visitDirectory` 回调（或单独的 `searchEntriesByName`），预算口径要一并定义——目录不计入 `MAX_SCANNED_FILES` 会让截断语义变模糊。②宿主在设置页或启动 notice 里常驻一条「文件搜索不可用，请重新 build」，而不是只发一次 warn。
-- **状态**: 未解决（已登记）。本轮实现的功能本身可用，这两条是边界。
+- **修复**（2026-11-07，BACKLOG 5.4）:
+  - **①（行为改动）**：`walkFiles` 增加第 6 个可选参数 `visitDirectory(absolute, relative)`，在目录通过接受规则（非符号链接、不在忽略清单）**入队时**触发，不额外 readdir。`searchFilesByName` 用它把目录并入候选，结果项新增 `kind: "file" | "dir"`，与文件共用同一套分层排序和同一个 `limit` 截断。
+    - **预算口径定案：仍是文件数**。目录不增加 `state.scanned`，所以 `maxScanned` 买到多少文件覆盖不随目录密度变化；这与 `glob` / `grep` 的 `MAX_SCANNED_FILES` 语义一致。修复建议里担心的「截断语义变模糊」的解法是**不改变单位**，而不是把目录也计入——计入会让同一个预算的覆盖范围取决于项目里目录多少，`scanTruncated` 的含义反而更飘。预算截停时未发现的目录与文件走同一条披露：`scanTruncated → truncated`。
+  - **②（行为改动）**：`searchUnavailableWarned` 的「每进程一条 notice」保留（每按键一条警告会埋掉转录），但**每条 `file_matches` 都带 `unavailable: true`**（完整内核不带该字段）；渲染器 `renderMention(files, unavailable)` 在弹窗里就地显示橙色说明与修法（`mentionSearchUnavailable`，en/zh）。这是按需可见而不是常驻横幅：用户每次敲 `@` 都会看到，且不污染转录。
+  - **顺带修的交互**：弹窗只有说明、没有可选项时，keydown 不再吞掉 Enter/Tab——否则屏幕上没有任何可选行，消息却发不出去。
+- **验证**: `tests/server/files-api.test.ts`（目录排序 / 空目录 / 忽略目录 / 预算单位 / limit 合并截断）、`tests/desktop/search-files-unavailable.test.js`（复制 `dist/` 删一个导出，三次查询都带 `unavailable:true` 且 notice 仍只有一条）、`tests/desktop/mention-limits.test.js`（渲染器接线与两种语言文案）。RED 证据：逐个还原上述行为后，对应用例分别失败（撤销 `visitDirectory` 调用 → files-api 5 例红；把目录计入 `scanned` → 预算单位 1 例红；去掉 `unavailable` → host 1 例红；还原事件接线 / 删说明分支 / 去掉 keydown 守卫 → mention-limits 各 1 例红）。
+- **状态**: **已解决**（2026-11-07）。
 
 ### D-183 · `maxTurns` 按整段会话累计，用满 10 轮后每条新消息都立刻熔断
 

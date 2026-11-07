@@ -96,7 +96,7 @@
 | OPT-36 | 设置页侧栏 `role="tablist"` 补键盘模型 | 桌面 | `index.html:614`；`settings.js:5003-5018` 无方向键/roving tabindex | 中 | S |
 | OPT-37 | 串口三个未接：500 行替换提示、运行中波特率、分叉 `atSeq` | 桌面 | `app.js:3093-3110`、`host.js:4175`；`host.js:4223-4232` vs `app.js:4580-4581`；`host.js:3600-3617` 只传 `id` | 中 | S-M |
 | OPT-38 | 死 UI / 未挂载 builder 清理 | 桌面 | `index.html:456-589`；`app.js` 39 个无生产者事件分支；`settings.js` 六个 builder 未挂载 | 中 | M |
-| OPT-39 | 设置页 Esc/遮罩丢未保存草稿 | 桌面 | `settings.js:1491/5338/5120`；`app.js:6225-6227` | 中 | S |
+| OPT-39 | 设置页 Esc/遮罩丢未保存草稿 | 桌面 | `settings.js:1491/5338/5120`；`app.js:6225-6227` | 中 | S（**2026-11-07 已落地，见 §12.1**） |
 | OPT-40 | Electron `will-navigate` 守卫 + `openExternal` 白名单 | 桌面 | `desktop/main.js:311-334` 无守卫；`app.js:7788-7795` 只拦转录 | 中 | S |
 | OPT-41 | 深色高亮行对比度 4.13:1 → 换 `--text-secondary` | 桌面 | `styles.css:21/28/5335-5338`（原记录在已删除的 `docs/ui-polish-shared.md`） | 中 | S |
 | OPT-42 | 工程卫生：`.npmrc`、`.node-version`、dependabot、npm script 入口 | 工程 | `package-lock.json` 396 条 npmmirror；无 `.nvmrc`；无 `.github/dependabot.yml`；发布脚本无 npm 入口 | 中 | S |
@@ -231,6 +231,8 @@
 | OPT-14 | 压缩尾界与预算共用 `TokenMeter` 比例 | `src/context/compact.ts:208`（**部分**：冷启动仍按 UTF-16 ÷4，D-005） |
 | OPT-05~09 | 批次 1，见 §10 | — |
 | OPT-23 的 ①② | `kb_grep` 的 `fileCount` / `files` 分布 + 工具描述写死「命中是候选」 | ③（评测与阈值）未做，D-179 仍未解决 |
+| OPT-37 | 串口三个未接（2026-11-07，批次 5.6） | ① 面板 `SERIAL_MAX_LINES` 裁行改计 `droppedLocal` 并在状态行单独显示——此前宿主的 `dropped` 只覆盖自己的 500 行环，面板裁掉的从未计数；② 打开时不再禁用波特率下拉，改变即发 `serialBaud`（宿主侧本就支持 `port.update()` 原地重配置，`mode:"reconfigured"` 保留会话）；③ `forkSession` 透传 `atSeq`，上界仍由内核判定 |
+| OPT-39 | 设置页草稿守卫（2026-11-07，批次 5.3） | 三条关闭路径（Esc / 背景 / 侧栏返回）共用 `requestClose()`；无草稿不弹确认。**顺带修掉**：`confirmAction` 原为 `z-index:200` 的 `<div>`，在 `showModal()` 的设置页后面**完全不可见**——设置页里所有二次确认此前都看不见 |
 
 ### 12.2 仍未做（按当前优先级）
 
@@ -241,12 +243,13 @@
 | OPT-16 | 会话列表与标题懒读 | `titleOf` 仍读整份日志（`desktop/host/host.js:622`） |
 | OPT-17 | 宿主/协议文案 i18n | `host.js` 约百余条中文文案仍不参与 `locale` |
 | OPT-21 | Keil 工具面读写分拆 | 整个 `keil_debug` 仍是单一 `destructiveHint: true`（`mcp-servers/keil/tools.ts:1424`） |
-| OPT-22 | Datasheet 三处截断披露 | `search()` 仍丢弃 `walkPdfFiles().truncated`、`hits.slice()` 无标记（`mcp-servers/datasheet/service.ts`） |
+| ~~OPT-22~~ | ~~Datasheet 三处截断披露~~ **已落地（2026-11-07，BACKLOG 5.1）** | `search()` 现在带 `count` / `truncated` / `scanTruncated`；`walkPdfFiles()` 的深度截停也置位。`scanTruncated` 同时覆盖预算与深度两种成因（同名覆盖，靠描述说明） |
+| ~~OPT-39~~ | ~~设置页 Esc/遮罩丢未保存草稿~~ **已落地（2026-11-07，BACKLOG 5.3）** | `settings.js` 新增 `requestClose()`：`connectionDirty` 为假直接关、不弹确认；为真走既有 `confirmAction`（文案 `connDiscardConfirm` / `connDiscardOk` / `connDiscardCancel`，中英）。三条关闭路径共用它：Esc、模态对话框背景点击、侧栏「返回」。**顺带修掉一个更大的问题**：`confirmAction` 原来建的是 `z-index:200` 的 `<div>`，而设置页是 `showModal()`（顶层图层）——实测（Electron 44，命中测试）确认那个 `<div>` 画在设置页**后面**且拿不到焦点，所以删除规则/服务/技能/记忆/工具链包的二次确认在此之前都不可能被看见。现改为模态 `<dialog>`，第二个模态框正确叠在设置页之上。证据与测试见 D-185 同批的 `tests/desktop/settings-draft-guard.test.js` |
 | OPT-24 | 语料与查询集进 CI | `.gitignore:26-27` 仍排除，回归组在 CI 整组 skip（D-158） |
 | OPT-25 | 统一 `verify` 命令 | **2026-11-07 已落地**：`npm run verify` = typecheck + check:js + check:docs + test |
 | ~~OPT-26~~ | ~~覆盖率纳入 `mcp-servers/**`~~ | **2026-11-07 按实测收窄后落地**。全量纳入口径实测 78.43%（9979/12722），被 keil（42.65%）/ serial（19.45%）/ embedded（0%）拖住，而这三块的剩余路径必须连真实 uVision 或 COM 口。最终口径 = `src/**` + `kb` / `datasheet` / `probe`，实测 90.15%，闸门仍是 85%。理由与数字见 `docs/BACKLOG.md` 批次 4 的 4.4 与 D-157 的 2026-11-07 补充 |
 | OPT-28 | 文档事实源对齐 | 本轮已改 README / MATRIX / frontend-design / m2-roadmap / release 五份；`docs/specs/frontend-design.md` 的其余描述性偏差仍会随实现继续漂移，没有回归守住 |
-| OPT-29~44 | 内核加固、桌面打磨、工程卫生、BR-7 夜批 | 未动；OPT-37（串口三个未接）、OPT-39（设置页草稿）、OPT-40（导航守卫）、OPT-42（工程卫生）成本最低，适合下一批 |
+| OPT-29~44 | 内核加固、桌面打磨、工程卫生、BR-7 夜批 | 除 OPT-39 与 OPT-37 已落地（见 §12.1）外未动；OPT-40（导航守卫）、OPT-42（工程卫生）成本最低，适合下一批 |
 
 ### 12.3 本文件自身的约束
 
