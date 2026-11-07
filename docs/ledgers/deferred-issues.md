@@ -2434,10 +2434,14 @@
   `process.kill(pid, "SIGKILL")` 只要 **0–3 ms**。改为两条并列发出：taskkill
   先起（`/T` 靠活着的父进程枚举子进程，顺序不能反），再立刻 `process.kill`
   收掉父进程本身。轮询问的是「父进程死了没有」，于是从等满 1 s 变成毫秒级返回；
-  整棵树仍由 taskkill 在自己时间里收完。**连带效果**：全量 `--maxWorkers=4`
-  从 3 条偶发红（都是等真实子进程死的用例）变成 0 失败。
+  整棵树仍由 taskkill 在自己时间里收完。
   RED 证据：`git stash` 掉改动后 `tests/mcp-terminate-speed.test.ts` 的第二条
   报 `expected true to be false`（200 ms 时进程还活着）。
+  **效果边界（别读成「消灭了偶发红」）**：改完后 `tests/mcp-manager.test.ts`
+  在 `--maxWorkers=4` 下连跑多次全绿；但 `tests/background-terminal.test.ts`
+  的「超时终止整棵进程树」仍会在全量并发时红（单跑 38/38 绿）——它走自己的
+  进程管理，不经过 `McpManager`，这次的优化管不到它。AGENTS.md 记录的并发
+  偶发红仍未全部消除。
 
 ### D-226 · 仿真故障注入复用 `mem_write`，权限层无法单独门禁「注入」这一动作
 
