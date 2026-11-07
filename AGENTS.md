@@ -31,8 +31,9 @@
 
 - 测试：`npm test`（vitest run，不触网，约 3800 例 / 55 s）、`npm run coverage`（`lines ≥ 85%`，当前实测 90.15%）、`npm run test:desktop`（协议层与宿主）、`npm run test:mcp`（领域层）。
 - **覆盖率口径**：`src/**` + `mcp-servers/{kb,datasheet,probe}/**`，排除 `**/tests/**`。`keil` / `serial` / `embedded` **刻意不纳入**——剩余路径必须连真实 uVision（UVSOCK 4823）或真实 COM 口，纳入只能靠豁免或造假。**不纳入 ≠ 已验证**：这两块仍由 D-157 的真机验证跟踪。理由与实测数字见 `vitest.config.ts` 的 `coverage` 注释。
-- 静态检查：`npm run typecheck`；`npm run check:js`（`desktop/` 与 `scripts/` 的 JS 语法，补 `tsc` 的盲区）；`npm run check:docs`（markdown 本地链接与 `<img src>`，移动/改名文档后必跑）。**`npm run lint` 等同 `tsc --noEmit`**（D-006），不是独立检查。
-- **完整验证：`npm run verify`** —— typecheck + check:js + check:docs + test 一次跑完。交付前用它，而不是只跑 `npm test`。
+- 静态检查：`npm run typecheck`；`npm run check:js`（`desktop/` 与 `scripts/` 的 JS 语法，补 `tsc` 的盲区）；`npm run check:docs`（markdown 本地链接与 `<img src>`，移动/改名文档后必跑）；`npm run check:ledgers`（台账内部自洽）。**`npm run lint` 等同 `tsc --noEmit`**（D-006），不是独立检查。
+- **完整验证：`npm run verify`** —— typecheck + check:js + check:docs + check:ledgers + test 一次跑完。交付前用它，而不是只跑 `npm test`。
+- **`check:ledgers` 的能力边界**：只对齐台账**内部文字**（顶部复核注记 vs 状态行、状态块内前后判词）。它**不读 `src/` 与 `desktop/`**，所以绿灯只意味着「没有条目自相矛盾」，**不意味着每个状态对代码都为真**。后者仍需人工逐条核对代码——2026-11-07 的审计做的是后者。
 - 构建：`npm run build`（先清 `dist/`）、`npm run build:mcp`（先清 `dist-mcp/`）；两条各清各的目录，不要交叉清理。
 - 端到端（需环境，默认不在 CI）：`npm run probe:e2e`（真实 Renode）、`npm run diagnosis:e2e`、`npm run packs:e2e`、`npm run kb:regression`、`npm run kb:review`、`npm run datasheet:regression`、`npm run datasheet:corpus`。
 - 桌面形态：用户先执行 `npm --prefix desktop install`，再 `npm --prefix desktop run desktop`。**agent 不代为执行任何 install**（见下文禁令）。

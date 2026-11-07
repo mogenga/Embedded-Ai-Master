@@ -81,3 +81,80 @@
 - `npm run coverage` → exit 0，Lines 90.15%（8778/9737），无 "does not meet" 错误；表中无 keil / serial / embedded 模块行，无 `fixtures.ts`。
 - 注入 `+=` 后 `npx vitest run tests/desktop/serial-dropped.test.js` → 1 failed（`expected '+=' to be '='`）；还原后 2 passed，`git diff desktop/renderer/app.js` 为空。
 - `npm run verify` → check:js 40 文件、check:docs 177 文档/96 链接、`3789 passed | 5 skipped`。
+
+## 2026-11-07 · 台账状态守护（BACKLOG 4.5）
+
+**用户关键原话**
+- 「Build an automated guard that detects **internal contradictions in the ledger documents** — the class of bug that was found by hand on 2026-11-07 and fixed in commit `c8948a3`.」
+- 约束原话：「A check that always passes is worse than no check — it manufactures false confidence.」，以及「**Prove it goes red.**」与「**Measure false positives on the CURRENT tree.**」
+
+**关键产出**
+- `scripts/check-ledger-status.mjs`（+ `scripts/check-ledger-status.d.mts`）。扫 `docs/ledgers/*.md`，报两类**台账内部**矛盾：
+  1. **顶部注记 vs 状态行**：条目带有 `> **YYYY-MM-DD 复核：…**` / `> **YYYY-MM-DD 已解决**：…` 注记，注记里写 已解决 / 已作废 / 已失效 / 已把决定用断言钉住，而该条 `- **状态**:` 仍以 未解决 / 仍未解决 / 待修 / 未修 开头。
+  2. **状态行自相矛盾**：同一条状态块（状态行 + 缩进续行）里前后判词相反——「未解决…已解决」或「已解决…仍未解决」。
+  输出沿用 `check-doc-links.mjs` 的约定：`walk` + 同一份 `SKIP_DIRS`、中文摘要行 `check-ledger-status: N 个台账、M 条状态行，无自相矛盾`、有命中时 `file:line id [rule] detail` 逐条点名，exit 1 / 0。
+- 接线：`package.json` 新增 `check:ledgers`，并插进 `verify`（typecheck → check:js → check:docs → check:ledgers → test）；`.github/workflows/ci.yml` 的 quick job 在 `check:docs` 之后加同名 step。
+- `tests/check-ledger-status.test.ts`（26 条）：合成夹具覆盖每种必须抓的形状与每种不得误报的形状；另从 `9c2166e:docs/deferred-issues.md` **原样抄下** D-134 / D-189 / D-193 / D-224 / D-202~205 的条目文本作为真实历史夹具，注释标明出处与提交。
+- `docs/BACKLOG.md` 4.5 标完成并写明实际检查范围与边界。
+
+**检查范围（明确写了不做什么）**
+- 脚本头注释与 BACKLOG 都写明：**只台账内部一致**，不读 `src/` / `desktop/`，因此**无法**判断状态对代码是否为真。绿色只意味着「没有条目自相矛盾」。
+- 这条边界在测试里也被钉住：D-134 与 D-189 的历史片段**断言零命中**，注释说明它们属于「状态行 vs 代码」的矛盾，`c8948a3` 靠读 `host.js` / `query.ts` 才发现，本脚本按设计抓不到。
+
+**历史命中数（我自己测的，不是转述）**
+- 对 `git show 9c2166e:docs/deferred-issues.md` 抽出的 2465 行文件跑：**6 处**，exit 1。全部是规则 1（顶部注记 vs 状态行）：
+  - `D-193`（第 1607 行，注记「本条已失效」+ 状态行「未解决（已登记）」）
+  - `D-202` / `D-203` / `D-204` / `D-205`（第 1973 / 1984 / 1995 / 2006 行，注记「已作废」+ 状态行「未解决。」）
+  - `D-224`（第 2340 行，注记「2026-11-06 已解决」+ 状态行「未解决（既有行为，本批次未改）」）
+- **任务 brief 里给的清单我没照抄，是自己跑出来的**。核对结果：brief 列的 D-134 / D-189 与 D-221 **不在命中里**，原因见上「范围」——它们的矛盾对象是代码，不是正文。brief 列的 D-193 / D-202 / D-203 / D-204 / D-205 / D-224 **全部命中**。另有一条 `9c2166e` 里已带注记但不是矛盾的（D-212「两半都已落地」但明说「一次真实更新从未跑过」），按设计不报。
+
+**当前树命中数**
+- `node scripts/check-ledger-status.mjs` → `4 个台账、247 条状态行，无自相矛盾`，exit 0。**零命中**，因为 `c8948a3` 已把那 6 条的状态行改对。
+- 没有发现新的遗留矛盾。台账内容一行未改。
+
+**误报分析（逐条核对过的合法形状）**
+- **`部分解决`**：D-003 / D-005 / T-040 的形状是「开头就写明只完成一部分 + 后面列剩下的」。规则只在**开头是绝对判词**（未解决/已解决）时才判矛盾，且反证前若出现 `部分 / 大部分 / 前两项 / 第 N 项 / ①②③` 就按子项口径放过。
+- **引用别的条目**：`未解决；与 D-134 同根因（D-134 已解决）` 说的是另一条。两条豁免：直角引号/括注内的内容算引用；标记前 16 字符里紧贴 `D-xxx` 编号的也算引用。
+- **引用旧状态**：D-224 修好后的写法 `（原始记录：「未解决（既有行为）」是修复前写下的。）`。含 `原始记录 / 原始状态 / 原记录 / 原状态 / 修复前 / 此前 / 历史` 的括注算引用；`**原始状态**：仍未解决` 这种不带括号的，看标记前缀。
+- **`已作废` / `已失效` 不算与 `未解决` 反证**：台账惯例是「先说本轮未解决，再说对象已随某次删除作废」。这两词是历史终止而不是另一种并存的判词，报它会把 6 条历史条目里的 D-134 一族（`状态行内部`）全变成误报。**这是本轮唯一一处放宽度**：如果将来出现「已作废 + 已解决」并列，会漏报——判断依据是这两词在台账里从来没有和「已解决」混用过。
+- **CRLF**：`embedded-defects-todolist.md` 是 CRLF。第一版没归一化换行，`.*$` 匹配不到 `\r` 结尾的行，**20 条状态行整批消失**，表现为「零命中」——正是脚本最不该有的假绿。已加 `.replace(/\r\n?/g, "\n")`，并补了一条测试断言该文件的 `statusLines === 20`。
+- **规则 1 的已知残留风险（今天没有实例）**：注记只要提到 已解决 / 已作废 / 已失效 / 已把决定用断言钉住 就算「已了结」，不看它是否只覆盖某个子项。因此「注记说 X 子项已解决、状态行说主项未解决」这种合法写法会被误报。当前四个台账里没有这个形状（逐条核过 11 个同时含两组词的串块，全部是引用旧状态、子项口径或 `已作废` 终止）。若将来出现，先判断它是误报还是真矛盾，再决定是否要收窄——不要直接把条目改掉。
+- **当今树的全量核对**：把四个台账里**同时**出现「未解决/仍未解决/未修/待修」与「已解决/已作废/已失效/已修复/已把决定用断言钉住」的状态块全部列出来（11 处），逐条确认本脚本的处理正确：6 处是「未解决 + 已作废」（按 2.c 放过）、1 处是 D-134 的「桌面宿主侧已解决 / 内核侧仍未解决」（合法的分侧口径，开头不是绝对判词）、1 处是 D-221 的「前两项已解决」（子项口径）、1 处是「已知限制…未修复…已作废」、2 处是「已解决 + 引号里的旧状态」（`「待修」` / `「未解决（既有行为）」`）。**没有一处需要放过但会误报，也没有一处应该报却放过。**
+
+**被拒绝或纠偏的内容**
+- 拒绝把「顶部注记提到已解决，状态行仍写未解决」以外的形状扩大成宽泛的关键词扫描。第一版试过「状态块里出现任何已解决即命中」，实测在当前树上就有假阳性（D-005 的 `**仍未解决**的是「冷启动」` 是合法的分项说明），最终收窄为「只在开头判词与后续强反证之间判矛盾」。
+- 没有为了让 D-134 / D-189 变成命中而去改规则。它们是「状态行 vs 代码」的矛盾，任何基于台账文本的规则都只能靠猜，猜出来的是假阳性。选择在脚本头、BACKLOG 和测试注释三处把边界写清楚。
+- 没有在 `checkText` 里对「已解决开头」跳过规则 2。第一版写了 `if (resolved === undefined) continue;`，结果 D-901 形状（已解决…仍未解决）漏报；测试的自查发现后改成两个方向都判。
+
+**翻车与返工**
+- 第一版把整行（含 `- **状态**: ` 前缀）当判词正文传给 `contradictionOf`，于是 `startsWith("未解决")` 恒 false——历史文件「零命中」，看起来像「历史数据是干净的」。是手工跑第二遍才发现的：把正文剥出来之后立刻变成 6 条。**这个 bug 的形状就是假绿本身**，写进了测试（每条命中用例都断言 `detail` 里出现具体判词，而不只是 `problems.length > 0`）。
+- 第一版 `checkPaths` 忽略命令行参数，对着 `9c2166e` 的文件跑实际扫的是 `docs/ledgers/`。加了路径参数（默认仍是 `docs/ledgers`）。
+- 两处历史夹具的行号预期写错了（D-193 期望 9 实际 8，D-224 期望 10 实际 9），是目数行数时把手写夹具的头部行算多了。按真实夹具重算。
+
+**RED 证据（每种形状都真跑过）**
+- 形状 1（顶部注记 vs 状态行）：把当前树 D-193 的状态行改回 `未解决（已登记）。` 后 `node scripts/check-ledger-status.mjs .tmp/red-topnote.md` → exit 1，`check-ledger-status: 1 处状态自相矛盾（共 227 条状态行）` / `…:1609 D-193 [top-note] 第 1601 行注记写「**2026-11-06 复核：本条已失效。** …」，状态行仍以「未解决」开头`。还原后零命中。
+- 形状 2a（未解决…已解决）：`.tmp/red-statusline.md` → exit 1，`D-900 [status-line] 状态行以「未解决」开头，后面又写「已解决」`。
+- 形状 2b（已解决…仍未解决）：同一夹具 → `D-901 [status-line] 状态行以「已解决」开头，后面又写「仍未解决」`。
+- 同夹具里的 D-902（`部分解决`）与 D-903（引用 D-134）**未被点名**——误报豁免在同一份夹具里被同时验证。
+
+**验证（真实输出）**
+- `node scripts/check-ledger-status.mjs` → `check-ledger-status: 4 个台账、247 条状态行，无自相矛盾`，exit 0。
+- `node scripts/check-ledger-status.mjs .tmp/ledger-hist/deferred-issues.md`（`9c2166e` 抽取件）→ `6 处状态自相矛盾（共 227 条状态行）`，exit 1。
+- `npx vitest run tests/check-ledger-status.test.ts` → `26 passed (26)`。
+- `npm run typecheck` → exit 0；`npm run check:js` → `41 个文件全部通过`（新增的 `.mjs` + `.d.mts` 也在内）。
+- `npm run check:docs` → 通过（BACKLOG / dev-notes 的新增引用都能解析）。
+- `npm run verify` → exit 0，见下方命令输出。
+
+**主代理复核（2026-11-07，不采信代理自述）**
+
+- 亲自跑 `node scripts/check-ledger-status.mjs` → exit 0，4 个台账 / 247 条状态行 / 零命中。
+- 亲自抽取 `git show 9c2166e:docs/deferred-issues.md` 跑检查器 → **6 处命中**，exit 1，与代理报告的条目一致（D-193 / D-202 / D-203 / D-204 / D-205 / D-224）。
+- **核实了它对 brief 的纠正**：我在 brief 里要求抓到 D-134 / D-189，实测修复前这两条**没有顶部注记**，状态行原文就是 `未解决;…` / `未解决（已登记；…）`——矛盾在「状态行 vs 代码」，文本规则抓不到。**代理是对的，我的 brief 错了。** 它没有为迎合 brief 去加规则，而是把边界写进脚本头、BACKLOG、CI 注释、测试头四处。
+- 亲自跑 `npx vitest run tests/check-ledger-status.test.ts` → 26 passed；`npm run verify` → exit 0（check:js 41 文件、check:docs 97 链接、check:ledgers 绿、3815 passed / 5 skipped）。
+- 读过两个「假绿」的测试钉子：每条命中用例都断言 `detail` 含具体判词（不只是 `problems.length > 0`），CRLF 用例断言 `statusLines === 20`。这两条正好对应代理自述的两次翻车，是把教训钉住了，不是口头承诺。
+- 唯一声明的松化（`已作废`/`已失效` 不算与 `未解决` 反证）我接受：当前台账里没有「已作废 + 已解决」并列的实例，预先猜形状只会引入假阳性。
+
+**同步的文档**
+- `AGENTS.md`：静态检查段补 `check:ledgers`；`verify` 补全五项；新增一段写死能力边界（绿灯 ≠ 状态准确）。
+- `README.md`：命令表补 `check:ledgers`，`verify` 说明改为「上面五项」。
+- `docs/BACKLOG.md`：4.5 标完成并写明两类检查与边界。

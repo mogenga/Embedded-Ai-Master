@@ -279,7 +279,8 @@ npm run typecheck     # 类型检查
 npm run lint          # 目前等同类型检查（D-006）
 npm run check:js      # 对 desktop/ 与 scripts/ 每个 JS 做语法检查
 npm run check:docs    # 检查 docs 里所有本地链接与图片路径可达
-npm run verify        # 上面四项 + 全量测试，一次跑完
+npm run check:ledgers # 检查台账状态行与正文是否自相矛盾
+npm run verify        # 上面五项 + 全量测试，一次跑完
 npm run coverage      # 覆盖率（行覆盖阈值 85%，实测 90.15%）
 npm run build         # 内核
 npm run build:mcp     # 领域 MCP server
