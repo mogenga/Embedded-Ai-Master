@@ -1047,7 +1047,8 @@
 - **影响**: 会话日志被分享、归档或上传时可能泄露敏感片段;仅 `paramsDigest`/`paramsKeys` 无法避免 preview 中的明文。
 - **触发升级条件**: 接入含密钥/凭据/隐私参数的工具;日志需要外发、长期归档或跨团队共享;出现合规要求。
 - **修复建议**: 增加按工具/键的脱敏配置或默认关闭 preview;必要时只保留 digest/keys;对已知敏感键建立内置黑名单并写入文档。
-- **状态**: 未解决;需要脱敏策略。
+- **状态**: **已解决**（2026-11-07，批次 6.6，`eab3966`）。`summarizeParams` 增加按**键名**脱敏：切词（驼峰 + 下划线/连字符）后三档判定——末词是计数名词（`count`/`limit`/`length`/`size`…）→ 不脱敏；任一词命中强敏感词（`secret`/`password`/`credential`/`authorization`/`auth`/`apikey`/`private`/`cookie`）→ 脱敏；末词命中弱敏感词（`key`/`token`/`session`）→ 脱敏。值换成 `[redacted:<类型>[:<规模>]]`，**不保留前缀字符**（前几位往往正是 `sk-` / `ghp_` 这类密钥前缀）。键名保留（`paramsKeys` 本来就列全名，脱敏键名不增加保护）。`paramsDigest` 仍对原始参数计算。
+  **仍是已知边界**：① 没有用户自定义敏感词表（`PermissionConfig` 走 `z.strictObject`，加字段要同时改内核与桌面两端，少改一处会让整个会话启动失败）——已记为后续项；② `desktop/renderer/protocol.js` 的 `sessionMarkdown` 导出会把 `assistant` 事件的 `call.arguments` **原样**写进 Markdown，那不走 `paramsPreview`，脱敏覆盖不到，是另一条会泄露的路径。
 
 ### D-114 · 权限规则是声明式匹配而非沙箱,不替代 shell 黑名单、fs 路径安全或 OS 隔离
 
@@ -1074,7 +1075,8 @@
 - **影响**: 第三方或后续内部调用若绕过 `runSession`,权限规则与 `permission_decision` 审计会被整体跳过;安全边界只在入口处成立。
 - **触发升级条件**: 对外开放库 API;出现绕过入口的调用方;需要库层强制策略。
 - **修复建议**: 将 gate 设为 `executeBatch` 必填或提供显式命名的 unsafe 选项;在类型/导出面标注不安全入口;补充“直接调用必须显式选择”测试与文档。
-- **状态**: 未解决;内部 API 约定。
+- **状态**: **已解决**（2026-11-07，批次 6.5，`d3133f7` + `b21717a`）。`BatchOptions.permission` 与 `LoopCtx.permissionGate` 都改为与 `unsafeSkipPermission: true` 互斥的联合类型，省略字段在类型层不成立；`executeBatch` 与 `query` 入口各有一道运行时守卫（`assertPermissionLayerChoice` → `PermissionLayerChoiceError`，`code` 为 `permission_choice_required` / `permission_choice_conflict`），抛在任何工具查询、schema 校验与执行之前。管线自身的并发/超时/落盘测试改成显式 `unsafeSkipPermission: true`（57 + 35 处），把「这是故意的」写进代码。
+  **仍未变的边界**：`executeBatch` / `query` 依然不从 `src/index.ts` 导出，「内部 API」定位没变；本条解决的是「不可能在不知情下跳过」，**不是**「对外 API 也强制策略」。也不是安全隔离——D-114 仍然成立。
 
 ### D-117 · MCP 工具参数不应用 server `inputSchema` 默认值,参数规则只匹配实际提交值
 
@@ -1354,7 +1356,7 @@
 - **影响**: 设备序列号、绝对路径、令牌片段会出现在页面与日志中;截图、投屏或共享时泄露。
 - **触发升级条件**: 接入含凭据的工具;审批界面需要共享或合规审查。
 - **修复建议**: 按 D-113 增加键级脱敏或默认关闭 preview;卡片仅展示 `paramsKeys` 与 `paramsDigest`。
-- **状态**: 未解决;与 D-113 同根因,此处只登记 Web 审批的展示面。（2026-10-22 说明：浏览器形态虽已下线，但审批条在桌面形态同样渲染 `paramsPreview`，本条描述的展示面风险仍然成立。）
+- **状态**: **已解决**（2026-11-07，随 D-113 一起，`eab3966`）。脱敏发生在 `summarizeParams` 这一层，`paramsPreview` 的**所有**下游自动受益，不需要改展示面。逐层核对过（`gate.ts:223` 只算一次 → `PermissionRequest` → `approval_request` 事件 → `protocol.js` 纯搬运 → `renderPendingParams` 只读 `paramsPreview`、不看原始 `args`），没有任何一层从 `args` 重建摘要。（2026-10-22 说明：浏览器形态虽已下线，但审批条在桌面形态同样渲染 `paramsPreview`，本条描述的展示面风险仍然成立——直到本次修复。）
 
 ### D-148 · 单会话串行运行,运行中不能追加或取消
 
@@ -2366,6 +2368,38 @@
 
 ### D-225 · MCP 正常关闭不回收进程树，只对直接子进程发信号
 
+> **2026-11-07 复核（批次 6.1，`feat/batch6-safety`）：已解决（附一条对原文的修正）。**
+>
+> 落地见本节末尾的「2026-11-07 落地」段。**先修正原文的一条因果**：
+> 原文「先关 client 再 taskkill → 孙进程三种姿态全部存活」归因于**顺序**，
+> 这个归因不成立。真正的变量是**孙进程是否 `detached`**：
+>
+> - 非 `detached` 的后代在 Windows 上**本来就随父进程死**——Node/libuv 给每个
+>   spawn 建 kill-on-close 的 Job Object，后代继承。实测只杀父进程、不碰孙进程：
+>   非 detached **0/4 存活**，detached **4/4 存活**。父进程正常退出与被
+>   TerminateProcess 的结果一致。
+> - 所以当初「三种姿态全部存活」的观察，说明当时测的后代是 detached；而
+>   「先 taskkill 再关 client 能救」的观察，多半是 taskkill 顺带收掉了别的东西，
+>   不是顺序本身起的作用。
+> - 原文「fire-and-forget → 孙进程 10 s 仍在」同理：若后代非 detached，
+>   这个观察本身就无法复现；若 detached，则是 taskkill 没机会枚举（见下）。
+>
+> **本机实测的补充事实**（2026-11-07，与原文的 500–850 ms 一致）：
+> `taskkill /T /F` 从 spawn 到**真正开始枚举**约 **1 s**（对不存在的 pid 也要
+> 1.2–1.3 s，属进程启动 + 杀软扫描成本，不是遍历成本）。而真实 MCP server 收到
+> stdin EOF 后 **0–109 ms 就退出**。所以「起 taskkill → 等 spawn → 关父进程」
+> 对 **detached** 后代是结构性必输：taskkill 开始枚举时父进程早已不在。
+> 探针实测 detached 场景下 0/10/25/50/100/200 ms 头程全部失败，250 ms 起才稳定。
+>
+> 外部枚举（`tasklist /FI` 800–1225 ms、`[Diagnostics.Process]::GetProcesses()`
+> 654–789 ms、`Get-CimInstance` 1.8–3.6 s）全部远超「关闭额外开销 ≤ 50 ms」的
+> 预算，所以「先快照后代 pid、关完再补刀」也不可行。
+>
+> **另一条本机环境缺陷**（影响既有用例，与本项无关）：本机 `taskkill` 对直接
+> 子进程 8/8 返回「拒绝访问」，完全杀不掉；`process.kill(pid, "SIGKILL")` 3 ms
+> 秒杀。这解释了 `mcp-manager.test.ts` 的「timeout 后关闭 server」为何在干净
+> HEAD 上也稳定红。
+
 - **发现**: 2026-11-06，批次 2 / OPT-03（MCP 连接改会话级持有）时。
 - **现象**: `McpManager.close()` 走 `disposeClient()` → SDK 的 `client.close()`，后者只对**直接子进程**发 stdin.end / SIGTERM / SIGKILL。真正的进程树回收（Windows `taskkill /pid <p> /T /F`、POSIX `kill(-pid)`）只存在于 `terminateAndWait`，而它只被 `beginDispose` 调用——那是超时、取消、断线这类**异常**路径。正常收尾不经过它，于是 `mcp-servers/probe` 里 Renode/OpenOCD 拉起的孙进程可能活过宿主。
 - **影响**: 与设计稿 V6「OpenOCD / 串口句柄泄漏 = 真实事故」直接冲突。会话级持有（本批次已落地）把关闭次数从「每条消息一次」降到「切换会话 / 退出各一次」，但没有改变**关不干净**这个事实。
@@ -2375,7 +2409,25 @@
   - 把它接进 `close()` 后，`mcp-manager.test.ts` 从 ~26 s 涨到 ~49 s，全量并行下把 `background-terminal` 里本就贴着 10 s 超时的用例挤过线（单跑必绿、全量稳定红、`--maxWorkers=4` 全绿）。
 - **触发升级条件**: ① 出现宿主退出后残留 `openocd` / `renode` / 串口相关进程的实测；② 真机验收（D-157）开始跑，探针进程生命周期被纳入检查；③ 有成本更低的回收手段（例如给 MCP 子进程建独立进程组 / Job Object，让父进程退出即带走整组）。
 - **修复建议**: 不要简单地把 `await terminateAndWait` 塞回 `close()`——那只是把 850 ms 摊到每次关闭上。优先方向是**让 OS 替我们回收**：Windows 上 `spawn` 时用 Job Object（`CREATE_BREAKAWAY_FROM_JOB` 之外的做法需实测），POSIX 上用 `detached: true` + 进程组；两者都能做到「父死子随」，不需要关闭路径等待。实现在 `src/mcp/manager.ts` 的 transport 构造处（`new StdioClientTransport`），不在 close 路径上。
-- **状态**: 未解决。本批次只做了会话级持有；回收语义与 HEAD 一致（未改善，也未退化）。
+- **状态**: **已解决**（2026-11-07，批次 6.1，`b21717a` + `09f19ff`）。见下方落地段。
+
+**2026-11-07 落地**
+
+- `src/mcp/manager.ts` 新增 `reapProcessTree(pid, client)`：正常关闭时在收父进程
+  **之前**起 `taskkill /pid <p> /T /F`，等它 spawn（不等 exit，上限 200 ms），
+  再交还 SDK 关闭，`killer.unref()`。关闭的额外开销从「等 900 ms」降到
+  「等 spawn 8–28 ms」。
+- 未能确认回收时发 `dispose_incomplete` 状态事件（`McpStatusKind` 新成员）。
+  它同时补进了 `MCP_STATUS_PAYLOAD_KINDS` 白名单——**这一步最初漏了**，导致
+  `toMcpStatusPayload` 把事件当未知类型丢掉，上报是假绿地（`09f19ff` 修复，
+  并新增 `tests/mcp-status-whitelist.test.ts` 钉住两份清单一致）。
+- **POSIX 侧做不到整组回收，如实上报**：`StdioClientTransport` 的
+  `StdioServerParameters` 只有 `command/args/env/stderr/cwd/maxBufferSize`，
+  **不透传 `detached`**，父进程因此不是进程组组长，`kill(-pid)` 必然 ESRCH。
+  实现返回「POSIX 下无法按组回收后代」，而不是假装成功。
+- **`detached` 后代仍然收不到**，用一条**显式断言「它仍然存活」**的测试把这条
+  边界钉住，而不是让一条过时的「已知限制」悄悄绿着。真正的修法是让回收发生得
+  比 taskkill 的 1 s 启动开销更早（Job Object 在 transport 构造处），属未来工作。
 
 ### D-226 · 仿真故障注入复用 `mem_write`，权限层无法单独门禁「注入」这一动作
 

@@ -77,12 +77,15 @@
 
 | # | 项 | 来源 | 验收 |
 |---|---|---|---|
-| 6.1 | MCP 正常关闭回收整个进程树（Windows Job Object / POSIX 进程组，而不是在 `close()` 里 `await taskkill`） | D-225 | 宿主退出后无残留 `openocd` / `renode` / 串口进程；关闭耗时不变差 |
-| 6.2 | Electron `will-navigate` 守卫 + `openExternal` 白名单 | OPT-40 | 外部链接只能走白名单；有测试 |
-| 6.3 | 长任务超时出口：MCP 120s 硬顶 vs Keil 10min 构建（按工具配置单次上限） | OPT-13 | Keil 构建不再被 120s 掐断；其他工具仍受默认上限 |
-| 6.4 | 并发只读分支的残留执行屏障 | OPT-34 | 超时后同批后续调用不再启动 |
-| 6.5 | `executeBatch` / `query` 内部 API 绕过权限层的防护 | D-116 | 直接调用时也走权限层，或有明确文档说明边界 |
-| 6.6 | 审批摘要的敏感片段：`paramsPreview` 最多 120 字符 | D-113 / D-147 | 敏感参数（密钥、路径）有脱敏规则 |
+| ~~6.1~~ | ~~MCP 正常关闭回收整个进程树~~ **已落地**（`b21717a` + `09f19ff`） | D-225 | `reapProcessTree` 在收父进程前起 `taskkill /T /F`，只等 spawn（8–28 ms），不等 exit；未能确认时发 `dispose_incomplete`。**两处如实上报的边界**：POSIX 上 SDK 不透传 `detached`，进程组不可用；`detached` 后代仍收不到（有显式断言钉住）。台账里「顺序不可省」的因果被证伪，真正的变量是 detached |
+| ~~6.2~~ | ~~Electron `will-navigate` 守卫 + `openExternal` 白名单~~ **已落地**（`95f2b55`） | OPT-40 | `desktop/link-policy.js` 纯函数判定：外链只放行 http/https 且 hostname 非空；导航只放行回到 index.html 自己（`path.relative` 判定）。38 例测试 |
+| ~~6.3~~ | ~~长任务超时出口~~ **已落地**（`b21717a`） | OPT-13 | 硬顶 120s → 600s，默认仍 15s；`ToolDef.callTimeoutMs` 让工具抬高地板，用户显式配置更优先；种子里 keil 单独 600s。**注意挡路的是两道 120s**，管线层先触发 |
+| ~~6.4~~ | ~~并发只读分支的残留执行披露~~ **已落地**（`e96fb4c`） | OPT-34 | 并发分支没有「后续调用」可跳（`Promise.all` 已全部启动），验收改成**披露**：超时后仍在跑的调用带 `detail.mayStillBeRunning: true` |
+| ~~6.5~~ | ~~`executeBatch` / `query` 绕过权限层的防护~~ **已落地**（`d3133f7`） | D-116 | 权限语义必须显式二选一（`permission` 或 `unsafeSkipPermission: true`），类型层互斥 + 入口运行时守卫。**不是**「直接调用也走权限层」——unsafe 分支本来就不走 |
+| ~~6.6~~ | ~~审批摘要的敏感片段~~ **已落地**（`eab3966`） | D-113 / D-147 | 键名切词后三档判定，敏感值换成 `[redacted:<类型>[:<规模>]]`；`paramsDigest` 与 `paramsKeys` 不变。真实工具面 31 个参数名误伤 0 |
+
+> [!WARNING]
+> **6.1 的两条残余不是「已完成」的一部分**：`detached` 后代在 `close()` 之后仍会存活，POSIX 下列表回收做不到。两者都有**显式断言**（不是注释里的一句「已知限制」），所以将来修好时测试会红、提醒改断言。真正的修法是把回收放到 transport 构造处（Job Object），比 taskkill 的 1 s 启动开销更早。
 
 ---
 
