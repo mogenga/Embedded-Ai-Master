@@ -368,6 +368,77 @@ describe("executeBatch 并发策略", () => {
     expect(results[1].result.code).toBe("duplicate_call_id");
     expect(results[1].result.evidence).toBe(false);
   });
+
+  it("并发批次超时 → 结果披露残留执行，且不跳过其余调用", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    const reg = new ToolRegistry([
+      makeTool<{}>("never", () => new Promise<ToolResult>(() => {}), true),
+      makeTool<{}>("quick", async () => ok("quick"), true),
+    ]);
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("1", "never"), call("2", "quick")],
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        timeoutMs: 10,
+      },
+    );
+
+    // 并发分支没有串行屏障可用：所有调用已经同时启动，跳不过谁。
+    expect(results[1].result).toMatchObject({ isError: false, code: "ok", text: "quick" });
+    // 但「管线返回时这条调用仍在跑」必须能从结果里读出来（detail 是既有通道，
+    // 经 query 原样写进 tool_result 事件），不能静默消失。
+    expect(results[0].result).toMatchObject({ isError: true, code: "tool_timeout" });
+    expect(results[0].result.detail).toMatchObject({ mayStillBeRunning: true });
+    // 没有残留的调用不该带这个标记。
+    expect(results[1].result.detail).toBeUndefined();
+  });
+
+  it("并发批次一条启动回调抛错 → 整体拒绝，但兄弟调用不会被取消", async () => {
+    const { session } = makeSession(path.join(tmp, "session"));
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let finished = false;
+    const reg = new ToolRegistry([
+      makeTool<{}>(
+        "a",
+        async () => {
+          markStarted();
+          await released;
+          finished = true;
+          return ok("a");
+        },
+        true,
+      ),
+      makeTool<{}>("b", async () => ok("b"), true),
+    ]);
+    const onToolStarted = vi.fn(async (batchCall: BatchCall) => {
+      if (batchCall.id === "2") throw new Error("started boom");
+    });
+
+    await expect(
+      executeBatch(session, reg, [call("1", "a"), call("2", "b")], {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        onToolStarted,
+      }),
+    ).rejects.toThrow("started boom");
+
+    // 拒绝不会取消兄弟调用：它照常开始执行，而调用方拿不到任何结果。
+    await started;
+    expect(finished).toBe(false);
+    release();
+    await vi.waitFor(() => expect(finished).toBe(true));
+  });
 });
 
 describe("executeBatch 错误与取消", () => {

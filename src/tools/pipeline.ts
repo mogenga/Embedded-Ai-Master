@@ -651,9 +651,19 @@ export async function executeBatch(
         if (entry.kind === "final") return entry.result;
         const outcome = await executeAuthorized(session, entry.call, entry.authorized, opts);
         const result = await finalizeResult(outcome.result, entry.call.id, opts.artifactDir);
+        // 并发分支落地不了串行屏障(所有调用已经同时启动,没有「后续」可跳),
+        // 但超时/中止后仍在跑的调用必须让调用方看得见,不能静默丢掉 pending。
+        // 用既有的 detail 通道披露:query 原样写进 tool_result 事件,与 shell 的
+        // abortEscalated/terminateFailed 同一个先例。措辞是 may 而非 is——它可能
+        // 在这批其它调用收尾期间结束。带 pending 的结果必然是 executeAuthorized
+        // 直接构造的 tool_timeout/tool_aborted 失败,本身不携带 detail,故直接赋值。
+        const disclosed =
+          outcome.pending === undefined
+            ? result
+            : { ...result, detail: { mayStillBeRunning: true } };
         return {
           id: entry.call.id,
-          result: { ...result, evidence: entry.evidence && result.isError !== true },
+          result: { ...disclosed, evidence: entry.evidence && disclosed.isError !== true },
         };
       }),
     );
