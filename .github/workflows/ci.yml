@@ -53,6 +53,13 @@ jobs:
       - name: Check local doc links
         run: npm run check:docs
 
+      # 台账的状态行与正文会静默分叉：2026-11-07 的手工审计（c8948a3）在
+      # docs/deferred-issues.md 里改掉了一批「顶部注记说已作废/已解决、状态行还写
+      # 未解决」的条目，而没有任何测试会因此变红。这一步只对齐台账内部的文字，
+      # 不读 src/ 与 desktop/——绿灯不等于每个状态对代码都为真。
+      - name: Check ledger status consistency
+        run: npm run check:ledgers
+
   offline:
     name: build + test (offline)
     runs-on: windows-latest
