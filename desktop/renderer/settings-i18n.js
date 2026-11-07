@@ -216,6 +216,13 @@ export const settingsStrings = {
     connAddProvider: "Add model service",
     connNewProvider: "New model service",
     connUnsaved: "Unsaved changes",
+    /* OPT-39: the model-services page is the only one with a Save step, so it
+       is the only one where closing the dialog can throw work away. The
+       question names what is lost and that it cannot be recovered. */
+    connDiscardConfirm:
+      "Close Settings and discard the unsaved changes on Model services? They have not been written to providers.json, and closing cannot undo this.",
+    connDiscardOk: "Discard and close",
+    connDiscardCancel: "Keep editing",
     connExpandNamed: "Expand {name}",
     connCollapseNamed: "Collapse {name}",
     connRequired: "Required",
@@ -726,6 +733,11 @@ export const settingsStrings = {
     connAddProvider: "添加模型服务",
     connNewProvider: "新建模型服务",
     connUnsaved: "有未保存的改动",
+    /* OPT-39：模型服务是唯一有「保存」步骤的页，也是唯一会在关闭对话框时
+       丢工作的页。问题里写明丢的是什么、以及关闭后无法撤销。 */
+    connDiscardConfirm: "关闭设置并丢弃「模型服务」里未保存的改动？这些改动还没有写进 providers.json，关闭后无法找回。",
+    connDiscardOk: "丢弃并关闭",
+    connDiscardCancel: "继续编辑",
     connExpandNamed: "展开 {name}",
     connCollapseNamed: "收起 {name}",
     connRequired: "必填",

@@ -5135,6 +5135,42 @@ function openSettings(tab = "general") {
   });
 }
 
+/**
+ * Close Settings — but not over an unsaved draft (OPT-39).
+ *
+ * The model-services page is the only page with a Save step, so it is the only
+ * page where closing can throw work away. Every close path goes through here —
+ * Escape, a click on the dialog's backdrop, and the rail's back button — so no
+ * one of them can be the one that quietly discards a half-typed provider card.
+ *
+ * No draft means no question: a confirmation with nothing behind it would warn
+ * about a loss that cannot happen, and would put an extra click in front of the
+ * overwhelmingly common case. Resolves false when the close was refused, so a
+ * caller with more to do knows to stay put.
+ */
+async function requestClose() {
+  if (!connectionDirty) {
+    closeModal(settingsDialog);
+    return true;
+  }
+  const s = S();
+  // Reuses the shared confirmation rather than inventing a second prompt: it
+  // already traps focus, cancels on Escape and on a backdrop click, and is the
+  // same dialog the other destructive actions on this page use.
+  const discard = await confirmAction(s.connDiscardConfirm, {
+    danger: true,
+    ok: s.connDiscardOk,
+    cancel: s.connDiscardCancel,
+  });
+  if (!discard) return false;
+  // The dialog is closing, and the draft lived in a DOM that is about to be
+  // replaced; the flag has to drop with it or the next open would think a
+  // draft from this visit still exists.
+  connectionDirty = false;
+  closeModal(settingsDialog);
+  return true;
+}
+
 /** Build one pane on demand; each page owns its own state and refresh. */
 function selectSettingsTab(tab) {
   const pages = settingsPages();
@@ -5183,7 +5219,8 @@ $("settings-nav").addEventListener("click", (event) => {
   if (button) selectSettingsTab(button.dataset.settingsTab);
 });
 
-$("settings-back").addEventListener("click", () => closeModal(settingsDialog));
+// Same guard as Escape and the backdrop: the back button is a close path too.
+$("settings-back").addEventListener("click", () => void requestClose());
 
 /**
  * The rail foot names the open folder and opens the General page.
@@ -5641,6 +5678,8 @@ function basename(path) {
     handleEvent,
     applyLocaleChange,
     refreshVersion,
+    /** The guarded close the app shell's Escape chain and backdrop click use. */
+    requestClose,
     close: () => closeModal(settingsDialog),
     isOpen: () => !settingsDialog.hidden,
     handleKey: (event) => {
