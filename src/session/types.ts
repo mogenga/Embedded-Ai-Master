@@ -98,7 +98,15 @@ export type McpStatusPayloadKind =
   | "config_failed"
   | "config_warning"
   | "project_config_skipped"
-  | "tool_name_renamed";
+  | "tool_name_renamed"
+  /**
+   * 正常关闭时进程树回收未确认（D-225）。
+   *
+   * 它不是「调用失败」也不是「连接失败」：连接已经用完了，只是「关干净了没有」
+   * 答案是「不确认」（R3：不许把没确认的事说成成功）。**必须在这份白名单里**，
+   * 否则 `toMcpStatusPayload` 会把事件当未知类型丢掉，上报变成假绿地。
+   */
+  | "dispose_incomplete";
 
 // 运行时白名单:type 只是编译期约束,日志/SSE 的内容不可信,必须有一处可被代码读取的清单。
 export const MCP_STATUS_PAYLOAD_KINDS: readonly McpStatusPayloadKind[] = [
@@ -113,6 +121,7 @@ export const MCP_STATUS_PAYLOAD_KINDS: readonly McpStatusPayloadKind[] = [
   "config_warning",
   "project_config_skipped",
   "tool_name_renamed",
+  "dispose_incomplete",
 ];
 
 export interface McpStatusPayload {

@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import { McpServer } from "@modelcontextprotocol/server";
 import { StdioServerTransport } from "@modelcontextprotocol/server/stdio";
@@ -10,6 +11,25 @@ if (process.env.PID_FILE) {
 
 if (process.env.PID_LOG) {
   fs.appendFileSync(process.env.PID_LOG, `${process.pid}\n`, "utf8");
+}
+
+// 孙进程夹具（D-225）。
+//
+// `GRANDCHILD_DETACHED=1` 时才用 `detached: true`。默认**不** detached，
+// 因为这是仓库里领域 server 的真实形态：`probe/renode.ts`、`serial/serial.ts`、
+// `keil/uvsock.ts` 的 `spawn` 都没有 `detached`，所以孙进程与 server 同属一个
+// libuv 的 kill-on-close Job Object，父进程一退它们就跟着走。
+//
+// 刻意保留 detached 开关是为了能测另一侧：detached 的后代**不会**随父进程死，
+// 而 `taskkill /T` 又依赖活着的父进程枚举，所以这类后代在「关闭不变慢」的
+// 预算内收不了——测试要能把这条边界钉住，而不是假装它不存在。
+if (process.env.GRANDCHILD_PID_FILE) {
+  const grandchild = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
+    stdio: "ignore",
+    detached: process.env.GRANDCHILD_DETACHED === "1",
+  });
+  fs.writeFileSync(process.env.GRANDCHILD_PID_FILE, String(grandchild.pid), "utf8");
+  grandchild.unref();
 }
 
 function textResult(text) {
