@@ -4614,7 +4614,19 @@ function buildToolsPage() {
       if (pack.manifest.license?.url) {
         const link = el("button", "link-button", s.packLicence);
         link.type = "button";
-        link.addEventListener("click", () => api.openExternal?.(pack.manifest.license.url));
+        // The main process refuses anything that is not http(s) and answers
+        // `{ok:false, reason}`; it also sends a transcript notice, but this
+        // page is a `showModal()` over the transcript, so that notice lands
+        // behind the dialog. The refusal has to be drawn here or the click
+        // looks like a dead button (R3).
+        link.addEventListener("click", async () => {
+          // `Promise.resolve` because `api.openExternal` is optional: a build
+          // without it must not turn a click into a TypeError.
+          const answer = await Promise.resolve(api.openExternal?.(pack.manifest.license.url));
+          if (answer?.ok !== false) return;
+          state.packError = answer.reason ?? "";
+          state.renderPackPage?.();
+        });
         meta.appendChild(link);
       }
       main.appendChild(meta);

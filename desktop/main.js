@@ -34,6 +34,14 @@ import {
   trayMenuTemplate,
   writeCloseBehavior,
 } from "./close-behavior.js";
+import {
+  blockedExternalText,
+  blockedNavigationText,
+  blockedRevealText,
+  checkExternalUrl,
+  checkNavigationTarget,
+  checkRevealTarget,
+} from "./link-policy.js";
 import { createUpdater } from "./updater.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -373,6 +381,52 @@ function startWindow(options = {}) {
     if (!win.isDestroyed()) win.webContents.send("host-event", message);
   };
 
+  /**
+   * The window draws `index.html` and nothing else.
+   *
+   * Without this, a click on an `<a href>` the renderer did not intercept (the
+   * transcript handler opens http(s) externally, but a `file:` link, a
+   * `mailto:` or a link inside a previewed artifact is not intercepted) or any
+   * `window.location` write from model-influenced content navigates the window
+   * away from the app: the preload survives, the DOM becomes whatever that
+   * document says, and there is no back button to a page that no longer
+   * exists. The decision is `checkNavigationTarget`; this handler applies it.
+   *
+   * A refused navigation is reported (R3): a link that did nothing looks
+   * exactly like a broken app. `javascript:` / `data:` are the exception —
+   * they cannot run in this window (the CSP has no `unsafe-inline`), and one
+   * notice per attempt is noise a page could produce at will.
+   */
+  win.webContents.on("will-navigate", (event) => {
+    // `event.url`, not the deprecated positional second argument: the event
+    // object is the documented shape, and the trailing args (url, isInPlace,
+    // isMainFrame, …) exist only for backward compatibility.
+    const decision = checkNavigationTarget(event.url, RENDERER);
+    if (decision.ok === true) return;
+    event.preventDefault();
+    // Parsed scheme, not `url.startsWith`: `java\nscript:` is one scheme to the
+    // parser and two strings to a prefix test.
+    if (decision.protocol === "javascript:" || decision.protocol === "data:") return;
+    sendToRenderer({
+      type: "notice",
+      level: "warn",
+      text: blockedNavigationText(event.url, decision.reason),
+    });
+  });
+
+  /**
+   * No second window, ever.
+   *
+   * `window.open`, `target="_blank"` and shift+click are all "the page asked
+   * for a window", and this app never draws one: one window, one host, one
+   * session (D-148). Denying outright rather than forwarding http(s) to
+   * `shell.openExternal`: a link the renderer means to open already has a
+   * visible route (the transcript click handler, which checks the scheme and
+   * reports a refusal), and routing `window.open` to the OS would give the
+   * same gesture two behaviours depending on how the link was marked up.
+   */
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+
   let host = null;
   let hostCwd = options.cwd ?? startCwd;
   let sessionToLoad = options.loadSession ?? null;
@@ -520,13 +574,57 @@ function startWindow(options = {}) {
   });
 
   ipcMain.handle("app-version", () => pkg.version ?? "0.0.0");
-  ipcMain.handle("open-external", (_event, url) => shell.openExternal(String(url)));
+
+  /**
+   * Open a link in the user's browser — and nothing else.
+   *
+   * `shell.openExternal` launches whatever program the OS associates with the
+   * scheme, so an unchecked string from the renderer (`file:`, `ms-msdt:`,
+   * `smb:`, a custom scheme) is a program launch, not a page load. The check
+   * is `checkExternalUrl`; only http(s) with a host passes, and the **parsed**
+   * href is what the shell receives so the check and the launch see the same
+   * bytes.
+   *
+   * The answer reaches the renderer (`{ok, url}` or `{ok:false, reason}`) and
+   * a refusal is **also** sent as a `notice` on the event channel. Most call
+   * sites (`app.js` transcript links, the PR button, `open_external` events)
+   * ignore the return value, and a click that silently does nothing is the
+   * failure mode R3 rules out — the notice is how those see it. The pack
+   * licence button in `settings.js` does read the answer, because that page is
+   * a modal over the transcript and draws the refusal in place.
+   */
+  ipcMain.handle("open-external", async (_event, url) => {
+    const decision = checkExternalUrl(url);
+    if (decision.ok === false) {
+      sendToRenderer({ type: "notice", level: "warn", text: blockedExternalText(url, decision.reason) });
+      return { ok: false, reason: decision.reason };
+    }
+    try {
+      await shell.openExternal(decision.url);
+      return { ok: true, url: decision.url };
+    } catch (error) {
+      // The OS may have no handler, or refused it. Reporting the failure is
+      // the difference between "nothing happened" and "nothing can".
+      const reason = `系统未能打开该链接：${error instanceof Error ? error.message : String(error)}`;
+      sendToRenderer({ type: "notice", level: "warn", text: blockedExternalText(url, reason) });
+      return { ok: false, reason };
+    }
+  });
+
   // Reveal a produced artifact rather than opening it: an artifact can be a
   // binary capture, and handing it to its default application would launch a
-  // program the operator did not ask for.
-  ipcMain.handle("reveal-artifact", (_event, target) =>
-    shell.showItemInFolder(String(target ?? "")),
-  );
+  // program the operator did not ask for. The path still has to be a path —
+  // `showItemInFolder` on a relative path is a silent no-op, and on a URL
+  // string it reveals something nobody asked for.
+  ipcMain.handle("reveal-artifact", (_event, target) => {
+    const decision = checkRevealTarget(target);
+    if (decision.ok === false) {
+      sendToRenderer({ type: "notice", level: "warn", text: blockedRevealText(target, decision.reason) });
+      return { ok: false, reason: decision.reason };
+    }
+    shell.showItemInFolder(decision.path);
+    return { ok: true, path: decision.path };
+  });
   ipcMain.handle("notify", (_event, payload) => {
     if (Notification.isSupported()) {
       new Notification({ title: String(payload?.title ?? "Embedded AI Master"), body: String(payload?.body ?? "") }).show();
