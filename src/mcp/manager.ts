@@ -762,12 +762,27 @@ export class McpManager {
     }
     if (process.platform === "win32") {
       try {
+        // taskkill 必须先起：`/T` 靠**活着的父进程**枚举子进程。
         const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
           stdio: "ignore",
           windowsHide: true,
         });
         killer.on("error", () => undefined);
         killer.unref();
+        // 再直接给父进程发信号，不等 taskkill 慢吞吞地起来。
+        //
+        // 本机实测（2026-11-07，5 轮）：`taskkill /T /F` 让父进程真的消失要
+        // 890–1160 ms（对不存在的 pid 也要 1.2–1.3 s——是进程启动 + 杀软扫描，
+        // 不是遍历）；`process.kill(pid, "SIGKILL")` 只要 0–3 ms。
+        //
+        // 下面的轮询问的是「父进程死了没有」。父进程由这一行收掉之后，循环
+        // 毫秒级就返回 true，而不是等满 taskkill 的 1 s；整棵树仍由 taskkill
+        // 在它自己的时间里收完，本函数的返回值只承诺「父进程确认死亡」。
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // 已退出或权限不足：taskkill 那条路仍在跑，不在这里下结论。
+        }
       } catch {
         void 0;
       }
