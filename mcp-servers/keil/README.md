@@ -75,4 +75,4 @@ npx vitest run mcp-servers/keil
 3. **只移植了 Keil 生态**：Zephyr / ESP-IDF / PlatformIO / Arduino / Cargo / CMake / Make 的工程识别与构建分支未迁移。
 4. **UVSOCK 是未公开协议**：偏移与状态码来自 MDK 5.43a 的实测报文，`UNSUPPORTED_ON_MDK_5_43` 表记录了 14 条不可用操作及其原因；换 MDK 版本需要重新验证。
 
-细节见 `docs/keil-headless.md`，限制登记见 `docs/deferred-issues.md`。
+细节见 `docs/operations/keil-headless.md`，限制登记见 `docs/ledgers/deferred-issues.md`。

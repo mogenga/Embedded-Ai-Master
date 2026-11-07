@@ -8,7 +8,7 @@
 
 ## 1. 假设
 
-H1-H7 定义见 [`docs/rag-vs-agentic-search-todo.md`](../../../docs/rag-vs-agentic-search-todo.md) §3；本实验不重新定义。
+H1-H7 定义见 [`docs/ledgers/rag-vs-agentic-search-todo.md`](../../../docs/ledgers/rag-vs-agentic-search-todo.md) §3；本实验不重新定义。
 
 ## 2. 主指标与判定
 

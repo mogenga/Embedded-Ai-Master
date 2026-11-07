@@ -69,7 +69,7 @@ cd desktop && HARNESS_HOME=/tmp/harness-test-limit ./node_modules/.bin/electron 
 
 1. `npm run check:js`、`npx vitest run tests/desktop`、`npm test` 全绿。若有测试断言了被删的行/按钮/命令，按新行为更新并在报告里列出。
 2. Electron 实测（隔离 HARNESS_HOME）：「行为」页不再有运行上限三行；系统提示仍在且能保存；权限预设仍在且能切换；保存后 `run.json` 里的 `maxTurns` 等旧值**未被改动**。
-3. 更新 `docs/frontend-design.md` 的行为页小节、`dev-notes/页面优化.md` 追加一节（用户原话、关键产出、翻车与返工）。
+3. 更新 `docs/specs/frontend-design.md` 的行为页小节、`dev-notes/页面优化.md` 追加一节（用户原话、关键产出、翻车与返工）。
 
 ## 交付
 

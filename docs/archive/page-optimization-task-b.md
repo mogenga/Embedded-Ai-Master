@@ -94,7 +94,7 @@ cd desktop && HARNESS_HOME=/tmp/harness-test ./node_modules/.bin/electron main.j
    - 对话页模型面板左栏出现两项（DeepSeek 图标 + 两个显示名称），点击切换右栏模型列表。
    - 只有一张卡时左栏消失。
    - 深色 / 浅色主题、1440 与 1100 宽度下无溢出。
-4. 顺手更新：`docs/frontend-design.md`（设置页与模型面板两节）、`docs/page-optimization-todolist.md`、`desktop/MATRIX.md` 若有能力表变化、`dev-notes/页面优化.md` 追加一节（用户原话、关键产出、翻车与返工）。
+4. 顺手更新：`docs/specs/frontend-design.md`（设置页与模型面板两节）、`docs/archive/page-optimization-todolist.md`、`desktop/MATRIX.md` 若有能力表变化、`dev-notes/页面优化.md` 追加一节（用户原话、关键产出、翻车与返工）。
 
 ## 交付
 

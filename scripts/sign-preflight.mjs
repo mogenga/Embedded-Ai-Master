@@ -5,7 +5,7 @@
  * **为什么需要它**：没有证书时 electron-builder 只打印一行
  * `no signing info identified, signing is skipped`（`DEBUG` 才看得到），构建照样退出 0、
  * 安装包照样产出——**签名被静默跳过，而日志里仍有 `signing with signtool.exe` 那行**
- * （见 `docs/code-signing.md` §7）。令牌没插、证书过期、指纹填错，全都表现为「打包成功、
+ * （见 `docs/operations/code-signing.md` §7）。令牌没插、证书过期、指纹填错，全都表现为「打包成功、
  * 产物未签名」，要等 SmartScreen 警告或自动更新报 `ERR_UPDATER_INVALID_SIGNATURE` 才发现。
  * 本脚本把这一步提前成一条命令：**先问「现在能签吗」，再打包**。
  *
@@ -224,7 +224,7 @@ export function assessCertificate(cert, now = Date.now()) {
  * 拼出可以不改仓库配置就签名的命令。
  *
  * **为什么用 `-c.win.signtoolOptions.…` 而不是写进 `desktop/package.json`**：证书主体因机器
- * 而异，写进仓库等于把「这台机器的证书」固化成项目配置（`docs/code-signing.md` §3/§5）。
+ * 而异，写进仓库等于把「这台机器的证书」固化成项目配置（`docs/operations/code-signing.md` §3/§5）。
  * electron-builder 26 的 CLI 把点号路径合并进配置（`builder.js` 把 `--config.a.b=c` 解析成
  * 对象再 `deepAssign`），字符串字段可靠；**数组字段不行**——`signingHashAlgorithms` 用点号
  * 传会被 yargs 解析成字符串并以 `configuration.win should be a null` 报错，所以它留在
@@ -350,7 +350,7 @@ export function summarize({ certs, selection, assessment, signtool, timestamp = 
     lines.push("打包命令（不改仓库配置，证书主体不进版本库）：");
     lines.push(`  ${buildSigningCommand(cert).command}`);
     lines.push("");
-    lines.push("打完后按 docs/code-signing.md §9 第 4/5/6 步验证：verify-signature.mjs 退出 0、");
+    lines.push("打完后按 docs/operations/code-signing.md §9 第 4/5/6 步验证：verify-signature.mjs 退出 0、");
     lines.push("signtool verify /pa /v 通过且有时间戳、app-update.yml 的 publisherName 与 CN 一致。");
     if (timestamp !== null) {
         lines.push("");
@@ -402,7 +402,7 @@ export const WINDOWS_PS51_MODULES = "C:\\WINDOWS\\system32\\WindowsPowerShell\\v
  * 特征：`-CodeSigningCert` 报 `NamedParameterNotFound`，或 `Certificate:` 驱动器不存在。
  * 根因是 `PSModulePath` 里排在前面的 PS7（`WindowsApps\Microsoft.PowerShell_*`）目录
  * 提供了另一版 `Microsoft.PowerShell.Security`，5.1 加载它之后就没有证书 provider。
- * 这与 `docs/code-signing.md` §6 记录的 `Get-AuthenticodeSignature` 失败是同一个根因。
+ * 这与 `docs/operations/code-signing.md` §6 记录的 `Get-AuthenticodeSignature` 失败是同一个根因。
  */
 export function looksLikeModulePathProblem(message) {
     if (typeof message !== "string") return false;
@@ -449,7 +449,7 @@ export async function resolvePowershell({ platform = process.platform, env = pro
                     "PowerShell 5.1 加载了不匹配的 Microsoft.PowerShell.Security，连探测 pwsh 都跑不了：",
                     message.split("\n").slice(0, 3).join(" "),
                     "",
-                    "electron-builder 走的是同一条路，它也会失败。修法见 docs/code-signing.md §6：",
+                    "electron-builder 走的是同一条路，它也会失败。修法见 docs/operations/code-signing.md §6：",
                     `把 ${WINDOWS_PS51_MODULES} 放到 PSModulePath 最前面再打包。`,
                 ].join("\n"),
             );
@@ -480,7 +480,7 @@ export async function queryCertificates({ platform = process.platform, env = pro
     } catch (error) {
         const message = `${error.stderr ?? ""}${error.message ?? ""}`;
         const hint = looksLikeModulePathProblem(message)
-            ? `\n（PSModulePath 里的 PowerShell 7 目录让 5.1 加载了不匹配的模块；修法见 docs/code-signing.md §6）`
+            ? `\n（PSModulePath 里的 PowerShell 7 目录让 5.1 加载了不匹配的模块；修法见 docs/operations/code-signing.md §6）`
             : "";
         throw new SignPreflightError(`用 ${shell.path} 查询证书失败: ${error.message}${hint}`, {
             cause: error,

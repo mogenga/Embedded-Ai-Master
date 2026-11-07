@@ -7,7 +7,7 @@
 >
 > **⚠️ 2026-11-07 现状说明（读本文前必看）**：本文写于 2026-10-19，其中 **「Web 前端 + HTTP API」「SSE 推送」「`POST /api/approvals`」「`/api/actions`」等形态已不存在**。2026-10-22 用户决定「不要浏览器了，只保留桌面端」，`desktop/renderer/bridge.js`、`src/server` 的 HTTP 层（`api.ts` / `serve.ts` / `http.ts` / `body.ts` / `config-api.ts` / `event-stream.ts`）与 `tests/server/*` 一并删除；交互形态是 **Electron 桌面宿主**（NDJSON over stdio），审批走宿主 `permission` 命令 + `approval_request` 事件，事件流走宿主进程内加速通道 + 日志跟随。**「Web 优先、不做 CLI」这条决策本身仍然有效**（两处含义：不做 CLI/TUI；审批 UI 优先于纯库层），但「Web」现在的落点是桌面 Electron 渲染层，不是浏览器页面。
 >
-> 其余条目（权限引擎、BR-2~BR-7、RAG 实验、外部验证）与实现状态基本一致；具体实现以 `docs/deferred-issues.md` 与各任务 spec 为准。
+> 其余条目（权限引擎、BR-2~BR-7、RAG 实验、外部验证）与实现状态基本一致；具体实现以 `docs/ledgers/deferred-issues.md` 与各任务 spec 为准。
 
 ## 0. 已确认的决策
 
@@ -20,7 +20,7 @@
 
 ## 1. P0 收尾（已完成部分）
 
-见 `docs/deferred-issues.md` 变更记录 2026-10-19 行与 `dev-notes/P0-剩余项修复.md`。本轮状态：
+见 `docs/ledgers/deferred-issues.md` 变更记录 2026-10-19 行与 `dev-notes/P0-剩余项修复.md`。本轮状态：
 
 - 已解决 24 项：D-010 / D-013 / D-014 / D-016 / D-023 / D-028 / D-034 / D-035 / D-036 / D-037 / D-039 / D-042 / D-044 / D-045 / D-046 / D-048 / D-049 / D-073 / D-089 / D-090 / D-100 / D-101 / D-103 / D-104。
 - 部分解决 1 项：D-084（`fs read` 增 `nextOffset`，跳过分类披露）。
@@ -56,7 +56,7 @@
    - 审计事件：`permission_decision`（工具、参数摘要、动作、理由）。
    - 测试约束：危险命令只做纯函数断言 + 断言底层未调用（AGENTS.md 强制）。
 
-2. **RAG 对照实验启动**（`docs/rag-vs-agentic-search-todo.md`）
+2. **RAG 对照实验启动**（`docs/ledgers/rag-vs-agentic-search-todo.md`）
    - 从 `regression.py` 导出 274 查询为 JSONL。
    - 搭 A（向量）/ B（agentic）/ C（index+grep）/ C′（BM25+grep）。
    - 指标：Recall@2/5、Hit@1、MRR、nDCG@5、P50/P95 延迟、token 成本、拒答率。
@@ -119,5 +119,5 @@
 
 ## 6. 文档关系
 
-- 事实源：`docs/BRD.md`（M2/M3 验收）、`docs/framework-architecture-inventory.md`（P1 七项）、`docs/deferred-issues.md`（风险与触发条件）。
+- 事实源：`docs/BRD.md`（M2/M3 验收）、`docs/specs/framework-architecture-inventory.md`（P1 七项）、`docs/ledgers/deferred-issues.md`（风险与触发条件）。
 - 本文只记录 M2 规划与决策；具体实现以各任务的 spec/plan 为准。

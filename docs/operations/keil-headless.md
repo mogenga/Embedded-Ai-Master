@@ -160,4 +160,4 @@
 3. UVSOCK 是未公开协议，偏移来自 MDK 5.43a 实测；换版本需要重新验证。
 4. 整片擦除不可用：`PRJ_FLASH_ERASE` 在 MDK 5.43 上无响应，本工具不做外部 CLI 替代；`flash` 只覆盖镜像自身扇区。
 
-条目登记在 `docs/deferred-issues.md`（D-199 起）。
+条目登记在 `docs/ledgers/deferred-issues.md`（D-199 起）。

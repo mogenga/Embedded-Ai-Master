@@ -20,8 +20,8 @@
   - 界面承诺的排队与附件并未发送（用户输入被丢弃）；
   - Keil 把 64 字节抽检说成整镜像校验、全 0 无警告、声明「自动备份」但无备份；
   - KB 语料引用的 49 处工具名在当前工具面不存在；
-  - `desktop/MATRIX.md` 与 `docs/frontend-design.md` 在能力清单、事件模型上与实现相反；
-  - `docs/deferred-issues.md` 至少 7 条描述的对象已不存在或已修复。
+  - `desktop/MATRIX.md` 与 `docs/specs/frontend-design.md` 在能力清单、事件模型上与实现相反；
+  - `docs/ledgers/deferred-issues.md` 至少 7 条描述的对象已不存在或已修复。
 - 最高价值的**结构性缺口**：
   - 内核没有内置系统提示词（D-221），模型行为上限被锁死；
   - MCP 连接是「每条用户消息一份」而非会话级，正常关闭不回收进程树；
@@ -44,7 +44,7 @@
 
 | ID | 项 | 域 | 类型 | 证据 | 价值 | 成本 | 来源 |
 |---|---|---|---|---|---|---|---|
-| OPT-01 | 内置系统提示词：先落 `base` + `environment` 两节，投影期注入 | 内核 | 需求差距 | `src/index.ts:710-724` 生产路径从不设 `systemPrompt`；`docs/system-prompt-design.md` §8 已评审未实现 | 高 | M | D-221 / DOC-04 / DOC-11 |
+| OPT-01 | 内置系统提示词：先落 `base` + `environment` 两节，投影期注入 | 内核 | 需求差距 | `src/index.ts:710-724` 生产路径从不设 `systemPrompt`；`docs/specs/system-prompt-design.md` §8 已评审未实现 | 高 | M | D-221 / DOC-04 / DOC-11 |
 | OPT-02 | 整跑墙钟超时 `deadlineMs`，落 `interrupted{reason:"deadline"}` | 内核 | 优化 | `src/loop/query.ts`、`src/index.ts`、`src/config/app-config.ts` 无 `deadline`/`AbortSignal.timeout`（grep 零命中）；`timeoutMs` 只到单次工具 | 高 | S | D-189 / DOC-12 |
 | OPT-03 | MCP 连接改会话级持有；正常关闭回收进程树 | 内核 | 优化 | `src/index.ts:653-699` 在 `runSession` 内 `new McpManager` + `connectAll`；`desktop/host/host.js:1685` 每条 prompt 一次 `runner.start`；`src/mcp/manager.ts:772-786` close 只 `client.close` | 高 | M | 新（KERNEL-2） |
 | OPT-04 | 产物全链路：模型可读 `artifacts/`，界面可打开产物面板 | 内核+桌面 | 新增 | `src/tools/pipeline.ts:266-272` 只回路径；`src/tools/path-safety.ts:55-72` 锁 `ctx.cwd`，而 `artifactDir` 在 `session.dir` 下；桌面 `openWorkbench("artifact")` 唯一调用点 `app.js:5488` 不可达 | 高 | S+S | KERNEL-7 / DESKTOP-5 |
@@ -78,7 +78,7 @@
 | OPT-25 | 统一 `verify` 命令 + Windows job 补 typecheck | 工程 | `package.json:9-27` 五条命令靠手记；`.github/workflows/ci.yml:24-48` typecheck 只在 ubuntu | 中高 | S | ENG-7/8 |
 | OPT-26 | 覆盖率纳入 `mcp-servers/**` | 工程 | `vitest.config.ts:17-24` 只统计 `src/**`；领域层 39 个测试文件零闸门 | 中高 | M | ENG-9 |
 | OPT-27 | `maxCostUsd` 在 provider 未定价时显式披露或拒绝 | 内核 | `src/loop/breakers.ts:55` `costTracked=false`；`settings.js:1557-1587` 已删价格入口 | 中高 | S | KERNEL-8 |
-| OPT-28 | 文档事实源对齐 | 文档 | `desktop/MATRIX.md` 命令表少于宿主 handlers（本次枚举宿主 61 个）；`docs/frontend-design.md` tab/隐藏能力/事件模型三处与实现相反；`m2-roadmap.md` 仍规划已删除的 HTTP 层；`deferred-issues.md` ≥7 条状态过时 | 高 | S | DOC-06/07/08/10、DESKTOP-12、MCP-11 |
+| OPT-28 | 文档事实源对齐 | 文档 | `desktop/MATRIX.md` 命令表少于宿主 handlers（本次枚举宿主 61 个）；`docs/specs/frontend-design.md` tab/隐藏能力/事件模型三处与实现相反；`m2-roadmap.md` 仍规划已删除的 HTTP 层；`deferred-issues.md` ≥7 条状态过时 | 高 | S | DOC-06/07/08/10、DESKTOP-12、MCP-11 |
 
 ---
 
@@ -163,7 +163,7 @@
 |---|---|---|
 | `tests/desktop/serial-bridge.test.js` 的 `../../../../desktop/...` 多了一级，41 条断言「从未加载」 | **证伪**：单跑该文件 30 例全绿；另建探针证明 vitest 把越界遍历钳制在项目根，四级与五级都能解析到同一文件 | 降级为 P2 卫生项（路径写法不依赖钳制行为），不计入假覆盖 |
 | 宿主 handlers 数量「63 个」 | 本次枚举为 **61 个**（`desktop/host/host.js:2814-4493`） | 文档采用「61（本次枚举）」并保留 MATRIX 未覆盖的结论 |
-| `docs/deferred-issues.md` 未解决条目数 | 分域统计口径不一（98 已解决 / 68 未解决 / 40 无状态行等） | 本文不引用单一总数，只按条目逐一判定 |
+| `docs/ledgers/deferred-issues.md` 未解决条目数 | 分域统计口径不一（98 已解决 / 68 未解决 / 40 无状态行等） | 本文不引用单一总数，只按条目逐一判定 |
 
 ---
 
@@ -179,16 +179,16 @@
 | OPT-08 | 宿主新增 `settingsNotice(page, text)`，五个保存 handler 失败带 `domain:"settings"`；设置页 `settingsFailure` 纯函数路由 + 就地 `role="alert"` 错误条，不跨页串扰 | `desktop/host/host.js`、`desktop/renderer/settings.js`、`tests/desktop/settings-save-error.test.js`（新增 8 例） | 同上 |
 | OPT-09 | 产物名从 `desktop/package.json` 的 `build.win.artifactName` 派生（0.1.5 → `Embedded-AI-Master-Setup-0.1.5.exe`）；新增 `scripts/clean.mjs` 单参数白名单清理，`build`/`build:mcp` 各清各的 | `scripts/release.mjs`、`scripts/clean.mjs`（新增）、`package.json`、`tests/clean-dist.test.ts`（新增 26 例） | `tests/release-check` + `tests/clean-dist` 98 例全绿；`dist`/`dist-mcp` 实测孤儿产物消失 |
 
-**登记结果**（`docs/deferred-issues.md`）：
+**登记结果**（`docs/ledgers/deferred-issues.md`）：
 - 关闭：D-186、D-188（短期方案）、D-210、D-187、D-193（失效）、D-202~D-205（作废）、D-163（部分解决）。
 - 新增：**D-222**（语料已改但 `latest.json` 仍是旧签名，下一次打包/OTA 必然失败）、**D-223**（Keil 整镜像回读未实现）、**D-224**（切换会话不清附件条，新会话发送被挡）。
-- 同步：`docs/release.md` §2 补「两条 build 各清各的目录」、`desktop/MATRIX.md` 的 `prompt` / 五个保存命令 / `device_status` / `notice` 路由。
+- 同步：`docs/operations/release.md` §2 补「两条 build 各清各的目录」、`desktop/MATRIX.md` 的 `prompt` / 五个保存命令 / `device_status` / `notice` 路由。
 
 **未做**（仍属批次 2/3 或需用户决定）：
 - 真正的渲染器队列（D-186 建议 ②）、内核多模态图片输入（D-188 长期方案）。
 - `_inbox.md` 的 13 处旧工具名与两处 front matter 触发词：按「本地沉淀、不参与检索」保留。
 
-**语料 OTA（D-222）已闭环（2026-11-06 稍晚）**：`corpusVersion=2` 已签名并上传，桶上清单与本地产物逐字节相同，108/108 文件 sha256 在桶上实测匹配；`package-prepare` 不带 `--manifest` 已能端到端装配 v2 随包语料（109 文件）。详见 `docs/deferred-issues.md` D-222 状态段。
+**语料 OTA（D-222）已闭环（2026-11-06 稍晚）**：`corpusVersion=2` 已签名并上传，桶上清单与本地产物逐字节相同，108/108 文件 sha256 在桶上实测匹配；`package-prepare` 不带 `--manifest` 已能端到端装配 v2 随包语料（109 文件）。详见 `docs/ledgers/deferred-issues.md` D-222 状态段。
 
 ---
 
@@ -245,7 +245,7 @@
 | OPT-24 | 语料与查询集进 CI | `.gitignore:26-27` 仍排除，回归组在 CI 整组 skip（D-158） |
 | OPT-25 | 统一 `verify` 命令 | `package.json` 仍无 `verify` |
 | OPT-26 | 覆盖率纳入 `mcp-servers/**` | `vitest.config.ts` 的 `coverage.include` 仍只有 `src/**` |
-| OPT-28 | 文档事实源对齐 | 本轮已改 README / MATRIX / frontend-design / m2-roadmap / release 五份；`docs/frontend-design.md` 的其余描述性偏差仍会随实现继续漂移，没有回归守住 |
+| OPT-28 | 文档事实源对齐 | 本轮已改 README / MATRIX / frontend-design / m2-roadmap / release 五份；`docs/specs/frontend-design.md` 的其余描述性偏差仍会随实现继续漂移，没有回归守住 |
 | OPT-29~44 | 内核加固、桌面打磨、工程卫生、BR-7 夜批 | 未动；OPT-37（串口三个未接）、OPT-39（设置页草稿）、OPT-40（导航守卫）、OPT-42（工程卫生）成本最低，适合下一批 |
 
 ### 12.3 本文件自身的约束

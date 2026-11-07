@@ -1,7 +1,7 @@
 # Datasheet MCP 设计文档
 
 > 移植来源：A 仓库 Prometheus `src/embedded/datasheet.ts`（197 行）。
-> 施工依据：`docs/datasheet-mcp-todolist.md`（D1–D20）。
+> 施工依据：`docs/archive/datasheet-mcp-todolist.md`（D1–D20）。
 > 实现根：`mcp-servers/datasheet/`。
 
 ## 1. 定位

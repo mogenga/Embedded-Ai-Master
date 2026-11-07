@@ -14,7 +14,7 @@
  *
  * 1. **Nothing happens without a click.** `autoDownload` and
  *    `autoInstallOnAppQuit` are both forced to `false`: checking, downloading
- *    and installing are three separate user actions. `docs/corpus-ota.md`
+ *    and installing are three separate user actions. `docs/operations/corpus-ota.md`
  *    settled the same question for the corpus ("a silent change makes 'the
  *    same question answered differently' unexplainable"); an application
  *    upgrade is a bigger version of that — the user may be in the middle of a

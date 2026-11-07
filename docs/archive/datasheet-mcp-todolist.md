@@ -67,10 +67,10 @@ mcp-servers/datasheet/
 
 ### 阶段 D:接线
 
-- [x] **D17** `docs/datasheet-mcp.md` 设计文档(定位/工具表/缓存策略/诚实边界/与 A 及业界方案的差异表,含本文件的对照表)。
+- [x] **D17** `docs/operations/datasheet-mcp.md` 设计文档(定位/工具表/缓存策略/诚实边界/与 A 及业界方案的差异表,含本文件的对照表)。
 - [x] **D18** mcp.json 预设模板:写进 README 的 `{ "mcpServers": { "datasheet": { "command": "node", "args": ["dist-mcp/datasheet/server.js"] } } }` 示例;若 keil/cubeide 的预设模板机制有集中注册点,同步加。
 - [x] **D19** 测试补齐到 85% 覆盖率;`npm run typecheck` + `npm run build:mcp` 过;`npm test` 全绿。
-- [x] **D20** deferred-issues 登记:渲染层隐藏清单中与 PDF/数据手册相关的入口(如有)标记解决路径;`docs/rag-vs-agentic-search-todo.md` 若与此相关,加一行链接。
+- [x] **D20** deferred-issues 登记:渲染层隐藏清单中与 PDF/数据手册相关的入口(如有)标记解决路径;`docs/ledgers/rag-vs-agentic-search-todo.md` 若与此相关,加一行链接。
 
 ## 3. 明确不做的
 
@@ -102,7 +102,7 @@ mcp-servers/datasheet/
 
 ## 6. 完工记录（2026-11-04 补记）
 
-D1–D15、D17–D20 全部落地，代码与文档在 `mcp-servers/datasheet/` 与 `docs/datasheet-mcp.md`。逐项对账结果：
+D1–D15、D17–D20 全部落地，代码与文档在 `mcp-servers/datasheet/` 与 `docs/operations/datasheet-mcp.md`。逐项对账结果：
 
 | 项 | 落点 |
 |---|---|
@@ -112,11 +112,11 @@ D1–D15、D17–D20 全部落地，代码与文档在 `mcp-servers/datasheet/` 
 | D9 | `README.md` 与 `permissions.example.json` |
 | D10–D13 | `bm25.ts`（手写 BM25 + 短语加成）、术语映射、回归门禁 |
 | D14–D15 | `registers.ts` 与 `datasheet_registers` 转正 |
-| D17–D18 | `docs/datasheet-mcp.md`、README 的接线示例 |
+| D17–D18 | `docs/operations/datasheet-mcp.md`、README 的接线示例 |
 | D19 | 行覆盖 93.65%，typecheck 与 build:mcp 通过 |
 | D20 | `deferred-issues.md` 的「Datasheet MCP 的检索与结构化提取缺口」一条（三条边界：撞名误报、保留位原料缺失、语料不入库） |
 
-**D16 是唯一没做的，且是「评估后不做」**：`verify_register_write` 需要判断「写 1 到保留位」，而 `-layout` 文本里保留位通常没有位域描述行（实测 RM0008 仅 1/1143），核心原料缺失。补齐需要列对齐解析，而列拆行错位正是本文件 §4 预设的风险。按 §3「spike 不过就放弃，不硬上」处理，结论与理由记在 `docs/datasheet-mcp.md` §5。
+**D16 是唯一没做的，且是「评估后不做」**：`verify_register_write` 需要判断「写 1 到保留位」，而 `-layout` 文本里保留位通常没有位域描述行（实测 RM0008 仅 1/1143），核心原料缺失。补齐需要列对齐解析，而列拆行错位正是本文件 §4 预设的风险。按 §3「spike 不过就放弃，不硬上」处理，结论与理由记在 `docs/operations/datasheet-mcp.md` §5。
 
 **验收标准有两项按实测口径修正**（不静默改标准）：
 

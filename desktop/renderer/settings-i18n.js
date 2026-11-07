@@ -391,7 +391,7 @@ export const settingsStrings = {
     kbExpandNamed: "Expand {name}",
     kbCollapseNamed: "Collapse {name}",
 
-    /* Corpus updates (docs/corpus-ota.md §7). One set of strings per state, and
+    /* Corpus updates (docs/operations/corpus-ota.md §7). One set of strings per state, and
        each one says what is true rather than "failed": the reason a check
        failed is the only actionable thing on the page. */
     kbGroupUpdate: "Corpus updates",
@@ -427,7 +427,7 @@ export const settingsStrings = {
     kbStateVerifyFailed: "Update source failed verification",
     kbStateVerifyFailedDesc: "The manifest the update source returned did not pass its signature check, so it was rejected. The installed corpus is unchanged.",
     kbStateConfigInvalid: "Update source not configured",
-    kbStateConfigInvalidDesc: "Corpus updates need a bucket address and a public key. Put them in the file below — its format is described in docs/corpus-ota.md §2.",
+    kbStateConfigInvalidDesc: "Corpus updates need a bucket address and a public key. Put them in the file below — its format is described in docs/operations/corpus-ota.md §2.",
     kbStateUnavailable: "No corpus installed",
     kbStateUnavailableDesc: "There is no installed corpus snapshot on this computer, so there is nothing to update. The knowledge-base status above says where the tools are reading from.",
     /* No reason of its own: the state has one, and it is shown verbatim. */
@@ -896,7 +896,7 @@ export const settingsStrings = {
     kbExpandNamed: "展开 {name}",
     kbCollapseNamed: "收起 {name}",
 
-    /* 语料更新（docs/corpus-ota.md §7）。七种状态各有一句，说的是事实而不是
+    /* 语料更新（docs/operations/corpus-ota.md §7）。七种状态各有一句，说的是事实而不是
        「失败了」：检查失败的原因才是这一页上唯一能照着做的东西。 */
     kbGroupUpdate: "语料更新",
     kbUpdateState: "更新状态",
@@ -925,7 +925,7 @@ export const settingsStrings = {
     kbStateVerifyFailed: "更新源未通过验签",
     kbStateVerifyFailedDesc: "更新源返回的清单没有通过签名校验，已被拒绝。已安装的语料没有被改动。",
     kbStateConfigInvalid: "更新源未配置",
-    kbStateConfigInvalidDesc: "语料更新需要桶地址与公钥，写在下面的文件里 —— 文件格式见 docs/corpus-ota.md §2。",
+    kbStateConfigInvalidDesc: "语料更新需要桶地址与公钥，写在下面的文件里 —— 文件格式见 docs/operations/corpus-ota.md §2。",
     kbStateUnavailable: "本机没有安装语料",
     kbStateUnavailableDesc: "这台电脑上没有可用的语料快照，因此没有可更新的东西。上面的知识库状态说明了工具正在读哪里。",
     kbUpdateProgress: "正在下载 {done}/{total} · {path}",

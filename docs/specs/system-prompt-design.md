@@ -1,8 +1,8 @@
 # 系统提示词组装设计草案
 
 > 版本: v0.2（骨架**已评审**，未开始实现） · 日期: 2026-11-01
-> 触发: 用户问「当前主 Agent 的提示词是什么」，核实结果见 [deferred-issues.md](deferred-issues.md) **D-221**——内核没有内置系统提示词，请求体里 `messages` 直接以 `user` 开头。
-> 定位: 关闭决策点 #8（`docs/framework-architecture-inventory.md:57`「分节组装(基础 / persona / 环境信息 / 工具说明)、personaPrefix 注入、指令冲突消解」）与 BRD **PLAT-6**（「系统提示词分节组装与冲突消解」）的设计稿。
+> 触发: 用户问「当前主 Agent 的提示词是什么」，核实结果见 [deferred-issues.md](../ledgers/deferred-issues.md) **D-221**——内核没有内置系统提示词，请求体里 `messages` 直接以 `user` 开头。
+> 定位: 关闭决策点 #8（`docs/specs/framework-architecture-inventory.md:57`「分节组装(基础 / persona / 环境信息 / 工具说明)、personaPrefix 注入、指令冲突消解」）与 BRD **PLAT-6**（「系统提示词分节组装与冲突消解」）的设计稿。
 > **本文只定分节、职责、注入时机与冲突规则，不写具体措辞。** 措辞属于产品决定，应在分节骨架评审通过后单独出稿。
 >
 > **v0.2 变更（2026-11-01 评审结论）**：Q1–Q6 六项全部拍板，见 §7.1。两处与 v0.1 实质不同：① **git 信息移出环境段**（§2.2，转待定项 T1——面向嵌入式开发，git 是否必要本身待议）；② **提示词哈希改写 `meta.json`**，不新增会话事件（§3.1）。`instructions` 节改为只读 `AGENTS.md` 并加 32 KiB 上限（§2.4）。**未开始实现。**
@@ -168,7 +168,7 @@
 
 草案初稿写的是「`AGENTS.md` + `CLAUDE.md` 都读」。**评审改为只读 `AGENTS.md`。**
 
-依据是跨工具调研表（`docs/harness-comparison.md:120`）里七个 harness 的项目指令文件名：
+依据是跨工具调研表（`docs/specs/harness-comparison.md:120`）里七个 harness 的项目指令文件名：
 
 | 工具 | 指令文件 |
 |---|---|

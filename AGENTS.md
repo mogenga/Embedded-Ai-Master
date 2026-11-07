@@ -1,23 +1,27 @@
 # AGENTS.md — Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 工具。当前已发布 **v0.2.0**（2026-11-06）：P0 内核（`src/`）、桌面前端（`desktop/`）与领域层 MCP server（`mcp-servers/`：probe / serial / keil / kb / embedded / datasheet）均已实现，测试在 `tests/`（`tests/desktop` 为协议层与宿主，`mcp-servers/*/tests` 为领域层）。按 `docs/BRD.md` 的里程碑口径，M2（领域层建设 + 扩展与安全）的主体已落地，**当前推进的是 M3**（交互与自动化：观测、todo 外化、BR-6 设备面板、BR-7 夜批管线，见「M3 剩余范围」）；阶段判断以用户确认为准，不要自行宣布进入下一阶段。构建与脚本配置见 `package.json` / `tsconfig*.json` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
+面向嵌入式调试场景的 agent 工具。当前已发布 **v0.2.0**（2026-11-06）：P0 内核（`src/`）、桌面前端（`desktop/`）与领域层 MCP server（`mcp-servers/`：probe / serial / keil / kb / embedded / datasheet）均已实现，测试在 `tests/`（`tests/desktop` 为协议层与宿主，`mcp-servers/*/tests` 为领域层）。按 `docs/BRD.md` 的里程碑口径，M2（领域层建设 + 扩展与安全）的主体已落地，**当前推进的是 M3**（交互与自动化：观测、todo 外化、BR-6 设备面板、BR-7 夜批管线，见「M3 剩余范围」）；阶段判断以用户确认为准，不要自行宣布进入下一阶段。构建与脚本配置见 `package.json` / `tsconfig*.json` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/ledgers/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
 
 ## 事实源（先读这些，别猜）
+
+`docs/` 自 2026-11-07 起按角色分四个子目录，索引见 `docs/README.md`：`specs/`（设计与规范）、`operations/`（操作手册与契约）、`ledgers/`（台账）、`archive/`（已完成的任务书）。`docs/` 根只放 `BACKLOG.md`、`BRD.md`、`README.md`。
+
+- **`docs/BACKLOG.md` — 待实现功能的唯一排期入口**（批次 4~10）。要开工先在这里找批次，不要在台账里随手挑一条。
 - `docs/BRD.md` — 业务需求（领域层 BR-xx / 平台层 PLAT-xx）、硬性规则 R1-R9、路线图 M1-M4。
-- `docs/p0-kernel-design.md` — 当前 M1 设计稿（harness 内核六项：主循环 / 模型接入 / 上下文 / 工具系统 / MCP 客户端 / 会话）。
-- `docs/framework-architecture-inventory.md` — 框架能力清单 24 项 + 10 个决策点。
-- `docs/harness-comparison.md` — Claude Code / dsh / Codex / Gemini CLI / opencode / goose / pi 横向调研。
-- `docs/rag-vs-agentic-search-todo.md` — 待办对照实验（决策点 #2 的判据）。**决策点 #2 至今未关闭**：结果为 exploratory，多 gold 标注、扰动集 H6、B 的 H7 跑批与 10x 规模验证均未做。
-- `docs/ontology-scope-note.md` — Ontology 暂缓纳入检索比对的**范围决策**与重启条件（2026-10-19）。它不是待办缺陷，不登记进 `deferred-issues.md`；未经重启条件触发，不要主动把它并入方案比对。
-- `docs/m2-roadmap.md` — M2 路线图（决策点 #5/#9 已关闭项、M2 任务分期）。**文首有 2026-11-07 现状说明**：文中「Web + HTTP API / SSE」的形态已不存在，交互形态是桌面 Electron 宿主。
-- `docs/frontend-design.md` — 前端设计规范（布局、令牌、组件、验收口径）。**v2.0 起以 `desktop/renderer/` 的实现为准**；v1.4 及更早基于已删除的 Preact 工作台，仅历史留档。
+- `docs/specs/p0-kernel-design.md` — 当前 M1 设计稿（harness 内核六项：主循环 / 模型接入 / 上下文 / 工具系统 / MCP 客户端 / 会话）。
+- `docs/specs/framework-architecture-inventory.md` — 框架能力清单 24 项 + 10 个决策点。
+- `docs/specs/harness-comparison.md` — Claude Code / dsh / Codex / Gemini CLI / opencode / goose / pi 横向调研。
+- `docs/ledgers/rag-vs-agentic-search-todo.md` — 待办对照实验（决策点 #2 的判据）。**决策点 #2 至今未关闭**：结果为 exploratory，多 gold 标注、扰动集 H6、B 的 H7 跑批与 10x 规模验证均未做。
+- `docs/specs/ontology-scope-note.md` — Ontology 暂缓纳入检索比对的**范围决策**与重启条件（2026-10-19）。它不是待办缺陷，不登记进 `deferred-issues.md`；未经重启条件触发，不要主动把它并入方案比对。
+- `docs/specs/m2-roadmap.md` — M2 路线图（决策点 #5/#9 已关闭项、M2 任务分期）。**文首有 2026-11-07 现状说明**：文中「Web + HTTP API / SSE」的形态已不存在，交互形态是桌面 Electron 宿主。
+- `docs/specs/frontend-design.md` — 前端设计规范（布局、令牌、组件、验收口径）。**v2.0 起以 `desktop/renderer/` 的实现为准**；v1.4 及更早基于已删除的 Preact 工作台，仅历史留档。
 - `desktop/MATRIX.md` — 前端命令/事件能力矩阵（已支持 / 隐藏 / 原因），是前端能力边界的事实源。
-- `docs/system-prompt-design.md` — 系统提示词分节组装设计（六节，稳定性降序）。**只实现了 `environment` 一节**（P0 切片）；`base` / `tools` / `instructions` / `memory` 的措辞属产品决定，未定稿前不得凭空补写（D-221 的教训）。
-- `docs/optimization-and-new-features.md` — 2026-11-06 的 44 项审计汇总。**§12 是当前有效的落地对照表**（16 项已落地 + 2 项部分 + 剩余项）；§§2–4 保留审计当时的位置与判断，不要当排期依据。
-- `docs/deferred-issues.md` — 已知但暂不修的缺陷与覆盖缺口，含升级触发条件；改动前先查，避免重复发现。
-- `docs/embedded-defects-todolist.md` — 嵌入式子系统的缺陷复查台账（T-xxx），与 D-xxx 分开编号；台账未结项只剩 T-035 与 T-040。**注意 T-035 台账写「待修」，但代码已改成赋值**（`desktop/renderer/app.js:3281`：`state.serial.dropped = message.dropped ?? …`，注释写明「assign, don't accumulate」，随 `dbb8226` 合入），缺的是把这条决定用断言钉住——不要因为台账写着「待修」就重复改一遍。
-- 领域 MCP 的设计与操作手册：`docs/keil-headless.md`（Keil 接线、57 个调试动作、已知限制）、`docs/datasheet-mcp.md`（PDF 检索与寄存器提取）、`docs/serial-panel-spec.md`（串口助手，含事后结论）、`docs/toolchain-packs.md`（包管理器不变量与权限语义）、`docs/corpus-ota.md`（语料 OTA 契约，唯一契约源）。
-- 发布与签名：`docs/release.md`（发布流程唯一操作手册）、`docs/code-signing.md`。
+- `docs/specs/system-prompt-design.md` — 系统提示词分节组装设计（六节，稳定性降序）。**只实现了 `environment` 一节**（P0 切片）；`base` / `tools` / `instructions` / `memory` 的措辞属产品决定，未定稿前不得凭空补写（D-221 的教训）。
+- `docs/ledgers/optimization-and-new-features.md` — 2026-11-06 的 44 项审计汇总。**§12 是当前有效的落地对照表**（16 项已落地 + 2 项部分 + 剩余项）；§§2–4 保留审计当时的位置与判断，不要当排期依据。
+- `docs/ledgers/deferred-issues.md` — 已知但暂不修的缺陷与覆盖缺口，含升级触发条件；改动前先查，避免重复发现。
+- `docs/ledgers/embedded-defects-todolist.md` — 嵌入式子系统的缺陷复查台账（T-xxx），与 D-xxx 分开编号；台账未结项只剩 T-035 与 T-040。**注意 T-035 台账写「待修」，但代码已改成赋值**（`desktop/renderer/app.js:3281`：`state.serial.dropped = message.dropped ?? …`，注释写明「assign, don't accumulate」，随 `dbb8226` 合入），缺的是把这条决定用断言钉住——不要因为台账写着「待修」就重复改一遍。
+- 领域 MCP 的设计与操作手册：`docs/operations/keil-headless.md`（Keil 接线、57 个调试动作、已知限制）、`docs/operations/datasheet-mcp.md`（PDF 检索与寄存器提取）、`docs/operations/serial-panel-spec.md`（串口助手，含事后结论）、`docs/operations/toolchain-packs.md`（包管理器不变量与权限语义）、`docs/operations/corpus-ota.md`（语料 OTA 契约，唯一契约源）。
+- 发布与签名：`docs/operations/release.md`（发布流程唯一操作手册）、`docs/operations/code-signing.md`。
 
 架构为两层：**平台层**（领域无关 harness，模型接入/上下文/工具/会话/权限）与**领域层**（嵌入式调试能力，经 MCP / 插件挂载）。内核代码不得含领域逻辑——嵌入式取证一律走 MCP，不进内核。
 
@@ -26,7 +30,8 @@
 ## 常用命令（以 `package.json` 与 `README.md` 为准）
 
 - 测试：`npm test`（vitest run，不触网，约 3800 例 / 55 s）、`npm run coverage`（`lines ≥ 85%`，当前实测 ~91%）、`npm run test:desktop`（协议层与宿主）、`npm run test:mcp`（领域层）。
-- 静态检查：`npm run typecheck`；`npm run check:js`（`desktop/` 与 `scripts/` 的 JS 语法，补 `tsc` 的盲区）。**`npm run lint` 等同 `tsc --noEmit`**（D-006），不是独立检查。
+- 静态检查：`npm run typecheck`；`npm run check:js`（`desktop/` 与 `scripts/` 的 JS 语法，补 `tsc` 的盲区）；`npm run check:docs`（markdown 本地链接与 `<img src>`，移动/改名文档后必跑）。**`npm run lint` 等同 `tsc --noEmit`**（D-006），不是独立检查。
+- **完整验证：`npm run verify`** —— typecheck + check:js + check:docs + test 一次跑完。交付前用它，而不是只跑 `npm test`。
 - 构建：`npm run build`（先清 `dist/`）、`npm run build:mcp`（先清 `dist-mcp/`）；两条各清各的目录，不要交叉清理。
 - 端到端（需环境，默认不在 CI）：`npm run probe:e2e`（真实 Renode）、`npm run diagnosis:e2e`、`npm run packs:e2e`、`npm run kb:regression`、`npm run kb:review`、`npm run datasheet:regression`、`npm run datasheet:corpus`。
 - 桌面形态：用户先执行 `npm --prefix desktop install`，再 `npm --prefix desktop run desktop`。**agent 不代为执行任何 install**（见下文禁令）。
@@ -49,7 +54,7 @@
 
 ## 当前能力边界（别把没有的当有）
 
-这份清单是**写代码前的事实核对表**；每一项都对应 `src/` 或 `desktop/` 的真实代码，细节与原因见 `docs/deferred-issues.md`。
+这份清单是**写代码前的事实核对表**；每一项都对应 `src/` 或 `desktop/` 的真实代码，细节与原因见 `docs/ledgers/deferred-issues.md`。
 
 **内核有**
 
@@ -159,14 +164,14 @@ Windows 为一等公民（git-bash）。已知坑（详见 BRD §13 / §11.2）�
 
 ## 实现期注意事项
 
-- **先查 `docs/deferred-issues.md` 再动手**：已知缺陷有编号（D-xxx），修复后标注「已解决」并保留条目，不要删除。
+- **先查 `docs/ledgers/deferred-issues.md` 再动手**：已知缺陷有编号（D-xxx），修复后标注「已解决」并保留条目，不要删除。
 - **`npm run lint` 等同 `tsc --noEmit`**（D-006），不要把它当作独立静态检查的证据。
 - **测试不得触网**：live 测试由 `HARNESS_COMPAT_LIVE=1` 显式开启；默认 `npm test` 必须离线通过。
 - **工具必须诚实（R3）**：新增工具或错误路径时，失败要显式返回错误码，不得静默吞掉或把失败伪装成成功；界面也不得伪造提交成功。
 - **改文档前先确认它是「事实源」还是「历史留档」**：现在有多处描述已被实现推翻（`m2-roadmap.md` 的 Web/HTTP、`frontend-design.md` v1.4 及更早、`MATRIX.md` 的历史轮次记录）。事实源写事实，历史留档加日期注记、保留原文；两类都不要改写对方的语气。
-- **`docs/deferred-issues.md` 的状态行不是单一事实源**：条目顶部可能有 `> **YYYY-MM-DD 复核：…**` 的注记，两者矛盾时以正文证据为准（2026-11-07 就核出 6 处状态行落后于正文）。改状态前先读条目全文。
+- **`docs/ledgers/deferred-issues.md` 的状态行不是单一事实源**：条目顶部可能有 `> **YYYY-MM-DD 复核：…**` 的注记，两者矛盾时以正文证据为准（2026-11-07 就核出 6 处状态行落后于正文）。改状态前先读条目全文。
 - **超时/取消的语义**：新增工具须响应 `AbortSignal`；超时后不得让残留调用与后续调用重叠（D-022 已缓解，新增写工具前重读）。**`deadlineMs` 到点只是不再发起新调用**，不强制终止正在执行的工具——不要把它宣传成硬杀。
 - **内核不含领域逻辑**：探针 / 串口 / KB 等嵌入式能力一律经 MCP 挂载；`src/` 只放平台层能力。
 - **新增会话事件类型 = 四处同步**：`src/session/types.ts` 的 `EventType`、`src/session/persistence.ts` 的 `EVENT_TYPES`（读盘白名单）、`src/context/build.ts` 的投影 `switch`、`desktop/renderer/protocol.js` 的 `KNOWN_TYPES`，另加事件能力矩阵 `desktop/MATRIX.md`。少一处就是「整份日志读不出来」或「整屏未识别事件」。
 - **新增前端能力前先看 `desktop/MATRIX.md`**：内核没有的能力隐藏入口（宿主回 `notice`），不要画一个点了会报错的按钮。
-- **工具链包管理**（`src/packs/`）是平台层，不属于领域层 MCP；其权限语义（`installPack` 允许、`removePack` 恒需审批）见 `docs/toolchain-packs.md`。
+- **工具链包管理**（`src/packs/`）是平台层，不属于领域层 MCP；其权限语义（`installPack` 允许、`removePack` 恒需审批）见 `docs/operations/toolchain-packs.md`。

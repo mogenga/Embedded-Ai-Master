@@ -4,12 +4,12 @@
 
 相关文档：
 
-- `docs/code-signing.md` —— Windows 代码签名（证书从哪来、怎么配、怎么验）。
-- `docs/deferred-issues.md` **D-212** —— 发布链路已跑通（`v0.1.0`–`v0.2.0` 七个 release）；应用内自动更新**已接入**（见 §12），但「一次真实的更新」仍未跑过，残余边界见 §12.6。
-- `docs/deferred-issues.md` **D-217** —— 未签名构建下，下载到的更新包不做签名校验。
-- `docs/deferred-issues.md` **D-211** —— 签名配置就位但从未验证过真实签名。
-- `docs/deferred-issues.md` **D-209** —— 根与 `desktop/` 的 Electron 版本不一致。
-- `docs/deferred-issues.md` **D-213** —— `resources/` 缺 `{ "type": "module" }`，所有安装用户多付一次重解析（已修，原因见 §11）。
+- `docs/operations/code-signing.md` —— Windows 代码签名（证书从哪来、怎么配、怎么验）。
+- `docs/ledgers/deferred-issues.md` **D-212** —— 发布链路已跑通（`v0.1.0`–`v0.2.0` 七个 release）；应用内自动更新**已接入**（见 §12），但「一次真实的更新」仍未跑过，残余边界见 §12.6。
+- `docs/ledgers/deferred-issues.md` **D-217** —— 未签名构建下，下载到的更新包不做签名校验。
+- `docs/ledgers/deferred-issues.md` **D-211** —— 签名配置就位但从未验证过真实签名。
+- `docs/ledgers/deferred-issues.md` **D-209** —— 根与 `desktop/` 的 Electron 版本不一致。
+- `docs/ledgers/deferred-issues.md` **D-213** —— `resources/` 缺 `{ "type": "module" }`，所有安装用户多付一次重解析（已修，原因见 §11）。
 
 ---
 
@@ -26,7 +26,7 @@
 | `gh` CLI | **已安装且已登录**，但**不在 `PATH` 里** | 版本 2.103.2，路径 `C:\Program Files\GitHub CLI\gh.exe`；`gh auth status` 退出 0，账号 `mogenga` |
 | `electron-updater` | **已安装（6.8.11）** | 声明在 `desktop/package.json`（`^6.8.11`），`desktop/node_modules/electron-updater/package.json` 实测为该版本 |
 | 应用内自动更新 | **已接入**（`desktop/updater.js` + 主进程 IPC + 关于页） | 见 §12 |
-| 签名 | 配置就位，**从未真实签过** | 本机无证书，见 `docs/code-signing.md` §7 |
+| 签名 | 配置就位，**从未真实签过** | 本机无证书，见 `docs/operations/code-signing.md` §7 |
 | 图标 | 已配置 `build/icon.ico` | `desktop/package.json` 的 `win.icon` |
 
 **三条由此推出的结论，写在这里免得被误解：**
@@ -304,7 +304,7 @@ cd desktop && npx electron-builder --win --x64 --dir
 
 **当前产物是未签名的。** 用户双击安装包会看到 SmartScreen 的整屏警告（"Windows 已保护你的电脑" → 「仍要运行」）。
 
-签名怎么做、证书从哪来、怎么验证是否签上，全部在 **`docs/code-signing.md`**。要点复述三条：
+签名怎么做、证书从哪来、怎么验证是否签上，全部在 **`docs/operations/code-signing.md`**。要点复述三条：
 
 1. 配 `WIN_CSC_LINK` + `WIN_CSC_KEY_PASSWORD` 就会自动签，**不需要改任何构建配置**。
 2. 证书**绝不能进仓库**（`.gitignore` 已忽略 `*.pfx` / `*.p12` 等）。
@@ -341,7 +341,7 @@ node scripts/verify-signature.mjs "desktop/dist-installer/Embedded-AI-Master-Set
 | `which gh` 为空 | GUI 安装器没写 PATH | 用完整路径或临时 `export PATH`，见 §1 |
 | `--dir` 没产 `latest.yml` | 那是 NSIS 目标的产物 | 发布必须跑完整 NSIS |
 | `--dir` 的 `resources/` 里没有 `app-update.yml` | `--dir` 的 target 不是 NSIS | 完整 NSIS 才有 |
-| 构建日志有 `signing with signtool.exe` 但产物未签名 | 那行在判断之前无条件打印 | 以 `verify-signature.mjs` 的结果为准，见 `docs/code-signing.md` §7 |
+| 构建日志有 `signing with signtool.exe` 但产物未签名 | 那行在判断之前无条件打印 | 以 `verify-signature.mjs` 的结果为准，见 `docs/operations/code-signing.md` §7 |
 | `gh release create` 后 tag 指向了别的提交 | 先建 release 后打 tag | 先推 tag，或加 `--verify-tag`，见 §2 |
 | 手动上传后远端资产名与 `latest.yml` 里的不一致 | GitHub 把空格改写为连字符 | 见 §2 末「手动上传时要注意文件名不一致」 |
 | 关于页显示「当前构建缺少更新模块」 | 打包时 `electron-updater` 没进 `resources/node_modules` | 跑 `npm --prefix desktop install` 后重新完整打包（§12.6 第 5 条） |
@@ -503,7 +503,7 @@ updaterCacheDirName: embedded-ai-master-desktop-updater
 **检查可以自动，下载和安装不能。**
 
 1. **用户可能正在长任务里。** 装更新要先退出应用；一次跑了十几分钟的构建或调试会话没有理由被一个后台动作打断。
-2. **静默变更让「同一问题回答不同」无法解释。** 这条理由与 `docs/corpus-ota.md` §6 对语料 OTA 的结论是同一个：如果某天回答开始不一样，而用户没做任何事，他就失去了唯一的解释线索。应用升级比语料替换动的东西更多。
+2. **静默变更让「同一问题回答不同」无法解释。** 这条理由与 `docs/operations/corpus-ota.md` §6 对语料 OTA 的结论是同一个：如果某天回答开始不一样，而用户没做任何事，他就失去了唯一的解释线索。应用升级比语料替换动的东西更多。
 3. **下载要占带宽和磁盘。** 安装包 113 MB；用户的网络可能是计费的。
 
 代码上不是「默认关掉」而是**显式关掉**：

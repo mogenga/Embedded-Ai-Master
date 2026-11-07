@@ -18,7 +18,7 @@ import {
 import path from "node:path";
 
 /**
- * 语料快照目录与 `current` 指针——OTA 的落地层（契约见 `docs/corpus-ota.md` §3/§6）。
+ * 语料快照目录与 `current` 指针——OTA 的落地层（契约见 `docs/operations/corpus-ota.md` §3/§6）。
  *
  * 这一层只做三件事：把版本目录建出来、把 `current` 指过去、把过期快照清掉。
  * 它不校验签名、不下载、不决定「要不要更新」——那些属于 manifest 与 OTA 客户端。

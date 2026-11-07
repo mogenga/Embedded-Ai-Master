@@ -1,7 +1,7 @@
 # 原型 UI（prototypes/，2026-11-07 已删除）
 
 > `prototypes/index.html` 已于 2026-11-07 清理删除：前端自 v2.0 起以 `desktop/renderer/` 的实现为准，
-> 原型的令牌与版式已被 `docs/frontend-design.md` 吸收，文件本身不再被任何代码或文档引用。
+> 原型的令牌与版式已被 `docs/specs/frontend-design.md` 吸收，文件本身不再被任何代码或文档引用。
 > 下文的行号与选择器引用指向的就是那个已删除的文件，保留作为当时的实现留痕。
 
 ## 2026-10-15 · 产品原型（HTML）首版
@@ -26,7 +26,7 @@
 
 - **用户关键原话**："带决策项讨论讨论"；逐项拍板：前端框架 = Preact + Vite、实时通道 = SSE + HTTP POST、`LoopEvent.tool_result` = 立即扩展。
 - **关键产出**：
-  1. `docs/frontend-design.md` v1.1：6 项 OPEN-UI 全部关闭（04 波形不做、05 虚拟滚动设触发条件、06 fork 仅派生入口）；§2 技术约束补 Preact + Vite 与 SSE + HTTP POST；§8.5 改为"已决"并写明实施要求。
+  1. `docs/specs/frontend-design.md` v1.1：6 项 OPEN-UI 全部关闭（04 波形不做、05 虚拟滚动设触发条件、06 fork 仅派生入口）；§2 技术约束补 Preact + Vite 与 SSE + HTTP POST；§8.5 改为"已决"并写明实施要求。
   2. `src/loop/events.ts`：`tool_result` 改为 `{ kind: "tool_result" } & ToolResultPayload`。
   3. `src/loop/query.ts`：新增 `toLoopToolResult()`，替换 aborted 与正常分支两处 yield，使实时事件与会话落盘由同一份字段构造。
   4. `tests/query.test.ts`：新增"tool_result 事件透传结构化 detail 与 artifactPath"用例；同步 3 处严格 `toEqual` 断言补 `code`。
@@ -37,7 +37,7 @@
 ## 2026-10-18 · 原型落地为前端设计文档
 
 - **用户关键原话**："把产品原型落地为前端设计文档"。
-- **关键产出**：`docs/frontend-design.md` v1.0，共 14 章——目标与范围、技术约束（内联完整技术栈）、信息架构、布局与栅格、设计令牌、主题系统、15 个组件规格、数据契约与状态投影、交互规范、可访问性、响应式、14 项可量化视觉验收、6 项待决策。
+- **关键产出**：`docs/specs/frontend-design.md` v1.0，共 14 章——目标与范围、技术约束（内联完整技术栈）、信息架构、布局与栅格、设计令牌、主题系统、15 个组件规格、数据契约与状态投影、交互规范、可访问性、响应式、14 项可量化视觉验收、6 项待决策。
 - **关键决策**：前端框架尚未定案（UI 形态决策点仍开放），文档按**框架无关契约**书写，令牌与组件规格与实现框架解耦；核对真实类型 `SessionEvent` / `AssistantPayload` / `ToolResultPayload` / `ToolAnnotations` / `LoopEvent` 后落数据投影表，发现 `LoopEvent.tool_result` 仅含 `{id, ok, text}`、缺 `code`/`detail`/`artifactPath`，登记为 OPEN-UI-02（实时渲染无法复用回放投影）。
 - **被拒绝或纠偏**：无。
 - **翻车与返工**：无。
@@ -84,7 +84,7 @@
 - **关键产出**：
   1. `scripts/verify-ui.mjs` 删除静态 serve，改为「临时 `HARNESS_HOME`（真实 `header.json` + `session.v1.jsonl`，含 user / assistant ask / tool_call / tool_result（readout+evidence）/ verdict / guard / usage / status）+ 真实 KB 目录 → 启动 `dist/server/serve.js` → 轮询 `/api/sessions` → CDP 验收 → 关闭服务 → 清理」；V14 断言真实 guard 四要素（写入 / 0x40004408 / 0x0009 / 待确认）；新增 V0 空态附加检查（空 `HARNESS_HOME` 下「暂无会话」「未配置知识库」，不计入 14 项）；清理失败仅 warning，不改变 SUMMARY 与退出码。
   2. `README.md` Web 工作台改为真实数据启动流程（`build` + `build:web` + `serve:ui`）、`HARNESS_UI_PORT` / `HARNESS_HOME` / `HARNESS_UI_STATIC`、六个 API 端点与 501 诚实边界、空态说明；删除「示例会话 / 回放演示」表述。
-  3. `docs/deferred-issues.md`：D-053、D-060 标记已解决；D-058 标记数据来源已解决、设备连接状态仍待 D-052；D-051 补 501 现状；D-059 复核仍存在；新增 D-063（API 只读、actions/events 未实现）、D-064（KB 深度 8 / 条目 2000 静默截断）、D-065（会话列表坏目录 errors 未展示）。
+  3. `docs/ledgers/deferred-issues.md`：D-053、D-060 标记已解决；D-058 标记数据来源已解决、设备连接状态仍待 D-052；D-051 补 501 现状；D-059 复核仍存在；新增 D-063（API 只读、actions/events 未实现）、D-064（KB 深度 8 / 条目 2000 静默截断）、D-065（会话列表坏目录 errors 未展示）。
 - **被拒绝或纠偏**：不接受「静态 serve `dist-web` + 前端演示数据」的验收方式；不向前端注入会话数据，只通过真实文件与 API 提供；不新增依赖、不跑 npm install/npx、不改 `.superpowers/`。
 - **翻车与返工**：V11 首次在真实数据下只遍历到 1 个控件。定位为设备三字段均为 `unknown`，TopBar 前两个 chip 的 `tag|cls|label` 完全相同（`button|chip|未接入`），脚本误判为「Tab 回到同一控件」而提前 break。修复为 FOCUS_PROBE 附带元素坐标并纳入去重 key，复跑遍历 29 个控件、0 个无焦点环。旧版静态验收脚本在同样数据缺失下同样只覆盖 1 个控件，证明这是既有盲区而非本次新引入。
 - **验证**：`vitest run`、`tsc --noEmit`、`tsc -p tsconfig.web.json --noEmit`、`vite build`、`tsc -p tsconfig.build.json` 全通过；`node scripts/verify-ui.mjs` V1-V14 全 PASS + V0 PASS，SUMMARY 14/14 PASS，exit 0，临时服务与目录已清理。

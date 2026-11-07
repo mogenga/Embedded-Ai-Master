@@ -71,7 +71,7 @@ export interface KbServiceOptions {
    * `kb_propose` 写入的 inbox 文件（绝对路径或相对进程 cwd 的路径）。
    *
    * 不传时保持历史行为：写 `<root>/_inbox.md`。传了就把 inbox 挪到语料根之外
-   * （OTA 部署形态是 `$HARNESS_HOME/kb/inbox/_inbox.md`，见 `docs/corpus-ota.md` §3）：
+   * （OTA 部署形态是 `$HARNESS_HOME/kb/inbox/_inbox.md`，见 `docs/operations/corpus-ota.md` §3）：
    * 快照会被整份替换，用户沉淀不能跟着被冲掉。`kb_status` 与 `kb_propose`
    * 都按这个位置读/写，不存在「写外部、读老位置」的分叉。
    */

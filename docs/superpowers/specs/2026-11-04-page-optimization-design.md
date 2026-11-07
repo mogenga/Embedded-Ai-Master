@@ -30,7 +30,7 @@
 | 约束 | 出处 |
 |---|---|
 | 无框架、无打包器、无构建步骤，渲染层是纯 ES 模块 | AGENTS.md 硬约束 1 |
-| 圆角只有三档（6 / 10 / 14px），阴影只用于输入框与浮层 | `docs/frontend-design.md` §5.4 |
+| 圆角只有三档（6 / 10 / 14px），阴影只用于输入框与浮层 | `docs/specs/frontend-design.md` §5.4 |
 | 工具必须诚实：不假装成功，不编造数据 | BRD R3 |
 | 测试不触网 | AGENTS.md |
 | 依赖安装由用户执行，agent 不代跑 | AGENTS.md |

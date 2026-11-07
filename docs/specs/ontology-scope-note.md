@@ -1,7 +1,7 @@
 # Ontology 与检索方案比对的范围说明
 
 > 创建: 2026-10-19。状态: **暂缓 —— 不纳入当前对照实验,后续再议**。
-> 关联: [rag-vs-agentic-search-todo.md](rag-vs-agentic-search-todo.md)(决策点 #2 判据)、[BRD.md](BRD.md) BR-3 / §14。
+> 关联: [rag-vs-agentic-search-todo.md](../ledgers/rag-vs-agentic-search-todo.md)(决策点 #2 判据)、[BRD.md](../BRD.md) BR-3 / §14。
 
 ---
 

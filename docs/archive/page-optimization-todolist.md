@@ -24,7 +24,7 @@
 ### T-03 · 附件上传 / 语音输入
 
 - 语音输入已于 2026-10-22 整块删除，不在本轮恢复。
-- 图片附件仍是 D-188：能画缩略图，但发送时被静默丢弃。本轮不碰，修复见 `docs/deferred-issues.md`。
+- 图片附件仍是 D-188：能画缩略图，但发送时被静默丢弃。本轮不碰，修复见 `docs/ledgers/deferred-issues.md`。
 
 ## 2. 本轮已做
 
@@ -48,7 +48,7 @@
 - [x] 删除 `preset-row` / `preset-grid` / `preset-card` / `preset-mark` / `preset-copy` / `preset-label` / `preset-url` / `preset-check` 全部 CSS 与渲染代码；`provider-presets.js` 保留（`providerMark` 仍被 `app.js` 的模型面板厂商栏使用）。
 - [x] 新增 i18n：`connProvider` / `connProviderDesc` / `connProviderCustom` / `connProviderTaken`（en + zh）；删除 `connQuickAdd` / `connQuickAddDesc` / `connPresetUse` / `connPresetConfigured`。（`connProviderTaken` 已于 §2.6 随「置灰」规则一并删除。）
 - [x] 新增纯函数 `providerPickerOptions` / `presetFillFor` 及 19 例单测（`tests/desktop/provider-presets.test.js` 由 17 例增至 30 例）。
-- [x] 文档同步：`docs/frontend-design.md` §5.3 字号阶表、§7.6 状态页签高度、§7.9 厂商选择器、§7.10 Esc 顺序、§10 最小字号；`desktop/MATRIX.md` 的 `saveProviders` 行。
+- [x] 文档同步：`docs/specs/frontend-design.md` §5.3 字号阶表、§7.6 状态页签高度、§7.9 厂商选择器、§7.10 Esc 顺序、§10 最小字号；`desktop/MATRIX.md` 的 `saveProviders` 行。
 
 ### 2.4 第三轮：输入区形状关系（2026-11-04，用户贴了 BoardUI Composer Panel 实拍）
 
@@ -70,7 +70,7 @@
 - [x] **对话页模型面板左栏按服务（API Key）划分**：一行 = 一张卡，厂商图标 + 显示名称（最多两行）；无已知厂商的服务回退到 `providerMark` 两字母字标。数据由 `providerRailRows(modelGroups(), meta)` 拼装——`models` 事件没有厂商字段，靠 `providerConfig` 已在渲染层 + localStorage 解决，**不改宿主与内核**。右栏表头与 `role="group"` 的 `aria-label` 也用显示名称，服务名进 `title`。
 - [x] 面板宽度 341 → 412px（容纳 158px 左栏 + 模型名）；左栏宽度与两行标签在 1440 / 1100 两个宽度、深/浅主题下实测无溢出。
 - [x] 新增单测：`tests/desktop/provider-meta.test.js`（25 例）+ `provider-presets.test.js` 增补（`nextProviderName` / `isAutoProviderName`，`providerPickerOptions` 改为归属语义），两文件共 61 例通过。
-- [x] 文档同步：`docs/frontend-design.md` §7.6 模型面板与 §7.9 模型服务页；`desktop/MATRIX.md` 的 `saveProviders` 行。
+- [x] 文档同步：`docs/specs/frontend-design.md` §7.6 模型面板与 §7.9 模型服务页；`desktop/MATRIX.md` 的 `saveProviders` 行。
 
 ### 2.7 第五轮：删除「浏览工作区文件」目录树（2026-11-05，Task E）
 
@@ -96,7 +96,7 @@
 - [x] **纯函数 + 单测**：`serviceKeyKind` / `serviceHeaderFacts`（`settings-models.js`），`tests/desktop/settings-models.test.js` 新增 7 例。
 - [x] **搜索适配**：查询时展开折叠的卡片正文与 `<details>`，清空后只收回搜索打开的那些。
 - [x] **不改的东西**：数据结构（`providers.json` / `prometheus.providerMeta`）、`saveProviders` 单一路径、每一条校验、内核与宿主，全部未动。
-- [x] 文档：`docs/frontend-design.md` §7.9 新增「卡片信息层级」小节。
+- [x] 文档：`docs/specs/frontend-design.md` §7.9 新增「卡片信息层级」小节。
 
 ### 2.5 复核时补的（2026-11-05）
 

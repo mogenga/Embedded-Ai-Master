@@ -30,7 +30,7 @@ const REVIEWED_FILE = '_reviewed.md'
  * 受管语料集合必须排除的文件名（按 basename 匹配），供 manifest 生成与 OTA 发布脚本使用。
  *
  * `_inbox.md` 排第一：它是用户本地沉淀，而 OTA 会**整份替换**语料快照
- * （`docs/corpus-ota.md` §3/§4）。把它算进清单只有两种结局——更新时冲掉用户的
+ * （`docs/operations/corpus-ota.md` §3/§4）。把它算进清单只有两种结局——更新时冲掉用户的
  * 提案，或者新快照校验失败。`_reviewed.md` 同理：审核记录也是用户数据，不是语料正文。
  */
 export const MANAGED_CORPUS_EXCLUDES: readonly string[] = [INBOX_FILE, REVIEWED_FILE]
@@ -166,7 +166,7 @@ function toProposal(parsed: ParsedBlock, id: string): KbProposal {
 /**
  * `_inbox.md` 的默认位置：语料根内。
  *
- * OTA 会整份替换语料快照，部署形态把 inbox 放在根外（契约 `docs/corpus-ota.md` §3
+ * OTA 会整份替换语料快照，部署形态把 inbox 放在根外（契约 `docs/operations/corpus-ota.md` §3
  * 的 `$HARNESS_HOME/kb/inbox/_inbox.md`），因此下面所有读写都提供「按文件路径」的
  * 变体；`root` 版本只是默认位置的薄封装，行为与改动前逐字一致。
  */

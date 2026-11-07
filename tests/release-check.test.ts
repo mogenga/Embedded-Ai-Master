@@ -199,11 +199,11 @@ describe("checkGitClean（注入字符串，不跑 git）", () => {
   });
 
   it("有未提交改动 → FAIL，并报数量", () => {
-    const porcelain = " M scripts/release.mjs\n?? docs/release.md\n";
+    const porcelain = " M scripts/release.mjs\n?? docs/operations/release.md\n";
     const result = checkGitClean(porcelain);
     expect(result.status).toBe(STATUS.FAIL);
     expect(result.detail).toContain("2 项");
-    expect(result.detail).toContain("docs/release.md");
+    expect(result.detail).toContain("docs/operations/release.md");
   });
 
   it("改动很多时截断显示，但数量如实", () => {

@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 
 /**
  * 语料清单（`latest.json`）的规范 JSON、结构校验与 Ed25519 验签——契约见
- * `docs/corpus-ota.md` §4/§6。
+ * `docs/operations/corpus-ota.md` §4/§6。
  *
  * 这一层解决的**唯一**问题：让「发布侧签的字节」与「客户端验的字节」逐字节相同。
  * 语料原文会直接进模型上下文，被篡改的语料不是解析错误而是提示注入（撞 R1/R2/R3），

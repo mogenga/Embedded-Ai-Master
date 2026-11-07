@@ -5,7 +5,7 @@
 - **用户关键原话**："登记并标注，然后修复A档（开fix分支），不准提交不准推送"。
 - **分支与状态**：从 `feat/p0`（`df62151`）创建 `fix/p0-a-tier`；全部改动停留在工作区，**未提交、未推送**；未使用 worktree、未执行 `npm install`、未派生 agent、未真实执行危险命令。
 - **登记与标注**：
-  - `docs/deferred-issues.md` 新增 D-105（项目级 MCP 配置自动执行无信任门槛）、D-106（连接错误重试可能重复执行破坏性工具）、D-107（`listTools()` 无显式超时）、D-108（MCP content/schema 无大小上限）。
+  - `docs/ledgers/deferred-issues.md` 新增 D-105（项目级 MCP 配置自动执行无信任门槛）、D-106（连接错误重试可能重复执行破坏性工具）、D-107（`listTools()` 无显式超时）、D-108（MCP content/schema 无大小上限）。
   - D-043 标注已解决（维度4 Task5 起 `runCwd = opts.cwd ?? process.cwd()` 同时用于 `header.workdir` 与 `LoopCtx.cwd`，resume 采用 `opts.cwd ?? header.workdir ?? process.cwd()`）。
   - A 档对应条目更新状态：D-022/D-099 标“已缓解”，D-031/D-032/D-067/D-075/D-102/D-105~D-108 标“已解决”；变更记录补一行。
 - **A 档修复**：
@@ -31,7 +31,7 @@
   - **D-071/D-077 已解决**：`fs.read` 把 signal 传给 `createReadStream` 并在读循环检查；`fs.write/edit` 在操作前后检查并把 signal 传给 `readFile`/`writeFile`，取消返回 `aborted`（write/edit 提示可能留下部分文件）。`walkFiles` 新增 signal 参数并在每个条目/递归/访问前 `throwIfAborted`；`glob`/`grep` 捕获 AbortError 返回 `aborted`，`grep` 在文件读取前与每 256 行检查。补 fs/glob/grep 取消测试与 `walkFiles` 遍历中 abort 测试。
   - **MCP 终止屏障**：`beginDispose` 终止 transport 后轮询 PID（`terminateTimeoutMs` 默认 2s）；确认退出后才允许重连；未确认时 `state.uncertain=true`，后续调用直接返回 `mcp_uncertain` 且不重连。新增“终止未确认拒绝重连”测试（spy `process.kill(pid,0)` 模拟进程仍存活）。
   - **D-099 进一步缓解**：emergency 阶段允许 `artifactPath` 存在的 evidence 降级为 `[tool result elided; full output at <path>]`；无 artifact 的 evidence 仍保留。`buildMessages` 的 evidence 投影条件同步允许 artifact 引用；新增 evidence+artifact 降级测试。
-  - 文档同步：README、`docs/deferred-issues.md`、dim3/dim4/dim5 spec、`p0-kernel-design.md`。
+  - 文档同步：README、`docs/ledgers/deferred-issues.md`、dim3/dim4/dim5 spec、`p0-kernel-design.md`。
 - **验证（最终工作区）**：`npm test` / `npm run coverage` 44 files / **1235 passed + 1 skipped**，coverage exit 0，statements **88.4%**、branches **83.56%**、functions **91.25%**、lines **90.38%**；`npm run lint`、`npm run typecheck`、`npm run build` 全部 exit 0。
 - **被拒绝或纠偏的内容**：未使用 worktree、未 `npm install`、未派生 agent、未真实执行危险命令；未提交、未推送；未把无 artifact 的 evidence 强制丢弃（保留设计约束）；未为第三方 in-process 工具引入 worker 隔离（更大架构改动，留 P1）。
 - **翻车与返工**：`build.test.ts` 原“evidence + artifact 保留原文”用例与新语义冲突，改为断言 artifact 引用；MCP manager 的 `terminateAndWait` 因 `transport.pid` 可能为 `null` 触发 typecheck，已归一为 `undefined`。其余为预期 RED→GREEN。

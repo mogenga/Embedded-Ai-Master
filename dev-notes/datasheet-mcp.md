@@ -22,7 +22,7 @@
 - **回归门禁**：语料 RM0008 Rev21 + RM0090 Rev22（sha256 钉死，corpus/ gitignore + 下载脚本）；50 金 + 25 负（data/ 自造标注入库）；基线 R@2 1.0 / Hit@1 1.0 / MRR 1.0 / 误报 0.04；`npm run datasheet:regression` PASS。
 - **阶段 C（结构化）**：`registers.ts` 位域行启发式（`Bit n NAME:` 逐行正则，不做列对齐）。实测校准抓出四个版式事实：①页眉行尾 `(USB)` 会抢占真标题（含 `RM0\d{3}` 的行不当标题）；②`SWJ_CFG[2:0]:` 位名带位宽注记；③复位值 `0x0000 0000` 空格分组；④AFIO_MAPR 密度分段表两段各自从高位开始（降序校验改分段 ≤2 段）。实测 RM0008 提取 143 表，USB_CNTR/AFIO_MAPR/USART_SR 逐位与手册一致。
 - **D16 spike → 放弃**：reserved 位域仅 1/1143（Reserved 位无位域描述行，只在位号图里）——verify_register_write 的核心原料缺失；补齐需列对齐解析（todolist 预判的列拆行风险）。按 todolist §3「spike 不过就放弃」执行，结论记入设计文档 §5 与 D-207。
-- **阶段 D**：设计文档 `docs/datasheet-mcp.md`（含 todolist §0 对照表 + 8 条实测偏差披露）；deferred-issues 录入 D-207 + 变更日志；rag-vs-agentic-search-todo §5 加关联行；MCP 注册示例在 README（B 无集中预设注册点，D18 条件分支不适用）。
+- **阶段 D**：设计文档 `docs/operations/datasheet-mcp.md`（含 todolist §0 对照表 + 8 条实测偏差披露）；deferred-issues 录入 D-207 + 变更日志；rag-vs-agentic-search-todo §5 加关联行；MCP 注册示例在 README（B 无集中预设注册点，D18 条件分支不适用）。
 - **验收偏差（向用户如实披露）**：验收 2 的 `USB_BCDR` 在 RM0008 Rev 21 / RM0090 Rev 22 均不存在（ST 当前最新版都没有 USB BCD 章节），实测替代 USB_CNTR→p642 / AFIO_MAPR→p184，USB_BCDR/USB_EPR 收入负例集作实证。
 - **最终验证**：datasheet 95/95、行覆盖 93.65%、typecheck 零新增错误、build:mcp 产物 8 个 js、全仓 npm test 2992 passed / 4 failed（skills-store EPERM ×2 + kb-review 数据集 ×1 均为既有环境问题；mcp-manager 并发用例单跑 36/36 绿，全量并行下的负载偶发，与 datasheet 无关）。
 - **翻车与返工**：bash 双引号里的 python 脚本含 Markdown 反引号被命令替换执行（AGENTS.md 2026-10-19 事故的第三次重演，本轮发生两次：node -e 的 String.raw 与 dev-notes 追记），均改用 Edit 工具/独立文件修复；教训：**含反引号的文本一律走 Write/Edit 工具，不走 bash 内联脚本**。python 补丁 `\n` 转义把测试文件写坏两次，均以 assert + Edit 修复。

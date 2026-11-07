@@ -73,7 +73,7 @@ src/raglab/
 | C′ BM25 + grep | 稀疏召回 + 精确 token 复核 |
 | D 混合 | C′ 或 A 召回 + B 精读（条件启用） |
 
-目标是关闭决策点 #2（KB 渐进加载载体），判定口径见主仓库 `docs/rag-vs-agentic-search-todo.md` §6。
+目标是关闭决策点 #2（KB 渐进加载载体），判定口径见主仓库 `docs/ledgers/rag-vs-agentic-search-todo.md` §6。
 
 ## 目录
 
@@ -102,8 +102,8 @@ experiments/rag-vs-agentic-search/
 完整设计（公平性协议 T1-T13、资产导入契约、方案定义、运行门禁、指标与决策映射、图表清单）见主仓库：
 
 - [`docs/superpowers/specs/2026-10-19-rag-vs-agentic-search-experiment-design.md`](../../docs/superpowers/specs/2026-10-19-rag-vs-agentic-search-experiment-design.md)
-- 上游待办：[`docs/rag-vs-agentic-search-todo.md`](../../docs/rag-vs-agentic-search-todo.md)
-- M2 路线图：[`docs/m2-roadmap.md`](../../docs/m2-roadmap.md)
+- 上游待办：[`docs/ledgers/rag-vs-agentic-search-todo.md`](../../docs/ledgers/rag-vs-agentic-search-todo.md)
+- M2 路线图：[`docs/specs/m2-roadmap.md`](../../docs/specs/m2-roadmap.md)
 
 ## 设计期已确定的公平性底线（摘要）
 

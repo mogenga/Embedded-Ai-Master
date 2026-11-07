@@ -25,7 +25,7 @@ import type { CorpusState, KbLayout } from "./snapshot.js";
 
 /**
  * 语料 OTA 客户端：检查 → 验签 → 版本比较 → 下载变更文件 → 校验 → 切指针。
- * 契约见 `docs/corpus-ota.md` §6（流程）与 §6.1（HTTP 状态语义）。
+ * 契约见 `docs/operations/corpus-ota.md` §6（流程）与 §6.1（HTTP 状态语义）。
  *
  * 三条贯穿全文件的规则：
  *

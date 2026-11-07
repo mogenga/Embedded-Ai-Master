@@ -115,17 +115,17 @@ parseFrontmatter(text: string): { data: Record<string, string | string[]>; body:
 
 ### 与对照实验方案 B 的关系（必须如实披露）
 
-`docs/rag-vs-agentic-search-todo.md` §7 与 `experiments/rag-vs-agentic-search/docs/experiment-report.md` 里被测量的是**方案 B**：工具面只有 `glob` / `grep` / `read` / `submit`，**没有 `kb_lookup`**，由 LLM 从零开始多轮检索并最终 `submit` 候选。本目录部署的是 **lookup 首跳 + glob/grep/read 循环**，模型可以先吃索引再决定要不要展开，形态与 B 不同。
+`docs/ledgers/rag-vs-agentic-search-todo.md` §7 与 `experiments/rag-vs-agentic-search/docs/experiment-report.md` 里被测量的是**方案 B**：工具面只有 `glob` / `grep` / `read` / `submit`，**没有 `kb_lookup`**，由 LLM 从零开始多轮检索并最终 `submit` 候选。本目录部署的是 **lookup 首跳 + glob/grep/read 循环**，模型可以先吃索引再决定要不要展开，形态与 B 不同。
 
 因此：**不能把 B 的 Recall@2 0.925 当作本部署的成绩**。本部署没有在 B 的评测协议下跑过，也没有对应的测量数字；B 的成绩只说明「agentic 检索这条路值得走」。
 
-同样的原因，实验里 **B 的 H7（KB 外查询拒答）整块未评估**——B 没有负样本跑批实现（`experiments/rag-vs-agentic-search/docs/experiment-report.md` §5）。本部署的拒答能力只剩 `kb_lookup` 那一道门槛（当前负样本拒答率 0.84，见下），一旦模型改用 `kb_grep` / `kb_glob`，就不存在任何拒答机制。**该缺口已登记为 D-179**（`docs/deferred-issues.md`）；召回质量与拒答的相邻问题由 D-159 跟踪。
+同样的原因，实验里 **B 的 H7（KB 外查询拒答）整块未评估**——B 没有负样本跑批实现（`experiments/rag-vs-agentic-search/docs/experiment-report.md` §5）。本部署的拒答能力只剩 `kb_lookup` 那一道门槛（当前负样本拒答率 0.84，见下），一旦模型改用 `kb_grep` / `kb_glob`，就不存在任何拒答机制。**该缺口已登记为 D-179**（`docs/ledgers/deferred-issues.md`）；召回质量与拒答的相邻问题由 D-159 跟踪。
 
 2026-10-22 这一轮按 D-179 的**建议 ① 与 ②** 做了一半：工具描述里写死「命中只是候选，断言前必须 `kb_read` 原文确认」，`kb_grep` 增加了命中文件级分布（`fileCount` / `files`）。**建议 ③（补 B 的负样本跑批、按同一评测协议拿真实拒答率）没有做**，所以 D-179 的状态仍是「未解决」——本轮只是把不可见的歧义变成可见的数字，拒答率依然未知，也**没有**因此设置任何阈值。
 
 - `kb_lookup` / `kb_glob` / `kb_grep` / `kb_read` / `kb_search` / `kb_status` 为只读工具。
 - `kb_propose` 把新知识写入待审 inbox，返回 `proposalId`、`inboxPath` 与 `status: "pending_review"`。它**只写待审区**：`kb_search` / `kb_grep` / `kb_glob` 均排除 `_inbox.md`，`kb_lookup` 只读 `index.yaml`，因此未审内容不会进入检索。
-- **inbox 位置可配置**：默认仍是 `<KB 根>/_inbox.md`（不传 `inboxPath` 时行为不变）。OTA 部署形态下语料快照会被整份替换，用户沉淀必须放在根外——`KbServiceOptions.inboxPath` / 环境变量 `KB_INBOX_PATH` 指向 `$HARNESS_HOME/kb/inbox/_inbox.md`（见 `docs/corpus-ota.md` §3）。`kb_status` 用 `inboxPath` 与 `inboxExternal` 如实回报实际位置，`kb_propose` 回报的 `inboxPath` 与之一致：写在哪就报在哪，绝不会写外部文件却回报 `_inbox.md`。
+- **inbox 位置可配置**：默认仍是 `<KB 根>/_inbox.md`（不传 `inboxPath` 时行为不变）。OTA 部署形态下语料快照会被整份替换，用户沉淀必须放在根外——`KbServiceOptions.inboxPath` / 环境变量 `KB_INBOX_PATH` 指向 `$HARNESS_HOME/kb/inbox/_inbox.md`（见 `docs/operations/corpus-ota.md` §3）。`kb_status` 用 `inboxPath` 与 `inboxExternal` 如实回报实际位置，`kb_propose` 回报的 `inboxPath` 与之一致：写在哪就报在哪，绝不会写外部文件却回报 `_inbox.md`。
 - 外部 inbox 不经 `kb_read` 暴露：`kb_read` 的路径校验仍限制在语料根内（不放宽成任意路径可读）。审核脚本不走这条路径，它直接按同一位置读文件。
 - `MANAGED_CORPUS_EXCLUDES`（`inbox.ts`）列出受管语料必须排除的文件名，第一项是 `_inbox.md`，另含 `_reviewed.md`：OTA 整份替换快照，用户沉淀与审核记录不能算进清单。
 - 同一 `kind + domain + content` 重复提交不会重复写入，返回已有 `proposalId` 与 `duplicate: true`（外部 inbox 下同样生效）。

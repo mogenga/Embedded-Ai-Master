@@ -1,7 +1,7 @@
 # Agent Harness 横向调研报告:Claude Code / dsh / Codex / Gemini CLI / opencode / goose / pi
 
 > 日期: 2026-10-15。状态: **调研完成,支撑架构选型**。
-> 关联: [framework-architecture-inventory.md](framework-architecture-inventory.md)(架构清单 24 项 + 10 决策点,本文逐项映射)、[BRD.md](BRD.md)(BR/PLAT 需求编号沿用)。
+> 关联: [framework-architecture-inventory.md](framework-architecture-inventory.md)(架构清单 24 项 + 10 决策点,本文逐项映射)、[BRD.md](../BRD.md)(BR/PLAT 需求编号沿用)。
 > 调研对象由用户指定:Claude Code(解析文章 diwang.info/how-claude-code-works)、dsh(github.com/deepseek-ai/deepseek-harness)、Codex 等,其余为补充。
 
 ---

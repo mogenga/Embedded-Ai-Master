@@ -1,7 +1,7 @@
 # 待办:RAG vs Agentic Search 实测对比
 
 > 创建: 2026-10-15。状态: **待办,属调研阶段任务**。
-> 关联: [framework-architecture-inventory.md](framework-architecture-inventory.md) 决策点 #2(KB 渐进加载载体)
+> 关联: [framework-architecture-inventory.md](../specs/framework-architecture-inventory.md) 决策点 #2(KB 渐进加载载体)
 
 ---
 
@@ -52,7 +52,7 @@
 
 ## 5. 任务清单
 
-- 相关: datasheet MCP(`mcp-servers/datasheet/`,设计文档 `docs/datasheet-mcp.md`)复用了同一「朴素检索起步 + 回归门禁护航」路线的第二个实例——BM25 + 整短语加成混合排序、词边界拒答、50 金/25 负回归门禁(与 kb 的 C′ 方案同风格,语料换 PDF 数据手册),其实测基线与已知局限见该设计文档 §6/§7。
+- 相关: datasheet MCP(`mcp-servers/datasheet/`,设计文档 `docs/operations/datasheet-mcp.md`)复用了同一「朴素检索起步 + 回归门禁护航」路线的第二个实例——BM25 + 整短语加成混合排序、词边界拒答、50 金/25 负回归门禁(与 kb 的 C′ 方案同风格,语料换 PDF 数据手册),其实测基线与已知局限见该设计文档 §6/§7。
 
 - [x] 从 regression.py 导出评测集(查询 + 预期文件),统一为 JSONL —— **原 274 条确认拿不到,已替换为自建 80 条**(2026-10-20,已过 G0)
 - [ ] 补标注:多 gold case(答案分散多文件)、扰动查询集三档 × 50 条、KB 外负样本 20-30 条 —— **负样本 25 条已完成**;多 gold 与扰动集未建(扰动集缺失只阻塞 H6,已按 §5.2 降级为 warning)

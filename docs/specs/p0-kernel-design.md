@@ -1,7 +1,7 @@
 # P0 内核架构方案(embeddedAgent harness)
 
 > 版本: v0.2 · 日期: 2026-10-16 · 状态: **M1 设计稿,待评审(决策点 #1 已关闭)**
-> 决策来源: 用户选型(2026-10-15/16)+ [harness-comparison.md](harness-comparison.md) 七工具调研 + [BRD.md](BRD.md) M1。
+> 决策来源: 用户选型(2026-10-15/16)+ [harness-comparison.md](harness-comparison.md) 七工具调研 + [BRD.md](../BRD.md) M1。
 > 选型决定: 主循环 / 上下文管理 / 工具系统 / MCP 客户端取 **Claude Code** 母本;模型接入融合 **dsh + opencode** 并简化;会话管理取 **dsh** 母本。
 > 语言栈(决策点 #1,**已关闭**): **TypeScript + Node 24**(ESM-only,本机 24.14.1 已具备)。复用边界: MCP 官方 TS SDK v2(`@modelcontextprotocol/client` / `@modelcontextprotocol/server`)与 Zod v4 为协议层复用;内核(主循环/会话/工具/上下文/MCP 生命周期)自研;模型适配层自研极简适配器(仅 complete/countTokens 两方法,P0 只实现 OpenAI 兼容,语法借鉴 dsh llm-pi-ai,不整体引第三方);测试用 vitest。选型依据 Context7 查证: MCP TS SDK v2 官方支持 Node 20+,开发环境要求 Node 24.x + npm 11.x 与本机相符;七工具 5/7 为 TS,全栈同构。(v0.2 修订)
 > 定位: 领域无关内核;嵌入式调试的垂直影响以"贯穿约束"形式表达(§7),内核代码不含领域逻辑。
@@ -188,7 +188,7 @@ async function* query(session: Session, input: UserInput, cfg: LoopConfig): Asyn
   }
   ```
   `ToolCtx` 携带会话 id、工作目录、事件发布器;`ToolResult` 含 `isError: boolean` + 结构化错误体(`code / message / detail`)——**R3"工具必须诚实"的类型化落点**:错误是数据,不是异常字符串。
-- **五阶段管线**(每批工具调用统一走过):查找 → schema 验证 → 权限检查(P0 恒 allow,接口留位给 P1 #7)→ 执行(超时 / 取消 / 大输出截断)→ 后处理(超限落盘 #3)。**职责边界(P0 实现)**: 管线只返回结构化 `ToolResult`,**不写会话日志、不发布事件、不记 usage**——这三件由主循环在收到批量结果后统一完成(`session.append(tool_result)` / yield 事件 / usage 记账),以保证"落日志"与"投影"由同一处负责、不重复写入。超时返回 `tool_timeout`;串行批次在超时后会等待残留执行一个宽限期,仍未结束则不再启动同批后续调用(后续结果标 `tool_skipped_after_timeout`),因此不会与后续写调用重叠;内置 `fs`/`shell`/`glob`/`grep` 均已响应 `AbortSignal`,不响应 signal 的自定义/第三方 in-process 工具仍可能继续运行(见 `docs/deferred-issues.md` D-022)。
+- **五阶段管线**(每批工具调用统一走过):查找 → schema 验证 → 权限检查(P0 恒 allow,接口留位给 P1 #7)→ 执行(超时 / 取消 / 大输出截断)→ 后处理(超限落盘 #3)。**职责边界(P0 实现)**: 管线只返回结构化 `ToolResult`,**不写会话日志、不发布事件、不记 usage**——这三件由主循环在收到批量结果后统一完成(`session.append(tool_result)` / yield 事件 / usage 记账),以保证"落日志"与"投影"由同一处负责、不重复写入。超时返回 `tool_timeout`;串行批次在超时后会等待残留执行一个宽限期,仍未结束则不再启动同批后续调用(后续结果标 `tool_skipped_after_timeout`),因此不会与后续写调用重叠;内置 `fs`/`shell`/`glob`/`grep` 均已响应 `AbortSignal`,不响应 signal 的自定义/第三方 in-process 工具仍可能继续运行(见 `docs/ledgers/deferred-issues.md` D-022)。
 - **超时分级**:内置 shell 默认 2 min;MCP 工具按 server 声明(serial 类长操作允许分钟级);超时 = signal 中止 + 结构化超时错误回传模型(模型可据此换策略——Phase 0 验证过"防 hang"必须做到工具级)。
 - **大输出截断**:执行器出口统一截断(默认 25k tokens,对齐母本 MCP 截断值),截断体交 #3 一级落盘。
 - **内置最小工具集**(决策点 #3 的答案):`fs`(读/写/编辑合一)、`shell`、`glob`、`grep` 四个进内核——诊断所需的"读日志、翻工程、跑编译"全够用;嵌入式取证一律走 MCP(探针/串口/KB),**不进内核**(领域逻辑不入内核的定位边界)。

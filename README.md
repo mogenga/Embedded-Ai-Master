@@ -50,7 +50,7 @@
 最新版 **v0.2.0**（2026-11-06）：Windows x64 NSIS 安装包约 113 MiB，在 [Releases](https://github.com/mogenga/Embedded-Ai-Master/releases/latest) 页。该版本新增系统提示词的 `environment` 节、整跑墙钟超时、MCP 会话级连接、进程内事件通道、产物面板入口、Renode 固件装载与证据筛选，详见 release 说明。
 
 > [!WARNING]
-> **安装包未做代码签名。** 首次运行 Windows 会显示「未知发布者」的 SmartScreen 提示——点「更多信息」→「仍要运行」。这是缺少签名证书所致（见 [`docs/code-signing.md`](docs/code-signing.md)），不是文件损坏。未签名构建里，应用内更新下载到的包也不做签名校验。
+> **安装包未做代码签名。** 首次运行 Windows 会显示「未知发布者」的 SmartScreen 提示——点「更多信息」→「仍要运行」。这是缺少签名证书所致（见 [`docs/operations/code-signing.md`](docs/operations/code-signing.md)），不是文件损坏。未签名构建里，应用内更新下载到的包也不做签名校验。
 
 ## 能做什么
 
@@ -102,7 +102,7 @@
 
 同一条循环喂给两种形态，差别只在事件流的消费者：**headless CLI** 与**桌面工作台**。这就是「一次诊断的日志能被原样回放」的结构基础。
 
-细节见 [`docs/p0-kernel-design.md`](docs/p0-kernel-design.md)。
+细节见 [`docs/specs/p0-kernel-design.md`](docs/specs/p0-kernel-design.md)。
 
 ### 检索层怎么选型
 
@@ -140,7 +140,7 @@
 **B 的优势不来自评测集与语料同源** —— 已用覆盖率分层排除：低覆盖层高 18.8 个百分点、高覆盖层高 23.5 个百分点，相关系数 −0.018；对照组的词频红利形态（低覆盖层 −12.5 个百分点）没有出现在 B 上。
 
 > [!NOTE]
-> **这是探索性结果，不是确认性结论。** 预注册未冻结哈希，确认性评测拒绝执行；样本 80 条（原设计 274 条），单标注者、无一致性系数。**方向已关闭，决策点未关闭** —— 剩余缺口见 [`docs/rag-vs-agentic-search-todo.md`](docs/rag-vs-agentic-search-todo.md) §7.4。
+> **这是探索性结果，不是确认性结论。** 预注册未冻结哈希，确认性评测拒绝执行；样本 80 条（原设计 274 条），单标注者、无一致性系数。**方向已关闭，决策点未关闭** —— 剩余缺口见 [`docs/ledgers/rag-vs-agentic-search-todo.md`](docs/ledgers/rag-vs-agentic-search-todo.md) §7.4。
 
 ## 快速开始
 
@@ -493,7 +493,7 @@ npm test
 - 三个比例参数有约束关系（尾部比例 < 软阈值 < 1），非法值在入口直接报错。
 - 压缩会改变消息前缀，可能打断服务商的提示词缓存；摘要本身没有完整性校验。
 
-完整算法与失败语义见 [`docs/p0-kernel-design.md`](docs/p0-kernel-design.md)。
+完整算法与失败语义见 [`docs/specs/p0-kernel-design.md`](docs/specs/p0-kernel-design.md)。
 
 ## 系统提示词
 
@@ -505,7 +505,7 @@ npm test
 - **只对新会话生效。** 内核不允许给「日志里没有系统消息的历史会话」凭空补一条——同一份日志的两次投影会得到不同输入。所以填写之后**旧会话一律续不上**，会明确报错。要续聊就先清空这个设置，或者新建会话。
 - 一旦某个会话写下系统消息，之后每次恢复都必须传**完全相同**的文本，否则同样报错。
 
-分节组装的设计草案见 [`docs/system-prompt-design.md`](docs/system-prompt-design.md)，尚未实现。
+分节组装的设计草案见 [`docs/specs/system-prompt-design.md`](docs/specs/system-prompt-design.md)，尚未实现。
 
 ## 会话
 
@@ -631,7 +631,7 @@ npm run kb:review -- --accept <id> --target <正式条目>   # 指标不降才�
 - **整片擦除不可用**：该版本 uVision 对整片擦除请求无响应，工具如实报错而不是伪装成功；烧录只擦除镜像自身占用的扇区。能力查询会列出实测不可用的操作。
 - **只回传日志原文**：构建诊断不做「文件:行号」结构化解析。
 
-默认预设下运行控制、烧录、擦除、写参数、改工程走审批，headless 降级为拒绝；取证读数标记为证据，破坏性动作带声明。详见 [`docs/keil-headless.md`](docs/keil-headless.md)。
+默认预设下运行控制、烧录、擦除、写参数、改工程走审批，headless 降级为拒绝；取证读数标记为证据，破坏性动作带声明。详见 [`docs/operations/keil-headless.md`](docs/operations/keil-headless.md)。
 
 ### 数据手册
 
@@ -667,7 +667,7 @@ npm run datasheet:regression              # 跑批并与基线比较
 npm run packs:e2e   # 默认装 pyOCD（约 35 MiB 真实下载）→ 验证可执行 → 卸 → 无残留
 ```
 
-根目录可用环境变量覆盖，默认在 `%LOCALAPPDATA%` 下。默认测试不触网，这个脚本是验收动作。出网需代理的机器上有对应的环境变量写法，详见 [`docs/toolchain-packs.md`](docs/toolchain-packs.md)。
+根目录可用环境变量覆盖，默认在 `%LOCALAPPDATA%` 下。默认测试不触网，这个脚本是验收动作。出网需代理的机器上有对应的环境变量写法，详见 [`docs/operations/toolchain-packs.md`](docs/operations/toolchain-packs.md)。
 
 ## 桌面工作台
 
@@ -705,7 +705,7 @@ npm run packs:e2e   # 默认装 pyOCD（约 35 MiB 真实下载）→ 验证可�
 
 agent 的写入经数据目录下的邮箱交给持口的面板执行，面板把它回放进转录并标注来源。
 
-串口流量不进转录；agent 读到的部分作为工具结果自然落盘。方案与实测坑见 [`docs/serial-panel-spec.md`](docs/serial-panel-spec.md)。
+串口流量不进转录；agent 读到的部分作为工具结果自然落盘。方案与实测坑见 [`docs/operations/serial-panel-spec.md`](docs/operations/serial-panel-spec.md)。
 
 ### 技能
 
@@ -752,7 +752,7 @@ agent 的写入经数据目录下的邮箱交给持口的面板执行，面板�
 
 发布用 `scripts/corpus-publish.mjs`：先生成带签名的清单再上传，**先传文件、最后传清单**。私钥已被 `.gitignore` 覆盖。
 
-完整契约（清单格式、规范 JSON、状态机、发布侧职责）见 [`docs/corpus-ota.md`](docs/corpus-ota.md)。
+完整契约（清单格式、规范 JSON、状态机、发布侧职责）见 [`docs/operations/corpus-ota.md`](docs/operations/corpus-ota.md)。
 
 ### 打包
 
@@ -773,7 +773,7 @@ npm --prefix desktop run dist             # 前置装配 + 打包
 
 运行时依赖闭包这一项不显然但必要：产物保留了裸包引用，宿主加载内核时从安装目录向上找依赖，找不到就直接退出。闭包由脚本从锁文件算出（14 个包、约 23 MB），不含构建工具；桌面自己的原生串口模块与更新库由打包器带进包内。
 
-**安装包已产出并发布到 v0.2.0**（2026-11-06，含安装包 / `.blockmap` / `latest.yml` 三个资产）。**v0.1.5 已在干净机器上完成安装验证**（2026-11-03），v0.2.0 尚未重复这项验证。仍未关闭的是签名相关项：代码签名从未真实执行过；未签名构建里应用内更新下载到的包也不做签名校验。发布流程见 [`docs/release.md`](docs/release.md)。
+**安装包已产出并发布到 v0.2.0**（2026-11-06，含安装包 / `.blockmap` / `latest.yml` 三个资产）。**v0.1.5 已在干净机器上完成安装验证**（2026-11-03），v0.2.0 尚未重复这项验证。仍未关闭的是签名相关项：代码签名从未真实执行过；未签名构建里应用内更新下载到的包也不做签名校验。发布流程见 [`docs/operations/release.md`](docs/operations/release.md)。
 
 ## 验证边界
 
@@ -796,7 +796,7 @@ npm --prefix desktop run dist             # 前置装配 + 打包
 
 ## 已知限制
 
-完整清单（带编号、触发升级条件与修复建议）见 [`docs/deferred-issues.md`](docs/deferred-issues.md)。用户会直接撞到的：
+完整清单（带编号、触发升级条件与修复建议）见 [`docs/ledgers/deferred-issues.md`](docs/ledgers/deferred-issues.md)。用户会直接撞到的：
 
 **模型与提示词**
 
@@ -832,28 +832,34 @@ npm --prefix desktop run dist             # 前置装配 + 打包
 
 ## 文档地图
 
+`docs/` 自 2026-11-07 起按角色分目录（`specs/` / `operations/` / `ledgers/` / `archive/`）。完整索引见 [`docs/README.md`](docs/README.md)。
+
+**接下来做什么，看 [`docs/BACKLOG.md`](docs/BACKLOG.md)** —— 待实现功能唯一的排期入口，按批次 4~10 划分。
+
 | 文档 | 角色 |
 |---|---|
+| [`docs/BACKLOG.md`](docs/BACKLOG.md) | 待实现功能，按批次划分（唯一排期入口） |
+| [`docs/README.md`](docs/README.md) | docs 目录结构、编号体系与维护规则 |
 | [`docs/BRD.md`](docs/BRD.md) | 业务需求、硬性规则、路线图 |
-| [`docs/p0-kernel-design.md`](docs/p0-kernel-design.md) | 内核六项设计：主循环 / 模型 / 上下文 / 工具 / MCP / 会话 |
-| [`docs/frontend-design.md`](docs/frontend-design.md) | 前端设计规范 |
+| [`docs/specs/p0-kernel-design.md`](docs/specs/p0-kernel-design.md) | 内核六项设计：主循环 / 模型 / 上下文 / 工具 / MCP / 会话 |
+| [`docs/specs/frontend-design.md`](docs/specs/frontend-design.md) | 前端设计规范 |
 | [`desktop/MATRIX.md`](desktop/MATRIX.md) | 前端命令与事件能力矩阵 |
-| [`docs/corpus-ota.md`](docs/corpus-ota.md) | 语料 OTA 接口契约（唯一契约源） |
-| [`docs/serial-panel-spec.md`](docs/serial-panel-spec.md) | 串口助手调研与实现方案 |
-| [`docs/keil-headless.md`](docs/keil-headless.md) | Keil 后端的接线与使用 |
-| [`docs/datasheet-mcp.md`](docs/datasheet-mcp.md) | 数据手册检索的设计与工具面 |
-| [`docs/toolchain-packs.md`](docs/toolchain-packs.md) | 工具链包管理器的结构、不变量与权限语义 |
-| [`docs/release.md`](docs/release.md) | 发布流程与打包契约 |
-| [`docs/code-signing.md`](docs/code-signing.md) | Windows 代码签名 |
-| [`docs/system-prompt-design.md`](docs/system-prompt-design.md) | 系统提示词分节组装草案（尚未实现） |
-| [`docs/m2-roadmap.md`](docs/m2-roadmap.md) | M2 任务分期与决策记录 |
-| [`docs/deferred-issues.md`](docs/deferred-issues.md) | 已知问题与升级条件（改代码前先查） |
-| [`docs/embedded-defects-todolist.md`](docs/embedded-defects-todolist.md) | 嵌入式子系统的缺陷复查台账 |
-| [`docs/harness-comparison.md`](docs/harness-comparison.md) · [`docs/framework-architecture-inventory.md`](docs/framework-architecture-inventory.md) | 横向调研与框架能力清单 |
-| [`docs/rag-vs-agentic-search-todo.md`](docs/rag-vs-agentic-search-todo.md) | 检索层对照实验的判据与结论 |
-| [`docs/ontology-scope-note.md`](docs/ontology-scope-note.md) | Ontology 暂缓纳入检索比对的**范围决策**与重启条件 |
+| [`docs/operations/corpus-ota.md`](docs/operations/corpus-ota.md) | 语料 OTA 接口契约（唯一契约源） |
+| [`docs/operations/serial-panel-spec.md`](docs/operations/serial-panel-spec.md) | 串口助手调研与实现方案 |
+| [`docs/operations/keil-headless.md`](docs/operations/keil-headless.md) | Keil 后端的接线与使用 |
+| [`docs/operations/datasheet-mcp.md`](docs/operations/datasheet-mcp.md) | 数据手册检索的设计与工具面 |
+| [`docs/operations/toolchain-packs.md`](docs/operations/toolchain-packs.md) | 工具链包管理器的结构、不变量与权限语义 |
+| [`docs/operations/release.md`](docs/operations/release.md) | 发布流程与打包契约 |
+| [`docs/operations/code-signing.md`](docs/operations/code-signing.md) | Windows 代码签名 |
+| [`docs/specs/system-prompt-design.md`](docs/specs/system-prompt-design.md) | 系统提示词分节组装草案（尚未实现） |
+| [`docs/specs/m2-roadmap.md`](docs/specs/m2-roadmap.md) | M2 任务分期与决策记录 |
+| [`docs/ledgers/deferred-issues.md`](docs/ledgers/deferred-issues.md) | 已知问题与升级条件（改代码前先查） |
+| [`docs/ledgers/embedded-defects-todolist.md`](docs/ledgers/embedded-defects-todolist.md) | 嵌入式子系统的缺陷复查台账 |
+| [`docs/specs/harness-comparison.md`](docs/specs/harness-comparison.md) · [`docs/specs/framework-architecture-inventory.md`](docs/specs/framework-architecture-inventory.md) | 横向调研与框架能力清单 |
+| [`docs/ledgers/rag-vs-agentic-search-todo.md`](docs/ledgers/rag-vs-agentic-search-todo.md) | 检索层对照实验的判据与结论 |
+| [`docs/specs/ontology-scope-note.md`](docs/specs/ontology-scope-note.md) | Ontology 暂缓纳入检索比对的**范围决策**与重启条件 |
 | [`experiments/rag-vs-agentic-search/`](experiments/rag-vs-agentic-search/) | 对照实验的完整资产：报告、评测脚本、查询集 |
 | [`dev-notes/`](dev-notes/) | 按阶段增量追记的过程留痕 |
 
 > [!NOTE]
-> 已移除的 CubeIDE / ESP-IDF / Arduino 三套后端的接入指南已于 2026-11-04 删除。它们的实现与取舍仍在 `docs/deferred-issues.md` 的变更记录里，需要追溯时可从那里的提交哈希找回。
+> 已移除的 CubeIDE / ESP-IDF / Arduino 三套后端的接入指南已于 2026-11-04 删除。它们的实现与取舍仍在 `docs/ledgers/deferred-issues.md` 的变更记录里，需要追溯时可从那里的提交哈希找回。

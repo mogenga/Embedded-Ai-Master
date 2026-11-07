@@ -1,6 +1,6 @@
 """从真实评分结果生成四方案对比图（README 用）。
 
-数据来源：results/scored/main/overall.csv —— 与 docs/rag-vs-agentic-search-todo.md §7.1
+数据来源：results/scored/main/overall.csv —— 与 docs/ledgers/rag-vs-agentic-search-todo.md §7.1
 的表格同源，不手工录入任何数字。
 
 输出两张：

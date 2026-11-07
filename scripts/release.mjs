@@ -442,7 +442,7 @@ export function checkSignature({ scriptMissing, files }) {
       id,
       title,
       status: STATUS.FAIL,
-      detail: `未签名: ${unsigned.map((item) => path.basename(item.file)).join(", ")}；用户会看到 SmartScreen 警告（见 docs/code-signing.md）`,
+      detail: `未签名: ${unsigned.map((item) => path.basename(item.file)).join(", ")}；用户会看到 SmartScreen 警告（见 docs/operations/code-signing.md）`,
     };
   }
   return {
@@ -659,14 +659,14 @@ release；而且它不会在发布前跑签名 / 工作区检查。gh 那条路�
 
 - 版本号的唯一来源是 desktop/package.json 的 version。根 package.json 也有一个
   version，两者不一致时**以 desktop/ 那份为准**（安装包用它），但这个不一致本身
-  是隐患，见 docs/release.md。
+  是隐患，见 docs/operations/release.md。
 - latest.yml 由 electron-updater 消费；应用内自动更新**已接入**（desktop/updater.js，
   desktop/package.json 的 dependencies 里有 electron-updater ^6.8.11），所以每次发布
-  都必须上传它，否则用户会看到「该 release 缺少更新清单」（docs/release.md §12.2）。
-  但「一次真实的更新」至今未跑过，残余边界见 D-212 与 docs/release.md §12.6。
+  都必须上传它，否则用户会看到「该 release 缺少更新清单」（docs/operations/release.md §12.2）。
+  但「一次真实的更新」至今未跑过，残余边界见 D-212 与 docs/operations/release.md §12.6。
 - 安装包名由 desktop/package.json 的 build.win.artifactName 决定；本脚本打印的名字
   与它取自同一份配置，不要在这里另写常量。
-- 未签名的 release，用户双击安装包会看到 SmartScreen 警告，见 docs/code-signing.md。
+- 未签名的 release，用户双击安装包会看到 SmartScreen 警告，见 docs/operations/code-signing.md。
 `;
 }
 

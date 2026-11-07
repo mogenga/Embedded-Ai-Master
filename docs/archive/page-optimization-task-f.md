@@ -14,7 +14,7 @@
 - `desktop/renderer/provider-meta.js`（显示名称与厂商归属的 localStorage 层）。
 - `desktop/renderer/vendor-marks.js`（厂商图标路径数据）。
 - `desktop/renderer/settings.css`（`.settings-form-card`、`.provider-picker*` 等）。
-- `docs/frontend-design.md` §7.9（设置页）与 §7.6。
+- `docs/specs/frontend-design.md` §7.9（设置页）与 §7.6。
 
 ## 现状（上一轮刚做的，这一轮是**继续重构**，不是推倒重来）
 
@@ -85,7 +85,7 @@ HARNESS_HOME=/tmp/harness-svc ./node_modules/.bin/electron main.js --remote-debu
 1. `npm run check:js`、`npx vitest run tests/desktop`、`npm test` 全绿。
 2. 纯逻辑抽成不碰 DOM 的函数并加单测（`tests/desktop/`，风格照 `settings-models.test.js`）。
 3. Electron 实测（隔离）：空态、一张卡折叠/展开、多张卡、重名被拒、缺少密钥的状态显示、推荐模型 chips、测试连接失败与成功的展示；深色/浅色/高对比；1440 与 1100 宽无溢出。
-4. 更新 `docs/frontend-design.md` §7.9、`docs/page-optimization-todolist.md`、`dev-notes/页面优化.md`。
+4. 更新 `docs/specs/frontend-design.md` §7.9、`docs/archive/page-optimization-todolist.md`、`dev-notes/页面优化.md`。
 
 ## 交付
 

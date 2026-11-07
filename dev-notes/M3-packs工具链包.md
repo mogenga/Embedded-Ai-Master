@@ -1,6 +1,6 @@
 # packs 工具链包管理器移植（Prometheus → Embedded-Ai-Master）
 
-> 2026-10-25 执行完毕。任务依据：`docs/packs-porting-todolist.md`（T1–T15）。
+> 2026-10-25 执行完毕。任务依据：`docs/archive/packs-porting-todolist.md`（T1–T15）。
 > 提交：`9d30946`（阶段一 src/packs）→ `3694044`（阶段二 宿主接线）→
 > `1ab0b05`（阶段三 文档/e2e）→ `5136549`（协议测试超时修复）。全部在本地
 > debug 分支，**未推送**。
@@ -42,7 +42,7 @@
   `NODE_USE_ENV_PROXY=1 HTTPS_PROXY=http://127.0.0.1:7897 npm run packs:e2e`
   （本机 clash-verge 混合端口从系统代理注册表读到 7897，不是默认 7890）。
   两条路径（网络恢复后裸跑 / 走代理）均复验通过，verdict 一致。用法已写进
-  README 与 docs/toolchain-packs.md。
+  README 与 docs/operations/toolchain-packs.md。
 - 验收 #3 实测（`.smoke/packs-final-a-b.mjs`，临时脚本未入库）：PATH 仅含
   pack 目录的裸环境里 `spawn("ninja", ["--version"])` 跑出 1.13.2。
 - 验收 #4 三连破坏性测试（`.smoke/packs-final-c.mjs`）：断下载（无半装/

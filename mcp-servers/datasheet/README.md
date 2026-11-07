@@ -110,4 +110,4 @@ npm run datasheet:regression -- --update-baseline  # 检索改动后重标基线
 - `verify_register_write` 不做（D16 spike 结论）：`-layout` 文本里位域描述
   行只覆盖 1/1143 的 Reserved 位，缺这一原料就无法判定「写 reserved 位」，
   补齐需要列对齐解析——按 todolist §3「spike 不过就放弃」执行。见
-  `docs/datasheet-mcp.md` §5。
+  `docs/operations/datasheet-mcp.md` §5。

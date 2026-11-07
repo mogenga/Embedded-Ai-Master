@@ -1,6 +1,6 @@
 # M2 · 语料 OTA
 
-> 增量追记，每完成一个阶段补一段。契约源：`docs/corpus-ota.md`；计划：`docs/superpowers/plans/2026-10-23-corpus-ota.md`。
+> 增量追记，每完成一个阶段补一段。契约源：`docs/operations/corpus-ota.md`；计划：`docs/superpowers/plans/2026-10-23-corpus-ota.md`。
 
 ## 2026-10-23 定案与首轮派发
 
@@ -18,7 +18,7 @@
 - 用户否掉了「语料全靠 OTA」形态，改为「初版随包 + OTA 更新」。
 
 **关键产出**
-- `docs/corpus-ota.md` —— 接口契约（唯一格式源）。
+- `docs/operations/corpus-ota.md` —— 接口契约（唯一格式源）。
 - `docs/superpowers/plans/2026-10-23-corpus-ota.md` —— T1–T10 依赖图。
 - `config/corpus.local.json` —— 真实桶地址与公钥，已被 `.gitignore` 忽略。
 - `.gitignore` 补 17 类密钥/证书规则（`*.pem` / `*.key` / `id_ed25519` 等）。
@@ -206,7 +206,7 @@
 **明确没做的事**
 - 没有渲染器侧自动化测试：`tests/desktop/` 里只有协议层与宿主测试，没有 DOM 测试框架，按要求**不为这一页新造一个**。渲染器改动靠人工核对（本任务未在 Electron 里实际打开过页面，见「需主代理决策」）。
 - 没有真实联调 OBS：按禁令全程不触网，真实桶的 200 / 403 行为由主代理验证。
-- 没改 `docs/corpus-ota.md`（契约源，只读）、没碰 `package.json` / lock / `node_modules`、没做任何 git 写操作。
+- 没改 `docs/operations/corpus-ota.md`（契约源，只读）、没碰 `package.json` / lock / `node_modules`、没做任何 git 写操作。
 
 ## 2026-10-23 T5 首次种子化与 KB 接线
 
@@ -252,7 +252,7 @@
 **关键产出**
 - `src/config/corpus-config.ts`：第二级从「目录 `resourcesRoot`」改成「明确的文件路径 `bundledPath`」；`CorpusConfigSource` 由 `"home" | "resources"` 改为 `"home" | "bundled"`；`ok` 分支新增 `path: string`（实际读到的文件路径）。
 - `desktop/host/host.js`：`corpusResourcesRoot` 改为 `corpusBundledPath`——打包形态 `path.join(roots.distParent, "corpus.json")`，其它形态 `path.join(roots.distParent, "config", "corpus.json")`；`CORPUS_CONFIG_FILE` 常量提到首次使用点之前；`readCorpusConfig` 去掉「按 source 反推 path」的分支，直接用 `loaded.path`。
-- `config/corpus.json`（新，进仓库）：真实桶地址 + 公钥。这两个值按 `docs/corpus-ota.md` §2 本就不是秘密，且必然随安装包分发；源码形态从此有一份默认配置。
+- `config/corpus.json`（新，进仓库）：真实桶地址 + 公钥。这两个值按 `docs/operations/corpus-ota.md` §2 本就不是秘密，且必然随安装包分发；源码形态从此有一份默认配置。
 - 测试：`tests/corpus-config.test.ts` 12 例（原 11 例改标签 + 新增「源码形态从 `config/corpus.json` 读到」「`bundledPath` 不传时不读第二级」）；`tests/desktop/host-corpus.test.js` 15 例（原 14 例 + 新增源码形态用例，并用 `kernelRootWithoutConfig()` 让三条「没有配置」用例真的没有配置）。
 
 **为什么 `source` 从 `"resources"` 改成 `"bundled"`**
@@ -277,7 +277,7 @@
 
 **已知未做**
 - 打包形态（`roots.distParent` 为 `resources/` 时）的路径分支没有宿主级用例：真跑需要一份打包产物，而构造它等于伪造 T10 的输出。该分支只是一次 `path.join`，真正的分支在加载器（`bundledPath` 传没传），已由 `tests/corpus-config.test.ts` 覆盖。
-- `README.md`、`docs/corpus-ota.md` 未改（主代理收尾统一改）；契约 §2 的表格仍写「构建时注入」，与源码形态新增的这一份需要主代理决定措辞。
+- `README.md`、`docs/operations/corpus-ota.md` 未改（主代理收尾统一改）；契约 §2 的表格仍写「构建时注入」，与源码形态新增的这一份需要主代理决定措辞。
 
 ## 2026-10-25 T10 打包配置与语料暂存脚本
 

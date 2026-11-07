@@ -76,7 +76,7 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 
 > **2026-11-07 复核：实现已从 PowerShell 泵换成 `serialport` 13（原生模块）。** `desktop/host/serial-bridge.js` 现在是进程内 `SerialPort` 实例（`import { SerialPort } from "serialport"`），不再 spawn PowerShell；agent 侧的一次性捕获（`mcp-servers/serial/serial.ts`）仍用 PowerShell 泵，被杀软拦截时如实报错（D-206）。清单里漏写的 `serialLine` / `serialBaud` / `serialEncoding` 一并补上。
 
-原因逐项登记在 `docs/deferred-issues.md` 的 D-166 与 D-169。技能的边界（没有权限语义、模型不能自己挑、参数只有字符串替换、项目作用域没有信任门）另见 D-198。
+原因逐项登记在 `docs/ledgers/deferred-issues.md` 的 D-166 与 D-169。技能的边界（没有权限语义、模型不能自己挑、参数只有字符串替换、项目作用域没有信任门）另见 D-198。
 
 > 2026-10-21 复核：`setModel` / `refreshModels` / `setCwd` 已从隐藏清单移出（见上表），`device_status` 改为独立事件。同日第三轮：`getFile`/`getArtifacts`/`getArtifact` 接上（只读预览 + 产物列表，桌面临时目录内、浏览器走 `GET /api/file` 与 `GET /api/sessions/:id/artifacts`），`setEffort` 改为如实拒绝，`listSessions` 支持归档/工作目录/分页筛选，工具注解随 `tool_started` 下发。同日第二轮：MCP 配置页与权限/运行参数页接回 `PUT /api/config`，会话改名/置顶/归档/删除/分叉/导出接上内核的 `meta.json` 与 `session-admin`；仍隐藏的是内核本身就没有的能力（git/终端/文件树/检查点/产物列表）与只存在于旧前端的 UI（分屏、新窗口——本外壳单实例单窗口）。
 

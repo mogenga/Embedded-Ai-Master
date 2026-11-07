@@ -17,7 +17,7 @@
  *   2. **Only exact lowercase values are writable.** `"TRay"`, `"tray "`, `1`
  *      and `""` are refused rather than folded to a neighbour: a typo turning
  *      into a silent settings change is exactly the "same question answered
- *      differently" problem `docs/corpus-ota.md` settled for the corpus.
+ *      differently" problem `docs/operations/corpus-ota.md` settled for the corpus.
  *
  * Like `desktop/updater.js`, this file has **no top-level import of
  * `electron`** so `vitest` can load it directly. `main.js` owns the `Tray`,

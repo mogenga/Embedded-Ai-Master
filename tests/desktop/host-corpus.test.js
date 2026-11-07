@@ -164,7 +164,7 @@ async function writeCorpusConfig(home, updateBaseUrl) {
  * offline nor "unconfigured". The directory is otherwise empty, so the host
  * needs the built kernel beside it: a junction to the real `dist/` (no
  * developer mode required; `rm({recursive:true})` removes the link, not the
- * target — both measured, see `docs/corpus-ota.md` §3).
+ * target — both measured, see `docs/operations/corpus-ota.md` §3).
  */
 async function kernelRootWithoutConfig() {
   const root = await tempDir("eam-kernel-noconfig-");
@@ -609,7 +609,7 @@ describe.skipIf(!CORPUS_BUILT)("corpus commands", () => {
    * derived from it. The kernel is a junction to the real `dist/`, so the host
    * loads this build while `config/corpus.json` sits in the temp directory.
    * Windows junctions need no developer mode and `rm({recursive:true})` removes
-   * the link, not its target (both measured; see `docs/corpus-ota.md` §3).
+   * the link, not its target (both measured; see `docs/operations/corpus-ota.md` §3).
    */
   it("源码形态从 <distParent>/config/corpus.json 读到配置，不再报 config_invalid", async () => {
     const root = await tempDir("eam-corpus-src-layout-");

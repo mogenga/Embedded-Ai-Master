@@ -3,7 +3,7 @@
  *
  * 系统提示词分节走**投影期注入**，不写会话日志：可选的 `systemSections` 在
  * 投影时拼进固定位置，与压缩摘要同一套机制。理由见
- * `docs/system-prompt-design.md` §3.1——写日志会让全部历史会话在续聊时触发
+ * `docs/specs/system-prompt-design.md` §3.1——写日志会让全部历史会话在续聊时触发
  * `system_prompt_mismatch`，且「改提示词 = 改历史事实」。
  */
 import type { ModelChatMessage } from "../model/protocol.js";

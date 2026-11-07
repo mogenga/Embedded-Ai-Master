@@ -37,7 +37,7 @@
 
 - **不要改** `--ui-scale` 的分档（0.9 / 1 / 1.1 / 1.25），也不要动 `--font-scale`（转录正文）。
 - `styles.css` 与 `settings.css` 里另有 **2 处硬编码 `font-size: 10px`**（`styles.css:6006`、`styles.css:6169` 附近）。把这两处改成 `var(--text-xs)`，否则字号阶调大后它们会成为漏网的最小字。
-- 检查 `docs/frontend-design.md` §5.3 里的字号阶表格，与实现同步更新（那份文档是事实源，表格里的数字必须与 `:root` 一致）。
+- 检查 `docs/specs/frontend-design.md` §5.3 里的字号阶表格，与实现同步更新（那份文档是事实源，表格里的数字必须与 `:root` 一致）。
 - 字号变大后必然有地方会挤：**逐个检查并修掉换行、溢出、截断**。重点区域：
   - `composer-bar`（底栏控件行，`flex-wrap: nowrap`，字号变大后芯片可能挤爆）
   - 顶栏 `.topbar`、侧栏 `.session-item`
@@ -135,6 +135,6 @@ cd desktop && HARNESS_HOME=/tmp/harness-test ./node_modules/.bin/electron main.j
 - 改完直接在工作区，**不要提交、不要 push**。
 - 交回时报告：改了哪些文件、字号阶最终值、下拉选择器的键盘行为（回车/空格打开、方向键移动、Esc 关闭、焦点回到触发器）、自测命令与结果、还有哪些你判断需要人看的地方。
 - 顺手把以下文档同步更新（它们是对外事实源，不更新就是撒谎）：
-  - `docs/frontend-design.md` §5.3 字号阶表格、§7.6 输入区相关条目（如果受影响）
-  - `docs/page-optimization-todolist.md` §2 已做列表
+  - `docs/specs/frontend-design.md` §5.3 字号阶表格、§7.6 输入区相关条目（如果受影响）
+  - `docs/archive/page-optimization-todolist.md` §2 已做列表
   - `dev-notes/页面优化.md` 追加一节，记：用户原话（本次）、关键产出、翻车与返工

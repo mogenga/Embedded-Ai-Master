@@ -2414,7 +2414,7 @@ async function handleTestProvider(payload) {
 // Corpus OTA (Settings → Knowledge base)
 // ---------------------------------------------------------------------------
 //
-// Three commands, and the split between them is the contract (`docs/corpus-ota.md`
+// Three commands, and the split between them is the contract (`docs/operations/corpus-ota.md`
 // §6): reading the status never touches the network, checking does, and applying
 // only happens because the operator clicked. `getCorpusStatus` is therefore the
 // only one the page calls on open — the startup check is the kernel's own job,

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 /**
- * 系统提示词分节（设计稿 `docs/system-prompt-design.md` §2）。
+ * 系统提示词分节（设计稿 `docs/specs/system-prompt-design.md` §2）。
  *
  * 六节按**稳定性降序**排列：越不常变的越靠前，prompt cache 才能以稳定前缀命中
  * （§0「顺序」、§7.3 A2）。空节整节省略，不留空标题（§4.3）。

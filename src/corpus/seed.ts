@@ -11,7 +11,7 @@ import type { KbLayout } from "./snapshot.js";
 
 /**
  * 首次种子化：把安装包内置的语料物化成快照，并把 `kb` 这台 MCP server 写进
- * `$HARNESS_HOME/mcp.json`。契约见 `docs/corpus-ota.md` §3（目录布局）与 §5
+ * `$HARNESS_HOME/mcp.json`。契约见 `docs/operations/corpus-ota.md` §3（目录布局）与 §5
  * （内置快照 = 一份合法的签名清单，首次启动物化）。
  *
  * **为什么需要它**：全新安装的用户没有 `$HARNESS_HOME/mcp.json`，KB server 不会
@@ -56,7 +56,7 @@ export interface SeedCorpusOptions {
    * 打包形态的 `<安装目录>/resources`；开发形态不传。
    *
    * 不传就等于「这台机器上没有内置语料」，`seedCorpus` 直接返回
-   * `no_bundled_corpus`——开发机不该被塞进随包语料（见 `docs/corpus-ota.md` §5
+   * `no_bundled_corpus`——开发机不该被塞进随包语料（见 `docs/operations/corpus-ota.md` §5
    * 只描述安装包形态）。
    */
   resourcesRoot?: string;

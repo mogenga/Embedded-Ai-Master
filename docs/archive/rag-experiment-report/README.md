@@ -2,7 +2,7 @@
 
 > **状态：探索性（exploratory）。预注册未冻结，本报告不构成主判定依据**（spec T2）。
 > 决策点 #2（KB 渐进加载的载体）**尚未关闭**——本轮只确定了方向。
-> 完整报告（含全部数字、偏差披露、复现命令）：[`experiments/rag-vs-agentic-search/docs/experiment-report.md`](../../experiments/rag-vs-agentic-search/docs/experiment-report.md)
+> 完整报告（含全部数字、偏差披露、复现命令）：[`experiments/rag-vs-agentic-search/docs/experiment-report.md`](../../../experiments/rag-vs-agentic-search/docs/experiment-report.md)
 
 **实验**：在嵌入式调试知识库（108 个 markdown 文件）上，用同一批 80 条查询、同一套
 判定口径，比较四种检索方案。语料快照带 SHA-256 校验，各方案看到同一份世界。
@@ -164,7 +164,7 @@ B 的「不塌」才是有意义的证据。
 
 ## 10. 产物
 
-- **完整报告**：[`experiments/rag-vs-agentic-search/docs/experiment-report.md`](../../experiments/rag-vs-agentic-search/docs/experiment-report.md)
+- **完整报告**：[`experiments/rag-vs-agentic-search/docs/experiment-report.md`](../../../experiments/rag-vs-agentic-search/docs/experiment-report.md)
 - **实验代码**：`experiments/rag-vs-agentic-search/src/raglab/`
 - **逐查询评分与汇总**：`experiments/rag-vs-agentic-search/results/scored/main/`
 - **统计与图表数据**：`experiments/rag-vs-agentic-search/results/tables/`、`results/analysis/`

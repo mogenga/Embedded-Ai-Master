@@ -96,7 +96,7 @@ HARNESS_HOME=/tmp/harness-rm ./node_modules/.bin/electron main.js --remote-debug
    - 打开工作台（serial）→ Escape 关闭 → 焦点回到 `#more-button`。
    - 重开应用，工作台 pane 记忆不会试图恢复一个已删除的 pane。
    - 深色/浅色、1440 与 1100 宽下无异常。
-3. 更新 `docs/frontend-design.md`（工作台/文件树小节）、`desktop/MATRIX.md`（`getTree` 行注明渲染层已无调用方）、`docs/page-optimization-todolist.md`、`dev-notes/页面优化.md`。
+3. 更新 `docs/specs/frontend-design.md`（工作台/文件树小节）、`desktop/MATRIX.md`（`getTree` 行注明渲染层已无调用方）、`docs/archive/page-optimization-todolist.md`、`dev-notes/页面优化.md`。
 
 ## 交付
 

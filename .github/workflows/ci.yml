@@ -47,6 +47,12 @@ jobs:
       - name: Syntax check JS (desktop / scripts)
         run: npm run check:js
 
+      # 文档在 2026-11-07 按角色分了子目录（specs / operations / ledgers /
+      # archive）。移动文件最容易留下的就是死链，而 markdown 死链不会让任何
+      # 测试变红。这一步只查本地链接（相对路径与 <img src>），不触网。
+      - name: Check local doc links
+        run: npm run check:docs
+
   offline:
     name: build + test (offline)
     runs-on: windows-latest

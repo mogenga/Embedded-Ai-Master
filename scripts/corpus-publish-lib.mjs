@@ -1,7 +1,7 @@
 /**
  * 语料发布的核心逻辑：扫描 → 排除受管项 → sha256 → 生成 `latest.json` → 签名 → 自校验 → 落盘。
  *
- * 契约见 `docs/corpus-ota.md` §4（格式）与 §8（发布侧职责）。这里刻意**不**在顶层
+ * 契约见 `docs/operations/corpus-ota.md` §4（格式）与 §8（发布侧职责）。这里刻意**不**在顶层
  * import `dist/` 里的任何东西：依赖由调用方以 `manifestApi` 注入。
  * 两个理由：
  * 1. 单测可以直接传 `src/corpus/manifest.ts` 的实现，不必先 `npm run build`；

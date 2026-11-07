@@ -69,7 +69,7 @@ cd desktop && HARNESS_HOME=/tmp/harness-test ./node_modules/.bin/electron main.j
 
 1. `npm run check:js`、`npx vitest run tests/desktop` 全绿（若你的改动影响 `tests/desktop/main-scope.test.js` 覆盖的 id 或作用域，一并修）。
 2. Electron 实测：打开文件树、展开/折叠、点文件、Escape 关闭、关闭后焦点回到按钮、重开保持上次 pane；深色/浅色；1440 与 1100 宽；长文件名与深层目录不溢出。
-3. 更新 `docs/frontend-design.md` 里工作台/文件树相关小节，`dev-notes/页面优化.md` 追加一节（用户原话、关键产出、翻车与返工）。
+3. 更新 `docs/specs/frontend-design.md` 里工作台/文件树相关小节，`dev-notes/页面优化.md` 追加一节（用户原话、关键产出、翻车与返工）。
 
 ## 交付
 

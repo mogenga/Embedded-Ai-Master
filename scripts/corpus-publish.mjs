@@ -2,7 +2,7 @@
 /**
  * 语料发布 CLI：扫描语料目录 → 生成带 Ed25519 签名的 `latest.json` → 输出待上传目录。
  *
- * 契约见 `docs/corpus-ota.md` §4/§8。这个文件只做参数解析、读私钥与打印指引；
+ * 契约见 `docs/operations/corpus-ota.md` §4/§8。这个文件只做参数解析、读私钥与打印指引；
  * 真正的逻辑在 `corpus-publish-lib.mjs`（可单测，不必起子进程）。
  *
  * 从 `dist/` 导入 `manifest.js`（与 `kb-review.mjs` 从 `dist-mcp/` 导入同一做法）：

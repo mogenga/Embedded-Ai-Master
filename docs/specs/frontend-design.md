@@ -436,7 +436,7 @@ prometheus.workbenchWidth  workbenchPane
 - **状态**：只存在该节点的 `data-expanded`（读者点过则另标 `data-user-toggled`）。不进 `state`，不进 localStorage——两块可同时一开一合（实测 `["true","true","false",…]`），重开会话默认全折叠。
 - **无障碍**：真 `<button>`，Tab 可达，Enter / Space 都可切换；`aria-expanded` 跟随状态；折叠时正文加 `aria-hidden`（正文内无可聚焦元素，所以安全）。
 - **导航**：`<button>` 内只放文本与装饰性 `<svg aria-hidden>`，不放任何交互元素。chevron 不参与布局宽度竞争（12px）。
-- **归属视觉**：折叠行与紧随其后的 `.tool-group` 之间是双向 12px（10px 下外边距 + 2px 上外边距），反向（工具组 → 下一段思考）是 18px，且整段没有分隔线。这个不对称的窄间距让截图里的工具行容易被读成「上一段思考的从属」。**实测 DOM 顺序严格等于日志顺序**（`thinking` 与 `tool-group` 按 seq 交错；见 `docs/deferred-issues.md` 变更记录）。这是视觉归因问题，不是渲染顺序 bug；若要消除误读，应在两者之间加分隔或把间距拉齐，而不是动插入时机。
+- **归属视觉**：折叠行与紧随其后的 `.tool-group` 之间是双向 12px（10px 下外边距 + 2px 上外边距），反向（工具组 → 下一段思考）是 18px，且整段没有分隔线。这个不对称的窄间距让截图里的工具行容易被读成「上一段思考的从属」。**实测 DOM 顺序严格等于日志顺序**（`thinking` 与 `tool-group` 按 seq 交错；见 `docs/ledgers/deferred-issues.md` 变更记录）。这是视觉归因问题，不是渲染顺序 bug；若要消除误读，应在两者之间加分隔或把间距拉齐，而不是动插入时机。
 
 ### 7.4 流式回答的渲染路径
 
@@ -474,7 +474,7 @@ prometheus.workbenchWidth  workbenchPane
   - **高度 25px**（30 → 28 → 25）：它是卡片的一行说明，不是第三条控件带；30px 时读起来像在和输入行、控件行抢位置。25px 仍容得下 12px 字号 / 19.2px 行高的 3px 上下边距，13px 圆环居中。
   - **宽度比卡片左右各窄 28px**（`max-width: calc(var(--column-width) - 56px)`）：页签底边是平的，必须落在卡片圆角之外的直边上，否则两端会浮在曲线上。
   - 它**不与计划条、审批条互斥**：页签始终可见，是上下文详情的唯一入口；运行中恰恰最想看一眼占用。
-  - **分支段是潜伏槽位**：判据仍是 `state.git?.available`，但本构建没有任何宿主上报 git 状态（`state.git` 恒为 null，`desktop/MATRIX.md` 记 git 为已隐藏），所以今天不显示。不伪造、不写「unknown」。接入条件见 `docs/page-optimization-todolist.md` T-01。
+  - **分支段是潜伏槽位**：判据仍是 `state.git?.available`，但本构建没有任何宿主上报 git 状态（`state.git` 恒为 null，`desktop/MATRIX.md` 记 git 为已隐藏），所以今天不显示。不伪造、不写「unknown」。接入条件见 `docs/archive/page-optimization-todolist.md` T-01。
   - 顶栏原来的 `#topbar-cwd-branch` 已删除——它从未亮过，是空壳不是功能。
   - 上下文环由 `renderContextRing()` 用 `stroke-dashoffset` 画；未测量时只剩轨道，**不是**画满。
 - 控件行（2026-11-05 改布局）：模式选择器、模型选择器、推理档**与发送按钮同一行**，整行在卡片自己的底边上，**没有分隔线**。发送按钮从输入行内搬到这一行之后：
@@ -937,8 +937,8 @@ interface ToolAnnotations {
 ## 16. 相关文档
 
 - `desktop/MATRIX.md` — 命令/事件能力矩阵（已支持 / 隐藏 / 原因），是 D-166 指定的事实源
-- `docs/deferred-issues.md` — D-163（桌面未实机）、D-164（流式，已解决）、D-165（无上下文占用率）、D-166（未覆盖能力清单）
+- `docs/ledgers/deferred-issues.md` — D-163（桌面未实机）、D-164（流式，已解决）、D-165（无上下文占用率）、D-166（未覆盖能力清单）
 - `docs/BRD.md` — 业务需求与硬性规则 R1–R9
-- `docs/p0-kernel-design.md` — 内核设计
-- `docs/m2-roadmap.md` — M2 路线图
+- `docs/specs/p0-kernel-design.md` — 内核设计
+- `docs/specs/m2-roadmap.md` — M2 路线图
 - `dev-notes/M2-前端移植.md` — 本次移植的过程留痕与翻车记录

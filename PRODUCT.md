@@ -79,7 +79,7 @@ web
 - **真实测量**：RAG 对照实验四方案 80 条查询的完整 csv / 图 / 报告，位于 `experiments/rag-vs-agentic-search/`。README 里的两组图表由脚本从 `results/scored/main/overall.csv` 生成，不手录。
 - **真实硬件结论**：Keil 协议偏移、状态码、整片擦除结论来自真机实测；Renode 探针端到端已跑通（仅仿真内存）。
 - **发布物**：v0.1.5 Windows x64 NSIS 安装包，已在干净机器验证安装。**未签名**，SmartScreen 会拦。
-- **不存在的东西**：没有客户案例、没有用户证言、没有自身性能基准（横向调研在 `docs/harness-comparison.md`，那是竞品分析不是自身基准）。**不得编造**。
+- **不存在的东西**：没有客户案例、没有用户证言、没有自身性能基准（横向调研在 `docs/specs/harness-comparison.md`，那是竞品分析不是自身基准）。**不得编造**。
 
 ## Product Principles
 
@@ -95,4 +95,4 @@ web
 - 状态不得只靠颜色：同时提供文字标签、图标或形状（色盲用户与高对比主题都依赖这一条）。
 - 支持系统减少动效偏好。
 - 最小字号 12px 且仅用于元信息。
-- **已知缺口**：多数图标按钮用 `title` 而非 `aria-label` 承载可访问名，部分屏幕阅读器与触屏上不朗读（`docs/frontend-design.md` §10）。
+- **已知缺口**：多数图标按钮用 `title` 而非 `aria-label` 承载可访问名，部分屏幕阅读器与触屏上不朗读（`docs/specs/frontend-design.md` §10）。
