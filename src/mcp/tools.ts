@@ -140,6 +140,10 @@ export function createMcpTools(
         destructive: info.destructive === true,
         evidence: info.evidence === true,
       },
+      // MCP 工具的自有预算来自 `mcp.json` 的 `timeoutMs`（`loadTools` 已把它
+      // 带进 `McpToolInfo`）。不声明这一项，管线会一律套 120s 缺省，
+      // `keil_debug` 的构建动作就在 120s 被掐断（OPT-13）。
+      ...(info.callTimeoutMs === undefined ? {} : { callTimeoutMs: info.callTimeoutMs }),
       execute: async (input, _ctx, signal) => {
         const result = withDeviceStatus(
           await manager.call(info.server, info.tool, input, signal),

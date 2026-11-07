@@ -1047,7 +1047,8 @@
 - **影响**: 会话日志被分享、归档或上传时可能泄露敏感片段;仅 `paramsDigest`/`paramsKeys` 无法避免 preview 中的明文。
 - **触发升级条件**: 接入含密钥/凭据/隐私参数的工具;日志需要外发、长期归档或跨团队共享;出现合规要求。
 - **修复建议**: 增加按工具/键的脱敏配置或默认关闭 preview;必要时只保留 digest/keys;对已知敏感键建立内置黑名单并写入文档。
-- **状态**: 未解决;需要脱敏策略。
+- **状态**: **已解决**（2026-11-07，批次 6.6，`eab3966`）。`summarizeParams` 增加按**键名**脱敏：切词（驼峰 + 下划线/连字符）后三档判定——末词是计数名词（`count`/`limit`/`length`/`size`…）→ 不脱敏；任一词命中强敏感词（`secret`/`password`/`credential`/`authorization`/`auth`/`apikey`/`private`/`cookie`）→ 脱敏；末词命中弱敏感词（`key`/`token`/`session`）→ 脱敏。值换成 `[redacted:<类型>[:<规模>]]`，**不保留前缀字符**（前几位往往正是 `sk-` / `ghp_` 这类密钥前缀）。键名保留（`paramsKeys` 本来就列全名，脱敏键名不增加保护）。`paramsDigest` 仍对原始参数计算。
+  **仍是已知边界**：① 没有用户自定义敏感词表（`PermissionConfig` 走 `z.strictObject`，加字段要同时改内核与桌面两端，少改一处会让整个会话启动失败）——已记为后续项；② `desktop/renderer/protocol.js` 的 `sessionMarkdown` 导出会把 `assistant` 事件的 `call.arguments` **原样**写进 Markdown，那不走 `paramsPreview`，脱敏覆盖不到，是另一条会泄露的路径。
 
 ### D-114 · 权限规则是声明式匹配而非沙箱,不替代 shell 黑名单、fs 路径安全或 OS 隔离
 
@@ -1074,7 +1075,8 @@
 - **影响**: 第三方或后续内部调用若绕过 `runSession`,权限规则与 `permission_decision` 审计会被整体跳过;安全边界只在入口处成立。
 - **触发升级条件**: 对外开放库 API;出现绕过入口的调用方;需要库层强制策略。
 - **修复建议**: 将 gate 设为 `executeBatch` 必填或提供显式命名的 unsafe 选项;在类型/导出面标注不安全入口;补充“直接调用必须显式选择”测试与文档。
-- **状态**: 未解决;内部 API 约定。
+- **状态**: **已解决**（2026-11-07，批次 6.5，`d3133f7` + `b21717a`）。`BatchOptions.permission` 与 `LoopCtx.permissionGate` 都改为与 `unsafeSkipPermission: true` 互斥的联合类型，省略字段在类型层不成立；`executeBatch` 与 `query` 入口各有一道运行时守卫（`assertPermissionLayerChoice` → `PermissionLayerChoiceError`，`code` 为 `permission_choice_required` / `permission_choice_conflict`），抛在任何工具查询、schema 校验与执行之前。管线自身的并发/超时/落盘测试改成显式 `unsafeSkipPermission: true`（57 + 35 处），把「这是故意的」写进代码。
+  **仍未变的边界**：`executeBatch` / `query` 依然不从 `src/index.ts` 导出，「内部 API」定位没变；本条解决的是「不可能在不知情下跳过」，**不是**「对外 API 也强制策略」。也不是安全隔离——D-114 仍然成立。
 
 ### D-117 · MCP 工具参数不应用 server `inputSchema` 默认值,参数规则只匹配实际提交值
 
@@ -1354,7 +1356,7 @@
 - **影响**: 设备序列号、绝对路径、令牌片段会出现在页面与日志中;截图、投屏或共享时泄露。
 - **触发升级条件**: 接入含凭据的工具;审批界面需要共享或合规审查。
 - **修复建议**: 按 D-113 增加键级脱敏或默认关闭 preview;卡片仅展示 `paramsKeys` 与 `paramsDigest`。
-- **状态**: 未解决;与 D-113 同根因,此处只登记 Web 审批的展示面。（2026-10-22 说明：浏览器形态虽已下线，但审批条在桌面形态同样渲染 `paramsPreview`，本条描述的展示面风险仍然成立。）
+- **状态**: **已解决**（2026-11-07，随 D-113 一起，`eab3966`）。脱敏发生在 `summarizeParams` 这一层，`paramsPreview` 的**所有**下游自动受益，不需要改展示面。逐层核对过（`gate.ts:223` 只算一次 → `PermissionRequest` → `approval_request` 事件 → `protocol.js` 纯搬运 → `renderPendingParams` 只读 `paramsPreview`、不看原始 `args`），没有任何一层从 `args` 重建摘要。（2026-10-22 说明：浏览器形态虽已下线，但审批条在桌面形态同样渲染 `paramsPreview`，本条描述的展示面风险仍然成立——直到本次修复。）
 
 ### D-148 · 单会话串行运行,运行中不能追加或取消
 
@@ -2366,6 +2368,38 @@
 
 ### D-225 · MCP 正常关闭不回收进程树，只对直接子进程发信号
 
+> **2026-11-07 复核（批次 6.1，`feat/batch6-safety`）：已解决（附一条对原文的修正）。**
+>
+> 落地见本节末尾的「2026-11-07 落地」段。**先修正原文的一条因果**：
+> 原文「先关 client 再 taskkill → 孙进程三种姿态全部存活」归因于**顺序**，
+> 这个归因不成立。真正的变量是**孙进程是否 `detached`**：
+>
+> - 非 `detached` 的后代在 Windows 上**本来就随父进程死**——Node/libuv 给每个
+>   spawn 建 kill-on-close 的 Job Object，后代继承。实测只杀父进程、不碰孙进程：
+>   非 detached **0/4 存活**，detached **4/4 存活**。父进程正常退出与被
+>   TerminateProcess 的结果一致。
+> - 所以当初「三种姿态全部存活」的观察，说明当时测的后代是 detached；而
+>   「先 taskkill 再关 client 能救」的观察，多半是 taskkill 顺带收掉了别的东西，
+>   不是顺序本身起的作用。
+> - 原文「fire-and-forget → 孙进程 10 s 仍在」同理：若后代非 detached，
+>   这个观察本身就无法复现；若 detached，则是 taskkill 没机会枚举（见下）。
+>
+> **本机实测的补充事实**（2026-11-07，与原文的 500–850 ms 一致）：
+> `taskkill /T /F` 从 spawn 到**真正开始枚举**约 **1 s**（对不存在的 pid 也要
+> 1.2–1.3 s，属进程启动 + 杀软扫描成本，不是遍历成本）。而真实 MCP server 收到
+> stdin EOF 后 **0–109 ms 就退出**。所以「起 taskkill → 等 spawn → 关父进程」
+> 对 **detached** 后代是结构性必输：taskkill 开始枚举时父进程早已不在。
+> 探针实测 detached 场景下 0/10/25/50/100/200 ms 头程全部失败，250 ms 起才稳定。
+>
+> 外部枚举（`tasklist /FI` 800–1225 ms、`[Diagnostics.Process]::GetProcesses()`
+> 654–789 ms、`Get-CimInstance` 1.8–3.6 s）全部远超「关闭额外开销 ≤ 50 ms」的
+> 预算，所以「先快照后代 pid、关完再补刀」也不可行。
+>
+> **另一条本机环境缺陷**（影响既有用例，与本项无关）：本机 `taskkill` 对直接
+> 子进程 8/8 返回「拒绝访问」，完全杀不掉；`process.kill(pid, "SIGKILL")` 3 ms
+> 秒杀。这解释了 `mcp-manager.test.ts` 的「timeout 后关闭 server」为何在干净
+> HEAD 上也稳定红。
+
 - **发现**: 2026-11-06，批次 2 / OPT-03（MCP 连接改会话级持有）时。
 - **现象**: `McpManager.close()` 走 `disposeClient()` → SDK 的 `client.close()`，后者只对**直接子进程**发 stdin.end / SIGTERM / SIGKILL。真正的进程树回收（Windows `taskkill /pid <p> /T /F`、POSIX `kill(-pid)`）只存在于 `terminateAndWait`，而它只被 `beginDispose` 调用——那是超时、取消、断线这类**异常**路径。正常收尾不经过它，于是 `mcp-servers/probe` 里 Renode/OpenOCD 拉起的孙进程可能活过宿主。
 - **影响**: 与设计稿 V6「OpenOCD / 串口句柄泄漏 = 真实事故」直接冲突。会话级持有（本批次已落地）把关闭次数从「每条消息一次」降到「切换会话 / 退出各一次」，但没有改变**关不干净**这个事实。
@@ -2375,7 +2409,39 @@
   - 把它接进 `close()` 后，`mcp-manager.test.ts` 从 ~26 s 涨到 ~49 s，全量并行下把 `background-terminal` 里本就贴着 10 s 超时的用例挤过线（单跑必绿、全量稳定红、`--maxWorkers=4` 全绿）。
 - **触发升级条件**: ① 出现宿主退出后残留 `openocd` / `renode` / 串口相关进程的实测；② 真机验收（D-157）开始跑，探针进程生命周期被纳入检查；③ 有成本更低的回收手段（例如给 MCP 子进程建独立进程组 / Job Object，让父进程退出即带走整组）。
 - **修复建议**: 不要简单地把 `await terminateAndWait` 塞回 `close()`——那只是把 850 ms 摊到每次关闭上。优先方向是**让 OS 替我们回收**：Windows 上 `spawn` 时用 Job Object（`CREATE_BREAKAWAY_FROM_JOB` 之外的做法需实测），POSIX 上用 `detached: true` + 进程组；两者都能做到「父死子随」，不需要关闭路径等待。实现在 `src/mcp/manager.ts` 的 transport 构造处（`new StdioClientTransport`），不在 close 路径上。
-- **状态**: 未解决。本批次只做了会话级持有；回收语义与 HEAD 一致（未改善，也未退化）。
+- **状态**: **已解决**（2026-11-07，批次 6.1，`b21717a` + `09f19ff`）。见下方落地段。
+
+**2026-11-07 落地**
+
+- `src/mcp/manager.ts` 新增 `reapProcessTree(pid, client)`：正常关闭时在收父进程
+  **之前**起 `taskkill /pid <p> /T /F`，等它 spawn（不等 exit，上限 200 ms），
+  再交还 SDK 关闭，`killer.unref()`。关闭的额外开销从「等 900 ms」降到
+  「等 spawn 8–28 ms」。
+- 未能确认回收时发 `dispose_incomplete` 状态事件（`McpStatusKind` 新成员）。
+  它同时补进了 `MCP_STATUS_PAYLOAD_KINDS` 白名单——**这一步最初漏了**，导致
+  `toMcpStatusPayload` 把事件当未知类型丢掉，上报是假绿地（`09f19ff` 修复，
+  并新增 `tests/mcp-status-whitelist.test.ts` 钉住两份清单一致）。
+- **POSIX 侧做不到整组回收，如实上报**：`StdioClientTransport` 的
+  `StdioServerParameters` 只有 `command/args/env/stderr/cwd/maxBufferSize`，
+  **不透传 `detached`**，父进程因此不是进程组组长，`kill(-pid)` 必然 ESRCH。
+  实现返回「POSIX 下无法按组回收后代」，而不是假装成功。
+- **`detached` 后代仍然收不到**，用一条**显式断言「它仍然存活」**的测试把这条
+  边界钉住，而不是让一条过时的「已知限制」悄悄绿着。真正的修法是让回收发生得
+  比 taskkill 的 1 s 启动开销更早（Job Object 在 transport 构造处），属未来工作。
+- **终止时延优化**（`5d42e38`）：`terminateAndWait` 在 Windows 上原本只靠
+  `taskkill /T /F`，而它从 spawn 到父进程真的消失要 890–1160 ms（5 轮实测；
+  对不存在的 pid 也要 1.2–1.3 s，是进程启动 + 杀软扫描）。同一次测量里
+  `process.kill(pid, "SIGKILL")` 只要 **0–3 ms**。改为两条并列发出：taskkill
+  先起（`/T` 靠活着的父进程枚举子进程，顺序不能反），再立刻 `process.kill`
+  收掉父进程本身。轮询问的是「父进程死了没有」，于是从等满 1 s 变成毫秒级返回；
+  整棵树仍由 taskkill 在自己时间里收完。
+  RED 证据：`git stash` 掉改动后 `tests/mcp-terminate-speed.test.ts` 的第二条
+  报 `expected true to be false`（200 ms 时进程还活着）。
+  **效果边界（别读成「消灭了偶发红」）**：改完后 `tests/mcp-manager.test.ts`
+  在 `--maxWorkers=4` 下连跑多次全绿；但 `tests/background-terminal.test.ts`
+  的「超时终止整棵进程树」仍会在全量并发时红（单跑 38/38 绿）——它走自己的
+  进程管理，不经过 `McpManager`，这次的优化管不到它。AGENTS.md 记录的并发
+  偶发红仍未全部消除。
 
 ### D-226 · 仿真故障注入复用 `mem_write`，权限层无法单独门禁「注入」这一动作
 
@@ -2386,10 +2452,30 @@
 - **修复建议**: 拆 `mem_flip`（或给 `mem_write` 加 `injection: true` 标记并由参数规则匹配），把「注入」变成可授权的独立动作；不要在没有门禁需求时提前拆——那会把同一套写内存语义固化成两份。
 - **状态**: **按用户决定保持现状（2026-11-06）**。用 `mem_write` 表达，不新增专用工具；本条记录的是「这个取舍的代价与重启条件」。
 
+### D-227 · 会话 Markdown 导出把工具调用原文原样写入，绕过审批摘要脱敏
+
+- **发现**: 2026-11-07，批次 6.6（审批摘要脱敏）时，由子代理顺带发现。
+- **现象**: `desktop/renderer/protocol.js` 的 `sessionMarkdown()` 导出会把 `assistant` 事件里的 `call.arguments` **原样 `JSON.stringify`** 写进 Markdown 文件。那是模型提交给工具的原始参数，不是 `paramsPreview`。
+- **影响**: D-113 / D-147 的脱敏只作用在 `summarizeParams` 这一层（审批卡片与 `approval_request` 事件），覆盖不到导出路径。用户把会话导出分享、存档或上传时，`apiKey` / `password` 之类的明文仍然在里面。与 D-113 描述的「日志被分享」是同一类风险，但走的是另一条路。
+- **触发升级条件**: 会话导出被用于分享、归档或跨团队交换；出现合规要求；用户反馈导出文件里有不该有的东西。
+- **修复建议**: 导出前对 `call.arguments` 过一遍与 `summarizeParams` 同一套键名判据（脱敏而非删除，保住工具调用的可读性）；或提供「导出时省略工具参数」选项。注意导出是**给用户自己看的**，与审批卡片的目标不同——这里可以更激进地省略。
+- **状态**: 未解决；2026-11-07 发现时只做了记录，没有改代码。
+
+### D-228 · 敏感键词表不可扩展，用户无法追加自己的敏感参数名
+
+- **发现**: 2026-11-07，批次 6.6（D-113 修复）落地时。
+- **现象**: 脱敏词表是 `src/permissions/audit.ts` 里的两个常量（`SENSITIVE_ANY_WORD` / `SENSITIVE_EDGE_WORD`）。用户的工具若用别的命名（比如 `machineToken` 已覆盖，但 `deviceSecretKey`、厂商私有的 `xyzAuth`），只能靠内置词表恰好命中。
+- **影响**: 扩展性缺口，不是安全漏洞——内置词表已覆盖 13 类常见命名，且对真实工具面 70 个参数名做过零误伤复核。但用户没法为自己的工具补一条。
+- **为什么当时没做**: `PermissionConfig` / `InlinePermissionConfig` 走 `z.strictObject`，加一个字段要同时改：两个 schema、`loadPermissionConfig` 的三层合并、`src/index.ts` 的 `PERMISSION_OPTION_KEYS` 与内联校验、`writePermissionConfig`、桌面设置页的 `DEFAULT_PERMISSIONS` 与 `savePermissions`、宿主的 `savePermissions`。**少改任何一处，用户写进 `permissions.json` 的字段都会被 strict schema 判为未知字段、整个会话启动失败。** 这是跨内核与桌面两端的改动，不是「加一行」。
+- **触发升级条件**: 用户报告自己的敏感参数没被脱敏；接入含厂商私有命名的工具；D-113 的残余被重新评估。
+- **修复建议**: 按上面那份清单一次改完，别只改内核侧（那会造出「配置能写但不生效」或「写了就启动失败」两种更糟的状态）。
+- **状态**: 未解决；已知扩展性缺口。
+
 ## 变更记录
 
 | 日期 | 变更 |
 |---|---|
+| 2026-11-07 | **批次 6（安全与资源回收）六项结案**（分支 `feat/batch6-safety`）。①D-225 **已解决**：`reapProcessTree` 在收父进程前起 `taskkill /T /F`，只等 spawn 不等 exit；未能确认时发 `dispose_incomplete`（同时补进了 `MCP_STATUS_PAYLOAD_KINDS` 白名单——**最初漏了，上报是假绿地**）。**修正原文因果**：原文「先关 client 再 taskkill → 孙进程存活」归因于顺序，实测真正的变量是后代是否 `detached`（非 detached 0/4 存活，detached 4/4 存活）；且本机 taskkill 要 ~1 s 才开始枚举，而 server 收 stdin EOF 后 0–109 ms 就退出，对 detached 后代结构性必输。台账原文不改，注记说明。附带终止时延优化（`5d42e38`）：再立刻 `process.kill(SIGKILL)` 收父进程，890–1160 ms → 0–3 ms。②D-116 **已解决**：`BatchOptions.permission` 与 `LoopCtx.permissionGate` 改为与 `unsafeSkipPermission: true` 互斥的联合，入口有 `assertPermissionLayerChoice` 运行时守卫。③D-113 / D-147 **已解决**：`summarizeParams` 按键名三档脱敏，值为 `[redacted:<类型>[:<规模>]]`；`paramsDigest` 与 `paramsKeys` 不变。④新增 **D-227**（会话 Markdown 导出绕过脱敏）与 **D-228**（敏感词表不可扩展）。⑤另有 OPT-13（长任务超时出口：硬顶 120s → 600s，`ToolDef.callTimeoutMs` 让工具抬高地板；**注意挡路的是两道 120s，管线层先触发**）、OPT-34（并发只读超时披露 `mayStillBeRunning`，不是屏障——并发分支没有后续调用可跳）、OPT-40（外链白名单与导航守卫）随本批落地，状态见 `optimization-and-new-features.md` §12。⑥留痕：`dev-notes/批次6-安全与资源回收.md`（含「我的探针错了」的完整复盘）。 |
 | 2026-11-07 | **文档事实源对齐**（用户「列出待实现功能」→ 逐条核对后「更新文档先」）。只改文档，不改代码。①**修掉 6 处状态行与正文矛盾**：D-134（桌面宿主的进程内加速通道已落地，内核 `LogTailEventSource` 仍轮询，改为「桌面侧已解决 / 内核侧未解决」）、D-149（随 D-134 桌面侧关闭，保留异常回退时泵补一帧的残余）、D-189（`deadlineMs` 已落地，改为已解决并列出证据与残余）、D-193（Board 面板已删、`getBoardState` 全仓 0 处，改为已失效）、D-202/203/204/205（CubeIDE / ESP-IDF 后端已随 `f03473b` 移除，状态行统一改为已作废）、D-224（`clearAttachments` 已落地，状态行仍写「未解决」）、D-221（三处文字已撤、`environment` 已落、四节未做、旧会话 mismatch 仍无友好文案、`promptSections` 无生产调用方，改为部分解决）。②**核对口径**：状态行不是单一事实源——`grep` 粗分类得到的「84 条未解决」里至少 6 条与条目顶部的复核注记矛盾，本轮按「正文证据优先于状态行」逐条改正。③其余文档同步见 `dev-notes/M2-阶段3.md` 的 2026-11-06 段。 |
 | 2026-11-07 | 清理无用与过时文件（用户「清理无用文件、过时文件」）：①删除 6 份已完成的一次性任务书，对应提交均已合入 `main` 且全仓零引用——`docs/ui-polish-shared.md`、`docs/ui-polish-task-{a,b,c,d}.md`（2026-11-05 界面优化轮，实现见 `e973aa7` / `7ef3769` / `48dd9d1`）与 `docs/test-optimization-brief.md`（测试优化轮，实现见 `e30b088` / `b666da6` / `941ff3a` / `09dd771` / `6cf7a55`）。**保留** `docs/page-optimization-task-{a..f}.md`：`dev-notes/页面优化.md` 逐轮引用它们作为需求留痕。②删除 `prototypes/index.html`（M1 的 HTML 原型，62 KB）：前端 v2.0 起以 `desktop/renderer/` 为准，令牌与版式已被 `docs/specs/frontend-design.md` 吸收；`dev-notes/原型-UI.md` 顶部加删除说明，历史行号保留为留痕。③`docs/ledgers/optimization-and-new-features.md` 的 OPT-41 证据列改为指向仍存在的 `styles.css` 行号，并注明原记录所在文件已删。④本地不可复现产物（均 gitignore）：`desktop/dist-installer/`（509 MB，v0.2.0 三件资产已在 GitHub Releases）、`desktop/build/{corpus,node_modules}/`（21 MB，打包脚本可重建）、`.tmp/corpus-v2`（与 `~/corpus-publish/v2` 逐字节相同）、`.tmp/skipcheck`（与 `mcp-servers/kb/tests/kb-tool-names.test.ts` 完全相同）、`.superpowers/sdd/`（10.7 MB 阶段产物）、空的 `.worktrees/feat-rag-experiment`。**保留** `dist/`、`dist-mcp/`（开发态宿主直接加载）与 `.tmp/corpus-v1-backup`（D-222 的回滚副本）、`.tmp/optimization-audit`。⑤验证：`npm run check:js` 39 文件通过、`npm run typecheck` 通过、`npm test` 141 files / 3787 passed / 5 skipped。 |
 | 2026-11-04 | 清理文档与勾选 todolist（用户「清理无用文档，不走pr」→「勾上 checkbox」）：①删除已移除后端的三份接入指南 `docs/{arduino,cubeide,espidf}-headless.md`（`f03473b` 已把三套后端移出产品，指南描述的能力在仓库里不存在；代码/配置/脚本零引用），README 同步改为删除说明。保留 `packs-porting-todolist.md`（T1–T15 验收清单）、`datasheet-mcp-todolist.md`（D6/D14/D16 设计取舍）、`embedded-defects-todolist.md`（仍有 1 条未结 + 复核驳回项存档）、`docs/archive/rag-experiment-report/`（5 张图无生成脚本）。②`docs/archive/datasheet-mcp-todolist.md` 的 20 个 checkbox 按实测对账后勾上 19 个，并补 §6 完工记录：D16「评估后不做」保持未勾并写明 spike 结论；验收标准两项按实测修正（用例 95 而非 ≥25；`USB_BCDR` 在两份手册中都不存在，改用 `USB_CNTR`/`AFIO_MAPR`）。③**修掉编号冲突**：`D-207` 被两个不同条目占用（同一天两批任务各自取号）。`corpus.example.json` 占位值那条改用唯一空号 **`D-194`**，Datasheet 那条保持 `D-207`；条目内加编号说明，`docs/operations/corpus-ota.md` §2 的引用同步。`dev-notes/datasheet-mcp.md` 两处指向 Datasheet 条，未动。④`docs/operations/datasheet-mcp.md`/`mcp-servers/datasheet/README.md` 里 D16 与 todolist 编号的引用核对无误。 |

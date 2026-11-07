@@ -759,6 +759,224 @@ describe("McpManager list_changed 与关闭", () => {
     });
   });
 
+  /**
+   * D-225 / BACKLOG 6.1：正常关闭要回收整棵进程树。
+   *
+   * **这条钉住的是仓库里真实存在的形态**：领域 server 的 `spawn` 全都**没有**
+   * `detached`（`probe/renode.ts`、`serial/serial.ts`、`keil/uvsock.ts`），
+   * 所以孙进程与 MCP server 同属一个 libuv 的 kill-on-close Job Object。实测
+   * 三层链只杀最上层，孙与曾孙全灭。这条用例保证 `close()` 之后这条性质仍然
+   * 成立——将来谁把 server 的直接子进程 `unref` 掉或改了关闭顺序，它会红。
+   *
+   * **detached 后代不在这条的能力范围内**，因为它收不了：`taskkill /T` 依赖
+   * 活着的父进程枚举，而真实 server 在 stdin EOF 后 0–109 ms 就退出（实测），
+   * taskkill 要约 1 s 才开始枚举。这条边界写在 `reapProcessTree` 的方法注释里，
+   * 也在 D-225 的复核注记里。
+   */
+  it("close 回收整棵进程树：父进程与非 detached 孙进程都退出", async () => {
+    const root = tempRoot();
+    const pidFile = path.join(root, "pid");
+    const grandchildFile = path.join(root, "grandchild.pid");
+    const manager = new McpManager([
+      config("echo", {
+        env: { PID_FILE: pidFile, GRANDCHILD_PID_FILE: grandchildFile },
+      }),
+    ]);
+    await manager.connectAll();
+    // 两个 pid 文件由子进程在启动时写；`connected` 只保证 MCP 握手完成，
+    // 不保证孙进程已经 spawn 出来。等到文件里有非空内容再读，避免读空串得到 0。
+    await waitFor(
+      () =>
+        existsSync(pidFile) &&
+        readFileSync(pidFile, "utf8").trim() !== "" &&
+        existsSync(grandchildFile) &&
+        readFileSync(grandchildFile, "utf8").trim() !== "",
+      3_000,
+    );
+    const pid = Number(readFileSync(pidFile, "utf8"));
+    const grandchildPid = Number(readFileSync(grandchildFile, "utf8"));
+    expect(isAlive(pid)).toBe(true);
+    expect(isAlive(grandchildPid)).toBe(true);
+
+    await manager.close();
+
+    await waitFor(() => !isAlive(pid), 3_000);
+    await waitFor(() => !isAlive(grandchildPid), 3_000);
+  }, 20_000);
+
+  /**
+   * 回收器起不来时不能伪装成成功（R3）。
+   *
+   * `taskkill` 找不到（本机实测：把 PATH 清空即可稳定制造 `spawn taskkill
+   * ENOENT`）时，父进程仍然会被 SDK 的 close 收掉，但整棵树的回收没有发生。
+   * 此时必须留下一条可读的 `mcp_status`（kind `dispose_incomplete`），而不是
+   * 静默当作清干净了。
+   *
+   * 用真实 ENOENT，不打桩：打桩只能证明「我调用了它」，不能证明真实失败路径上
+   * 的行为。这条在 POSIX 上不适用（走的是 `process.kill` 分支，没有 taskkill），
+   * 所以按平台跳过。
+   */
+  it.skipIf(process.platform !== "win32")(
+    "回收器起不来时记录 dispose_incomplete，不伪装成成功",
+    async () => {
+      const root = tempRoot();
+      const pidFile = path.join(root, "pid");
+      const grandchildFile = path.join(root, "grandchild.pid");
+      const events: McpStatusEvent[] = [];
+      const manager = new McpManager(
+        [
+          config("echo", {
+            env: { PID_FILE: pidFile, GRANDCHILD_PID_FILE: grandchildFile },
+          }),
+        ],
+        { logger: (event) => events.push(event) },
+      );
+      await manager.connectAll();
+      await waitFor(
+        () =>
+          existsSync(grandchildFile) && readFileSync(grandchildFile, "utf8").trim() !== "",
+        3_000,
+      );
+
+      const previousPath = process.env.PATH;
+      const previousPathAlias = process.env.Path;
+      try {
+        process.env.PATH = "";
+        process.env.Path = "";
+        await manager.close();
+      } finally {
+        if (previousPath === undefined) delete process.env.PATH;
+        else process.env.PATH = previousPath;
+        if (previousPathAlias === undefined) delete process.env.Path;
+        else process.env.Path = previousPathAlias;
+      }
+
+      const incomplete = events.filter((event) => event.kind === "dispose_incomplete");
+      expect(incomplete).toHaveLength(1);
+      expect(incomplete[0]).toMatchObject({ server: "echo" });
+      expect(incomplete[0]?.message).toContain("taskkill");
+    },
+    20_000,
+  );
+
+  /**
+   * 成功关闭时**不**发 `dispose_incomplete`。
+   *
+   * 只有「失败要说」而没有「成功不说话」的反向断言，等于允许实现无条件报错——
+   * 那样界面上每次关连接都会多一条 warn，用户很快学会忽略它，R3 的信号就废了。
+   */
+  it("正常关闭不产生 dispose_incomplete", async () => {
+    const events: McpStatusEvent[] = [];
+    const manager = new McpManager([config("echo")], {
+      logger: (event) => events.push(event),
+    });
+    await manager.connectAll();
+
+    await manager.close();
+
+    expect(events.filter((event) => event.kind === "dispose_incomplete")).toHaveLength(0);
+  }, 20_000);
+
+  /**
+   * `dispose_incomplete` 只在**终态关闭**时上报，重连路径不上报。
+   *
+   * `disposeClient` 同时服务 `close()` 与「重连前收旧的」（`connectServer`）两条
+   * 路径。后者清完马上就建新连接，此时报「树没回收干净」既不影响语义，也会让
+   * 每次断线重连都多一条 warn——读者很快学会忽略它，R3 的信号就废了。
+   *
+   * 为什么用静态断言而不是行为测试：断线重连那条路径上 `state.transport` 已被
+   * `beginDispose` 清空，`pid` 恒为 `undefined`，`reapProcessTree` 直接返回成功，
+   * 失败分支**走不到**。行为测试在那里恒绿，钉不住任何东西（实测：去掉守卫仍绿）。
+   * 能钉住的只有调用点的参数，所以这里断言源码形态——与本仓库
+   * `tests/desktop/composer-copy.test.js` 的做法一致。
+   */
+  it("只有终态 close 传 reportIncomplete，重连路径不传", () => {
+    const source = readFileSync(
+      path.join(import.meta.dirname, "..", "src", "mcp", "manager.ts"),
+      "utf8",
+    );
+    // close() 里那处调用必须带第三参 true。
+    expect(source).toMatch(/state\.closed = true;\s*\n\s*await this\.disposeClient\(state, true, true\);/);
+    // 其余调用点不得带第三参（`connectServer` 里两处 + 重连前的状态收敛）。
+    const calls = source.match(/this\.disposeClient\([^)]*\)/g) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const withReport = calls.filter((call) => call.includes(", true, true"));
+    expect(withReport).toHaveLength(1);
+  });
+
+  /**
+   * 关闭路径不能被 `taskkill` 的退出拖慢。
+   *
+   * 实测：`client.close()` 本身约 10–120 ms；`taskkill /T /F` 跑完要
+   * 900–1300 ms。如果实现把它的 exit 等进来，这条会红得很明显。
+   *
+   * 阈值 500 ms 是一条上界，钉住「没有把 taskkill 的完整执行时间算进关闭」，
+   * 同时给机器抖动留了足够余量（实测 close 稳定在 10–120 ms）。
+   */
+  it("close 不等待 taskkill 退出：额外开销远小于 taskkill 的执行时间", async () => {
+    const manager = new McpManager([config("echo")]);
+    await manager.connectAll();
+
+    const started = Date.now();
+    await manager.close();
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeLessThan(500);
+  }, 20_000);
+
+  /**
+   * **已知边界，不是缺陷**：`detached` 的后代在 `close()` 之后仍会存活。
+   *
+   * 为什么收不了（本机实测，理由都写在 `reapProcessTree` 的方法注释里）：
+   *  - `detached` 让后代脱离 libuv 的 kill-on-close Job Object，于是父死子不死；
+   *  - `taskkill /T` 靠**活着的父进程**枚举子进程，而真实 MCP server 在 stdin
+   *    EOF 后 0–109 ms 就退出，taskkill 要约 1 s 才开始枚举——竞速结构性必输；
+   *  - 外部枚举（`tasklist /FI` 800–1225 ms、`Get-CimInstance` 1.7–3.6 s）都
+   *    远超「关闭额外开销 ≤ 50 ms」的预算，所以「先快照后补刀」也不行。
+   *
+   * 这条断言的存在意义是**把边界写进可执行的规格**：哪天实现真的能收走
+   * detached 后代（比如 SDK 允许传 spawn 选项），`toBe(true)` 会红，提醒改这条
+   * 说明与 D-225 的复核注记，而不是让一条过时的「已知限制」悄悄一直绿着。
+   */
+  it.skipIf(process.platform !== "win32")(
+    "已知边界：detached 后代在 close 之后仍存活",
+    async () => {
+      const root = tempRoot();
+      const pidFile = path.join(root, "pid");
+      const grandchildFile = path.join(root, "grandchild.pid");
+      const manager = new McpManager([
+        config("echo", {
+          env: {
+            PID_FILE: pidFile,
+            GRANDCHILD_PID_FILE: grandchildFile,
+            GRANDCHILD_DETACHED: "1",
+          },
+        }),
+      ]);
+      await manager.connectAll();
+      await waitFor(
+        () =>
+          existsSync(grandchildFile) && readFileSync(grandchildFile, "utf8").trim() !== "",
+        3_000,
+      );
+      const grandchildPid = Number(readFileSync(grandchildFile, "utf8"));
+      expect(isAlive(grandchildPid)).toBe(true);
+
+      await manager.close();
+      // 给回收器足够的时间（本机实测 taskkill 约 1 s 走完）。
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+
+      try {
+        expect(isAlive(grandchildPid)).toBe(true);
+      } finally {
+        try {
+          process.kill(grandchildPid, "SIGKILL");
+        } catch {}
+      }
+    },
+    20_000,
+  );
+
   it("连接成功但 tools/list 挂起时按发现超时失败并回收子进程", async () => {
     const root = tempRoot();
     const pidFile = path.join(root, "pid");

@@ -169,3 +169,115 @@ describe("summarizeParams", () => {
     expect(utf8Bytes(summary.preview)).toBeLessThanOrEqual(4096);
   });
 });
+
+describe("summarizeParams sensitive-key redaction", () => {
+  it("replaces the value of a sensitive key with a recognisable marker", () => {
+    const summary = summarizeParams({ apiKey: "sk-live-1234", password: "hunter2" });
+    expect(summary.preview).toEqual({
+      apiKey: "[redacted:string:12]",
+      password: "[redacted:string:7]",
+    });
+    const rendered = JSON.stringify(summary.preview);
+    expect(rendered).not.toContain("sk-live");
+    expect(rendered).not.toContain("hunter2");
+  });
+
+  it("keeps key names and paramsKeys intact so the audit still has a skeleton", () => {
+    const summary = summarizeParams({ api_key: "abcdef", path: "src/a.ts" });
+    expect(summary.keys).toEqual(["api_key", "path"]);
+    expect(Object.keys(summary.preview ?? {})).toEqual(["api_key", "path"]);
+    expect(summary.preview?.path).toBe("src/a.ts");
+  });
+
+  it("keeps a little shape: string length, array/object size, scalar type", () => {
+    const preview = summarizeParams({
+      secret: "abcd",
+      credentials: { a: 1, b: 2 },
+      apiKeys: ["one", "two", "three"],
+      private: true,
+      authorization: null,
+    }).preview;
+    expect(preview?.secret).toBe("[redacted:string:4]");
+    expect(preview?.credentials).toBe("[redacted:object:2]");
+    expect(preview?.apiKeys).toBe("[redacted:array:3]");
+    expect(preview?.private).toBe("[redacted:boolean]");
+    expect(preview?.authorization).toBe("[redacted:null]");
+  });
+
+  it("matches case-insensitively across snake, kebab and camel spellings", () => {
+    for (const key of [
+      "API_KEY",
+      "apiKey",
+      "APIKey",
+      "x-api-key",
+      "clientSecret",
+      "access-token",
+      "Set-Cookie",
+      "Authorization",
+      "userPassword",
+      "passwd",
+      "credential",
+      "session",
+    ]) {
+      const preview = summarizeParams({ [key]: "leak-me" }).preview;
+      expect(preview?.[key], `key ${key} should be redacted`).toBe("[redacted:string:7]");
+    }
+  });
+
+  it("does not over-match keys whose words merely contain a sensitive word", () => {
+    for (const key of [
+      "monkey",
+      "keyboard",
+      "author",
+      "authors",
+      "tokens",
+      "maxTokens",
+      "tokenCount",
+      "tokenLimit",
+      "passwordLength",
+      "keyCount",
+      "sessionId",
+      "session_id",
+      "content",
+      "path",
+      "op",
+      "monkeyBusiness",
+    ]) {
+      const summary = summarizeParams({ [key]: "visible" });
+      expect(summary.preview?.[key], `key ${key} must stay visible`).toBe("visible");
+    }
+  });
+
+  it("redacts token as a word but not the counting spellings", () => {
+    expect(summarizeParams({ token: "abcdef" }).preview?.token).toBe("[redacted:string:6]");
+    expect(summarizeParams({ tokenCount: 42 }).preview?.tokenCount).toBe(42);
+    expect(summarizeParams({ maxTokens: 32000 }).preview?.maxTokens).toBe(32000);
+  });
+
+  it("leaves paramsDigest computed over the raw arguments", () => {
+    const expected = createHash("sha256")
+      .update('{"apiKey":"sk-live"}')
+      .digest("hex")
+      .slice(0, 16);
+    expect(digestParams({ apiKey: "sk-live" })).toBe(expected);
+  });
+
+  it("counts the marker against the 4096-byte preview budget", () => {
+    const args: Record<string, string> = {};
+    for (let index = 0; index < 32; index += 1) {
+      args[`${String(index).padStart(2, "0")}secret${"k".repeat(80)}`] = "v".repeat(120);
+    }
+    const summary = summarizeParams(args);
+    expect(summary.preview?.previewTruncated).toBe(true);
+    expect(utf8Bytes(summary.preview)).toBeLessThanOrEqual(4096);
+  });
+
+  it("keeps an own __proto__ parameter while redacting a sensitive sibling", () => {
+    const args = JSON.parse('{"__proto__":"AAAA","secret":"BBBB"}') as Record<string, unknown>;
+    const preview = summarizeParams(args).preview;
+    expect(Object.hasOwn(preview ?? {}, "__proto__")).toBe(true);
+    // __proto__ 不是敏感词,它只用于校验脱敏不会破坏既有 defineProperty 路径。
+    expect(preview?.__proto__).toBe("AAAA");
+    expect(preview?.secret).toBe("[redacted:string:4]");
+  });
+});

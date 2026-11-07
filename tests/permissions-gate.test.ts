@@ -3,6 +3,8 @@ import { PermissionConfigError } from "../src/permissions/errors.js";
 import { createPermissionGate } from "../src/permissions/gate.js";
 import { evaluatePolicy } from "../src/permissions/policy.js";
 import type { PermissionPrompter, SourcedRule } from "../src/permissions/types.js";
+import { createApprovalBridge } from "../src/server/approvals.js";
+import type { SessionEvent } from "../src/session/types.js";
 import type { ToolDef } from "../src/tools/types.js";
 
 vi.mock("../src/permissions/policy.js", async (importOriginal) => {
@@ -144,6 +146,58 @@ describe("createPermissionGate", () => {
     expect(captured.paramsDigest).toMatch(/^[a-f0-9]{16}$/);
     expect(captured.paramsKeys).toEqual(["op"]);
     expect(captured.paramsPreview).toEqual({ op: "write" });
+  });
+
+  it("hands the prompter a redacted preview but keeps the raw args and digest", async () => {
+    const fixture = deferredPrompter();
+    const captured = await firstPromptRequest(fixture, "call-1", {
+      apiKey: "sk-live-secret",
+      path: "src/a.ts",
+    });
+
+    expect(captured.paramsPreview).toEqual({
+      apiKey: "[redacted:string:14]",
+      path: "src/a.ts",
+    });
+    expect(JSON.stringify(captured.paramsPreview)).not.toContain("sk-live");
+    expect(captured.paramsKeys).toEqual(["apiKey", "path"]);
+    // 参数原文仍交给审批器:gate 只脱敏可见摘要,不改调用本身。
+    expect(captured.args).toEqual({ apiKey: "sk-live-secret", path: "src/a.ts" });
+    expect(captured.paramsDigest).toMatch(/^[a-f0-9]{16}$/);
+  });
+
+  it("writes a redacted paramsPreview into the approval_request event", async () => {
+    // 端到端链路:真实 gate → 真实 ApprovalBridge → session.append。
+    // 脱敏发生在 summarizeParams,后面每一层都只搬运 preview,所以事件里
+    // 必须是标记;args 与 paramsDigest 仍是原始值(审计追溯不受影响)。
+    const appended: Array<Omit<SessionEvent, "seq" | "ts">> = [];
+    const bridge = createApprovalBridge();
+    bridge.bindSession({
+      append: async (event) => {
+        appended.push(event);
+        return { ...event, seq: appended.length - 1, ts: "" };
+      },
+    });
+    const gate = createPermissionGate({ preset: "diagnose", rules: [], prompter: bridge });
+
+    const pending = check(gate, "call-secret", shell, {
+      apiKey: "sk-live-abcdef",
+      command: "echo hi",
+    });
+    await flush();
+
+    const event = appended.find((entry) => entry.type === "approval_request");
+    expect(event).toBeDefined();
+    expect(event?.payload.paramsPreview).toEqual({
+      apiKey: "[redacted:string:14]",
+      command: "echo hi",
+    });
+    expect(JSON.stringify(event?.payload.paramsPreview)).not.toContain("sk-live");
+    expect(event?.payload.paramsKeys).toEqual(["apiKey", "command"]);
+    expect(event?.payload.paramsDigest).toMatch(/^[a-f0-9]{16}$/);
+
+    bridge.decide(String(event?.payload.requestId), "allow");
+    await expect(pending).resolves.toMatchObject({ effective: "allow" });
   });
 
   it("同一 callId 的多次审批使用不同的 requestId", async () => {

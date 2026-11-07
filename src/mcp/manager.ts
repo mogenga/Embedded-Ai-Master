@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { Client, SdkError, SdkErrorCode } from "@modelcontextprotocol/client";
 import type { CallToolResult } from "@modelcontextprotocol/client";
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
@@ -12,6 +13,8 @@ export interface McpToolInfo {
   readOnly?: boolean;
   destructive?: boolean;
   evidence?: boolean;
+  /** 该 server 配置的单次调用预算，取自 `mcp.json` 的 `timeoutMs`。 */
+  callTimeoutMs?: number;
 }
 
 export interface McpCallResult {
@@ -30,7 +33,10 @@ export type McpStatusKind =
   | "tools_refresh_failed"
   | "tool_invalid_schema"
   | "listener_failed"
-  | "call_failed";
+  | "call_failed"
+  // 正常关闭时进程树回收未确认（D-225）。与 `call_failed` 分开是因为它既不是
+  // 一次调用失败、也不是连接失败：连接已经用完了，只是「关干净了没有」答案是否。
+  | "dispose_incomplete";
 
 export interface McpStatusEvent {
   kind: McpStatusKind;
@@ -73,8 +79,21 @@ type InvokeOutcome =
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_CALL_TIMEOUT_MS = 15_000;
-const MAX_CALL_TIMEOUT_MS = 120_000;
+// 单次 MCP 调用的硬顶。原来是 120s，而 `keil` 的构建动作内部允许 10 分钟
+// （`buildInIde` 的默认值），于是「按 10min 配置」在 120s 就被掐断——配置
+// 与实现对不上，属于 R3 意义上的假承诺（OPT-13）。抬到 10 分钟与构建侧一致；
+// 真正的短上限仍由 `mcp.json` 的 `timeoutMs` 与管线层的工具预算各自决定，
+// 这里只是不许它们要得比 10 分钟更多。
+const MAX_CALL_TIMEOUT_MS = 600_000;
 const DEFAULT_TERMINATE_TIMEOUT_MS = 2_000;
+/**
+ * 等回收器（`taskkill`）发出 spawn 事件或报错的上限。
+ *
+ * 只用来区分「回收器发出去了」与「根本没起来」（ENOENT 等）——**不**等它跑完。
+ * 实测本机 spawn 事件 8–28 ms；给 200 ms 是为了让杀软扫描负载下的慢启动不被
+ * 误判成失败。超时按「已发出」处理：慢不等于没起来，把它当失败会是误报。
+ */
+const REAPER_SPAWN_WAIT_MS = 200;
 const MAX_CONTENT_BYTES = 1024 * 1024;
 const MAX_SCHEMA_BYTES = 64 * 1024;
 const MAX_DESCRIPTION_CHARS = 4096;
@@ -118,6 +137,29 @@ function isProcessAlive(pid: number): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * 等回收器「发出去了」还是「根本没起来」。
+ *
+ * 返回 `undefined` 表示进程已创建（或等待超时——慢不等于失败，见
+ * `REAPER_SPAWN_WAIT_MS` 的注释）；返回字符串表示确定的启动失败原因
+ * （`ENOENT` 等），由调用方上报。
+ */
+function waitForSpawnOrError(killer: ChildProcess): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: string | undefined): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => finish(undefined), REAPER_SPAWN_WAIT_MS);
+    timer.unref?.();
+    killer.once("spawn", () => finish(undefined));
+    killer.once("error", (error: Error) => finish(error.message));
+  });
 }
 
 function byteLength(value: string): number {
@@ -281,7 +323,7 @@ export class McpManager {
     await Promise.allSettled(
       [...this.states.values()].map(async (state) => {
         state.closed = true;
-        await this.disposeClient(state, true);
+        await this.disposeClient(state, true, true);
       }),
     );
   }
@@ -568,7 +610,7 @@ export class McpManager {
         await this.disposeClient(state);
         return false;
       }
-      const tools = await this.loadTools(connectedClient, config.name);
+      const tools = await this.loadTools(connectedClient, config);
       if (this.isClosed(state)) {
         await this.disposeClient(state);
         return false;
@@ -600,7 +642,8 @@ export class McpManager {
     }
   }
 
-  private async loadTools(client: Client, server: string): Promise<McpToolInfo[]> {
+  private async loadTools(client: Client, config: McpServerConfig): Promise<McpToolInfo[]> {
+    const server = config.name;
     const { tools } = await client.listTools(undefined, { timeout: this.connectTimeoutMs });
     const loaded: McpToolInfo[] = [];
     for (const tool of tools) {
@@ -629,6 +672,9 @@ export class McpManager {
           typeof tool.description === "string" ? tool.description : "",
         ),
         inputSchema: tool.inputSchema,
+        // 把 server 配的预算带给管线。不写死常量：`mcp.json` 里用户写的
+        // `timeoutMs` 必须真的生效，否则那条配置就是假的（OPT-13）。
+        callTimeoutMs: config.timeoutMs ?? DEFAULT_CALL_TIMEOUT_MS,
       };
       if (tool.annotations?.readOnlyHint === true) {
         info.readOnly = true;
@@ -657,7 +703,7 @@ export class McpManager {
         return;
       }
       try {
-        tools = await this.loadTools(client, state.config.name);
+        tools = await this.loadTools(client, state.config);
         break;
       } catch (error) {
         lastError = error;
@@ -716,12 +762,27 @@ export class McpManager {
     }
     if (process.platform === "win32") {
       try {
+        // taskkill 必须先起：`/T` 靠**活着的父进程**枚举子进程。
         const killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
           stdio: "ignore",
           windowsHide: true,
         });
         killer.on("error", () => undefined);
         killer.unref();
+        // 再直接给父进程发信号，不等 taskkill 慢吞吞地起来。
+        //
+        // 本机实测（2026-11-07，5 轮）：`taskkill /T /F` 让父进程真的消失要
+        // 890–1160 ms（对不存在的 pid 也要 1.2–1.3 s——是进程启动 + 杀软扫描，
+        // 不是遍历）；`process.kill(pid, "SIGKILL")` 只要 0–3 ms。
+        //
+        // 下面的轮询问的是「父进程死了没有」。父进程由这一行收掉之后，循环
+        // 毫秒级就返回 true，而不是等满 taskkill 的 1 s；整棵树仍由 taskkill
+        // 在它自己的时间里收完，本函数的返回值只承诺「父进程确认死亡」。
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          // 已退出或权限不足：taskkill 那条路仍在跑，不在这里下结论。
+        }
       } catch {
         void 0;
       }
@@ -780,20 +841,155 @@ export class McpManager {
     );
   }
 
-  private async disposeClient(state: ServerState, clearTools = false): Promise<void> {
+  /**
+   * 收掉一个 server 的客户端与进程树。
+   *
+   * `reportIncomplete` 只在**终态关闭**（`close()`）时为真。重连路径也走这里
+   * （`connectServer` 先收旧的再建新的），但那里「树没回收干净」既不影响语义、
+   * 也不该在会话日志里刷警告——下一条连接马上就会建起来。把它一并上报会让每次
+   * 断线重连都多一条 warn，读者很快学会忽略这一行，R3 的信号就废了。
+   */
+  private async disposeClient(
+    state: ServerState,
+    clearTools = false,
+    reportIncomplete = false,
+  ): Promise<void> {
     if (state.terminating !== undefined) {
       await state.terminating;
     }
     const client = state.client;
+    const pid = state.transport?.pid ?? undefined;
     state.client = undefined;
     state.transport = undefined;
     state.connected = false;
     if (clearTools) {
       state.tools = [];
     }
+    const failure = await this.reapProcessTree(pid, client);
+    if (failure !== undefined && reportIncomplete) {
+      // 「没确认回收」必须说出来（R3）。`state.uncertain` 只在异常路径上生效：
+      // 那时连接还会被复用，下一次调用要据此拒绝重连。正常关闭这条路上没有
+      // 「下一次调用」了，所以它需要一个能被宿主与日志看见的去处——状态事件
+      // 会经 `toMcpStatusPayload` 写进会话日志，桌面端渲染成一条 warn。
+      this.emit({ kind: "dispose_incomplete", server: state.config.name, message: failure });
+    }
+  }
+
+  /**
+   * 正常关闭时的进程树回收。成功（或无可回收）返回 `undefined`；没确认时返回
+   * 一条人能读的原因。
+   *
+   * ## 实测事实（2026-11-07，本机，全部为本任务重测）
+   *
+   * 1. **Windows 上非 detached 的后代已经由 OS 自动回收**。Node/libuv 给每个
+   *    `spawn` 出来的直接子进程建了 kill-on-close 的 Job Object，后代继承它；
+   *    实测三层链（宿主 → server → 孙 → 曾孙）只杀最上层，孙与曾孙全灭
+   *    （2/2）。仓库里所有领域 server 的 `spawn` 都**没有** `detached`
+   *    （`probe/renode.ts`、`serial/serial.ts`、`keil/uvsock.ts`），所以正常
+   *    关闭本来就收得干净——**D-225 描述的「Renode/OpenOCD 孙进程活过宿主」
+   *    在默认 spawn 姿态下没有复现**。
+   * 2. **只有 `detached` 的后代能活过父进程**（实测：非 detached 0/6 存活，
+   *    detached 6/6 存活；父进程正常退出与被 TerminateProcess 结果一致）。
+   *    这类后代**没有**父子关联可用，`taskkill /T` 也无法枚举：`/T` 依赖活着的
+   *    父进程。
+   * 3. **`taskkill /T /F` 从 spawn 到真正枚举要约 1 s**。本机对**不存在的 pid**
+   *    也要 1.2–1.3 s——这 1 s 是进程启动成本（杀软扫描），不是遍历。真正的
+   *    「枚举 + 终止」发生在约 1 s 处。
+   * 4. **真实 MCP server 收到 stdin EOF 后 0–109 ms 就退出**（实测
+   *    `StdioServerTransport` 在 stdin end 时 `onclose`，进程随即结束；持句柄的
+   *    也要到 SDK 的 2 s SIGTERM 才走）。所以「起 taskkill → 等 spawn → 关
+   *    client」这种姿态，taskkill 开始枚举时父进程早已不在，**必然漏掉
+   *    detached 后代**（实测 0/10/25/50/100/200 ms 头程全漏，250 ms 起才稳定）。
+   * 5. 任何外部枚举手段都 ≥ 800 ms（`tasklist /FI` 800–1225 ms、
+   *    `[Diagnostics.Process]::GetProcesses()` 654–789 ms、`Get-CimInstance`
+   *    1764–3646 ms），远超「关闭额外开销 ≤ 50 ms」的预算，所以「先快照后代
+   *    pid、关完再补刀」也不可行。
+   *
+   * ## 因此这里做的是什么
+   *
+   * 在**不延长父进程生命、不增加关闭时延**的前提下，Windows 上唯一能起的作用
+   * 是把回收器发出去：起 `taskkill /T /F` 并 `unref`，不等它的退出（等它就是
+   * D-225 记的「26 s → 49 s」）。它对「父进程此刻还活着且持有子进程」的场景
+   * 有效（例如异常路径上 `beginDispose` 已经等在 pid 上；或 server 自己握着
+   * 管道没退），对「父进程已随 stdin EOF 退出」的场景**不保证**——那种场景由
+   * 上面第 1 条的 Job Object 负责，而第 2 条的 detached 后代谁都收不了。
+   *
+   * 所以返回值区分的是**「回收器有没有真的发出去」**，不是「树一定没了」：
+   * 这正是 R3 的要求——能证明的说能证明，不能证明的如实说不确定。
+   *
+   * ## 为什么不做在 transport 构造处（D-225 的修复建议）
+   *
+   * `StdioServerParameters` 只有 `command/args/env/stderr/cwd/maxBufferSize`，
+   * 没有 `detached` 之类的 spawn 选项（SDK 自己 `spawn(..., shell:false,
+   * windowsHide)`，见 `node_modules/@modelcontextprotocol/client/dist/stdio.mjs:74`）。
+   * 要在构造处拿到 Job Object / 进程组，只能自己 spawn 再把管道塞给 SDK，或自造
+   * transport 子类——两者都要复制 SDK 的缓冲、协议版本协商与 close 语义，契约
+   * 风险远大于本批次收益。真正想要「父死子随」的正确落点是 **server 侧**：
+   * 领域 server 自己 `spawn` 子进程时不要 `detached`（它们现在都没用），别再
+   * 给后代脱离 Job Object 的机会。
+   *
+   * ## POSIX
+   *
+   * `StdioClientTransport` 不传 `detached: true`，父进程因此不是进程组组长，
+   * `kill(-pid)` 指向的是一个不存在的组（ESRCH）。这里退化为「只保证直接子进程
+   * 收到 SIGKILL」——与 SDK 自己的 close 等价，**不声称**回收整棵树。要做到进程
+   * 组必须在 spawn 时 `detached: true`，那正是上面论证过不可行的位置，所以这里
+   * 如实返回「未确认」，而不是假装成功。
+   */
+  private async reapProcessTree(
+    pid: number | undefined,
+    client: Client | undefined,
+  ): Promise<string | undefined> {
+    if (pid === undefined) {
+      // 没连上过（或已断）：没有子进程可回收，不算失败。
+      if (client) {
+        await client.close().catch(() => undefined);
+      }
+      return undefined;
+    }
+
+    if (process.platform !== "win32") {
+      // POSIX：进程组不可用（见方法注释）。先让 SDK 关掉直接子进程，再如实
+      // 报「未确认整树回收」——不能因为「直接子进程没了」就说树收干净了。
+      if (client) {
+        await client.close().catch(() => undefined);
+      }
+      return isProcessAlive(pid)
+        ? "POSIX 下 MCP 子进程不是进程组组长，无法按组回收后代"
+        : "POSIX 下只保证直接子进程退出，后代是否回收未确认";
+    }
+
+    let killer: ReturnType<typeof spawn>;
+    try {
+      // `detached` 不能让回收器活过宿主退出（实测：宿主退出后它照样被 Job
+      // Object 带走），所以不设——保持与既有 terminateAndWait 同一姿态。
+      killer = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch (error) {
+      if (client) {
+        await client.close().catch(() => undefined);
+      }
+      return `taskkill 启动失败：${messageOf(error)}`;
+    }
+
+    const spawned = await waitForSpawnOrError(killer);
+    if (spawned !== undefined) {
+      // 回收器根本没起来（ENOENT 等）。此时父进程仍要被 SDK 收掉，但整棵树
+      // 没有回收器可用——如实上报。
+      if (client) {
+        await client.close().catch(() => undefined);
+      }
+      return `taskkill 未能启动：${spawned}`;
+    }
+
+    // 父进程交给 SDK 关闭；回收器在后台自己跑完，不等它的退出。
     if (client) {
       await client.close().catch(() => undefined);
     }
+    killer.unref();
+    return undefined;
   }
 
   private isTimeoutError(error: unknown): boolean {

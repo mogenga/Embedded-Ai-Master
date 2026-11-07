@@ -27,6 +27,7 @@
       "main.js",
       "updater.js",
       "close-behavior.js",
+      "link-policy.js",
       "preload.cjs",
       "host/**/*",
       "renderer/**/*",

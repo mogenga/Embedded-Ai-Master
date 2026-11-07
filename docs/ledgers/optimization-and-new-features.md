@@ -239,7 +239,7 @@
 | ID | 项 | 为什么还没做 |
 |---|---|---|
 | OPT-12 | 预算与占用率计入 tool schemas | `heuristicCountTokens` 仍只算 content + tool_calls；每轮重建的 schema 未计。需要先定「schema 怎么算 token」的口径 |
-| OPT-13 | 长任务超时出口（MCP 120s 硬顶 vs Keil 10min 构建） | `src/mcp/manager.ts:76` 的 `MAX_CALL_TIMEOUT_MS` 仍钳死；需要按工具配置单次上限 |
+| ~~OPT-13~~ | ~~长任务超时出口~~ **已落地（2026-11-07，BACKLOG 6.3，`b21717a`）** | `MAX_CALL_TIMEOUT_MS` 120s → 600s（默认调用超时仍 15s）；`ToolDef.callTimeoutMs` 让工具抬高自己的地板，`resolveTimeoutMs` 取 `max(opts.timeoutMs, 工具声明)`——用户显式配置更优先。MCP 适配器把 server 的 `timeoutMs` 透传进去，种子里 keil 单独 600s。**关键发现：挡路的是两道 120s，且管线层先触发**——它的 abort 会让 MCP 层 `beginDispose` 拆掉整台 server 的连接，模型看到的是「连接断开」而不是「构建超时」。没有给 `keil_debug` 加工具级声明：它是工具级字段而该工具有 57 个动作，构建要 10 分钟、读寄存器几毫秒 |
 | OPT-16 | 会话列表与标题懒读 | `titleOf` 仍读整份日志（`desktop/host/host.js:622`） |
 | OPT-17 | 宿主/协议文案 i18n | `host.js` 约百余条中文文案仍不参与 `locale` |
 | OPT-21 | Keil 工具面读写分拆 | 整个 `keil_debug` 仍是单一 `destructiveHint: true`（`mcp-servers/keil/tools.ts:1424`） |
@@ -249,7 +249,9 @@
 | OPT-25 | 统一 `verify` 命令 | **2026-11-07 已落地**：`npm run verify` = typecheck + check:js + check:docs + test |
 | ~~OPT-26~~ | ~~覆盖率纳入 `mcp-servers/**`~~ | **2026-11-07 按实测收窄后落地**。全量纳入口径实测 78.43%（9979/12722），被 keil（42.65%）/ serial（19.45%）/ embedded（0%）拖住，而这三块的剩余路径必须连真实 uVision 或 COM 口。最终口径 = `src/**` + `kb` / `datasheet` / `probe`，实测 90.15%，闸门仍是 85%。理由与数字见 `docs/BACKLOG.md` 批次 4 的 4.4 与 D-157 的 2026-11-07 补充 |
 | OPT-28 | 文档事实源对齐 | 本轮已改 README / MATRIX / frontend-design / m2-roadmap / release 五份；`docs/specs/frontend-design.md` 的其余描述性偏差仍会随实现继续漂移，没有回归守住 |
-| OPT-29~44 | 内核加固、桌面打磨、工程卫生、BR-7 夜批 | 除 OPT-39 与 OPT-37 已落地（见 §12.1）外未动；OPT-40（导航守卫）、OPT-42（工程卫生）成本最低，适合下一批 |
+| ~~OPT-34~~ | ~~并发只读分支补残留执行屏障~~ **已落地（2026-11-07，BACKLOG 6.4，`e96fb4c`）** | **原方案不成立**：并发分支里所有调用在 `Promise.all` 那一刻已全部启动，没有「后续调用」可跳，照搬串行屏障只会得到一个永远不触发的死分支。真正的问题是 `executeAuthorized` 产出的 `pending` 被静默丢弃，调用方无从知道有工具仍在跑。改为用既有的 `detail` 通道披露 `mayStillBeRunning: true`（与 `shell` 的 `abortEscalated` / `terminateFailed` 同一先例）。串行屏障逐字未动 |
+| ~~OPT-40~~ | ~~Electron `will-navigate` 守卫 + `openExternal` 白名单~~ **已落地（2026-11-07，BACKLOG 6.2，`95f2b55`）** | 新增 `desktop/link-policy.js`（纯函数，无 electron import，可单测）：外链只放行 `http`/`https` 且 hostname 非空；导航只放行「回到 index.html 自己」（`fileURLToPath` + `path.relative`，不用 `startsWith`——`index.html.evil` 会混过去）。判据用 `new URL().protocol` 而非字符串前缀：`HTTPS://` 会被前缀误杀，而 `java\nscript:` 解析后就是 `javascript:`。`setWindowOpenHandler` 选全拒绝。38 例测试 |
+| OPT-29~44 | 内核加固、桌面打磨、工程卫生、BR-7 夜批 | 除 OPT-13 / OPT-34 / OPT-37 / OPT-39 / OPT-40 已落地（见 §12.1 与本表）外未动；OPT-42（工程卫生）成本最低，适合下一批 |
 
 ### 12.3 本文件自身的约束
 
