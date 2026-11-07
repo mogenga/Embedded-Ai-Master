@@ -42,7 +42,7 @@ export interface DatasheetFileMeta {
 
 export interface DatasheetListResult {
   files: DatasheetFileMeta[]
-  /** 预算截停（≤200 文件）：files.length 是下界，未命中不等于不存在。 */
+  /** 遍历被截停（≤200 文件预算或 6 层深度上限）：files.length 是下界，未命中不等于不存在。 */
   scanTruncated: boolean
 }
 
@@ -61,6 +61,12 @@ export interface DatasheetSkip {
 
 export interface DatasheetSearchResult {
   hits: DatasheetHit[]
+  /** 命中总数（limit 裁剪前）：可以大于 hits.length，「3 条」与「40 条里的前 3 条」由此区分。 */
+  count: number
+  /** hits 被 limit 截断（不是遍历被截）：提高 limit（上限 50）或收窄查询，不要以为命中只有这些。 */
+  truncated: boolean
+  /** 文件遍历被截停（200 文件预算或 6 层深度上限）：count/found 只覆盖已扫描部分，未命中不等于不存在。 */
+  scanTruncated: boolean
   /** 无法索引/无法检索的文件与原因：提取器缺失（附安装命令）、过大、无文本层。 */
   skipped: DatasheetSkip[]
   extractor: string | null
@@ -252,10 +258,19 @@ export class DatasheetService {
   async search(query: string, limit: number = DEFAULT_SEARCH_LIMIT): Promise<DatasheetSearchResult> {
     const needle = query.trim().toLowerCase()
     const extractor = await this.findExtractor()
-    if (!needle) return { hits: [], skipped: [], extractor }
+    if (!needle) {
+      return { hits: [], count: 0, truncated: false, scanTruncated: false, skipped: [], extractor }
+    }
     if (!extractor) {
       // A 的诚实设计：提取器缺失报安装命令，不返回看起来像「无命中」的空结果。
-      return { hits: [], skipped: [{ path: '.', reason: EXTRACTOR_INSTALL_HINT }], extractor: null }
+      return {
+        hits: [],
+        count: 0,
+        truncated: false,
+        scanTruncated: false,
+        skipped: [{ path: '.', reason: EXTRACTOR_INSTALL_HINT }],
+        extractor: null,
+      }
     }
     const cappedLimit = Math.min(Math.max(limit, 1), MAX_SEARCH_LIMIT)
     const queryTokens = [...new Set(expandQueryTokens(query))]
@@ -266,8 +281,10 @@ export class DatasheetService {
     const tokenSeen = new Set<string>()
     const hits: DatasheetHit[] = []
     const skipped: DatasheetSkip[] = []
+    // 遍历预算/深度截停的事实必须带进结果：截停时未命中不等于不存在。
+    const walk = this.walkPdfFiles()
     // 混合排序要先全量打分再截断，不能像 A 那样命中即停。
-    for (const file of this.walkPdfFiles().files) {
+    for (const file of walk.files) {
       const indexed = await this.indexFile(file)
       if (indexed.kind === 'missing') continue
       if (indexed.kind === 'too_large') {
@@ -312,9 +329,17 @@ export class DatasheetService {
     hits.sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || a.page - b.page)
     // 任一查询 token 全语料零出现：如实返回无命中，不把泛词页当答案。
     if (queryTokens.length > 0 && queryTokens.some((token) => !tokenSeen.has(token))) {
-      return { hits: [], skipped, extractor }
+      return { hits: [], count: 0, truncated: false, scanTruncated: walk.truncated, skipped, extractor }
     }
-    return { hits: hits.slice(0, cappedLimit), skipped, extractor }
+    // count 是裁剪前的真实总数；truncated 说明 hits 只是前 limit 条。
+    return {
+      hits: hits.slice(0, cappedLimit),
+      count: hits.length,
+      truncated: hits.length > cappedLimit,
+      scanTruncated: walk.truncated,
+      skipped,
+      extractor,
+    }
   }
 
   /** excerpt 的命中锚点：整短语优先，否则首个出现的查询 token。 */
@@ -562,13 +587,18 @@ export class DatasheetService {
   /**
    * 检索根下的全部 PDF：≤maxDepth 层、跳 `.` 开头目录（含缓存目录
    * `.datasheet-mcp/`，防自吃）与 node_modules。A 侧的既定遍历规则。
-   * truncated 置 true 表示预算截停——文件数是下界，未列出不等于不存在。
+   * truncated 置 true 表示遍历被截停——文件预算用完，或存在超出深度上限
+   * 的目录未下探；文件数是下界，未列出不等于不存在。
    */
   private walkPdfFiles(): { files: string[]; truncated: boolean } {
     const out: string[] = []
     let truncated = false
     const walk = (dir: string, depth: number): void => {
-      if (depth > this.maxDepth) return
+      if (depth > this.maxDepth) {
+        // 走到这里说明还有一层目录没扫：不能悄悄少扫一层还说没有更多。
+        truncated = true
+        return
+      }
       let entries
       try {
         entries = readdirSync(dir, { withFileTypes: true })

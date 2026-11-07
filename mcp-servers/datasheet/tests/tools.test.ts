@@ -76,6 +76,30 @@ describe('datasheet_search', () => {
     })
   })
 
+  it('surfaces count / truncated / scanTruncated in the result', async () => {
+    const handler = toolByName(datasheetTools(makeService('pdftotext')), 'datasheet_search')
+      .handler
+    const result = await handler({ query: 'usb_bcdr' })
+    expect(result.structuredContent).toMatchObject({
+      count: 1,
+      truncated: false,
+      scanTruncated: false,
+    })
+  })
+
+  it('tells the caller how many hits were cut when the limit truncates', async () => {
+    writeFileSync(path.join(root, 'second.pdf'), '%PDF-1.4 placeholder')
+    const handler = toolByName(datasheetTools(makeService('pdftotext')), 'datasheet_search')
+      .handler
+    const result = await handler({ query: 'usb_bcdr', limit: 1 })
+    expect(result.structuredContent).toMatchObject({
+      count: 2,
+      truncated: true,
+      scanTruncated: false,
+    })
+    expect((result.structuredContent as { hits: unknown[] }).hits).toHaveLength(1)
+  })
+
   it('fails with invalid_argument on schema violations', async () => {
     const handler = toolByName(datasheetTools(makeService('pdftotext')), 'datasheet_search')
       .handler

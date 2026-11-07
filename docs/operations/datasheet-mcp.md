@@ -14,10 +14,21 @@
 
 | 工具 | 输入 | 作用 | 关键返回 |
 |---|---|---|---|
-| `datasheet_search` | `{query, limit?}` | BM25 + 整短语加成的混合排序检索 | `found` / `hits[{path,page,excerpt,score}]` / `skipped[]` / `extractor` |
+| `datasheet_search` | `{query, limit?}` | BM25 + 整短语加成的混合排序检索 | `found` / `hits[{path,page,excerpt,score}]` / `count` / `truncated` / `scanTruncated` / `skipped[]` / `extractor` |
 | `datasheet_read` | `{path, page, pageEnd?}` | 整页文本（≤50 页、≤512KiB） | `pages[{page,text}]` / `total` / `truncated` |
 | `datasheet_registers` | `{query}` 或 `{path, page?}` | 结构化寄存器表（启发式提取） | `found` / `tables[{path,name,peripheral?,offset?,resetValue?,bits[],sourcePage,confidence}]` |
 | `datasheet_status` | `{}` | 提取器/缓存/文件统计 | `root` / `extractor` / `cacheDir` / `cacheEntries` / `fileCount` / `scanTruncated` |
+
+**两种截断不是一回事**（对齐 `mcp-servers/kb` 的同一对词）：
+
+| 字段 | 含义 | 该怎么读 |
+|---|---|---|
+| `count` | `limit` 裁剪前的命中总数，可以大于 `hits.length` | 「3 条」与「40 条里的前 3 条」由此区分 |
+| `truncated` | `hits` 被 `limit` 截断 | 提高 `limit`（上限 50）或收窄查询 |
+| `scanTruncated` | **文件遍历**被截停（200 文件预算**或** 6 层深度上限） | `count` / `found` 只覆盖已扫描部分——**未命中不等于不存在** |
+
+> [!NOTE]
+> `scanTruncated` 同时覆盖「预算截停」与「深度截停」两种成因，无法区分是哪一种。这是有意的：两者对调用方是同一件事（结果可能不完整），拆成两个字段只会让下游各写一份判断。2026-11-07 之前深度截停不置位，超深目录里的 PDF 会静默消失（BACKLOG 5.1）。
 
 错误码：`invalid_argument` / `path_denied` / `not_found` / `file_too_large` / `extractor_missing` / `no_text_layer` / `extract_failed` / `page_out_of_range` / `page_range_too_large` / `empty_query`。
 

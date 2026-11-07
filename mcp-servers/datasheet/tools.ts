@@ -92,7 +92,7 @@ export function datasheetTools(service: DatasheetService): DatasheetToolSpec[] {
   const search: DatasheetToolSpec = {
     name: 'datasheet_search',
     description:
-      '在工作区 PDF 数据手册里检索（BM25 词频打分 + 整短语命中加成的混合排序，大小写不敏感），返回 hits[{path,page,excerpt,score}]，page 为 1-based，按混合分降序。每份文件报最高分的一页；要完整上下文必须用 datasheet_read 读整页。查询的每个词都必须至少出现在一份手册里，否则如实返回 found=false（查不存在的寄存器名不会拿泛词页凑数）。skipped 列出无法检索的文件与原因：提取器缺失（附安装命令）、文件过大、无文本层（扫描件）——这些是事实报告，不是命中。无命中时必须如实告知用户，不得编造页码或内容；索引只覆盖检索根下前 200 个 PDF（scanTruncated 语义见 datasheet_status），未命中不等于手册里没有，可换更短的关键词（寄存器名优先）重试。',
+      '在工作区 PDF 数据手册里检索（BM25 词频打分 + 整短语命中加成的混合排序，大小写不敏感），返回 hits[{path,page,excerpt,score}]，page 为 1-based，按混合分降序。每份文件报最高分的一页；要完整上下文必须用 datasheet_read 读整页。查询的每个词都必须至少出现在一份手册里，否则如实返回 found=false（查不存在的寄存器名不会拿泛词页凑数）。skipped 列出无法检索的文件与原因：提取器缺失（附安装命令）、文件过大、无文本层（扫描件）——这些是事实报告，不是命中。count 是 limit 裁剪前的命中总数（可以大于 hits.length）；truncated: true 表示只返回了前 limit 条，应提高 limit（上限 50）或收窄查询，不要以为命中只有这些。scanTruncated: true 表示文件遍历被截停（200 个文件的预算或 6 层深度上限），count 与 found 只覆盖已扫描到的部分——此时未命中不等于手册里没有。无命中时必须如实告知用户，不得编造页码或内容；可换更短的关键词（寄存器名优先）重试。',
     inputSchema: searchSchema,
     annotations: { readOnlyHint: true },
     handler: withSchema(searchSchema, async (args) => {
@@ -101,6 +101,9 @@ export function datasheetTools(service: DatasheetService): DatasheetToolSpec[] {
         const structuredContent = {
           found: result.hits.length > 0,
           hits: result.hits,
+          count: result.count,
+          truncated: result.truncated,
+          scanTruncated: result.scanTruncated,
           skipped: result.skipped,
           extractor: result.extractor,
         }
@@ -139,7 +142,7 @@ export function datasheetTools(service: DatasheetService): DatasheetToolSpec[] {
   const status: DatasheetToolSpec = {
     name: 'datasheet_status',
     description:
-      '查看数据手册检索的状态：检索根路径、pdftotext 提取器是否可用（缺失时其余工具都会报 extractor_missing，安装方法见其错误信息）、缓存目录与条目数、PDF 文件数。scanTruncated: true 表示文件遍历被 200 个的预算截停，fileCount 只是下界，未列出的 PDF 不等于不存在。',
+      '查看数据手册检索的状态：检索根路径、pdftotext 提取器是否可用（缺失时其余工具都会报 extractor_missing，安装方法见其错误信息）、缓存目录与条目数、PDF 文件数。scanTruncated: true 表示文件遍历被截停（200 个文件的预算或 6 层深度上限），fileCount 只是下界，未列出的 PDF 不等于不存在。',
     annotations: { readOnlyHint: true },
     handler: async () => {
       try {

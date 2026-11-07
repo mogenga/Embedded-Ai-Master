@@ -81,13 +81,36 @@ describe('listDatasheets', () => {
       'l1/l2/l3/l4/l5/l6/deep.pdf'.split(path.sep).join('/'),
     ])
   })
+
+  it('reports scanTruncated when a directory sits past the depth limit', () => {
+    writePdf('top.pdf', '%PDF-1.4')
+    writePdf(path.join('l1', 'l2', 'deep.pdf'), '%PDF-1.4')
+    const result = makeService({ maxDepth: 1 }).listDatasheets()
+    expect(result.files.map((file) => file.path)).toEqual(['top.pdf'])
+    // 超深目录里可能有 PDF：不能悄悄少扫一层还说没有更多。
+    expect(result.scanTruncated).toBe(true)
+  })
+
+  it('leaves scanTruncated false when every directory is within the depth limit', () => {
+    writePdf('top.pdf', '%PDF-1.4')
+    writePdf(path.join('l1', 'inner.pdf'), '%PDF-1.4')
+    const result = makeService({ maxDepth: 1 }).listDatasheets()
+    expect(result.scanTruncated).toBe(false)
+  })
 })
 
 describe('search (extractor injected)', () => {
   it('an empty query returns nothing without walking the tree', async () => {
     writePdf('a.pdf', '%PDF-1.4')
     const result = await makeService({ findExtractor: () => Promise.resolve(null) }).search('   ')
-    expect(result).toEqual({ hits: [], skipped: [], extractor: null })
+    expect(result).toEqual({
+      hits: [],
+      count: 0,
+      truncated: false,
+      scanTruncated: false,
+      skipped: [],
+      extractor: null,
+    })
   })
 
   it('reports the install hint instead of an empty-looking miss when pdftotext is absent', async () => {
@@ -212,6 +235,57 @@ describe('search (extractor injected)', () => {
     })
     expect((await service.search('magic phrase', 1)).hits.length).toBe(1)
     expect((await service.search('magic phrase')).hits.length).toBe(2)
+  })
+
+  it('reports the pre-limit total and truncated when hits exceed the limit', async () => {
+    for (const name of ['a.pdf', 'b.pdf', 'c.pdf']) writePdf(name, '%PDF-1.4')
+    const result = await makeService({
+      findExtractor: () => Promise.resolve('pdftotext'),
+      extract: () => Promise.resolve('shared magic phrase'),
+    }).search('magic phrase', 2)
+    // 「2 条」与「3 条里的前 2 条」必须能区分。
+    expect(result.hits).toHaveLength(2)
+    expect(result.count).toBe(3)
+    expect(result.truncated).toBe(true)
+    expect(result.scanTruncated).toBe(false)
+  })
+
+  it('reports count equal to hits and no truncation on a normal search', async () => {
+    writePdf('a.pdf', '%PDF-1.4')
+    writePdf('b.pdf', '%PDF-1.4')
+    const result = await makeService({
+      findExtractor: () => Promise.resolve('pdftotext'),
+      extract: () => Promise.resolve('shared magic phrase'),
+    }).search('magic phrase', 12)
+    expect(result.hits).toHaveLength(2)
+    expect(result.count).toBe(2)
+    expect(result.truncated).toBe(false)
+    expect(result.scanTruncated).toBe(false)
+  })
+
+  it('carries the file-budget truncation into the search result', async () => {
+    writePdf('a.pdf', '%PDF-1.4')
+    writePdf('b.pdf', '%PDF-1.4')
+    const result = await makeService({
+      maxFiles: 1,
+      findExtractor: () => Promise.resolve('pdftotext'),
+      extract: () => Promise.resolve('shared magic phrase'),
+    }).search('magic phrase')
+    // 只扫了 1 个文件：count 是下界，未命中不等于不存在。
+    expect(result.count).toBe(1)
+    expect(result.scanTruncated).toBe(true)
+  })
+
+  it('carries the depth-limit truncation into the search result', async () => {
+    writePdf(path.join('l1', 'l2', 'deep.pdf'), '%PDF-1.4')
+    const result = await makeService({
+      maxDepth: 1,
+      findExtractor: () => Promise.resolve('pdftotext'),
+      extract: () => Promise.resolve('shared magic phrase'),
+    }).search('magic phrase')
+    expect(result.hits).toEqual([])
+    expect(result.count).toBe(0)
+    expect(result.scanTruncated).toBe(true)
   })
 })
 

@@ -24,12 +24,13 @@ winget install oschwartz10612.Poppler
 
 | 工具 | 作用 | 关键返回值 |
 |---|---|---|
-| `datasheet_search(query, limit?)` | BM25 + 整短语加成的混合排序、大小写不敏感；每份文件报最高分的一页 | `found` / `hits[{path,page,excerpt,score}]` / `skipped[{path,reason}]` / `extractor` |
+| `datasheet_search(query, limit?)` | BM25 + 整短语加成的混合排序、大小写不敏感；每份文件报最高分的一页 | `found` / `hits[{path,page,excerpt,score}]` / `count` / `truncated` / `scanTruncated` / `skipped[{path,reason}]` / `extractor` |
 | `datasheet_read(path, page, pageEnd?)` | 按相对路径 + 1-based 页码读整页文本 | `pages[{page,text}]` / `total` / `truncated` |
 | `datasheet_registers({query}` 或 `{path, page?}`) | 结构化寄存器表（启发式提取） | `found` / `tables[{path,name,peripheral?,offset?,resetValue?,bits[{name,msb,lsb,desc?}],sourcePage,confidence}]` |
 | `datasheet_status()` | 检索根 / 提取器 / 缓存统计 | `root` / `extractor` / `cacheDir` / `cacheEntries` / `fileCount` / `scanTruncated` |
 
-- `datasheet_search`：limit 缺省 12、上限 50；文件遍历预算 200 个 PDF（`scanTruncated` 时 fileCount 是下界）；excerpt 取命中点前 120 / 后 200 字符。无命中必须如实告知，不得编造页码或内容。
+- `datasheet_search`：limit 缺省 12、上限 50；excerpt 取命中点前 120 / 后 200 字符。无命中必须如实告知，不得编造页码或内容。
+- **两种截断不是一回事**（与 `mcp-servers/kb` 同一套词汇）：`truncated: true` 是「返回条数被 limit 截」——`count` 是裁剪前的命中总数，可以提高 limit（上限 50）或收窄查询；`scanTruncated: true` 是「遍历被截停」——200 个 PDF 的文件预算用完，或有目录超出 6 层深度上限，此时 `count` / `found` 只覆盖已扫描到的部分，未命中不等于不存在。两者都可能同时为 true，此时优先按 `scanTruncated` 处理。`datasheet_status` 的 `scanTruncated` 同样是后一种含义。
 - `datasheet_read`：path 相对检索根（`datasheet_search` 返回的 path 原样可用），拒绝绝对路径与 `..` 越界（`path_denied`）；单次至多 50 页、累计至多 512KiB，超出 `truncated: true`；页码越界返回 `page_out_of_range` 并附 `total`。页文本来自 `pdftotext -layout`，保留列对齐。
 - `datasheet_registers`：`query` 与 `path` **必须二选一**（两者都给或都不给都是 `invalid_argument`）。`query` 按寄存器名全库大小写不敏感包含匹配（`usb` 命中 `USB_CNTR`），默认最多 10 张表；`path`（可带 `page`）只读指名文件。表由启发式从 `-layout` 页文本提取，**低置信度的表在提取阶段就被丢弃**（宁缺毋滥），每张表带 `sourcePage`。位域描述可能被表格换行拆断——**引用位定义或复位值前必须用 `datasheet_read` 读 `sourcePage` 原页核对**；同一寄存器名可能命中多份手册（同名不同芯片），以 `path + sourcePage` 区分。
 - `datasheet_status`：提取器缺失时附 `installHint`，本身不报错（如实报告状态是它的本职）。
