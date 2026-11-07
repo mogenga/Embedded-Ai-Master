@@ -36,13 +36,15 @@
        "keil": {
          "command": "node",
          "args": ["G:/Develop/AImaster/Embedded-Ai-Master/dist-mcp/keil/server.js"],
-         "timeoutMs": 120000
+         "timeoutMs": 600000
        }
      }
    }
    ```
 
    路径要用**绝对路径**，并且指向 `dist-mcp`（不是 `mcp-servers` 源码目录）。
+
+   `timeoutMs` 写 **600000（10 分钟）**：`keil_debug` 的 `build` / `rebuild` 在 uVision 里内部就允许 10 分钟，而内核以前把上限钳在 120s——构建会在两分钟被掐断，且界面上表现为「MCP 连接断开」而不是「构建超时」。2026-11-07 起硬顶抬到 10 分钟，首启自动写入的种子配置也是这个值。改小它会让构建重新失败。
 
 3. **复制权限模板**（可选但推荐）：
 

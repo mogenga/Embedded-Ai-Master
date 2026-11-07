@@ -29,7 +29,7 @@
 
 ## 常用命令（以 `package.json` 与 `README.md` 为准）
 
-- 测试：`npm test`（vitest run，不触网，约 3800 例 / 55 s）、`npm run coverage`（`lines ≥ 85%`，当前实测 90.15%）、`npm run test:desktop`（协议层与宿主）、`npm run test:mcp`（领域层）。
+- 测试：`npm test`（vitest run，不触网，约 **3950 例** / 60–100 s）、`npm run coverage`（`lines ≥ 85%`，当前实测 90.15%）、`npm run test:desktop`（协议层与宿主）、`npm run test:mcp`（领域层）。
 - **覆盖率口径**：`src/**` + `mcp-servers/{kb,datasheet,probe}/**`，排除 `**/tests/**`。`keil` / `serial` / `embedded` **刻意不纳入**——剩余路径必须连真实 uVision（UVSOCK 4823）或真实 COM 口，纳入只能靠豁免或造假。**不纳入 ≠ 已验证**：这两块仍由 D-157 的真机验证跟踪。理由与实测数字见 `vitest.config.ts` 的 `coverage` 注释。
 - 静态检查：`npm run typecheck`；`npm run check:js`（`desktop/` 与 `scripts/` 的 JS 语法，补 `tsc` 的盲区）；`npm run check:docs`（markdown 本地链接与 `<img src>`，移动/改名文档后必跑）；`npm run check:ledgers`（台账内部自洽）。**`npm run lint` 等同 `tsc --noEmit`**（D-006），不是独立检查。
 - **完整验证：`npm run verify`** —— typecheck + check:js + check:docs + check:ledgers + test 一次跑完。交付前用它，而不是只跑 `npm test`。
@@ -38,7 +38,9 @@
 - 端到端（需环境，默认不在 CI）：`npm run probe:e2e`（真实 Renode）、`npm run diagnosis:e2e`、`npm run packs:e2e`、`npm run kb:regression`、`npm run kb:review`、`npm run datasheet:regression`、`npm run datasheet:corpus`。
 - 桌面形态：用户先执行 `npm --prefix desktop install`，再 `npm --prefix desktop run desktop`。**agent 不代为执行任何 install**（见下文禁令）。
 - live 测试默认跳过；开启方式见 README「live 测试」。
-- **并行负载下的偶发红**：本机默认并行度下 `background-terminal` / `mcp-manager` / `ls` / `files-api` / `glob` 偶发超时（单跑必绿，每次红的用例都不同）。稳定口径是 `npx vitest run --maxWorkers=4`。判断「是不是真回归」时先单跑那条用例，再按稳定口径复跑一次。
+- **并行负载下的偶发红**：本机默认并行度下 `background-terminal` / `mcp-manager` / `ls` / `files-api` / `glob` / `shell` 偶发超时（单跑必绿，每次红的用例都不同）。稳定口径是 `npx vitest run --maxWorkers=4`。判断「是不是真回归」时先单跑那条用例，再按稳定口径复跑一次。
+  这些用例的共同点是**等一个真实子进程死掉**：`taskkill /T /F` 在装了杀软的本机上要 890–1160 ms，并发跑十几份测试时机器排不过来。2026-11-07 的 `5d42e38` 让 `McpManager` 先直接 `process.kill(SIGKILL)` 收父进程，`mcp-manager` 那组因此稳住了；`background-terminal` / `shell` 走各自的进程管理，**不受那处优化影响**，仍会在全量并发时红。
+  **判断方法**：单文件跑 `npx vitest run <file>` 全绿 + 全量跑只红那一条 = 负载，不是回归。不要为了让它绿去调大测试的超时阈值——那会把真实的慢也一起藏掉。
 - CI（`.github/workflows/ci.yml`）只有两个 job：`typecheck + syntax (fast)`（ubuntu，`typecheck` + `check:js`）与 `build + test (offline)`（windows，`build` + `build:mcp` + `coverage`）。**覆盖率闸门只在 `--coverage` 下生效**，所以 offline job 不单独跑 `npm test`。
 - 本地资产缺失时（KB 语料、查询集、真实 `index.yaml`、`dist-mcp/kb/inbox.js`）相关用例 `skipIf`，**不是覆盖下降**；CI 恒比本地多 skip 5 例。
 
