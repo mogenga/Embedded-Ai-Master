@@ -56,6 +56,16 @@ export interface WalkResult {
 
 export type FileVisitor = (absolute: string, relative: string) => Promise<void> | void;
 
+/**
+ * Sees each directory the walk accepts into its queue.
+ *
+ * Called before the directory is visited, and only for directories that pass
+ * the same rules as a normal walk (not a symlink, not on the ignore list).
+ * Synchronous on purpose: it reports what BFS already discovered, and making
+ * it awaitable would let a caller change the traversal's timing.
+ */
+export type DirectoryVisitor = (absolute: string, relative: string) => void;
+
 export function toPosix(value: string): string {
   return value.split(path.sep).join("/");
 }
@@ -89,6 +99,17 @@ function byName(a: Dirent, b: Dirent): number {
  * - 内存 O(队列中的目录数)，即树的宽度；
  * - 预算耗尽时不会为尚未轮到的目录白读 readdir。
  * 同一层内按名字排序后再处理，使结果不依赖 readdir 的返回顺序。
+ *
+ * `visitDirectory` 是给「目录本身也是结果」的调用方（`@` 文件名搜索）用的。
+ * 它在该目录通过全部接受规则（非符号链接、不在忽略清单）**入队时**触发，
+ * 因此：
+ * - 不增加任何 I/O——这些目录本来就要 readdir，名字已经在手上；
+ * - **不消耗 `scanned` 预算**。预算是文件数，这条语义在 `glob` / `grep` /
+ *   搜索三处必须一致；若目录也计数，同一个预算买到的文件覆盖会随目录密度
+ *   变化，`scanTruncated` 的含义也随之漂移。
+ * - 根目录本身不触发：调用方要的是「根下面有哪些目录」，根不是一个候选。
+ * 截断时未发现的目录不会被静默漏掉——预算截停一律置 `scanTruncated`，
+ * 与文件走到同一条「结果可能不完整」的披露路径。
  */
 export async function walkFiles(
   root: string,
@@ -96,6 +117,7 @@ export async function walkFiles(
   visit: FileVisitor,
   maxScanned = MAX_SCANNED_FILES,
   signal?: AbortSignal,
+  visitDirectory?: DirectoryVisitor,
 ): Promise<WalkResult> {
   const state: WalkState = {
     scanned: 0,
@@ -141,6 +163,7 @@ export async function walkFiles(
       if (entry.isDirectory()) {
         if (isIgnoredDirectory(entry.name)) continue;
         queue.push(absolute);
+        visitDirectory?.(absolute, toPosix(path.relative(workdir, absolute)));
         continue;
       }
       if (!entry.isFile()) continue;

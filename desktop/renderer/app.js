@@ -48,7 +48,6 @@ const diffRoot = $("diff-root");
 const fileRoot = $("file-root");
 const changesList = $("changes-list");
 const changesSummary = $("changes-summary");
-const checkpointList = $("checkpoint-list");
 const terminalRoot = $("terminal-root");
 const terminalOutput = $("terminal-output");
 const terminalInput = $("terminal-input");
@@ -56,7 +55,6 @@ const terminalPrompt = $("terminal-prompt");
 
 const state = {
   busy: false,
-  goalRun: null,
   mode: "ask",
   effort: "auto",
   effortChoices: { levels: [], default: "", fixed: "" },
@@ -85,9 +83,6 @@ const state = {
   pendingPermissionId: null,
   changedFiles: [],
   changes: { files: [], additions: 0, deletions: 0 },
-  checkpoints: [],
-  /** True when the last checkpoint restore can itself be undone. */
-  checkpointRedo: false,
   selectedChange: null,
   selectedFile: null,
   /** Pending "the preview never arrived" timeout; cleared on the reply. */
@@ -163,8 +158,6 @@ const state = {
    * cleared. @-mentions typed into the text are already in the text itself.
    */
   mentionFiles: [],
-  /** Sub-agent records for the Tasks pane. */
-  subagents: [],
   pr: null,
   commands: [],
   /**
@@ -182,7 +175,6 @@ const state = {
    */
   skills: [],
   diffScope: "session",
-  currentSubagent: null,
   /** The serial monitor is renderer-local except for the stream itself. */
   serialPorts: [],
   serial: {
@@ -207,6 +199,15 @@ const state = {
     lines: [],
     /** Lines the host could not keep up with, since the last clear. */
     dropped: 0,
+    /**
+     * Lines evicted by this pane's own `SERIAL_MAX_LINES` cap (OPT-37 ①).
+     *
+     * Separate from `dropped` on purpose: the host counts what never left its
+     * ring, and has no way to know the renderer also trims. Folding the two
+     * into one number would make the status line wrong in both directions
+     * whenever only one side trimmed.
+     */
+    droppedLocal: 0,
     /** Lines the current filter hides, recomputed on each render. */
     filtered: 0,
     /** Why the port closed or failed to open, shown in the status row. */
@@ -1440,11 +1441,19 @@ function setStatus(key) {
  * also cannot show a destructive action in the app's own color language. This
  * follows the same tokens as every other surface, traps focus while open, and
  * returns a promise.
+ *
+ * It is a modal `<dialog>`, not a z-indexed `<div>`. Settings and the shortcut
+ * sheet are opened with `showModal()`, which puts them in the browser's top
+ * layer; a plain element renders *behind* that layer no matter how high its
+ * z-index, and cannot take focus (measured in Electron 44: hit-testing the
+ * confirm button returned the settings dialog). Every destructive confirmation
+ * on the settings pages was therefore drawn where nobody could see it. A
+ * second modal dialog stacks correctly above the first and still traps focus.
  */
 function confirmAction(message, options = {}) {
   return new Promise((resolve) => {
     const previous = document.activeElement;
-    const overlay = document.createElement("div");
+    const overlay = document.createElement("dialog");
     overlay.className = "confirm-overlay";
     overlay.innerHTML =
       `<div class="confirm-dialog" role="alertdialog" aria-modal="true">` +
@@ -1454,10 +1463,17 @@ function confirmAction(message, options = {}) {
       `<button class="confirm-ok${options.danger ? " danger" : ""}">${escapeHtml(options.ok ?? t.confirm)}</button>` +
       `</div></div>`;
     document.body.appendChild(overlay);
+    overlay.showModal();
 
     const ok = overlay.querySelector(".confirm-ok");
     const cancel = overlay.querySelector(".confirm-cancel");
+    let settled = false;
     const close = (answer) => {
+      if (settled) return;
+      settled = true;
+      // `close()` is what drops the dialog out of the top layer; removing the
+      // node afterwards keeps the document free of spent dialogs.
+      overlay.close?.();
       overlay.remove();
       document.removeEventListener("keydown", onKey, true);
       if (previous && typeof previous.focus === "function") previous.focus();
@@ -1479,6 +1495,15 @@ function confirmAction(message, options = {}) {
     document.addEventListener("keydown", onKey, true);
     ok.addEventListener("click", () => close(true));
     cancel.addEventListener("click", () => close(false));
+    // The browser's own Escape path. The capture handler above normally
+    // consumes the key first, but a close request that arrives some other way
+    // must still answer the promise rather than leave it pending forever.
+    overlay.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      close(false);
+    });
+    // A modal dialog retargets clicks on its backdrop to the dialog element,
+    // so `event.target === overlay` is exactly "clicked outside the card".
     overlay.addEventListener("click", (event) => {
       if (event.target === overlay) close(false);
     });
@@ -1944,22 +1969,41 @@ function updateMention() {
   }, 120);
 }
 
-function renderMention(files) {
+function renderMention(files, unavailable = false) {
   if (!mention) return;
   mention.files = files;
   mention.index = 0;
   fileMention.innerHTML = "";
+  if (unavailable) {
+    // The host answered, but the kernel it loaded cannot search (a stale
+    // `dist/`). Saying "no matching file" would be a lie; the popup stays
+    // open with the reason and the fix, and Enter still sends the message
+    // because there is nothing to choose (D-184 ②, R3).
+    mention.files = [];
+    const note = document.createElement("div");
+    note.className = "mention-hint";
+    note.textContent = t.mentionSearchUnavailable;
+    fileMention.appendChild(note);
+    fileMention.hidden = false;
+    return;
+  }
   if (files.length === 0) {
     fileMention.hidden = true;
     return;
   }
-  files.forEach((path, index) => {
+  files.forEach((entry, index) => {
+    // Entries are `{path, kind?}` since D-184 ①: the kernel searches
+    // directories as well as files. A directory gets a trailing `/` so the two
+    // kinds are distinguishable at a glance — both are valid `@` targets, but
+    // picking a folder and picking a file are different plans.
+    const path = typeof entry === "string" ? entry : String(entry?.path ?? "");
+    const isDir = typeof entry === "object" && entry !== null && entry.kind === "dir";
     const row = document.createElement("button");
     row.className = `mention-row${index === 0 ? " active" : ""}`;
     row.setAttribute("role", "option");
     const cut = path.lastIndexOf("/");
     row.innerHTML =
-      `<span class="mention-name">${escapeHtml(path.slice(cut + 1))}</span>` +
+      `<span class="mention-name">${escapeHtml(path.slice(cut + 1))}${isDir ? "/" : ""}</span>` +
       (cut > 0 ? `<span class="mention-dir">${escapeHtml(path.slice(0, cut))}</span>` : "");
     row.addEventListener("mousedown", (event) => {
       event.preventDefault();
@@ -3350,12 +3394,6 @@ function handleEvent(message) {
       if (state.pane === "diff" && !workbench.hidden) renderDiff();
       break;
 
-    case "checkpoints":
-      state.checkpoints = message.entries ?? [];
-      state.checkpointRedo = Boolean(message.redo);
-      renderCheckpoints();
-      break;
-
     case "artifacts":
       state.artifacts = message.artifacts ?? [];
       renderArtifacts();
@@ -3366,73 +3404,13 @@ function handleEvent(message) {
       break;
 
     case "file_matches":
-      if (message.query === mention?.query) renderMention(message.files ?? []);
+      // `unavailable` is the stale-`dist/` state (D-184 ②). It rides on every
+      // answer, not just the first, because a one-time notice is easy to miss
+      // and an empty list alone reads as "no matching file".
+      if (message.query === mention?.query) {
+        renderMention(message.files ?? [], message.unavailable === true);
+      }
       break;
-
-    case "subagent_start": {
-      const node = addNode(
-        `<div class="subagent running"${message.id ? ` data-subagent="${escapeHtml(message.id)}"` : ""}>` +
-          `<div class="subagent-head"><span class="subagent-glyph">${icon("corner-down-right")}</span>` +
-          `<span class="subagent-title">${escapeHtml(t.subagentLabel)}</span>` +
-          `<span class="subagent-count"></span>` +
-          (message.id ? `<button class="subagent-stop" type="button">${escapeHtml(t.subagentStop)}</button>` : "") +
-          `<button class="subagent-toggle" type="button" aria-expanded="false">${escapeHtml(t.subagentExpand)}</button>` +
-          `</div>` +
-          `<div class="subagent-prompt">${escapeHtml(message.prompt ?? "")}</div>` +
-          `<div class="subagent-activities"></div>` +
-          `</div>`,
-      );
-      // Expand/collapse: the card stays compact by default but nothing is
-      // discarded, so a stuck child can be read line by line.
-      const toggle = node.querySelector(".subagent-toggle");
-      toggle?.addEventListener("click", () => {
-        const open = node.classList.toggle("expanded");
-        toggle.setAttribute("aria-expanded", open ? "true" : "false");
-        toggle.textContent = open ? t.subagentCollapse : t.subagentExpand;
-      });
-      // Stopping a child from its own card is the difference between "the
-      // agent is doing something odd" and "I can end that one part".
-      node.querySelector(".subagent-stop")?.addEventListener("click", () => {
-        api.send({ cmd: "stopSubagent", id: message.id });
-      });
-      state.currentSubagent = { node, count: 0, id: message.id ?? "" };
-      break;
-    }
-
-    case "subagents": {
-      // The Tasks panel's live view; the cards in the transcript already show
-      // history, this is for the ones still running.
-      state.subagents = message.subagents ?? [];
-      renderSubagents();
-      break;
-    }
-
-    case "subagent_activity": {
-      const sub = state.currentSubagent;
-      if (!sub) break;
-      sub.count += 1;
-      const list = sub.node.querySelector(".subagent-activities");
-      const line = document.createElement("div");
-      line.className = "subagent-line";
-      line.innerHTML = `${icon(message.kind === "tool" ? "chevron-right" : "dot", "inline")}<span>${escapeHtml(message.text)}</span>`;
-      list.appendChild(line);
-      // A long sub-task used to keep only its last 40 lines, which is exactly
-      // the point where you cannot see how it got stuck. Everything is kept in
-      // the DOM; the collapsed card clips it and "expand" reveals the rest.
-      sub.node.querySelector(".subagent-count").textContent = String(sub.count);
-      break;
-    }
-
-    case "subagent_end": {
-      const sub = state.currentSubagent;
-      if (!sub) break;
-      sub.node.classList.remove("running");
-      if (!message.ok) sub.node.classList.add("failed");
-      sub.node.querySelector(".subagent-count").textContent = message.ok ? t.subagentDone : t.subagentFailed;
-      sub.node.querySelector(".subagent-stop")?.remove();
-      state.currentSubagent = null;
-      break;
-    }
 
     case "export_ready":
       exportSessionFile(message.markdown, message.filename);
@@ -3977,90 +3955,6 @@ function handleEvent(message) {
       scrollToBottom();
       break;
 
-    // ---- 自主循环 ----
-    // 每一轮的边界都要看得见：否则几轮下来，用户读到的是一段连续的对话，
-    // 分不清哪一段是自己说的、哪一段是循环自己接上的。
-    case "goal_start":
-      state.goalRun = { kind: message.kind, goal: message.goal, maxRounds: message.maxRounds, round: 0 };
-      addNode(
-        `<div class="compact-marker goal-marker">` +
-          `<span class="compact-line"></span>` +
-          `<span class="compact-label">${escapeHtml(
-            message.kind === "goal"
-              ? t.goalStarted.replace("{n}", String(message.maxRounds))
-              : t.loopStarted.replace("{n}", String(message.maxRounds)),
-          )}</span>` +
-          `<span class="compact-line"></span>` +
-          `</div>`,
-      );
-      renderGoalBadge();
-      scrollToBottom();
-      break;
-
-    case "goal_round":
-      if (message.phase === "start") {
-        // 第 1 轮也要标出来：它是规划轮，和后面的执行轮性质不同，用户
-        // 需要知道"这一轮只是拆步骤，还没动手"。
-        addNode(
-          `<div class="compact-marker">` +
-            `<span class="compact-line"></span>` +
-            `<span class="compact-label">${escapeHtml(
-              message.round === 1 && state.goalRun?.kind === "loop" ? t.loopPlanRound : t.goalRound.replace("{n}", String(message.round)),
-            )}</span>` +
-            `<span class="compact-line"></span>` +
-            `</div>`,
-        );
-        scrollToBottom();
-        if (state.goalRun) {
-          state.goalRun.round = message.round;
-          renderGoalBadge();
-        }
-      }
-      break;
-
-    case "goal_end":
-      state.goalRun = null;
-      renderGoalBadge();
-      addNode(
-        `<div class="goal-summary ${message.stop === "goal-met" || message.stop === "task-list-complete" ? "done" : "stopped"}">` +
-          `<strong>${escapeHtml(t.goalEnded)}</strong> ` +
-          escapeHtml(message.detail) +
-          `</div>`,
-      );
-      scrollToBottom();
-      break;
-
-    case "recovery": {
-      // A previous process died mid-goal. Offer to pick the loop up rather
-      // than silently dropping the work, with the round it had reached.
-      const list = message.sessions || [];
-      if (list.length === 0) break;
-      const rows = list
-        .slice(0, 4)
-        .map((session) => {
-          const label = escapeHtml(session.title || session.id);
-          const note = escapeHtml(`${session.goal.kind} ${session.goal.round}/${session.goal.maxRounds}: ${session.goal.text}`);
-          return (
-            `<div class="recovery-row" data-session="${escapeHtml(session.id)}">` +
-            `<div class="recovery-title">${label}</div>` +
-            `<div class="recovery-note">${note}</div>` +
-            `<div class="recovery-actions">` +
-            `<button class="link-button" data-recovery-open="${escapeHtml(session.id)}">${escapeHtml(t.recoveryOpen)}</button>` +
-            `</div></div>`
-          );
-        })
-        .join("");
-      addNode(`<div class="notice recovery"><div class="recovery-head">${escapeHtml(t.recoveryTitle)}</div>${rows}</div>`);
-      for (const button of document.querySelectorAll("[data-recovery-open]")) {
-        button.addEventListener("click", () => {
-          const id = button.getAttribute("data-recovery-open");
-          api.send({ cmd: "loadSession", id });
-          api.send({ cmd: "resumeGoal" });
-        });
-      }
-      break;
-    }
-
     case "turn_progress": {
       // The status line names what the turn is doing and how long it has run.
       // It is not a message in the transcript: a heartbeat every second would
@@ -4144,7 +4038,7 @@ function handleEvent(message) {
       // has one; until then the chart is empty rather than the old one.
       state.contextBreakdown = null;
       target
-        .querySelectorAll(".turn, .tool-row, .tool-group, .tool-item, .tool-output, .notice, .plan, .thinking, .subagent, .compact-marker")
+        .querySelectorAll(".turn, .tool-row, .tool-group, .tool-item, .tool-output, .notice, .plan, .thinking, .compact-marker")
         .forEach((node) => node.remove());
       state.currentAssistant = null;
       state.currentThinking = null;
@@ -4370,31 +4264,7 @@ function handleEvent(message) {
   }
 }
 
-/** The Tasks pane: every sub-agent this session started, and its state. */
-function renderSubagents() {
-  const list = $("tasks-list");
-  if (!list) return;
-  list.innerHTML = "";
-  const subagents = state.subagents ?? [];
-  if (subagents.length === 0) {
-    list.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.noTasks)}</div>`;
-    return;
-  }
-  for (const agent of subagents) {
-    const row = document.createElement("div");
-    row.className = `task-row ${agent.status}`;
-    const seconds = Math.max(0, Math.round((agent.elapsedMs ?? 0) / 1000));
-    row.innerHTML =
-      `<span class="task-state ${escapeHtml(agent.status)}"></span>` +
-      `<span class="task-label">${escapeHtml(agent.label)}</span>` +
-      `<span class="task-meta">${escapeHtml(t.taskMeta(agent.turns ?? 0, seconds))}</span>` +
-      (agent.status === "running" ? `<button class="link-button task-stop">${escapeHtml(t.subagentStop)}</button>` : "");
-    row.querySelector(".task-stop")?.addEventListener("click", () => api.send({ cmd: "stopSubagent", id: agent.id }));
-    list.appendChild(row);
-  }
-}
-
-/* ---------- workbench: diff, file, checkpoints ---------- */
+/* ---------- workbench: diff, file ---------- */
 
 /**
  * Panes with a backend in this kernel. Everything else is unreachable.
@@ -4462,22 +4332,13 @@ function openWorkbench(pane, { opener = null } = {}) {
   const showTerminal = state.pane === "terminal";
   const showArtifact = state.pane === "artifact";
   const showBrowser = state.pane === "browser";
-  const showHistory = state.pane === "history";
-  const showTasks = state.pane === "tasks";
   const showFile = state.pane === "file";
   const showSerial = state.pane === "serial";
-  const tasksRoot = $("tasks-root");
-  if (tasksRoot) tasksRoot.hidden = !showTasks;
-  if (showTasks) {
-    api.send({ cmd: "subagents" });
-    renderSubagents();
-  }
   $("diff-pane").hidden = !showDiff;
   diffRoot.hidden = !showDiff;
   diffFilelist.hidden = !showDiff || state.changes.files.length === 0;
   $("diff-scope").hidden = !showDiff;
   $("changes-list").hidden = !showDiff;
-  $("history-root").hidden = !showHistory;
   $("artifact-list-pane").hidden = !showArtifact || Boolean(state.selectedArtifact);
   fileRoot.hidden = !showFile;
   terminalRoot.hidden = !showTerminal;
@@ -4485,7 +4346,6 @@ function openWorkbench(pane, { opener = null } = {}) {
   $("browser-root").hidden = !showBrowser;
   $("serial-root").hidden = !showSerial;
   if (showDiff) renderDiff();
-  if (showHistory) api.send({ cmd: "getCheckpoints" });
   if (showArtifact) api.send({ cmd: "getArtifacts" });
   if (showTerminal) {
     openTerminal();
@@ -4778,8 +4638,12 @@ function fillSerialControls() {
     }
   }
   baudSelect.value = String(state.serial.baud || state.serial.selectedBaud || 115200);
+  // The port is fixed once open — the host owns that session and switching it
+  // would be a different connection. The baud rate is not: `serialBaud`
+  // reconfigures the open port in place (the ring and the session survive), so
+  // disabling it here made a supported operation unreachable (OPT-37 ②).
   portSelect.disabled = state.serial.open;
-  baudSelect.disabled = state.serial.open;
+  baudSelect.disabled = false;
   $("serial-toggle").textContent = state.serial.open ? t.serialStop : t.serialStart;
   $("serial-toggle").classList.toggle("btn-primary", !state.serial.open);
   renderSerialStatus();
@@ -4801,6 +4665,11 @@ function renderSerialStatus() {
     parts.push(`${t.serialPausedState}${serial.pausedBacklog ? ` · ${serial.pausedBacklog} ${t.serialNewLines}` : ""}`);
   } else if (serial.dropped) {
     parts.push(`${serial.dropped} ${t.serialDropped}`);
+  }
+  // The pane's own cap, reported separately: `dropped` above is the host's ring
+  // and says nothing about lines that arrived and were then evicted here.
+  if (serial.droppedLocal) {
+    parts.push(`${serial.droppedLocal} ${t.serialTrimmed}`);
   }
   if (serial.filtered) parts.push(`${serial.filtered} ${t.serialFiltered}`);
   status.textContent = parts.join(" · ");
@@ -4887,6 +4756,11 @@ function appendSerialLines(lines) {
   if (serial.lines.length > SERIAL_MAX_LINES) {
     const excess = serial.lines.length - SERIAL_MAX_LINES;
     serial.lines.splice(0, excess);
+    // Counted separately from the host's `dropped`: these lines reached the
+    // pane and were then evicted here, so the host has no idea they are gone.
+    // Without this the status line says "0 dropped" while the top of the
+    // transcript is quietly disappearing (OPT-37 ①, 2026-11-08).
+    serial.droppedLocal = (serial.droppedLocal ?? 0) + excess;
     for (let index = 0; index < excess; index++) output.firstElementChild?.remove();
   }
 
@@ -4951,6 +4825,8 @@ function setSerialState(message) {
     serial.lines = [];
     serial.filtered = 0;
     serial.dropped = 0;
+    // The pane's own trim counter describes the ring that was just cleared.
+    serial.droppedLocal = 0;
     serial.follow = true;
   }
   fillSerialControls();
@@ -4992,6 +4868,9 @@ $("serial-clear").addEventListener("click", () => {
     if (!yes) return;
     state.serial.lines = [];
     state.serial.filtered = 0;
+    // Clearing starts a new ring on both sides: the pane's own trim count is
+    // about the lines that are gone, so it goes with them (OPT-37 ①).
+    state.serial.droppedLocal = 0;
     $("serial-output").innerHTML = "";
     api.send({ cmd: "serialClear", port: state.serial.port ?? undefined });
     renderSerialStatus();
@@ -5062,7 +4941,14 @@ $("serial-port").addEventListener("change", () => {
 });
 
 $("serial-baud").addEventListener("change", () => {
-  state.serial.selectedBaud = Number($("serial-baud").value) || 115200;
+  const baud = Number($("serial-baud").value) || 115200;
+  state.serial.selectedBaud = baud;
+  // While the port is open the pick is a live reconfiguration, not just a
+  // remembered preference for the next open (OPT-37 ②). The host answers with
+  // `mode: "reconfigured"`, which keeps the transcript — only the decode
+  // changes. If the driver refuses, `serial_state{open:false, error}` arrives
+  // and the pane says why instead of showing a baud rate that is not in force.
+  if (state.serial.open) api.send({ cmd: "serialBaud", baud });
 });
 
 $("serial-encoding")?.addEventListener("change", (event) => {
@@ -5494,66 +5380,6 @@ $("git-branch").addEventListener("click", () => {
     .catch(() => (label.title = t.copyFailed))
     .finally(() => setTimeout(() => (label.title = name), 1200));
 });
-
-function renderCheckpoints() {
-  checkpointList.innerHTML = "";
-  const entries = state.checkpoints;
-  if (entries.length === 0) {
-    checkpointList.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.noCheckpoints)}</div>`;
-    return;
-  }
-  if (state.checkpointRedo) {
-    // The undo is itself undoable; without this the first click on "restore"
-    // was a one-way door and users stopped using it.
-    const redo = document.createElement("button");
-    redo.className = "restore-start";
-    redo.textContent = t.redoSafe;
-    redo.addEventListener("click", () => api.send({ cmd: "redo" }));
-    checkpointList.appendChild(redo);
-  }
-
-  const restoreAll = document.createElement("button");
-  restoreAll.className = "restore-start";
-  restoreAll.textContent = t.restoreStart;
-  restoreAll.addEventListener("click", () => {
-    void confirmAction(t.restoreConfirm, { danger: true }).then((yes) => {
-      if (yes) api.send({ cmd: "restoreCheckpoint", id: "start" });
-    });
-  });
-  checkpointList.appendChild(restoreAll);
-
-  // History grouped by the turn that produced the change. A flat list of
-  // paths lost the "what happened when" that makes a restore decision possible.
-  let lastIndex = null;
-  for (const entry of [...entries].reverse()) {
-    if (entry.messageIndex !== undefined && entry.messageIndex !== lastIndex) {
-      lastIndex = entry.messageIndex;
-      const header = document.createElement("div");
-      header.className = "checkpoint-turn";
-      header.textContent = t.checkpointTurn(entry.messageIndex);
-      checkpointList.appendChild(header);
-    }
-    const row = document.createElement("button");
-    row.className = "checkpoint-row";
-    const time = new Date(entry.at).toLocaleTimeString(state.locale === "zh" ? "zh-CN" : "en-US", {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-    row.innerHTML =
-      `<span class="checkpoint-time">${escapeHtml(time)}</span>` +
-      `<span class="checkpoint-path">${escapeHtml(entry.path)}</span>`;
-    row.title = `${entry.tool} · ${t.restoreFile}`;
-    row.addEventListener("click", () => {
-      // This row is one file. Restoring the whole range from here undid every
-      // later edit too, which is not what clicking one path promises.
-      void confirmAction(`${t.restoreFile} ${entry.path}?`, { danger: true }).then((yes) => {
-        if (yes) api.send({ cmd: "restoreFile", path: entry.path });
-      });
-    });
-    checkpointList.appendChild(row);
-  }
-}
 
 function openFile(path) {
   state.selectedFile = path;
@@ -6395,10 +6221,21 @@ input.addEventListener("keydown", (event) => {
       closeMention();
       return;
     }
-    if ((event.key === "Enter" || event.key === "Tab") && !event.shiftKey && !event.isComposing) {
+    // Only a row consumes Enter/Tab. The popup can be open with no rows — the
+    // stale-`dist/` note (D-184 ②) or a query that has not answered yet — and
+    // swallowing Enter there would stop the message from being sent while the
+    // screen shows nothing selectable.
+    if (
+      (event.key === "Enter" || event.key === "Tab")
+      && !event.shiftKey
+      && !event.isComposing
+      && mention.files.length > 0
+    ) {
       event.preventDefault();
-      const path = mention.files[mention.index];
-      if (path) applyMention(path);
+      const entry = mention.files[mention.index];
+      // `{path, kind?}` since D-184 ① — never the bare string it used to be.
+      const path = typeof entry === "string" ? entry : String(entry?.path ?? "");
+      if (path !== "") applyMention(path);
       return;
     }
   }
@@ -6466,8 +6303,25 @@ document.addEventListener("keydown", (event) => {
       return;
     }
     if (!settingsDialog.hidden || !shortcutsDialog.hidden) {
-      closeModal(settingsDialog);
+      // Settings owns a draft (the model-services page is the only page with a
+      // Save step), so it decides whether closing is allowed: with unsaved
+      // edits it asks first. The shortcut sheet has nothing to lose and closes
+      // straight away — including when both are open, which happens when the
+      // sheet is summoned from inside Settings. The ordering of this whole
+      // chain is unchanged: this branch still runs in the same place, and a
+      // refusal only means the Settings dialog stays open.
+      //
+      // `preventDefault` is load-bearing, not defensive. Both dialogs here are
+      // `showModal()`, so without it the browser turns this same keypress into
+      // a native close request *after* this handler returns — and it lands on
+      // whichever dialog is on top by then. With a draft, that is the
+      // confirmation `requestClose` just opened: Escape would open the prompt
+      // and dismiss it in the same keystroke, then natively close Settings
+      // behind a `hidden` attribute that still said "open" (measured: the
+      // dialog left the top layer while `settingsDialog.hidden === false`).
+      event.preventDefault();
       closeModal(shortcutsDialog);
+      if (!settingsDialog.hidden) void settings.requestClose();
       return;
     }
     if (!topbarMenu.hidden) {
@@ -6775,47 +6629,6 @@ function askText(label, value = "") {
     field.focus();
     field.select();
   });
-}
-
-/**
- * The badge in the title bar while a goal or task loop is running.
- *
- * An autonomous run must be visible at all times and stoppable in one click.
- * Without the badge, the only sign that something is looping is the transcript
- * scrolling, and a user who looks away cannot tell whether it is still going.
- */
-function renderGoalBadge() {
-  const badge = $("goal-badge");
-  const run = state.goalRun;
-  if (!badge) return;
-  if (!run) {
-    badge.hidden = true;
-    return;
-  }
-  badge.hidden = false;
-  const label = run.kind === "goal" ? t.goalBadge : t.loopBadge;
-  $("goal-badge-text").textContent = `${label} ${run.round}/${run.maxRounds}`;
-}
-
-$("goal-badge")?.addEventListener("click", () => api.send({ cmd: "stopGoal" }));
-
-/**
- * Start a goal or task loop, asking for the goal first.
- *
- * The prompt names the round ceiling before anything runs: an autonomous loop
- * spends the user's tokens without them typing again, so the cost has to be
- * stated up front rather than discovered in the transcript.
- */
-async function startAutonomous(command) {
-  if (state.goalRun) {
-    addNotice("warn", t.goalAlreadyRunning);
-    return;
-  }
-  const goal = await askText(command === "startGoal" ? t.goalPrompt : t.loopPrompt, "");
-  if (goal === null) return;
-  const trimmed = goal.trim();
-  if (!trimmed && command === "startGoal") return;
-  api.send({ cmd: command, goal: trimmed, maxRounds: 8 });
 }
 
 /* ---------- command palette ---------- */
@@ -8039,9 +7852,29 @@ document.addEventListener("click", (event) => {
 });
 
 modalScrim.addEventListener("click", () => {
-  closeModal(settingsDialog);
   closeModal(shortcutsDialog);
+  // Settings can own an unsaved draft, so it decides (OPT-39). `#modal-scrim`
+  // is the sibling under the open dialog; a click there reaches it only in a
+  // browser without the top layer, so the dialog's own backdrop handler below
+  // is the path that actually fires — both go through the same guard.
+  void settings.requestClose();
 });
+
+// While a modal `<dialog>` is open it retargets backdrop clicks to itself, so
+// the "clicked the scrim" gesture arrives here, with the dialog as the target.
+// `event.target === settingsDialog` is therefore exactly "outside the card".
+settingsDialog.addEventListener("click", (event) => {
+  if (event.target === settingsDialog) void settings.requestClose();
+});
+
+// A native close request (Escape handled by the browser, not by the chain
+// above) takes the dialog out of the top layer without touching `hidden`. The
+// two then disagree: `hidden === false` while nothing is on screen and the
+// scrim is still up, and the next open would call `showModal()` on a dialog the
+// DOM already considers closed. Refusing the request keeps the shell's own
+// state the only source of truth; every intended close goes through
+// `closeModal` / `requestClose`.
+settingsDialog.addEventListener("cancel", (event) => event.preventDefault());
 
 transcript.addEventListener("click", (event) => {
   const link = event.target.closest("a");

@@ -557,6 +557,12 @@ function compactModules() {
  * The `@` popup asks once per keystroke; without this flag a kernel missing
  * `searchFilesByName` would emit one notice per character and bury the
  * transcript. One warning per process says the same thing once.
+ *
+ * The notice is not the whole disclosure (D-184 ②): a user who scrolled past
+ * it would then read every empty answer as "no matching file". Every
+ * `file_matches` therefore also carries `unavailable: true`, which the popup
+ * renders in place — on demand, on each keystroke, without flooding the
+ * transcript.
  */
 let searchUnavailableWarned = false;
 
@@ -1752,6 +1758,32 @@ function persistEffort() {
   return effortWrite;
 }
 
+/**
+ * The kernel's sentence for "this log has no `system` event, so one cannot be
+ * appended on resume" (BACKLOG 5.2 / D-221 ②).
+ *
+ * The kernel's own code (`system_prompt_mismatch`) does not reach this host:
+ * a failure raised before the run is ready is re-thrown by the runner as
+ * `model_unavailable`, with the original sentence carried inside the message.
+ * So `error.code` here is always `model_unavailable`, and the sentence is the
+ * only fact that separates this shape of the mismatch — the one with an exit
+ * the operator can act on — from the other shape ("Session system prompt does
+ * not match …"), where a prompt *is* recorded and this advice would be false.
+ * The kernel rule itself is untouched; this is a presentation decision.
+ */
+const NO_SYSTEM_PROMPT_EVENT =
+  "Cannot add a system prompt to a non-empty session without a system event";
+
+function systemPromptMismatchHint(error) {
+  if (!(error instanceof Error) || !error.message.includes(NO_SYSTEM_PROMPT_EVENT)) {
+    return undefined;
+  }
+  // The settings input that used to produce this is gone, so the only path
+  // left is a hand-edited `run.json`. Name the file this host actually reads —
+  // "clear the setting" without a path sends the reader hunting.
+  return `发送失败：这个会话没有记录系统提示词，续聊时不能补写。请新建会话，或清空 ${path.join(harnessHome, "run.json")} 里的 systemPrompt 后重试。`;
+}
+
 async function handlePrompt(text) {
   if (typeof text !== "string" || text.trim() === "") {
     send({ type: "error", message: "消息不能为空" });
@@ -1798,7 +1830,16 @@ async function handlePrompt(text) {
   } catch (error) {
     running = false;
     ctx.running = false;
-    send({ type: "error", message: `发送失败：${error instanceof Error ? error.message : String(error)}` });
+    // Only the "no system event recorded" shape gets the readable exit; every
+    // other start failure keeps today's sentence, kernel text included. The
+    // check is on the message because the runner flattens the code (see
+    // `systemPromptMismatchHint`); an unmapped code therefore cannot be
+    // swallowed by an over-broad `code ===` branch here.
+    send({
+      type: "error",
+      message: systemPromptMismatchHint(error)
+        ?? `发送失败：${error instanceof Error ? error.message : String(error)}`,
+    });
     send({ type: "run_end" });
     return;
   }
@@ -3737,10 +3778,28 @@ const handlers = {
       send({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
       return;
     }
+    // Optional fork position (OPT-37): absent means "the end of the log", as
+    // before. A present value must be a non-negative integer — a typo must not
+    // silently fork at the end, which is what dropping the field did.
+    // The upper bound is the kernel's to check: it owns the log's last seq, so
+    // its own message ("atSeq 必须是 0..N 之间的整数") goes out verbatim rather
+    // than a bound derived here from a second read.
+    let atSeq;
+    if (payload.atSeq !== undefined) {
+      if (typeof payload.atSeq !== "number" || !Number.isInteger(payload.atSeq) || payload.atSeq < 0) {
+        send({
+          type: "notice",
+          level: "warn",
+          text: `会话未分叉：atSeq 必须是非负整数（收到 ${JSON.stringify(payload.atSeq)}）`,
+        });
+        return;
+      }
+      atSeq = payload.atSeq;
+    }
     const admin = kernel.createSessionAdmin({ harnessHome });
     let outcome;
     try {
-      outcome = await admin.fork(id);
+      outcome = atSeq === undefined ? await admin.fork(id) : await admin.fork(id, atSeq);
     } catch (error) {
       send({ type: "notice", level: "warn", text: `会话未分叉：${messageOf(error)}` });
       return;
@@ -4160,6 +4219,11 @@ const handlers = {
    * renderer only releases the popup on that event, so staying silent would
    * leave it waiting forever. A refusal says why in a `notice` (R3); a truncation
    * rides along as `truncated` because "not all matches" is not "no matches".
+   *
+   * `files` entries are `{path, kind?}`: since D-184 ① the kernel searches
+   * directories as well as files, and both are usable `@` targets. The `kind`
+   * travels down because the popup draws a folder differently (a trailing `/`)
+   * — dropping it here made the kernel's `kind` a field with no reader.
    */
   async searchFiles(payload = {}) {
     const query = typeof payload.query === "string" ? payload.query : "";
@@ -4170,7 +4234,9 @@ const handlers = {
     if (typeof search !== "function") {
       // A `dist/` built before the search landed. Warn once per process: the
       // popup asks on every keystroke, and one notice per character would bury
-      // the transcript. The empty answer still releases the popup.
+      // the transcript. The empty answer still releases the popup — and it
+      // says *why* it is empty on every answer, so a missed notice does not
+      // turn into "this project has no matching file" (D-184 ②).
       if (!searchUnavailableWarned) {
         searchUnavailableWarned = true;
         send({
@@ -4185,6 +4251,7 @@ const handlers = {
         files: [],
         truncated: false,
         scanned: 0,
+        unavailable: true,
       });
       return;
     }
@@ -4205,7 +4272,13 @@ const handlers = {
     send({
       type: "file_matches",
       query,
-      files: files.map((file) => file.path),
+      // `kind` 一起送下去：内核已经知道条目是文件还是目录（D-184 ①），
+      // 只传 path 会让这个字段变成「产出了却没人读」。弹窗用它给目录画
+      // 尾随的 `/`——两种条目都是合法的 `@` 目标，但看起来不是一回事。
+      files: files.map((file) => ({
+        path: file.path,
+        ...(file.kind === "dir" ? { kind: "dir" } : {}),
+      })),
       // 两种截断对弹窗是同一件事：列表不是全部。
       truncated: result?.truncated === true || result?.scanTruncated === true,
       scanned: typeof result?.scanned === "number" ? result.scanned : 0,

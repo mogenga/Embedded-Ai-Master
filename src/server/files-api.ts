@@ -436,6 +436,11 @@ export interface FileNameMatch {
   name: string;
   /** POSIX 风格相对路径；匹配与排序都用它。 */
   relative: string;
+  /**
+   * 目录也是合法的 `@` 目标：`@src` 比 `@src/foo.ts` 更常用。
+   * `listDirectory` 能打开它，因此搜索也必须能返回它——能搜到就要能打开。
+   */
+  kind: "file" | "dir";
 }
 
 export interface FileSearchResult {
@@ -495,17 +500,21 @@ function parseSearchQuery(rawQuery: unknown): string {
 }
 
 /**
- * 按文件名片段搜索一个目录下的文件。
+ * 按名称片段搜索一个目录下的文件与目录。
  *
  * 边界与 `listDirectory` 完全相同（同一个 `resolveReadableDirectory`），因为
  * 这是一条会返回绝对路径的读接口：能搜到就必须能打开，反之亦然。
  *
  * 空查询**不遍历**：弹窗每次击键都会带着当时已输入的片段来问，空串意味着
- * "还没输入"，此时扫一遍整棵树只是白花预算。
+ * 「还没输入」，此时扫一遍整棵树只是白花预算。
  *
- * 只返回**文件**：遍历器不访问目录，因此目录不会被命中。弹窗插入的是路径，
- * 目录路径本来也是合法的 `@` 目标，这是已知限制而不是"目录不存在"——真要
- * 支持，得先让 `walkFiles` 也访问目录并重新定义预算的计量单位。
+ * **目录与文件都是结果**（D-184 ①，2026-11-07）。弹窗插入的是路径，目录
+ * 路径与文件路径一样可用；只返回文件会让 `@src` 完不成，而目录往往比文件
+ * 更常用。实现走 `walkFiles` 的 `visitDirectory`：目录在**入队时**被报告，
+ * 不额外 readdir，也**不占用 `MAX_SEARCH_SCAN` 的预算**——预算的计量单位
+ * 仍是「访问过的文件数」，与 `glob` / `grep` 同一语义。因此目录密度不会
+ * 改变一次搜索能覆盖多少文件；预算截停时 `scanTruncated` 照常置位，未发现
+ * 的目录与文件走同一条「结果可能不完整」的披露路径，不会被说成「没有」。
  */
 export async function searchFilesByName(
   harnessHome: string,
@@ -522,24 +531,30 @@ export async function searchFilesByName(
   const limit = options?.limit ?? MAX_SEARCH_RESULTS;
   const maxScanned = options?.maxScanned ?? MAX_SEARCH_SCAN;
   const matches: RankedMatch[] = [];
+  /**
+   * 大小写不敏感地匹配 POSIX 相对路径：`src/foo` 因此能命中子目录里的条目。
+   * `walkFiles` 已经产出 POSIX 相对路径，这里再折一次只是防着平台分隔符从别的
+   * 遍历器流进来（D-181 之后只有这一处，但折一次没有代价）。
+   */
+  const record = (absolute: string, relative: string, kind: "file" | "dir") => {
+    const posixRelative = toPosix(relative);
+    if (!posixRelative.toLowerCase().includes(needle)) return;
+    const name = path.basename(absolute);
+    matches.push({
+      path: absolute,
+      name,
+      relative: posixRelative,
+      kind,
+      rank: rankMatch(name, posixRelative, needle),
+    });
+  };
   const { state, error } = await walkFiles(
     root,
     root,
-    (absolute, relative) => {
-      // 大小写不敏感地匹配 POSIX 相对路径：`src/foo` 因此能命中子目录里的文件。
-      // `walkFiles` 已经产出 POSIX 相对路径，这里再折一次只是防着平台分隔符
-      // 从别的遍历器流进来（D-181 之后只有这一处，但折一次没有代价）。
-      const posixRelative = toPosix(relative);
-      if (!posixRelative.toLowerCase().includes(needle)) return;
-      const name = path.basename(absolute);
-      matches.push({
-        path: absolute,
-        name,
-        relative: posixRelative,
-        rank: rankMatch(name, posixRelative, needle),
-      });
-    },
+    (absolute, relative) => record(absolute, relative, "file"),
     maxScanned,
+    undefined,
+    (absolute, relative) => record(absolute, relative, "dir"),
   );
   if (error !== undefined) {
     // 根在 readdir 时读不了：与 `listDirectory` 同一套错误语义，不把"读失败"
@@ -555,10 +570,11 @@ export async function searchFilesByName(
     root,
     query,
     // `rank` is an internal tiebreaker; it must not leak into the wire shape.
-    files: matches.slice(0, limit).map(({ path: absolute, name, relative }) => ({
+    files: matches.slice(0, limit).map(({ path: absolute, name, relative, kind }) => ({
       path: absolute,
       name,
       relative,
+      kind,
     })),
     scanned: state.scanned,
     truncated: matches.length > limit,

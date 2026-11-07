@@ -258,19 +258,23 @@ describe("searchFilesByName", () => {
 
     const result = await searchFilesByName(home, root, "readme");
 
-    expect(result.files.map((file) => file.relative)).toEqual([
-      "readme",
-      "readme.md",
-      "x-readme.md",
-      "longer-x-readme.md",
-      "readme-dir/notes.md",
+    // `readme-dir` is a directory result now (D-184 ①) and sorts in the same
+    // prefix tier as `readme.md`, behind it by relative length. The two path
+    // hits keep their order and the nested file stays last.
+    expect(result.files.map((file) => [file.kind, file.relative])).toEqual([
+      ["file", "readme"],
+      ["file", "readme.md"],
+      ["dir", "readme-dir"],
+      ["file", "x-readme.md"],
+      ["file", "longer-x-readme.md"],
+      ["file", "readme-dir/notes.md"],
     ]);
     expect(result.query).toBe("readme");
     expect(result.truncated).toBe(false);
     expect(result.scanTruncated).toBe(false);
   });
 
-  it("嵌套路径查询命中子目录里的文件，relatives 用 / 分隔", async () => {
+  it("嵌套路径查询命中子目录及其文件，relatives 用 / 分隔", async () => {
     const { home, root } = makeProject();
     mkdirSync(path.join(root, "src", "server"), { recursive: true });
     writeFileSync(path.join(root, "src", "server", "files-api.ts"), "x");
@@ -278,10 +282,14 @@ describe("searchFilesByName", () => {
 
     const result = await searchFilesByName(home, root, "src/server");
 
-    expect(result.files).toHaveLength(1);
-    const match = result.files[0];
+    // The directory itself and the file inside it both match the path query.
+    // The shorter relative path is the directory, so it comes first.
+    expect(result.files.map((file) => [file.kind, file.relative])).toEqual([
+      ["dir", "src/server"],
+      ["file", "src/server/files-api.ts"],
+    ]);
+    const match = result.files[1];
     expect(match).toBeDefined();
-    expect(match?.relative).toBe("src/server/files-api.ts");
     expect(match?.name).toBe("files-api.ts");
     expect(path.isAbsolute(match?.path ?? "")).toBe(true);
     expect(match?.path).toBe(path.join(await realpath(root), "src", "server", "files-api.ts"));
@@ -325,14 +333,80 @@ describe("searchFilesByName", () => {
     expect(result.scanned).toBe(1);
   });
 
-  it("目录本身不返回（遍历器只访问文件）", async () => {
+  it("目录本身也进结果，并与文件共用同一套分层排序", async () => {
     const { home, root } = makeProject();
+    // `@src` is a legitimate thing to type: the popup inserts a path, and a
+    // directory path is just as usable as a file one. D-184 ① was that the
+    // walker never visited directories, so this could not complete.
+    mkdirSync(path.join(root, "src"));
+    writeFileSync(path.join(root, "src", "main.c"), "x");
     mkdirSync(path.join(root, "readme-dir"));
     writeFileSync(path.join(root, "readme-dir", "inner.md"), "x");
 
-    const result = await searchFilesByName(home, root, "readme");
+    const result = await searchFilesByName(home, root, "src");
 
-    expect(result.files.map((file) => file.relative)).toEqual(["readme-dir/inner.md"]);
+    expect(result.files.map((file) => [file.kind, file.relative])).toEqual([
+      ["dir", "src"],
+      ["file", "src/main.c"],
+    ]);
+    expect(result.files[0]?.name).toBe("src");
+    expect(result.files[0]?.path).toBe(path.join(await realpath(root), "src"));
+  });
+
+  it("空目录也返回：一个没有子项的目录仍是可用的 @ 目标", async () => {
+    const { home, root } = makeProject();
+    mkdirSync(path.join(root, "empty-dir"));
+
+    const result = await searchFilesByName(home, root, "empty-dir");
+
+    expect(result.files.map((file) => file.relative)).toEqual(["empty-dir"]);
+    expect(result.files[0]?.kind).toBe("dir");
+  });
+
+  it("忽略目录（node_modules）不出现在结果里", async () => {
+    const { home, root } = makeProject();
+    mkdirSync(path.join(root, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(path.join(root, "node_modules", "pkg", "index.js"), "x");
+
+    const result = await searchFilesByName(home, root, "node_modules");
+
+    expect(result.files).toEqual([]);
+  });
+
+  it("目录不进扫描预算：scanned 仍只数文件", async () => {
+    const { home, root } = makeProject();
+    // A chain of directories and one file. If entries were counted, `maxScanned`
+    // would trip on the directories before reaching the file; D-184 ① names
+    // "redefine the budget's unit of measure" as the risk. Keeping files as
+    // the unit means the same budget buys the same file coverage.
+    mkdirSync(path.join(root, "a", "b", "c"), { recursive: true });
+    writeFileSync(path.join(root, "a", "b", "c", "keep.txt"), "x");
+
+    const result = await searchFilesByName(home, root, "keep", { maxScanned: 1 });
+
+    expect(result.files.map((file) => [file.kind, file.relative])).toEqual([
+      ["file", "a/b/c/keep.txt"],
+    ]);
+    expect(result.scanned).toBe(1);
+    expect(result.scanTruncated).toBe(false);
+  });
+
+  it("目录与文件共用一个 limit：合并排序后只截断一次", async () => {
+    const { home, root } = makeProject();
+    mkdirSync(path.join(root, "hit-dir"));
+    for (const name of ["hit-1.md", "hit-2.md"]) {
+      writeFileSync(path.join(root, name), "x");
+    }
+
+    const result = await searchFilesByName(home, root, "hit", { limit: 2 });
+
+    // `hit-dir` is the shortest relative path, then the two files. The point is
+    // that the cut is made once, over the merged ranked list — not "N files".
+    expect(result.files.map((file) => [file.kind, file.relative])).toEqual([
+      ["dir", "hit-dir"],
+      ["file", "hit-1.md"],
+    ]);
+    expect(result.truncated).toBe(true);
   });
 
   it("越界路径返回 400 invalid_path", async () => {
