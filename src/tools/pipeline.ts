@@ -23,14 +23,69 @@ export interface PermissionOptions {
   onDecision: (call: BatchCall, decision: PermissionRequest) => Promise<void>;
 }
 
-export interface BatchOptions {
+interface BatchOptionsCommon {
   signal: AbortSignal;
   artifactDir: string;
   cwd?: string;
   timeoutMs?: number;
   settleGraceMs?: number;
-  permission?: PermissionOptions;
   onToolStarted?: (call: BatchCall, access: ToolAccess) => Promise<void>;
+}
+
+/**
+ * 权限层**必须二选一**，不允许省略（D-116）。
+ *
+ * 之前 `permission?` 可省略，省略即静默走无判定路径：直接调用 `executeBatch`
+ * 的代码既不经过 gate，也不写 `permission_decision`，而日志上看不出少了什么。
+ * 现在要么给 `permission`（真正判定并审计），要么写 `unsafeSkipPermission: true`
+ * （明确声明"这批调用故意不经权限层"，例如管线自身的并发/超时/落盘测试）。
+ * 类型上互斥，运行时另有守卫兜住 JS 调用方。
+ */
+export type BatchOptions = BatchOptionsCommon &
+  (
+    | { permission: PermissionOptions; unsafeSkipPermission?: never }
+    | { permission?: never; unsafeSkipPermission: true }
+  );
+
+export type PermissionLayerChoiceCode =
+  | "permission_choice_required"
+  | "permission_choice_conflict";
+
+/** 调用方没有就"是否经过权限层"做出显式选择时抛出，见 `BatchOptions`。 */
+export class PermissionLayerChoiceError extends Error {
+  readonly code: PermissionLayerChoiceCode;
+
+  constructor(code: PermissionLayerChoiceCode, message: string) {
+    super(message);
+    this.name = "PermissionLayerChoiceError";
+    this.code = code;
+  }
+}
+
+/** `BatchOptions` / `LoopCtx` 共用的"是否经过权限层"这一对字段。 */
+export interface PermissionLayerChoice {
+  permission?: unknown;
+  unsafeSkipPermission?: unknown;
+}
+
+// 类型层已排除"两者都不给"，但 JS 调用方与 `as unknown as` 仍能绕过去。
+// 在入口一次性判定：此时任何工具都还没被查询、校验或执行。
+export function assertPermissionLayerChoice(
+  choice: PermissionLayerChoice,
+  where: string,
+): void {
+  if (choice.permission !== undefined && choice.unsafeSkipPermission === true) {
+    throw new PermissionLayerChoiceError(
+      "permission_choice_conflict",
+      `${where}: permission and unsafeSkipPermission are mutually exclusive`,
+    );
+  }
+  if (choice.permission === undefined && choice.unsafeSkipPermission !== true) {
+    throw new PermissionLayerChoiceError(
+      "permission_choice_required",
+      `${where}: pass permission to enforce the permission layer, or unsafeSkipPermission: true to bypass it explicitly`,
+    );
+  }
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -285,11 +340,30 @@ async function finalizeResult(
   }
 }
 
-function resolveTimeoutMs(timeoutMs: number | undefined): number {
-  if (timeoutMs === undefined || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    return DEFAULT_TIMEOUT_MS;
+/**
+ * 单次调用的时间预算。
+ *
+ * 两个来源取较大者：用户为本轮配的 `timeoutMs`（`run.json` 的 `limits`），
+ * 与工具自己声明的 `callTimeoutMs`（MCP 工具取自 `mcp.json` 的 server
+ * `timeoutMs`）。**用户配的更优先**——那是他为本轮做的决定；工具声明只用来
+ * 把「管线缺省 120s」抬高到它真正需要的长度（OPT-13：Keil 构建要 10 分钟）。
+ *
+ * 内置工具不声明 `callTimeoutMs`，因此仍拿 120s 缺省，行为完全不变。
+ */
+function resolveTimeoutMs(timeoutMs: number | undefined, callTimeoutMs?: number): number {
+  const requested = normalizeBudget(timeoutMs);
+  const declared = normalizeBudget(callTimeoutMs);
+  if (requested === undefined) {
+    return declared ?? DEFAULT_TIMEOUT_MS;
   }
-  return Math.min(Math.max(Math.floor(timeoutMs), 1), MAX_TIMEOUT_MS);
+  return declared === undefined ? requested : Math.max(requested, declared);
+}
+
+function normalizeBudget(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return Math.min(Math.max(Math.floor(value), 1), MAX_TIMEOUT_MS);
 }
 
 interface ExecuteOutcome {
@@ -412,7 +486,7 @@ async function executeAuthorized(
     return { result: failure("tool_aborted", "tool aborted before execution") };
   }
 
-  const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
+  const timeoutMs = resolveTimeoutMs(opts.timeoutMs, authorized.tool.callTimeoutMs);
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = AbortSignal.any([opts.signal, timeoutSignal]);
   // artifactDir 与 finalizeResult 落盘用的是同一个值：只有同源，artifact 工具
@@ -585,6 +659,10 @@ export async function executeBatch(
   calls: BatchCall[],
   opts: BatchOptions,
 ): Promise<BatchResult[]> {
+  assertPermissionLayerChoice(
+    { permission: opts.permission, unsafeSkipPermission: opts.unsafeSkipPermission },
+    "executeBatch",
+  );
   const seen = new Set<string>();
   const duplicates = calls.map((call) => {
     if (typeof call.id !== "string") return false;

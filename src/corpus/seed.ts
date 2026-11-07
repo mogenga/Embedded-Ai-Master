@@ -426,6 +426,24 @@ const EMBEDDED_SERVER_FILES: ReadonlyArray<{ name: string; file: string }> = [
   { name: "datasheet", file: "datasheet/server.js" },
 ];
 
+/**
+ * 种子里每台 server 的单次调用预算。
+ *
+ * **keil 需要 10 分钟**：`keil_debug` 的 `build` / `rebuild` 走
+ * `buildInIde`，其内部默认就允许 10 分钟（`keilSession.ts`）。种子里写 120s
+ * 会让那条默认值永远走不到——构建必然在 120s 被掐断，而配置表面上看不出
+ * 任何问题（OPT-13）。
+ *
+ * 其余三台没有分钟级的动作，保持 120s：给它们同样的长度只会让一次卡住的
+ * 调用多占三倍的会话时间。用户要放宽任何一台，都可以在 `mcp.json` 里自己
+ * 写 `timeoutMs`，MCP 层的硬顶现在是 10 分钟，容得下。
+ */
+export const EMBEDDED_SERVER_TIMEOUT_MS: Readonly<Record<string, number>> = {
+  serial: 120_000,
+  keil: 600_000,
+  datasheet: 120_000,
+};
+
 export interface SeedEmbeddedMcpOptions {
   /** `$HARNESS_HOME`；`mcp.json` 在它下面。 */
   harnessHome: string;
@@ -479,7 +497,7 @@ export async function seedEmbeddedMcpEntries(opts: SeedEmbeddedMcpOptions): Prom
       command: process.execPath,
       args: [serverPath],
       env: { ELECTRON_RUN_AS_NODE: "1" },
-      timeoutMs: 120_000,
+      timeoutMs: EMBEDDED_SERVER_TIMEOUT_MS[name] ?? 120_000,
     });
     seeded.push(name);
   }

@@ -41,5 +41,17 @@ export interface ToolDef<I> {
   modelSchema?: unknown;
   annotations?: ToolAnnotations;
   access?(input: I): ToolAccess;
+  /**
+   * 该工具自己知道的单次调用预算（毫秒）。缺省表示「按管线的 120s 缺省」。
+   *
+   * 只有「工具比管线更清楚自己要跑多久」时才该声明：`keil_debug` 的构建动作
+   * 内部允许 10 分钟，而管线的 120s 会在它之前把调用掐断（OPT-13 / D-022）。
+   * 声明之后，管线取 `max(本次运行的 timeoutMs, 该值)`——用户显式配了更长的
+   * 预算仍然优先，因为那是他为本轮做的决定。
+   *
+   * **不要给内置工具批量声明**：`shell` / `grep` / `glob` 的 120s 是故意的，
+   * 放宽它们等于让一次卡住的调用占住会话十分钟。
+   */
+  callTimeoutMs?: number;
   execute(input: I, ctx: ToolCtx, signal: AbortSignal): Promise<ToolResult>;
 }
