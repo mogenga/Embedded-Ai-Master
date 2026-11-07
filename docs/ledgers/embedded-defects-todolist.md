@@ -159,7 +159,7 @@
 
 - **位置**: `desktop/renderer/app.js:2688`（`+= message.dropped`）vs `serial-bridge.js:656`（host 发的是累计值）。
 - **修复建议**: renderer 改为直接赋值（与 serial_snapshot 路径一致）。
-- **状态**: 待修。
+- **状态**: **已解决**（2026-11-07）。代码修复随 `dbb8226`（2026-10-25 P1 批次）落地：`desktop/renderer/app.js` 的 `serial_lines` 分支改为赋值 `state.serial.dropped = message.dropped ?? state.serial.dropped ?? 0`（现约 3281 行），并附注释说明宿主发的是累计值、累加会让计数每次 flush 都涨同一份。当时未补测试，本条因此一直挂着「待修」。2026-11-07 补静态断言 `tests/desktop/serial-dropped.test.js`：切出 `case "serial_lines":` 分支，断言对 `state.serial.dropped` 只有一次写入且是 `=`（排除 `+=` 与 `x = x + message.dropped` 两种复发形态），并断言分支内注释仍保留「running total / accumulate」的因果关系。静态检查的理由：renderer 依赖 DOM，仓库无 jsdom 且新增依赖未获批，沿用 `composer-copy.test.js` / `renderer-reachability.test.js` 的读源码约定。
 
 ---
 
