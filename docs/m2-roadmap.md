@@ -4,12 +4,16 @@
 >
 > 本文记录 P0 内核完成后（M1 → M2）的任务规划与三项用户决策：
 > **Web 优先、不做 CLI**；**采纳默认权限预设建议**；**P0 未完成项先修，剩余工作落成文档**。
+>
+> **⚠️ 2026-11-07 现状说明（读本文前必看）**：本文写于 2026-10-19，其中 **「Web 前端 + HTTP API」「SSE 推送」「`POST /api/approvals`」「`/api/actions`」等形态已不存在**。2026-10-22 用户决定「不要浏览器了，只保留桌面端」，`desktop/renderer/bridge.js`、`src/server` 的 HTTP 层（`api.ts` / `serve.ts` / `http.ts` / `body.ts` / `config-api.ts` / `event-stream.ts`）与 `tests/server/*` 一并删除；交互形态是 **Electron 桌面宿主**（NDJSON over stdio），审批走宿主 `permission` 命令 + `approval_request` 事件，事件流走宿主进程内加速通道 + 日志跟随。**「Web 优先、不做 CLI」这条决策本身仍然有效**（两处含义：不做 CLI/TUI；审批 UI 优先于纯库层），但「Web」现在的落点是桌面 Electron 渲染层，不是浏览器页面。
+>
+> 其余条目（权限引擎、BR-2~BR-7、RAG 实验、外部验证）与实现状态基本一致；具体实现以 `docs/deferred-issues.md` 与各任务 spec 为准。
 
 ## 0. 已确认的决策
 
 | # | 决策 | 结论 | 影响 |
 |---|---|---|---|
-| 1 | 交互形态 | **Web 优先，不做 CLI** | M2 审批通道以 Web 前端 + HTTP API 为主；headless/库层策略先实现为权限引擎与审计事件，UI 在 M3 接实时审批；不建设 REPL/TUI |
+| 1 | 交互形态 | **Web 优先，不做 CLI**（2026-10-22 收窄为**桌面 Electron 优先，不做浏览器形态**） | M2 审批通道以交互式前端 + 审批事件为主；headless/库层策略先实现为权限引擎与审计事件，UI 在 M3 接实时审批；不建设 REPL/TUI。**「Web」不再指浏览器页面**——`src/server` 的 HTTP 层与 `bridge.js` 已于 2026-10-22 删除，见文首现状说明 |
 | 2 | 权限默认预设 | **采纳 `diagnose`** | 读工具 allow；`mem_write`/`reset`/`serial_write` ask；`shell` ask；未知 MCP 工具 deny |
 | 3 | 顺序 | **先修 P0 剩余，再进 M2** | 本轮 `fix/p0-remaining` 已完成可本地修复项，外部验证与架构项落 deferred |
 | 4 | 已过时条目 | 决策点 #9（UI 形态）**关闭：Web 先行** | BRD §14 已就地标注关闭；M2 里程碑口径不变 |
@@ -60,15 +64,15 @@
 
 3. **事件总线设计**（与 1 并行）
    - 事件类型：`permission_decision` / `tool_started` / `tool_result` / `mcp_status` / `evidence`。
-   - Web 订阅协议：SSE（现有抽象层已有替换点）。
+   - ~~Web 订阅协议：SSE~~ → **实际落点（2026-11-07 复核）**：桌面宿主的进程内加速通道（`handleLiveEvent`）+ 日志跟随兜底，见 D-134；**没有 SSE，也没有 HTTP 端点**。
    - 不实现 Web 实时审批，只定义接口。
 
 ### 阶段 2（权限骨架完成后）
 
-4. **权限引擎实现 + Web 审批 API**
-   - `POST /api/approvals` 与 SSE 推送 `approval_request`。
+4. **权限引擎实现 + 审批通道**
+   - ~~`POST /api/approvals` 与 SSE 推送 `approval_request`~~ → **实际实现（2026-11-07 复核）**：`approval_request` 落会话日志，宿主投影成 `permission_request`；渲染层审批条用宿主 `permission` 命令回 `yes` / `no`。（`/api/approvals` 已随 HTTP 层删除。）
    - headless/库层：`ask` → deny（显式预设），绝不挂起。
-   - Web：审批面板（M3 的 I 工作流提前做最小版）。
+   - 交互式前端：审批面板（M3 的 I 工作流提前做最小版）。
 
 5. **BR-2 取证 MCP MVP**
    - 工具面：`device_list` / `attach` / `detach` / `halt` / `resume` / `reset` / `mem_read` / `mem_write`；串口 `open/read/write/close/status`。

@@ -5,7 +5,7 @@
 相关文档：
 
 - `docs/code-signing.md` —— Windows 代码签名（证书从哪来、怎么配、怎么验）。
-- `docs/deferred-issues.md` **D-212** —— 发布链路已跑通（`v0.1.0`–`v0.1.5` 六个 release）；应用内自动更新**已接入**（见 §12），但「一次真实的更新」仍未跑过，残余边界见 §12.6。
+- `docs/deferred-issues.md` **D-212** —— 发布链路已跑通（`v0.1.0`–`v0.2.0` 七个 release）；应用内自动更新**已接入**（见 §12），但「一次真实的更新」仍未跑过，残余边界见 §12.6。
 - `docs/deferred-issues.md` **D-217** —— 未签名构建下，下载到的更新包不做签名校验。
 - `docs/deferred-issues.md` **D-211** —— 签名配置就位但从未验证过真实签名。
 - `docs/deferred-issues.md` **D-209** —— 根与 `desktop/` 的 Electron 版本不一致。
@@ -13,15 +13,15 @@
 
 ---
 
-## 1. 当前状态（2026-11-03 更新）
+## 1. 当前状态（2026-11-06 更新）
 
-> 下表保留 2026-10-25 的实测依据；两行 `Releases` 与 `签名` 已在 2026-11-03 按实际进展改写。
+> 下表保留 2026-10-25 的实测依据；`Releases` 一行已于 2026-11-06 按 `v0.2.0` 实际发布结果改写，`签名` 与干净机器安装两行沿用 2026-11-03 的结论。
 
 | 项 | 状态 | 依据 |
 |---|---|---|
 | 仓库 | `mogenga/Embedded-Ai-Master`，**public** | GitHub API 实测 `private: false`、`visibility: public` |
-| Releases | **`v0.1.5` 为最新**（`v0.1.0`–`v0.1.5` 六个 release，各含安装包 / `.blockmap` / `latest.yml` 三个资产） | `gh release list` / `gh release view v0.1.5` 实测 |
-| 干净机器安装 | **已通过**（2026-11-03） | 用户报告；D-208 关闭 |
+| Releases | **`v0.2.0` 为最新**（`v0.1.0`–`v0.2.0` 七个 release，各含安装包 / `.blockmap` / `latest.yml` 三个资产；`v0.2.0` 的安装包 118,319,613 字节） | `gh release list` / `gh release view v0.2.0 --json assets` 实测（2026-11-06） |
+| 干净机器安装 | **已通过，仅限 v0.1.5**（2026-11-03）；v0.2.0 未重复该验证 | 用户报告；D-208 关闭。v0.2.0 的安装路径未单独验证 |
 | `desktop/package.json` 的 `build.publish` | 已配置 GitHub provider | `npx electron-builder --win --x64 --dir` 退出 0，schema 接受 |
 | `gh` CLI | **已安装且已登录**，但**不在 `PATH` 里** | 版本 2.103.2，路径 `C:\Program Files\GitHub CLI\gh.exe`；`gh auth status` 退出 0，账号 `mogenga` |
 | `electron-updater` | **已安装（6.8.11）** | 声明在 `desktop/package.json`（`^6.8.11`），`desktop/node_modules/electron-updater/package.json` 实测为该版本 |
@@ -557,7 +557,7 @@ main.js ──createUpdater()──> updater.js ──> electron-updater
 
 ### 12.6 已知边界
 
-1. **一次真实的更新从未跑过。** 接入时 `v0.1.0` 是最新版，没有更新的版本可装；此后虽然连发了 `v0.1.1`–`v0.1.5`，但没有任何一次记录的「旧版收到新版提示并完成下载安装」验证——**版本号变了不等于这条路径跑过**。（D-212 残余）
+1. **一次真实的更新从未跑过。** 接入时 `v0.1.0` 是最新版，没有更新的版本可装；此后虽然连发了 `v0.1.1`–`v0.2.0`（七个 release），但没有任何一次记录的「旧版收到新版提示并完成下载安装」验证——**版本号变了不等于这条路径跑过**。`v0.2.0` 发布后首次具备真实验证条件：装 v0.1.5，等 About 页提示 v0.2.0，点下载与重启安装。（D-212 残余）
 2. **未签名期间，下载到的更新包不做签名校验。** `electron-updater` 在 `app-update.yml` 没有 `publisherName` 时直接放行；而 `publisherName` 只在有证书时才写得进去。完整性目前只靠 `latest.yml` 的 `sha512`。见 **D-217**。
 3. **`quitAndInstall` 的 NSIS 行为只有源码依据。** 调用是非静默的（`quitAndInstall(false, true)`），用户看得见安装进度；安装器收到 `--updated` 后走「等待应用退出 → 仍在就结束进程」的免确认路径。这条路径没有在真实更新里跑过。
 4. **更新要重启应用。** 没有热替换；正在跑的回合会随退出结束。
@@ -567,7 +567,7 @@ main.js ──createUpdater()──> updater.js ──> electron-updater
 
 ## 13. 相关条目
 
-- **D-212** —— 发布链路从未真正跑过一次 release；`electron-updater` 未接入（**应用内更新部分已解决**，残余见 §12.6）。
+- **D-212** —— 发布链路已跑通（`v0.1.0`–`v0.2.0` 七个 release）；应用内自动更新已接入（**2026-10-25 已解决**），但「一次真实的更新」仍未跑过，残余见 §12.6。
 - **D-217** —— 未签名构建下 `publisherName == null` 时下载包不做签名校验。
 - **D-211** —— 签名配置就位但从未验证过真实签名。
 - **D-208** —— 真实安装包从未产出（**2026-11-03 已解决**：v0.1.5 安装包在干净机器上安装验证通过）。

@@ -1236,7 +1236,8 @@
 - **影响**: 对毫秒级工具/设备状态反馈不足;高频事件会合并到轮询批次。跨进程仍是最兼容的方案,但同进程场景多付一次轮询延迟。
 - **触发升级条件**: 需要亚 100ms 延迟、高频设备事件,或轮询 I/O 成为开销。
 - **修复建议**: 在同一 `SessionEventSource` 接口下增加进程内适配器(append 后立即通知,仍以日志为事实源并保留文件跟随作为补偿),SSE 与客户端协议不变。
-- **状态**: 未解决;本轮按用户决策保留日志投影 + 轮询。
+- **状态**: **桌面宿主侧已解决（2026-11-07 复核；功能落地 2026-11-06，批次 3 / OPT-15）**。`desktop/host/host.js` 的 `handleLiveEvent` 是「进程内加速器」：`runner.start` 注入的 `onSessionEvent` 在 `append` **落盘并 fsync 之后**把同一个 `SessionEvent` 直接交给宿主，转录不再等轮询；文件泵保留，仍是崩溃恢复、跨进程与重连补播的唯一通道，两条路径用同一个 `lastSeq` 游标去重。只有当前 run、且 seq 连续（`lastSeq + 1`）的事件走加速通道，缺口一律留给泵——跳过而不是猜。加速通道抛错时**回退游标**并发一条 warn `notice`，让泵重新投递；重复一帧可读，静默丢一帧不可读（代码注释写明了这个取舍）。
+  **仍未解决**：内核侧的 `LogTailEventSource` 仍是 200ms 轮询（`src/events/log-tail.ts:21` 的 `DEFAULT_POLL_MS`），没有提供通用的进程内 `SessionEventSource` 实现；任何**非桌面宿主**的订阅方（库调用方、未来的 Web 形态）依旧只有轮询。本条对内核的一半继续有效。
 
 ### D-135 · 无独立 `evidence` 事件,evidence 由 `tool_result.payload` 承载
 
@@ -1371,7 +1372,7 @@
 - **影响**: 审批交互不是即时反馈;极端调度下延迟更长。正确性不受影响(日志仍是事实源)。
 - **触发升级条件**: 需要亚 100ms 交互,或审批频次显著提高。
 - **修复建议**: 按 D-134 增加进程内低延迟适配器,保持 SSE 协议不变。
-- **状态**: 未解决;与 D-134 同根因,此处登记审批链路的可见延迟。（2026-10-22 说明：浏览器形态下线后 SSE 已不存在，但桌面宿主同样以 200ms 轮询跟随日志，审批卡片出现与终态更新的延迟量级未变，本条按「与 D-134 同根因」继续有效。）
+- **状态**: **桌面形态已解决（2026-11-07 复核；功能落地 2026-11-06，随 D-134 / OPT-15）**。`approval_request` 同样走宿主的进程内加速通道：`src/server/approvals.ts` 的 `request()` 先 `session.append`，而 `runner.ts` 包装过的 `append` 在落盘后立刻回调 `onSessionEvent`，宿主随即投影成 `permission_request`。审批卡片出现与 `permission_decision` 终态更新因此不再依赖 200ms 轮询。（2026-10-22 说明：浏览器形态下线后 SSE 已不存在，桌面宿主是唯一形态，本条按「与 D-134 同根因」登记；D-134 的桌面侧关闭后本条的可见延迟随之消失。**残余**：加速通道只覆盖当前 run 的连续 seq，异常回退时仍由泵按 200ms 补齐一帧，这是兜底不是常态。）
 
 ### D-150 · 会话结束后迟到决策返回 404,运行中已超时返回 410
 
@@ -1604,7 +1605,8 @@
 - **影响**: 唯一常驻的页签点开即报错；用户会以为整个工作台不可用，而实际上 File / Files / Artifact 三个页签（由动作打开）是能工作的。
 - **触发升级条件**: 用户报告板卡面板打不开；或阶段 4 设备控制落地。
 - **修复建议**: 二选一——①删掉 `getBoardState` 的四处调用与 Board 页签的常驻，把面板改成由 `device_status` 事件驱动（工具行点击时打开）；②给 host 与 bridge 补 `getBoardState`，如实回 `{ probe: "unknown", serial: "unknown" }`（`GET /api/device` 已经这么做了，`src/server/api.ts:884`）。按 R3 应选 ①：没有扫描器就不要画一个需要扫描器才能填的面板。
-- **状态**: 未解决（已登记）。**2026-10-22 补充**：`bridge.js` 已删除，「两端都没有 handler」现在只剩桌面宿主一端的缺口（`getBoardState` 仍无 handler）；修复建议 ② 里提到的 `GET /api/device` 也已随 HTTP 层删除，若选 ② 只能让宿主直接回 `{ probe: "unknown", serial: "unknown", cpu: "unknown", backend: "unknown" }`。
+- **状态**: **已失效（2026-11-07 复核）**。Board 页签、`getBoardState` 调用点与「板卡面板打不开」这个入口都不存在了：`SUPPORTED_PANES` 现为 `file` / `artifact` / `serial`，`index.html` 的工作台 tab 条也只有这三个；全仓（`desktop/`、`src/`、`tests/`）grep `getBoardState` 为 0 处。`device_status` 事件仍由内核产出，渲染器 `case "device_status"` 刻意不画东西（事件保留、当前无 UI 消费者）。以下旧的补充保留以便追溯，不再适用。
+  - **2026-10-22 补充（历史）**：`bridge.js` 已删除，「两端都没有 handler」现在只剩桌面宿主一端的缺口；`GET /api/device` 也已随 HTTP 层删除。
 
 ### D-192 · 快捷键表列的三条键与实现不符，另有一条键每次都触发一次如实拒绝
 
@@ -1678,7 +1680,12 @@
 - **影响**: 夜批与无人值守场景下，一次 run 只有在 `maxTurns`（现已默认不限制）或 `maxCostUsd` 触发时才停；一个卡在模型网关慢响应上的 run 可以无限期占用会话锁。`src/demo/run.ts` 的外部超时只能靠外层管线。
 - **触发升级条件**: 出现一次 run 长时间不结束；或夜批管线落地。
 - **修复建议**: `RunOptions` 加 `deadlineMs`（整跑上限），`runSession` 起一个 `AbortSignal.timeout` 与外部 signal 合并，到时写 `interrupted{reason:"deadline"}`——**不是** `max_turns`，原因要说真话。README 的 `run.json` 字段表同步。
-- **状态**: 未解决（已登记；与 D-022「超时≠强制终止」是同一根因的两个层次）。
+- **状态**: **已解决（2026-11-07 复核；功能落地 2026-11-06，批次 2 / OPT-02）**。
+  - `RunOptions.deadlineMs`（`src/index.ts:79`）经 `LoopCtx` 进主循环；`query.ts` 的循环顶部与「模型返回后仍有待执行工具调用」两处判 `deadlineReached()`，命中即 `interrupted{reason:"deadline"}`。措辞刻意不写 `max_turns`——到点是一个更基本的事实，不该被报成轮数上限（`query.ts` 的注释写明了这个顺序）。
+  - `run.json` 的 `deadlineMs`（`src/config/app-config.ts:46`）：正数或 `null`，`null` 表示不限制；`desktop/host/host.js:791` 只在非 `null` 时下发，缺省即无上限。
+  - 渲染层 `protocol.js:949` 把 `deadline` 投影成用户能读的停止原因，不落到通用「已中断」。
+  - 回归：`tests/query.test.ts` 与 `tests/app-config-providers.test.ts` 覆盖配置校验与到点收尾。
+  - **残余**（与 D-022 一致，不在本条）：到点是「不再发起新调用」，不保证正在执行的工具被强制终止。
 
 ### D-188 · 图片附件静默丢弃：缩略图留在输入框上，发送后无声消失
 
@@ -1970,7 +1977,7 @@
 - **影响**: CubeIDE 工程的编译选项、文件组织只能用 CubeIDE IDE 本体改；门面对此类请求只能报 `info` 可用、编辑不可用。
 - **触发升级条件**: 用户在 CubeIDE 工程上要求改编译选项/文件组织且不能手开 IDE。
 - **修复建议**: 按需实现最小编辑面（defines / include paths 两项最有价值），直接编辑 `.cproject` 并保留自动备份；或评估 Eclipse headlessbuild 是否有等价的 setOption 入口。
-- **状态**: 未解决。
+- **状态**: **已作废（2026-11-07 复核）**。后端不存在，能力缺口随之消失；如将来重新引入 CubeIDE 后端，按本条修复建议重新评估。
 
 ### D-203 · CubeIDE 的 J-Link 与 OpenOCD gdbserver 路线未接入
 
@@ -1981,7 +1988,7 @@
 - **影响**: 非 ST-Link 探针在 cubeide 后端上不可用（keil 侧按 `.uvoptx` 配置走，反而没有这个限制）。
 - **触发升级条件**: 用户用 J-Link 调 CubeIDE 工程。
 - **修复建议**: `gdbserver.ts` 增加 backend 参数（stlink | jlink | openocd），openocd 需要板级配置文件参数（没有默认值，fail-closed）。
-- **状态**: 未解决。
+- **状态**: **已作废（2026-11-07 复核）**。后端已移除；J-Link / OpenOCD 探针现在走 probe MCP 的 openocd 后端，与本条无关。
 
 ### D-204 · ESP-IDF 串口监控输出流未接入
 
@@ -1992,7 +1999,7 @@
 - **影响**: 调 ESP32 固件日志仍要自己开串口工具；backtrace 解码缺位。
 - **触发升级条件**: 用户要求读固件日志或解码 backtrace。
 - **修复建议**: 接 esptool 的 Serial 通道或直接串口读流，叠加 `xtensa-esp32s3-elf-addr2line` 做 backtrace 解码。
-- **状态**: 未解决。
+- **状态**: **已作废（2026-11-07 复核）**。后端已移除；串口输出由 `mcp-servers/serial/` 的 `embed_serial` 承担，但**没有** ELF backtrace 解码——若将来需要，按本条修复建议单独立项，不要挂在本条上。
 
 ### D-205 · ESP-IDF menuconfig / sdkconfig 编辑未做
 
@@ -2003,7 +2010,7 @@
 - **影响**: 改配置要用 IDF IDE/命令行本体。
 - **触发升级条件**: agent 化配置修改成为高频需求。
 - **修复建议**: 最小动作面 `get_config`/`set_config`（读 sdkconfig 的 `CONFIG_x=y` 行、写回并触发重配置），复杂选项仍留给 menuconfig。
-- **状态**: 未解决。
+- **状态**: **已作废（2026-11-07 复核）**。后端已移除。
 
 ### D-207 · Datasheet MCP 的检索与结构化提取缺口
 
@@ -2299,7 +2306,12 @@
   2. **给 `system_prompt_mismatch` 一条人能读的出路**：宿主识别这个 code，把「旧会话没有系统提示词，无法在续聊时补上；请新建会话，或把这个设置清空」显示出来，而不是把英文原文塞进 `发送失败：`。
   3. **内置提示词本身**走决策点 #8：分节组装 + persona 注入 + 冲突消解，并在写进内核时定好老会话的迁移（最省事的做法是把内置段记为**投影期注入**而非日志事件——`build.ts` 在处理 `effectiveSummary` 时已经有「不进日志、投影时插入」的先例，走同一条路就绕开了 `system_prompt_mismatch`）。
 
-- **状态**: 未修。**这是当前 Agent 行为的上限所在**——它解释了为什么模型有时要人喊着才去 `read` 原文、为什么多步任务不会主动列计划。
+- **状态**: **部分解决（2026-11-07 复核）**。逐条对账：
+  - **三处文字已撤（建议 ①，已完成）**：`src/server/runner.ts` 的字段注释改成「内核没有内置提示词：`environment` 等内置节由投影期注入、不写日志」；`src/config/app-config.ts` 改为「附加到每段对话最前面的自定义系统提示词；"" 表示不加」；设置页的自由输入框本身已于 2026-11-05 移除，只剩一条如实说明（`behaviorSystemPromptNote`：「…仍会随每段对话发出，位置在内置环境段之后」）。
+  - **`environment` 节已落地（建议 ③ 的第一个切片）**：`src/context/system-sections.ts` 提供分节渲染与 `hashSections`，`src/index.ts:594` 在投影期组装，`src/context/build.ts:347` 把节插到消息最前面、**不写会话日志**——正是本条修复建议里「最省事的做法」。内容只有 working directory / platform / shell / 会话日期四项，逐字节稳定（日期只到日，避免打断 prompt cache）。
+  - **仍未做**：`base`（身份 / 风格 / 计划 / 工具偏好 / R3）、`tools`、`instructions`（只读 `AGENTS.md`）、`memory` 四节。`src/index.ts:325` 的注释明确写着「属于 P1 之后的分期，措辞是产品决定，不在本函数内凭空补写」。因此**「模型行为上限」这半条依旧成立**——不会有「先列计划」「读原文再断言」这类指令。
+  - **第二个缺陷（旧会话续不上）**：触发路径已从界面移除（输入框删除），所以普通用户不再撞到；手改 `run.json` 仍会触发，宿主对 `system_prompt_mismatch` **没有**人能读的映射（`desktop/host/host.js:1801` 仍是 `发送失败：<英文原文>`）。建议 ② 未做。
+  - **仍待定**：`meta.json` 的 `promptSections` 读写已具备（`src/session/metadata.ts`），但 `hashSections` 在 `src/` 里**没有生产调用方**——目前只有测试在用，「把每节哈希写进 `meta.json`」这一步还没接上。
 
 ### D-222 · KB 语料已改，但已签名的 OTA 清单 `latest.json` 仍是旧版
 
@@ -2337,7 +2349,7 @@
 - **影响**: OPT-07 之后「有附件即拒绝发送」，于是这个残留会把新会话的每一次发送都挡下来，而图片本属于上一个会话——用户看到的是一个不知道自己从哪来的阻塞。
 - **触发升级条件**: 已触发（OPT-07 落地后即成立）。
 - **修复建议**: `session_loaded` 与 `newSession` 时清空 `state.attachments` 并重绘附件条；若有真实的多模态上传路径，再按会话归属保存。
-- **状态**: 未解决（既有行为，本批次未改）。
+- **状态**: **已解决（2026-11-07 复核）**。`clearAttachments()` 在 `startSessionIn`（新建）与 `session_loaded`（打开）两条会话边界都被调用；`tests/desktop/composer-copy.test.js` 的静态断言钉住两处调用，删掉任一处即红。（原始记录：「未解决（既有行为，本批次未改）」是修复前写下的，保留以便追溯。）
 
 ### D-225 · MCP 正常关闭不回收进程树，只对直接子进程发信号
 
@@ -2365,6 +2377,8 @@
 
 | 日期 | 变更 |
 |---|---|
+| 2026-11-07 | **文档事实源对齐**（用户「列出待实现功能」→ 逐条核对后「更新文档先」）。只改文档，不改代码。①**修掉 6 处状态行与正文矛盾**：D-134（桌面宿主的进程内加速通道已落地，内核 `LogTailEventSource` 仍轮询，改为「桌面侧已解决 / 内核侧未解决」）、D-149（随 D-134 桌面侧关闭，保留异常回退时泵补一帧的残余）、D-189（`deadlineMs` 已落地，改为已解决并列出证据与残余）、D-193（Board 面板已删、`getBoardState` 全仓 0 处，改为已失效）、D-202/203/204/205（CubeIDE / ESP-IDF 后端已随 `f03473b` 移除，状态行统一改为已作废）、D-224（`clearAttachments` 已落地，状态行仍写「未解决」）、D-221（三处文字已撤、`environment` 已落、四节未做、旧会话 mismatch 仍无友好文案、`promptSections` 无生产调用方，改为部分解决）。②**核对口径**：状态行不是单一事实源——`grep` 粗分类得到的「84 条未解决」里至少 6 条与条目顶部的复核注记矛盾，本轮按「正文证据优先于状态行」逐条改正。③其余文档同步见 `dev-notes/M2-阶段3.md` 的 2026-11-06 段。 |
+| 2026-11-07 | 清理无用与过时文件（用户「清理无用文件、过时文件」）：①删除 6 份已完成的一次性任务书，对应提交均已合入 `main` 且全仓零引用——`docs/ui-polish-shared.md`、`docs/ui-polish-task-{a,b,c,d}.md`（2026-11-05 界面优化轮，实现见 `e973aa7` / `7ef3769` / `48dd9d1`）与 `docs/test-optimization-brief.md`（测试优化轮，实现见 `e30b088` / `b666da6` / `941ff3a` / `09dd771` / `6cf7a55`）。**保留** `docs/page-optimization-task-{a..f}.md`：`dev-notes/页面优化.md` 逐轮引用它们作为需求留痕。②删除 `prototypes/index.html`（M1 的 HTML 原型，62 KB）：前端 v2.0 起以 `desktop/renderer/` 为准，令牌与版式已被 `docs/frontend-design.md` 吸收；`dev-notes/原型-UI.md` 顶部加删除说明，历史行号保留为留痕。③`docs/optimization-and-new-features.md` 的 OPT-41 证据列改为指向仍存在的 `styles.css` 行号，并注明原记录所在文件已删。④本地不可复现产物（均 gitignore）：`desktop/dist-installer/`（509 MB，v0.2.0 三件资产已在 GitHub Releases）、`desktop/build/{corpus,node_modules}/`（21 MB，打包脚本可重建）、`.tmp/corpus-v2`（与 `~/corpus-publish/v2` 逐字节相同）、`.tmp/skipcheck`（与 `mcp-servers/kb/tests/kb-tool-names.test.ts` 完全相同）、`.superpowers/sdd/`（10.7 MB 阶段产物）、空的 `.worktrees/feat-rag-experiment`。**保留** `dist/`、`dist-mcp/`（开发态宿主直接加载）与 `.tmp/corpus-v1-backup`（D-222 的回滚副本）、`.tmp/optimization-audit`。⑤验证：`npm run check:js` 39 文件通过、`npm run typecheck` 通过、`npm test` 141 files / 3787 passed / 5 skipped。 |
 | 2026-11-04 | 清理文档与勾选 todolist（用户「清理无用文档，不走pr」→「勾上 checkbox」）：①删除已移除后端的三份接入指南 `docs/{arduino,cubeide,espidf}-headless.md`（`f03473b` 已把三套后端移出产品，指南描述的能力在仓库里不存在；代码/配置/脚本零引用），README 同步改为删除说明。保留 `packs-porting-todolist.md`（T1–T15 验收清单）、`datasheet-mcp-todolist.md`（D6/D14/D16 设计取舍）、`embedded-defects-todolist.md`（仍有 1 条未结 + 复核驳回项存档）、`docs/rag-experiment-report/`（5 张图无生成脚本）。②`docs/datasheet-mcp-todolist.md` 的 20 个 checkbox 按实测对账后勾上 19 个，并补 §6 完工记录：D16「评估后不做」保持未勾并写明 spike 结论；验收标准两项按实测修正（用例 95 而非 ≥25；`USB_BCDR` 在两份手册中都不存在，改用 `USB_CNTR`/`AFIO_MAPR`）。③**修掉编号冲突**：`D-207` 被两个不同条目占用（同一天两批任务各自取号）。`corpus.example.json` 占位值那条改用唯一空号 **`D-194`**，Datasheet 那条保持 `D-207`；条目内加编号说明，`docs/corpus-ota.md` §2 的引用同步。`dev-notes/datasheet-mcp.md` 两处指向 Datasheet 条，未动。④`docs/datasheet-mcp.md`/`mcp-servers/datasheet/README.md` 里 D16 与 todolist 编号的引用核对无误。 |
 | 2026-11-03 | 文档与实现对齐（用户「更新README，不涉及具体代码」→「一并修掉」，只改文档与两个既有错误：`scripts/packs-e2e.mjs` 的缺省条目、`mcp-servers/datasheet/permissions.example.json` 的非法 preset）：①**根 README** 按当前实现重写——删掉 CubeIDE / ESP-IDF / Arduino / `embed_project`（`f03473b` 已移除）、PowerShell 串口泵（`3530fac` 已换 `serialport`）与「9 个工具链包 / 默认 Ninja」（目录只剩 4 条）等过期说法；「真实安装包尚未产出」改为「v0.1.5 已发布，缺干净机器安装验证」；补上 datasheet MCP、首启自动接入四台 server、`apiKey` 明文密钥、计划条/托盘/应用内更新、系统提示词缺失（D-221）等缺项；Agentic Search 一节区分**实验形态**（C′ 是自实现 BM25、B 是离线方案）与**部署形态**（`kb_lookup` 是 `index.yaml` 关键词打分，没有「夜批 B」这条链路）。②**`docs/toolchain-packs.md`** 新增「目录（当前 4 条 Windows x64）」表并写明 `f03473b` 移除了哪 5 条；差异表「同 9 条」改为「迁移时 9 条、现 4 条」。③**`mcp-servers/datasheet/README.md`** 修掉三处「registers 未实现、恒 `not_available`」——阶段 C 与交付同轮完成（`docs/datasheet-mcp.md` §8 第 2 条早就记了这次转正），工具表、错误码表（`not_available` 删除，补 `empty_query` / `internal_error`）、差异表同步。④**`docs/datasheet-mcp.md`** 工具表 `datasheet_registers` 补 `found` 与 `path`，测试段改为 2026-11-03 实测的 94 通过 / 1 跳过。⑤**`scripts/packs-e2e.mjs`** 缺省条目由已删除的 `ninja-1.13.2-win32-x64` 改为 `pyocd-0.46.0-win32-x64`（目录里最小的可装条目）——修前不带 `PACKS_E2E_PACK` 每次都以「目录里没有」退出 1。⑥**`mcp-servers/datasheet/permissions.example.json`** 的 `preset` 由不存在的 `"readonly-demo"` 改为 `"diagnose"`：`PresetSchema` 只认四档，原配置若被原样复制进 `permissions.json` 会让 `runSession` 启动即抛 `PermissionConfigError`；四个示例现已逐一用 `loadPermissionConfig` 验证可加载。⑦**根 README 的「已知限制」**删掉三条已修的（D-193 随目标板页面删除、D-187 改走主进程 IPC、D-192），补 D-221 与 D-209。⑧**`docs/serial-panel-spec.md`** 顶部加状态说明、命令表按实现校正（补 `serialLine` / `serialBaud` / `serialEncoding`）、并在「方案 A/B」处补记事后结论（一期 B 于 2026-10-24 被 `3530fac` 换成 A）。⑨**`scripts/packs-e2e.mjs`** 的清理改为 `process.on("exit")` + 信号处理：原先的 `rmSync` 在文件末尾，`fail()` 的 `process.exit()` 会跳过它，一次中断在临时目录留下 1.7 MB（已手工清掉并实测新路径无残留）。⑩**D-208 关闭**（用户「干净机器安装验证已经通过了」，v0.1.5）：`docs/corpus-ota.md` §9 第 3 项、`docs/release.md` §1/§13、`docs/code-signing.md` §11 同步。 |
 | 2026-11-01 | 追问「当前主 Agent 的提示词是什么」时核实：**内核根本没有内置系统提示词**。抓取 `dist/` 真实请求体，`messages` 只有一条 `user`，模型能看到的全部指令是 12 条工具 `description`（795 字符）；`git log --all -S "DEFAULT_SYSTEM_PROMPT"` 为空，历史上从未有过。而三处文字都说有：`server/runner.ts:47` 的「Replaces the built-in system prompt」、设置页「行为」页的「排在内置指令之前。留空使用默认提示词」、`config/app-config.ts:40` 的「"" 表示用内核默认提示词」。同时复现第二个缺陷：设置页一填 `systemPrompt`，所有**无 system 事件的历史会话**续聊全部抛 `system_prompt_mismatch`，界面显示英文原文 `发送失败：Cannot add a system prompt to a non-empty session without a system event`。录入 **D-221**（含三级修复建议：先撤三处谎 → 给 mismatch 一条人能读的出路 → 内置提示词走决策点 #8 的分节组装并按投影期注入规避迁移） |

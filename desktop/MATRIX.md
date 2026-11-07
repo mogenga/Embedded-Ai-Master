@@ -61,11 +61,20 @@
 
 ### 已隐藏（前端不渲染入口，宿主回显式 `notice`）
 
-git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi`）、终端（`terminalOpen`/`terminalRun`/`terminalInterrupt`/`terminalRestart`）、worktree（`worktreeStart`/`worktreeMerge`/`worktreeDiscard`/`worktreeDiff`；**顶栏与面板已在 2026-10-22 整块删除**，用户点它只得到「桌面宿主暂不支持该命令」）、packs（`getPacks`/`installPack`/…）、browser（`browserOpen`/`browserNavigate`/…）、memory / instructions / hooks、subagents、goals、检查点（`getCheckpoints`/`restoreCheckpoint`/`restoreFile`）、压缩（`compact`）、板卡控制（`getBoardState`）；串口已移出（见下）。
+git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi`）、终端（`terminalOpen`/`terminalRun`/`terminalInterrupt`/`terminalRestart`）、worktree（`worktreeStart`/`worktreeMerge`/`worktreeDiscard`/`worktreeDiff`；**顶栏与面板已在 2026-10-22 整块删除**，用户点它只得到「桌面宿主暂不支持该命令」）、browser（`browserOpen`/`browserNavigate`/…）、memory / instructions / hooks、subagents、goals、检查点（`getCheckpoints`/`restoreCheckpoint`/`restoreFile`）、板卡控制（`getBoardState`）。
+
+> **2026-11-07 复核，三处已移出本清单**：
+> - **packs** 已于 2026-10-25 接通（`getPacks` / `getPackCatalog` / `installPack` / `installFromManifest` / `removePack` / `verifyPack` / `prunePacks`，设置页「工具链」页可见）。
+> - **`compact`** 早已接通（`/compact` 走宿主的 `compact` handler，见 `listCommands` 一行），此前留在清单里是笔误。
+> - **串口**已于 2026-10-23 接通，见下方串口一节。
+>
+> **仍隐藏**的共同原因是**内核没有这个能力**（或入口已随面板删除），不是「前端没接」。`getBoardState` 尤其如此：Board 面板已于 2026-10-26 删除，`SUPPORTED_PANES` 现为 `file` / `artifact` / `serial`。
 
 > **`skills` 已于 2026-10-22 第十六轮移出本清单**（见下表 `getSkills` / `saveSkill` / `removeSkill`）。它当初在这里的原因和别的项不一样：git/终端/worktree 那些是「内核有能力、前端没接」，技能是**内核根本没有这个能力**，所以这一轮先补内核再加前端入口。
 
-串口监视器**已在 2026-10-23 接通**：`serialOpen` / `serialClose` / `serialStatus` / `serialClear` / `serialWrite` / `listSerialPorts` 都有宿主实现（`desktop/host/serial-bridge.js`，PowerShell .NET SerialPort 泵，零 npm 依赖），工作台 tab 条常驻 Serial tab。面板与 agent 双通道共享数据但不共享口：面板持口并镜像环形缓冲到 `$HARNESS_HOME/serial/ring.json`，agent 经 `embed_serial`（serial server，2026-10-25 从 cubeide 拆出独立挂载）读镜像或开一次性捕获；同口冲突诚实报错 `port_busy`。
+串口监视器**已在 2026-10-23 接通**，宿主九个 handler：`serialOpen` / `serialClose` / `serialStatus` / `serialClear` / `serialWrite` / `serialLine` / `serialBaud` / `serialEncoding` / `listSerialPorts`，工作台 tab 条常驻 Serial tab。面板与 agent 双通道共享数据但不共享口：面板持口并镜像环形缓冲到 `$HARNESS_HOME/serial/ring.json`，agent 经 `embed_serial`（serial server，2026-10-25 从 cubeide 拆出独立挂载）读镜像或开一次性捕获；同口冲突诚实报错 `port_busy`。
+
+> **2026-11-07 复核：实现已从 PowerShell 泵换成 `serialport` 13（原生模块）。** `desktop/host/serial-bridge.js` 现在是进程内 `SerialPort` 实例（`import { SerialPort } from "serialport"`），不再 spawn PowerShell；agent 侧的一次性捕获（`mcp-servers/serial/serial.ts`）仍用 PowerShell 泵，被杀软拦截时如实报错（D-206）。清单里漏写的 `serialLine` / `serialBaud` / `serialEncoding` 一并补上。
 
 原因逐项登记在 `docs/deferred-issues.md` 的 D-166 与 D-169。技能的边界（没有权限语义、模型不能自己挑、参数只有字符串替换、项目作用域没有信任门）另见 D-198。
 
@@ -131,7 +140,9 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 
 ## 阶段 4 交互层
 
-`docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` 的 §7（回放）、§8（导出）、§9（设备控制）原设计基于已删除的 `src/ui`，需按本前端重写。三项在当前内核上都是可做的：回放只需按事件下标截断后重建消息列表；导出读 `GET /api/sessions/:id`；设备控制把预置指令发进会话、仍经权限与审批。详见 D-166。
+`docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` 的 §7（回放）、§8（导出）、§9（设备控制）原设计基于已删除的 `src/ui`，需按本前端重写。三项在当前内核上都是可做的：回放只需按事件下标截断后重建消息列表；**导出已接通**（宿主 `exportSession` 把日志渲染成 Markdown，经 `saveFile` 存盘——`GET /api/sessions/:id` 随 HTTP 层于 2026-10-22 删除，不要照旧 spec 读）；设备控制把预置指令发进会话、仍经权限与审批。详见 D-166。
+
+> **2026-11-07 复核：§7/§9 仍未实现，§8 已实现。** 板卡面板（原 §9 的落点）已随目标板页面在 2026-10-26 删除，设备信息改由所调用工具的那一行与输出承载——若重启 §9，先定「面板还是行」这个形态问题，不要复活 `getBoardState`。
 
 > 2026-10-21 第四轮（用户「模型配置没有、无法打开本地文件夹」）：新增 `saveProviders`（整份写 `providers.json`）、`setWorkspace`（登记目录后委托 `setCwd`）、真实 `getTree`（接 `listDirectory` / `GET /api/tree`）；`searchFiles` 仍是空匹配，原因改为写在代码里。设置页恢复「模型服务」页，`apiKeyEnv` 明确标注为环境变量名、未定价时成本显示「未知」。浏览器形态的 `pickDirectory` 不再静默返回 `null`，改为说明拿不到绝对路径并提示手输。
 

@@ -37,7 +37,7 @@ v1.4 描述的是一套**从未按此实现**的设计基线（Preact + Vite、�
 - 两栏布局（可拖拽侧栏 + 主对话区 + 可选工作台面板）与响应式降级；
 - 四态主题（跟随系统 / 日间 / 夜间 / 高对比）与若干正交偏好（密度、宽度、视图、缩放、动效）；
 - 会话列表（按工作目录分组、搜索、过滤、归档）、转录、工具行、审批条、消息流；
-- 右侧工作台面板（板卡 / 串口两个 tab）；
+- 右侧工作台面板（`serial` 常驻；`file` / `artifact` 由动作打开。板卡 tab 已于 2026-10-26 删除，`SUPPORTED_PANES` 现为 `file / artifact / serial`）；
 - 设置页（通用 / 外观 / 关于）；
 - 键盘操作、可访问性、视觉验收口径。
 
@@ -52,7 +52,9 @@ v1.4 描述的是一套**从未按此实现**的设计基线（Preact + Vite、�
 
 以下入口在 DOM 中保留但带 `hidden`，宿主收到对应命令时回显式 `notice`（R3，不静默吞掉）。逐条见 `desktop/MATRIX.md`：
 
-git / PR、终端、worktree、packs、browser、skills / memory / instructions / hooks、subagents、goals、检查点恢复、附件（图片）、板卡/串口的写操作、`effort` 直设（内核适配层不发该参数，如实拒绝而不是假装生效）。
+git / PR、终端、worktree、browser、memory / instructions / hooks、subagents、goals、检查点恢复、附件（图片）的多模态发送、板卡控制（`getBoardState`）、`effort` 直设（内核适配层不发该参数，如实拒绝而不是假装生效）。
+
+> **2026-11-07 复核**：`packs`（工具链包管理）与 `skills` 已先后接通并从本清单移出；串口控制已接通（见 `desktop/MATRIX.md`）。「板卡」不再是隐藏项而是**已删除**：Board 面板随目标板页面于 2026-10-26 移除，设备信息由工具行承载。
 
 > **已从本文档移出的能力**（2026-10-21 起陆续接通，此处列表曾长期未同步）：导出、会话 fork / 删除 / 改名、工作目录切换、模型直选、`@` 文件补全、斜杠命令（`/clear` `/context` `/compact`）、压缩（桌面形态）。它们现在在本文件 §7、§8 与 `desktop/MATRIX.md` 里按「已支持」描述。**文件树（目录浏览）于 2026-11-05 删除**，不是「移出」——入口、DOM、渲染代码与样式都不在了，单文件预览面板 `pane=file` 保留（§7.8）。
 
@@ -148,7 +150,7 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 | 输入框 | `div.composer` | `index.html` |
 | 状态页签 | `div#composer-status-tab`（含 `#usage-meter` 触发点） | `index.html` |
 | 用量弹层 | `div#usage-popover`（在状态页签内） | `index.html` |
-| 工作台 | `section#workbench` | `index.html:357` |
+| 工作台 | `section#workbench` | `index.html:428` |
 | 设置页 | `dialog#settings-dialog` | `index.html:513` |
 | 命令面板 | `div#command-palette` | `index.html:544` |
 | 快捷键 / 输入对话框 | `dialog#shortcuts-dialog` / `dialog#input-dialog` | `index.html:549,561` |
@@ -178,7 +180,7 @@ git / PR、终端、worktree、packs、browser、skills / memory / instructions 
 | 内容列宽 | `--column-width: min(var(--reading-width), calc(100vw - 120px))` | `styles.css:1998` |
 | `--reading-width` | 默认 `780px`；narrow `620px` / wide `980px` | `styles.css:83, 1982` |
 | 输入区 | `padding: 0 28px 16px` | `styles.css:2832` |
-| 工作台 | `width: 420px; min-width: 320px; max-width: 560px` | `styles.css:679` |
+| 工作台 | `width: var(--workbench-width, 420px); min-width: 320px; max-width: 560px`（宽度由拖拽条写 `--workbench-width` 并记忆） | `styles.css:779` |
 | 查找栏 | sticky，`width: min(520px, calc(100% - 32px))` | `styles.css:1923` |
 | 命令面板 | fixed，`top: 14vh`，`width: min(560px, calc(100vw - 40px))` | `styles.css:3459` |
 | 设置页 | `width: min(1080px, 96vw); height: min(760px, 90vh)`；左栏 240px + 右 pane `max-width: 780px` | `styles.css:4874`, `settings.css:28,202` |

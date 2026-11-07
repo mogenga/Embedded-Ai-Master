@@ -7,6 +7,8 @@
 > 本文是自包含的汇总，不依赖原始报告。
 >
 > **状态更新（2026-11-06 稍晚）：批次 1 已实现**，详见 §10。OPT-05/06/07/08/09 均已落地并通过合并验证。
+>
+> **状态更新（2026-11-07）：批次 2 与批次 3 也已实现**，合并提交 `e62675f`，`npm test` 3633 passed / 5 skipped。本文件 §§2–4 的表格保留审计当时的原始判断（证据行号是审计时的位置）；**已落地的项见 §12「批次 2/3 落地与剩余项对照」**，不要按表格里的「建议本轮先做」重新排期。
 
 ---
 
@@ -96,7 +98,7 @@
 | OPT-38 | 死 UI / 未挂载 builder 清理 | 桌面 | `index.html:456-589`；`app.js` 39 个无生产者事件分支；`settings.js` 六个 builder 未挂载 | 中 | M |
 | OPT-39 | 设置页 Esc/遮罩丢未保存草稿 | 桌面 | `settings.js:1491/5338/5120`；`app.js:6225-6227` | 中 | S |
 | OPT-40 | Electron `will-navigate` 守卫 + `openExternal` 白名单 | 桌面 | `desktop/main.js:311-334` 无守卫；`app.js:7788-7795` 只拦转录 | 中 | S |
-| OPT-41 | 深色高亮行对比度 4.13:1 → 换 `--text-secondary` | 桌面 | `styles.css:21/28/5335-5338`；`docs/ui-polish-shared.md` 已标未修 | 中 | S |
+| OPT-41 | 深色高亮行对比度 4.13:1 → 换 `--text-secondary` | 桌面 | `styles.css:21/28/5335-5338`（原记录在已删除的 `docs/ui-polish-shared.md`） | 中 | S |
 | OPT-42 | 工程卫生：`.npmrc`、`.node-version`、dependabot、npm script 入口 | 工程 | `package-lock.json` 396 条 npmmirror；无 `.nvmrc`；无 `.github/dependabot.yml`；发布脚本无 npm 入口 | 中 | S |
 | OPT-43 | 领域小项：错误码词表、`kb_search` count/truncated、serial 权限模板、embedded 模板错名 | 领域 | `keil/tools.ts:1318-1326`；`kb/service.ts:718-764`；`mcp-servers/serial/` 无模板；`embedded/permissions.example.json:37` `embed_pack` vs `embed_packs` | 中 | S |
 | OPT-44 | BR-7 夜批管线（夹具格式 + 幂等 + 整跑超时 + exit code 表） | 领域 | `BRD.md:189-192`；仓库只有单场景 `scripts/diagnosis-e2e.mjs` | 中（M3 前） | L |
@@ -202,3 +204,51 @@
 **最小故障注入**：不新增工具。`mem_write` 已经是逐字节写 + 回读校验 + `declaration`（`renode-backend.ts` 的 `writeMemory`），足以表达位翻转：`mem_read` 读字节 → 与 `1 << bit` 异或 → `mem_write` 写回。README「探针」一节给出可直接照做的参数示例；探针权限模板新增 `renode_load` 的目录 glob 规则示例。
 
 **待真机验证**（代码里没有臆造语法，按 KB 语料与官方文档实现）：Renode 1.16 上 `sysbus LoadELF` 的成功/失败输出文案未实测，`LOAD_FAILURE_PATTERN` 是保守措辞匹配；`pause` 在已暂停机器上的行为也未实测（当前实现只在 running 时发）。`npm run probe:e2e` 未在本轮执行（需要真实 Renode 与构建产物）。
+
+---
+
+## 12. 批次 2/3 落地与剩余项对照（2026-11-07 复核）
+
+合并提交 `e62675f`。下表逐项给出当前代码事实；**「已落地」只有同时有代码与回归才算**，代码在但没测的标「部分」。
+
+### 12.1 已落地（16 项全量 + 2 项部分）
+
+计数口径：OPT-01 / 02 / 03 / 04 / 05 / 06 / 07 / 08 / 09 / 10 / 11 / 15 / 18 / 19 / 20 / 27 共 16 项；OPT-14 与 OPT-23 只落了各自的一部分，单列在表尾。
+
+| ID | 落地内容 | 证据 |
+|---|---|---|
+| OPT-01 | 系统提示词投影期注入 + `environment` 节（工作目录 / 平台 / shell / 会话日期，逐字节稳定） | `src/context/system-sections.ts`、`src/index.ts:594`、`src/context/build.ts:347`；`tests/system-sections.test.ts`、`tests/build.test.ts`。**只落了 `environment` 一节**，`base` / `tools` / `instructions` / `memory` 仍未做（D-221 部分解决） |
+| OPT-02 | 整跑墙钟 `deadlineMs`，到点落 `interrupted{reason:"deadline"}` | `src/index.ts:79`、`src/loop/query.ts` 三处判点、`src/config/app-config.ts:46`、`desktop/host/host.js:791`、`desktop/renderer/protocol.js:949`；`tests/query.test.ts` |
+| OPT-03 | MCP 连接改会话级持有 | `src/index.ts` 在 `runSession` 外持有 `McpManager`；进程树回收**未做**（D-225） |
+| OPT-04 | artifact 只读工具 + 产物面板与「打开产物」入口 | `src/tools/artifact.ts`（`name: "artifact"`，锚定会话产物根）、`desktop/renderer/app.js:1002` 的 `openWorkbench("artifact")` |
+| OPT-10 | 连续截断上限 3 次后自停 | `src/loop/query.ts:150` 的 `MAX_CONSECUTIVE_TRUNCATIONS` |
+| OPT-11 | `context_length_exceeded` 恢复路径 | `src/loop/query.ts:155` 的模式匹配 + 恢复分支 |
+| OPT-15 | 进程内事件通道（桌面宿主侧） | `desktop/host/host.js:1493` 的 `handleLiveEvent`；文件泵保留为兜底（D-134 桌面侧已解决、内核侧仍轮询） |
+| OPT-18 | `turn_progress` 带工具名与耗时 | `desktop/renderer/protocol.js:529` 的 `turnProgress` |
+| OPT-19 | evidence 透传、筛选与导出标记 | `desktop/renderer/protocol.js:388`、`desktop/renderer/app.js:144/798` |
+| OPT-20 | Renode 固件装载（`renode_load`）+ 用 `mem_write` 表达最小故障注入 | `mcp-servers/probe/tools.ts`、`renode-backend.ts` 的 `loadFirmware`；§11 |
+| OPT-27 | 无定价时 `maxCostUsd` 如实披露 | `src/loop/breakers.ts` + `status{cost_cap_untracked}`；`tests/query.test.ts` |
+| OPT-14 | 压缩尾界与预算共用 `TokenMeter` 比例 | `src/context/compact.ts:208`（**部分**：冷启动仍按 UTF-16 ÷4，D-005） |
+| OPT-05~09 | 批次 1，见 §10 | — |
+| OPT-23 的 ①② | `kb_grep` 的 `fileCount` / `files` 分布 + 工具描述写死「命中是候选」 | ③（评测与阈值）未做，D-179 仍未解决 |
+
+### 12.2 仍未做（按当前优先级）
+
+| ID | 项 | 为什么还没做 |
+|---|---|---|
+| OPT-12 | 预算与占用率计入 tool schemas | `heuristicCountTokens` 仍只算 content + tool_calls；每轮重建的 schema 未计。需要先定「schema 怎么算 token」的口径 |
+| OPT-13 | 长任务超时出口（MCP 120s 硬顶 vs Keil 10min 构建） | `src/mcp/manager.ts:76` 的 `MAX_CALL_TIMEOUT_MS` 仍钳死；需要按工具配置单次上限 |
+| OPT-16 | 会话列表与标题懒读 | `titleOf` 仍读整份日志（`desktop/host/host.js:622`） |
+| OPT-17 | 宿主/协议文案 i18n | `host.js` 约百余条中文文案仍不参与 `locale` |
+| OPT-21 | Keil 工具面读写分拆 | 整个 `keil_debug` 仍是单一 `destructiveHint: true`（`mcp-servers/keil/tools.ts:1424`） |
+| OPT-22 | Datasheet 三处截断披露 | `search()` 仍丢弃 `walkPdfFiles().truncated`、`hits.slice()` 无标记（`mcp-servers/datasheet/service.ts`） |
+| OPT-24 | 语料与查询集进 CI | `.gitignore:26-27` 仍排除，回归组在 CI 整组 skip（D-158） |
+| OPT-25 | 统一 `verify` 命令 | `package.json` 仍无 `verify` |
+| OPT-26 | 覆盖率纳入 `mcp-servers/**` | `vitest.config.ts` 的 `coverage.include` 仍只有 `src/**` |
+| OPT-28 | 文档事实源对齐 | 本轮已改 README / MATRIX / frontend-design / m2-roadmap / release 五份；`docs/frontend-design.md` 的其余描述性偏差仍会随实现继续漂移，没有回归守住 |
+| OPT-29~44 | 内核加固、桌面打磨、工程卫生、BR-7 夜批 | 未动；OPT-37（串口三个未接）、OPT-39（设置页草稿）、OPT-40（导航守卫）、OPT-42（工程卫生）成本最低，适合下一批 |
+
+### 12.3 本文件自身的约束
+
+- 表格里的**证据行号是审计当时（2026-11-06 上午）的位置**，代码已变动；以上 §12 的证据是复核后的位置。
+- 不要再把 §2 的「P0 建议本轮先做」当排期依据——那 9 项里 7 项已落地、1 项作废（OPT-09 随发布链路）、1 项部分（OPT-04 的产物面板入口已通）。
