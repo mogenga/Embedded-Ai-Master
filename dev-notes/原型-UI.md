@@ -1,4 +1,8 @@
-# 原型 UI（prototypes/）
+# 原型 UI（prototypes/，2026-11-07 已删除）
+
+> `prototypes/index.html` 已于 2026-11-07 清理删除：前端自 v2.0 起以 `desktop/renderer/` 的实现为准，
+> 原型的令牌与版式已被 `docs/frontend-design.md` 吸收，文件本身不再被任何代码或文档引用。
+> 下文的行号与选择器引用指向的就是那个已删除的文件，保留作为当时的实现留痕。
 
 ## 2026-10-15 · 产品原型（HTML）首版
 
