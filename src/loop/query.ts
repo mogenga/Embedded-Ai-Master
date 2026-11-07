@@ -9,7 +9,7 @@ import type {
   ModelChatMessage,
   ModelProtocol,
 } from "../model/protocol.js";
-import type { PermissionGate } from "../permissions/types.js";
+import type { PermissionGate, PermissionRequest } from "../permissions/types.js";
 import type { SessionHandle } from "../session/session.js";
 import type {
   PermissionDecisionPayload,
@@ -17,17 +17,17 @@ import type {
   ToolResultPayload,
   ToolStartedPayload,
 } from "../session/types.js";
-import { executeBatch } from "../tools/pipeline.js";
+import { assertPermissionLayerChoice, executeBatch } from "../tools/pipeline.js";
 import type { BatchCall, BatchOptions, BatchResult } from "../tools/pipeline.js";
 import { toModelToolSchemas } from "../tools/registry.js";
 import type { ToolRegistry } from "../tools/registry.js";
-import type { ToolResult } from "../tools/types.js";
+import type { ToolAccess, ToolResult } from "../tools/types.js";
 import type { BreakerLimits, PricePerMillion } from "./breakers.js";
 import { assertBreakers, computeCostUsd, LoopBroke, normalizeUsage } from "./breakers.js";
 import { createAssistantDeltaWriter } from "./assistant-delta.js";
 import type { LoopEvent, LoopFinishReason } from "./events.js";
 
-export interface LoopCtx {
+interface LoopCtxCommon {
   session: SessionHandle;
   model: ModelProtocol;
   modelCfg: ModelCfg;
@@ -50,13 +50,26 @@ export interface LoopCtx {
   deadlineMs?: number;
   systemPrompt?: string;
   pricePerMillion?: PricePerMillion;
-  permissionGate?: PermissionGate;
   /**
    * 投影期注入的系统提示词分节（不写会话日志，见 `context/system-sections.ts`）。
    * 缺省时不注入任何节——与实现该机制之前的行为逐字节一致。
    */
   systemSections?: SystemSections;
 }
+
+/**
+ * 是否经过权限层，必须**显式二选一**（D-116）。
+ *
+ * 与 `BatchOptions` 同一原则：`permissionGate` 过去可省略，省略即静默跳过 gate
+ * 与 `permission_decision` 审计，而这种跳过在日志里完全看不出。现在要么给
+ * `permissionGate`（判定 + 审计），要么写 `unsafeSkipPermission: true`
+ * （明确声明这条路径故意不经权限层，例如只测循环本体的用例）。
+ */
+export type LoopCtx = LoopCtxCommon &
+  (
+    | { permissionGate: PermissionGate; unsafeSkipPermission?: never }
+    | { permissionGate?: never; unsafeSkipPermission: true }
+  );
 
 export interface LoopConfig extends BreakerLimits {}
 
@@ -324,6 +337,12 @@ export async function* query(
   input: string,
   cfg: LoopConfig,
 ): AsyncGenerator<LoopEvent> {
+  // 与 executeBatch 同一个入口判据（D-116）：`query` 是 async generator,
+  // 函数体要到第一次 next() 才执行,所以守卫放在最前面、任何 append 之前。
+  assertPermissionLayerChoice(
+    { permission: ctx.permissionGate, unsafeSkipPermission: ctx.unsafeSkipPermission },
+    "query",
+  );
   const { session } = ctx;
   const initialEvents = session.events();
   if (
@@ -677,13 +696,13 @@ export async function* query(
       }
 
       const split = splitToolUses(response.toolCalls);
-      const batchOptions: BatchOptions = {
+      const batchOptionsBase = {
         signal: ctx.signal,
         artifactDir: ctx.artifactDir,
         ...(ctx.cwd === undefined ? {} : { cwd: ctx.cwd }),
         ...(ctx.timeoutMs === undefined ? {} : { timeoutMs: ctx.timeoutMs }),
         // 由 pipeline 在每个调用真正执行前调用;写失败会让该调用不执行。
-        onToolStarted: async (call, access) => {
+        onToolStarted: async (call: BatchCall, access: ToolAccess) => {
           const payload: ToolStartedPayload = {
             callId: call.id,
             tool: call.name,
@@ -708,36 +727,36 @@ export async function* query(
           });
         },
       };
-      if (ctx.permissionGate !== undefined) {
-        const gate = ctx.permissionGate;
-        batchOptions.permission = {
-          gate,
-          onDecision: async (call, decision) => {
-            const payload: PermissionDecisionPayload = {
-              requestId: decision.requestId,
-              callId: decision.callId,
-              tool: decision.tool,
-              action: decision.action,
-              effective: decision.effective,
-              reason: decision.reason,
-              preset: decision.preset,
-              source: decision.source,
-              ...(decision.ruleIndex === undefined ? {} : { ruleIndex: decision.ruleIndex }),
-              paramsDigest: decision.paramsDigest,
-              paramsKeys: decision.paramsKeys,
-              ...(decision.paramsPreview === undefined
-                ? {}
-                : { paramsPreview: decision.paramsPreview }),
-              access: decision.access,
-            };
-            await session.append({
-              type: "permission_decision",
-              payload: { ...payload },
-              parent: assistantEvent.seq,
-            });
-          },
+      // 把 ctx 上的选择原样交给 pipeline：`unsafeSkipPermission` 是调用方自己
+      // 显式写下的声明，不是这里替它补的默认值（D-116）。
+      const onDecision = async (call: BatchCall, decision: PermissionRequest): Promise<void> => {
+        const payload: PermissionDecisionPayload = {
+          requestId: decision.requestId,
+          callId: decision.callId,
+          tool: decision.tool,
+          action: decision.action,
+          effective: decision.effective,
+          reason: decision.reason,
+          preset: decision.preset,
+          source: decision.source,
+          ...(decision.ruleIndex === undefined ? {} : { ruleIndex: decision.ruleIndex }),
+          paramsDigest: decision.paramsDigest,
+          paramsKeys: decision.paramsKeys,
+          ...(decision.paramsPreview === undefined
+            ? {}
+            : { paramsPreview: decision.paramsPreview }),
+          access: decision.access,
         };
-      }
+        await session.append({
+          type: "permission_decision",
+          payload: { ...payload },
+          parent: assistantEvent.seq,
+        });
+      };
+      const batchOptions: BatchOptions =
+        ctx.permissionGate === undefined
+          ? { ...batchOptionsBase, unsafeSkipPermission: true }
+          : { ...batchOptionsBase, permission: { gate: ctx.permissionGate, onDecision } };
       const batchResults: BatchResult[] =
         split.calls.length === 0
           ? []

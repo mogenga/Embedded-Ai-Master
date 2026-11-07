@@ -121,7 +121,9 @@ async function makeCtx(
   overrides: Partial<LoopCtx> = {},
 ): Promise<{ ctx: LoopCtx; session: SessionHandle; dir: string }> {
   const { session, dir } = await makeSession();
-  const ctx: LoopCtx = {
+  // 权限语义由下面显式决定，不随 overrides 的残留键透传（D-116）。
+  const { permissionGate, unsafeSkipPermission: _ignored, ...rest } = overrides;
+  const base = {
     session,
     model,
     modelCfg: { contextWindow: 8192, maxOutput: 512 },
@@ -129,8 +131,13 @@ async function makeCtx(
     budget: () => ({ over: false, tokens: 0, softLimit: 1 }),
     signal: new AbortController().signal,
     artifactDir: path.join(dir, "artifacts"),
-    ...overrides,
+    ...rest,
   };
+  // 这条用例集里既有"有 gate"也有"故意没有 gate"的，必须显式选（D-116）。
+  const ctx: LoopCtx =
+    permissionGate === undefined
+      ? { ...base, unsafeSkipPermission: true }
+      : { ...base, permissionGate };
   return { ctx, session, dir };
 }
 
@@ -410,5 +417,38 @@ describe("query 权限审计", () => {
       session.events().find((event) => event.type === "interrupted")?.payload,
     ).toStrictEqual({ reason: "error" });
     expect(() => buildMessages(session.events())).not.toThrow();
+  });
+});
+
+describe("query 必须显式选择权限语义（D-116）", () => {
+  it("既没有 permissionGate 也没有 unsafeSkipPermission → 开跑前抛错,不落任何事件", async () => {
+    const provider = scriptedProvider([reply("不应被调用")]);
+    const { ctx, session } = await makeCtx(provider);
+    // makeCtx 总是显式选择；这里模拟绕过类型层的 JS 调用方。
+    const bogus = { ...ctx } as Record<string, unknown>;
+    delete bogus.unsafeSkipPermission;
+
+    await expect(
+      collect(query(bogus as unknown as LoopCtx, "x", { maxTurns: 10 })),
+    ).rejects.toMatchObject({
+      name: "PermissionLayerChoiceError",
+      code: "permission_choice_required",
+    });
+    expect(session.events()).toEqual([]);
+    expect(provider.calls).toHaveLength(0);
+  });
+
+  it("显式 unsafeSkipPermission → 照旧执行且不落 permission_decision", async () => {
+    const provider = scriptedProvider([reply("调用", [echoCall("c1", "ok")]), reply("完成")]);
+    const { ctx, session } = await makeCtx(provider);
+
+    await collect(query(ctx, "x", { maxTurns: 10 }));
+
+    expect(session.events().some((event) => event.type === "permission_decision")).toBe(false);
+    expect(session.events().find((event) => event.type === "tool_result")?.payload).toMatchObject({
+      id: "c1",
+      ok: true,
+      code: "ok",
+    });
   });
 });

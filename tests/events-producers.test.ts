@@ -145,15 +145,16 @@ function permissionOf(
 }
 
 function optsOf(
-  overrides: Partial<BatchOptions> = {},
+  overrides: Partial<Omit<BatchOptions, "permission" | "unsafeSkipPermission">> = {},
   permission?: PermissionOptions,
 ): BatchOptions {
-  return {
+  const base = {
     signal: overrides.signal ?? new AbortController().signal,
     artifactDir: path.join(tmpdir(), "events-producers-artifacts"),
     ...overrides,
-    ...(permission === undefined ? {} : { permission }),
   };
+  // 不给 gate 时必须显式声明跳过权限层（D-116）；这里的用例测的是管线回调。
+  return permission === undefined ? { ...base, unsafeSkipPermission: true } : { ...base, permission };
 }
 
 describe("pipeline tool_started 生产者", () => {
@@ -556,7 +557,9 @@ describe("query tool_started 生命周期", () => {
     const dir = await makeTempDir("events-producers-query-");
     const session = await createSession(dir);
     sessions.push(session);
-    const ctx: LoopCtx = {
+    // 权限语义由下面显式决定，不随 overrides 的残留键透传（D-116）。
+    const { permissionGate, unsafeSkipPermission: _ignored, ...rest } = overrides;
+    const base = {
       session,
       model,
       modelCfg: { contextWindow: 8192, maxOutput: 512 },
@@ -564,8 +567,13 @@ describe("query tool_started 生命周期", () => {
       budget: () => ({ over: false, tokens: 0, softLimit: 1 }),
       signal: new AbortController().signal,
       artifactDir: path.join(dir, "artifacts"),
-      ...overrides,
+      ...rest,
     };
+    // 没有 gate 的用例测的是事件生产，显式声明跳过权限层（D-116）。
+    const ctx: LoopCtx =
+      permissionGate === undefined
+        ? { ...base, unsafeSkipPermission: true }
+        : { ...base, permissionGate };
     return { ctx, session, dir };
   }
 
@@ -735,6 +743,8 @@ describe("query assistant_delta 生产者", () => {
       budget: () => ({ over: false, tokens: 0, softLimit: 1 }),
       signal: new AbortController().signal,
       artifactDir: path.join(dir, "artifacts"),
+      // 测的是增量事件生产，显式声明不经权限层（D-116）。
+      unsafeSkipPermission: true,
     };
     for await (const _event of query(ctx, "x", { maxTurns: 10 })) {
       // 跑到结束即可。
@@ -827,6 +837,8 @@ describe("query thinking_delta 生产者", () => {
       budget: () => ({ over: false, tokens: 0, softLimit: 1 }),
       signal: new AbortController().signal,
       artifactDir: path.join(dir, "artifacts"),
+      // 测的是增量事件生产，显式声明不经权限层（D-116）。
+      unsafeSkipPermission: true,
     };
     for await (const _event of query(ctx, "x", { maxTurns: 10 })) {
       // 跑到结束即可。

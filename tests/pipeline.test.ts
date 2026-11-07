@@ -123,6 +123,7 @@ describe("executeBatch 管线阶段", () => {
     const results = await executeBatch(session, reg, [call("t1", "ghost")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     expect(results).toHaveLength(1);
@@ -147,6 +148,7 @@ describe("executeBatch 管线阶段", () => {
     const results = await executeBatch(session, reg, [call("t1", "echo", { wrong: true })], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     expect(results[0].result.isError).toBe(true);
@@ -162,6 +164,7 @@ describe("executeBatch 管线阶段", () => {
     const results = await executeBatch(session, reg, [], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     expect(results).toEqual([]);
@@ -181,7 +184,11 @@ describe("executeBatch 并发策略", () => {
       session,
       reg,
       [call("1", "a"), call("2", "b")],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results.map((entry) => entry.result.isError)).toEqual([false, false]);
@@ -201,7 +208,11 @@ describe("executeBatch 并发策略", () => {
       session,
       reg,
       [call("1", "reader"), call("2", "writer")],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
     const elapsed = performance.now() - started;
 
@@ -223,7 +234,11 @@ describe("executeBatch 并发策略", () => {
       session,
       reg,
       [call("1", "a"), call("2", "ghost"), call("3", "b")],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
     const elapsed = performance.now() - started;
 
@@ -248,7 +263,11 @@ describe("executeBatch 并发策略", () => {
       session,
       reg,
       [call("s", "slow"), call("f", "fast")],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results.map((entry) => entry.id)).toEqual(["s", "f"]);
@@ -271,7 +290,11 @@ describe("executeBatch 并发策略", () => {
       session,
       reg,
       [call("1", "evidence"), call("2", "plain")],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results[0].result.evidence).toBe(true);
@@ -298,7 +321,11 @@ describe("executeBatch 并发策略", () => {
       session,
       reg,
       [call("mcp", "mcp__probe__mem_read")],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results[0].result.evidence).toBe(true);
@@ -325,7 +352,11 @@ describe("executeBatch 并发策略", () => {
       session,
       reg,
       [call("1", "evidence")],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results[0].result.isError).toBe(true);
@@ -347,7 +378,11 @@ describe("executeBatch 并发策略", () => {
       session,
       reg,
       [call("dup", "evidence"), call("dup", "evidence")],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results[1].result.code).toBe("duplicate_call_id");
@@ -362,7 +397,11 @@ describe("executeBatch 并发策略", () => {
       session,
       reg,
       [call("dup", "plain"), call("dup", "plain")],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results[1].result.code).toBe("duplicate_call_id");
@@ -383,6 +422,7 @@ describe("executeBatch 并发策略", () => {
       {
         signal: new AbortController().signal,
         artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
         timeoutMs: 10,
       },
     );
@@ -429,6 +469,7 @@ describe("executeBatch 并发策略", () => {
       executeBatch(session, reg, [call("1", "a"), call("2", "b")], {
         signal: new AbortController().signal,
         artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
         onToolStarted,
       }),
     ).rejects.toThrow("started boom");
@@ -453,6 +494,7 @@ describe("executeBatch 错误与取消", () => {
     const results = await executeBatch(session, reg, [call("1", "boom")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     expect(results[0].result.isError).toBe(true);
@@ -474,6 +516,7 @@ describe("executeBatch 错误与取消", () => {
     const results = await executeBatch(session, reg, [call("boom-long", "boom")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -497,6 +540,7 @@ describe("executeBatch 错误与取消", () => {
     const results = await executeBatch(session, reg, [call("1", "slow")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
       timeoutMs: 10,
     });
 
@@ -524,6 +568,7 @@ describe("executeBatch 错误与取消", () => {
     const results = await executeBatch(session, reg, [call("1", "signal-aware")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
       timeoutMs: 10,
     });
 
@@ -549,6 +594,7 @@ describe("executeBatch 错误与取消", () => {
       {
         signal: new AbortController().signal,
         artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
         timeoutMs: 10,
         settleGraceMs: 20,
       },
@@ -583,6 +629,7 @@ describe("executeBatch 错误与取消", () => {
       {
         signal: new AbortController().signal,
         artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
         timeoutMs: 10,
         settleGraceMs: 200,
       },
@@ -603,6 +650,7 @@ describe("executeBatch 错误与取消", () => {
       const results = await executeBatch(session, reg, [call("1", "slow")], {
         signal: new AbortController().signal,
         artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
         timeoutMs,
       });
 
@@ -619,6 +667,7 @@ describe("executeBatch 错误与取消", () => {
     const results = await executeBatch(session, reg, [call("1", "instant")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
       timeoutMs,
     });
 
@@ -635,6 +684,7 @@ describe("executeBatch 错误与取消", () => {
     const results = await executeBatch(session, reg, [call("1", "guarded")], {
       signal: controller.signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     expect(results[0].result.code).toBe("tool_aborted");
@@ -654,6 +704,7 @@ describe("executeBatch 错误与取消", () => {
       const results = await executeBatch(session, reg, [call("1", "slow")], {
         signal: controller.signal,
         artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
       });
       const elapsed = performance.now() - started;
 
@@ -677,6 +728,7 @@ describe("executeBatch 错误与取消", () => {
     const results = await executeBatch(session, reg, [call("1", "aborting")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     expect(results[0].result.isError).toBe(true);
@@ -693,6 +745,7 @@ describe("executeBatch 错误与取消", () => {
     await executeBatch(session, reg, [call("1", "ok")], {
       signal: controller.signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     expect(getEventListeners(controller.signal, "abort")).toHaveLength(0);
@@ -709,7 +762,11 @@ describe("executeBatch 证据落盘", () => {
       session,
       reg,
       [call("small", "echo", { text: "hi" })],
-      { signal: new AbortController().signal, artifactDir: dir },
+      {
+        signal: new AbortController().signal,
+        artifactDir: dir,
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results[0].result.isError).toBe(false);
@@ -727,6 +784,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call("big-1", "big")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -747,6 +805,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call("huge-1", "huge")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -768,6 +827,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call("emoji", "big")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const body = results[0].result.text.split("\n[truncated")[0] ?? "";
@@ -786,6 +846,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call("edge-8000", "edge")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     expect(results[0].result.text).toBe(text);
@@ -802,6 +863,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call("edge-8001", "edge")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -826,6 +888,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call("fail-big", "fails")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -845,6 +908,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call("edge-100000", "edge")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -864,6 +928,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call("edge-100001", "edge")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -884,6 +949,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call(reserved, "big")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -901,6 +967,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call("a".repeat(200), "big")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -922,7 +989,11 @@ describe("executeBatch 证据落盘", () => {
       session,
       reg,
       [call("a/b", "big-a"), call("a?b", "big-b")],
-      { signal: new AbortController().signal, artifactDir: dir },
+      {
+        signal: new AbortController().signal,
+        artifactDir: dir,
+        unsafeSkipPermission: true,
+      },
     );
 
     const first = artifactPathOf(results[0].result.artifactPath, dir, "a_b");
@@ -948,6 +1019,7 @@ describe("executeBatch 证据落盘", () => {
     const results = await executeBatch(session, reg, [call(id, "big")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -971,7 +1043,11 @@ describe("executeBatch 证据唯一性", () => {
       session,
       reg,
       [call("dup", "tool"), call("dup", "tool")],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results[0].result.code).toBe("ok");
@@ -987,6 +1063,7 @@ describe("executeBatch 证据唯一性", () => {
     const results = await executeBatch(session, reg, [call("", "tool"), call("", "tool")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     expect(results[0].result.code).toBe("ok");
@@ -1003,7 +1080,11 @@ describe("executeBatch 证据唯一性", () => {
       session,
       reg,
       [{ id: 42 as unknown as string, name: "tool", input: {} }],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results[0].result).toMatchObject({ isError: true, code: "tool_protocol_error" });
@@ -1024,7 +1105,11 @@ describe("executeBatch 证据唯一性", () => {
       session,
       reg,
       [call("same", "first-tool"), call("same", "second-tool")],
-      { signal: new AbortController().signal, artifactDir: dir },
+      {
+        signal: new AbortController().signal,
+        artifactDir: dir,
+        unsafeSkipPermission: true,
+      },
     );
 
     expect(results[0].result.code).toBe("ok");
@@ -1047,10 +1132,12 @@ describe("executeBatch 证据唯一性", () => {
     const first = await executeBatch(session, reg, [call("shared", "big-a")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
     const second = await executeBatch(session, reg, [call("shared", "big-b")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const firstPath = artifactPathOf(first[0].result.artifactPath, dir, "shared");
@@ -1078,6 +1165,7 @@ describe("executeBatch ToolResult 形状校验", () => {
     const results = await executeBatch(session, reg, [call("1", "bad")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -1102,6 +1190,7 @@ describe("executeBatch ToolResult 形状校验", () => {
     const results = await executeBatch(session, reg, [call("1", "bad")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -1127,6 +1216,7 @@ describe("executeBatch 落盘失败", () => {
     const results = await executeBatch(session, reg, [call("1", "big")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -1153,6 +1243,7 @@ describe("executeBatch 落盘失败", () => {
     const results = await executeBatch(session, reg, [call("1", "fails")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -1172,6 +1263,7 @@ describe("executeBatch 落盘失败", () => {
     const results = await executeBatch(session, reg, [call("1", "huge")], {
       signal: new AbortController().signal,
       artifactDir: dir,
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -1194,6 +1286,7 @@ describe("executeBatch 出口限长", () => {
     const results = await executeBatch(session, reg, [call("long-name", "n".repeat(300000))], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -1219,6 +1312,7 @@ describe("executeBatch 出口限长", () => {
     const results = await executeBatch(session, reg, [call("1", "big-schema", {})], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     const result = results[0].result;
@@ -1252,7 +1346,11 @@ describe("executeBatch 出口限长", () => {
       session,
       reg,
       [call("1", "strict-schema", { known: "k", [extraKey]: "v" })],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     const result = results[0].result;
@@ -1282,6 +1380,7 @@ describe("executeBatch 出口限长", () => {
     const results = await executeBatch(session, reg, [call("1", "many-issues", {})], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     const issues = results[0].result.detail as Array<{ message: string }>;
@@ -1320,7 +1419,11 @@ describe("executeBatch 出口限长", () => {
       session,
       reg,
       [call("1", "union-schema", { value: {} })],
-      { signal: new AbortController().signal, artifactDir: artifactDir() },
+      {
+        signal: new AbortController().signal,
+        artifactDir: artifactDir(),
+        unsafeSkipPermission: true,
+      },
     );
 
     const issues = results[0].result.detail as Array<{
@@ -1369,6 +1472,7 @@ describe("executeBatch 工具上下文", () => {
     await executeBatch(session, reg, [call("1", "ctx")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
     });
 
     // artifactDir 与落盘用的是同一个 BatchOptions 值，不是第二个来源。
@@ -1393,6 +1497,7 @@ describe("executeBatch 工具上下文", () => {
     await executeBatch(session, reg, [call("1", "ctx")], {
       signal: new AbortController().signal,
       artifactDir: artifactDir(),
+      unsafeSkipPermission: true,
       cwd,
     });
 

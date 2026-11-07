@@ -420,7 +420,7 @@ describe("pipeline 与 artifact 共用同一个产物根", () => {
       makeSession(sessionDir),
       new ToolRegistry([bigTool]),
       [{ id: "big-1", name: "big", input: {} }],
-      { signal, artifactDir: root },
+      { signal, artifactDir: root, unsafeSkipPermission: true },
     );
 
     expect(received?.artifactDir).toBe(root);

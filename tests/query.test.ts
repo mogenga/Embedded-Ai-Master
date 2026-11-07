@@ -135,7 +135,9 @@ async function makeCtx(
   sessionSystemPrompt?: string,
 ): Promise<{ ctx: LoopCtx; session: SessionHandle; dir: string }> {
   const { session, dir } = await makeSession(sessionSystemPrompt);
-  const ctx: LoopCtx = {
+  // 权限语义由下面显式决定，不随 overrides 的残留键透传（D-116）。
+  const { permissionGate, unsafeSkipPermission: _ignored, ...rest } = overrides;
+  const base = {
     session,
     model,
     modelCfg: { contextWindow: 8192, maxOutput: 512 },
@@ -143,8 +145,13 @@ async function makeCtx(
     budget: () => ({ over: false, tokens: 0, softLimit: 1 }),
     signal: new AbortController().signal,
     artifactDir: path.join(dir, "artifacts"),
-    ...overrides,
+    ...rest,
   };
+  // 没给 gate 的用例测的是主循环本体，显式声明跳过权限层（D-116）。
+  const ctx: LoopCtx =
+    permissionGate === undefined
+      ? { ...base, unsafeSkipPermission: true }
+      : { ...base, permissionGate };
   return { ctx, session, dir };
 }
 

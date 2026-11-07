@@ -94,17 +94,27 @@ function permissionOf(
   return { gate, onDecision };
 }
 
+type PermissionChoice = PermissionOptions | { unsafeSkipPermission: true };
+
+/** 显式声明"这批调用不经权限层"：管线自身的并发/超时/落盘用例走这条。 */
+function unsafe(): { unsafeSkipPermission: true } {
+  return { unsafeSkipPermission: true };
+}
+
 function optsOf(
-  permission?: PermissionOptions,
+  choice: PermissionChoice,
   overrides: Partial<{ timeoutMs: number; settleGraceMs: number; signal: AbortSignal }> = {},
 ): Parameters<typeof executeBatch>[3] {
-  return {
+  const base = {
     signal: overrides.signal ?? new AbortController().signal,
     artifactDir: path.join(tmp, "artifacts"),
     ...(overrides.timeoutMs === undefined ? {} : { timeoutMs: overrides.timeoutMs }),
     ...(overrides.settleGraceMs === undefined ? {} : { settleGraceMs: overrides.settleGraceMs }),
-    ...(permission === undefined ? {} : { permission }),
   };
+  // 权限语义必须在调用点选：给 gate，或显式声明跳过（D-116）。
+  return "unsafeSkipPermission" in choice
+    ? { ...base, unsafeSkipPermission: true }
+    : { ...base, permission: choice };
 }
 
 describe("executeBatch 权限授权与执行边界", () => {
@@ -246,7 +256,7 @@ describe("executeBatch 权限授权与执行边界", () => {
       session,
       reg,
       [call("c1", "fileop", { op: "write" })],
-      optsOf(),
+      optsOf(unsafe()),
     );
 
     expect(execute).toHaveBeenCalledTimes(1);
@@ -723,5 +733,68 @@ describe("executeBatch MCP 端到端授权", () => {
       effective: "deny",
       preset: "diagnose",
     });
+  });
+});
+
+describe("executeBatch 必须显式选择权限语义（D-116）", () => {
+  // 类型层已由 union 排除"两者都不给"，但 JS 调用方与 `as unknown as` 仍然能绕过去。
+  // 运行时守卫是最后一层：绝不允许"什么都不填"静默走无判定路径。
+  it("既不传 permission 也不传 unsafeSkipPermission → 抛错且不执行任何工具", async () => {
+    const session = makeSession(path.join(tmp, "session"));
+    const execute = vi.fn(async () => ok("never"));
+    const tool = makeTool("fileop", z.object({ op: z.string() }), execute, { readOnly: false });
+    const reg = new ToolRegistry([tool]);
+
+    const bogusOptions = {
+      signal: new AbortController().signal,
+      artifactDir: path.join(tmp, "artifacts"),
+    } as unknown as Parameters<typeof executeBatch>[3];
+
+    await expect(
+      executeBatch(session, reg, [call("c1", "fileop", { op: "write" })], bogusOptions),
+    ).rejects.toMatchObject({
+      name: "PermissionLayerChoiceError",
+      code: "permission_choice_required",
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("permission 与 unsafeSkipPermission 同时给 → 抛错且不执行（互斥）", async () => {
+    const session = makeSession(path.join(tmp, "session"));
+    const execute = vi.fn(async () => ok("never"));
+    const tool = makeTool("fileop", z.object({ op: z.string() }), execute, { readOnly: false });
+    const reg = new ToolRegistry([tool]);
+
+    const conflicting = {
+      signal: new AbortController().signal,
+      artifactDir: path.join(tmp, "artifacts"),
+      permission: permissionOf(fakeGate(), async () => {}),
+      unsafeSkipPermission: true,
+    } as unknown as Parameters<typeof executeBatch>[3];
+
+    await expect(
+      executeBatch(session, reg, [call("c1", "fileop", { op: "write" })], conflicting),
+    ).rejects.toMatchObject({
+      name: "PermissionLayerChoiceError",
+      code: "permission_choice_conflict",
+    });
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("显式 unsafeSkipPermission → 保持无判定执行（管线自测路径）", async () => {
+    const session = makeSession(path.join(tmp, "session"));
+    const execute = vi.fn(async () => ok("done"));
+    const tool = makeTool("fileop", z.object({ op: z.string() }), execute, { readOnly: false });
+    const reg = new ToolRegistry([tool]);
+
+    const results = await executeBatch(
+      session,
+      reg,
+      [call("c1", "fileop", { op: "write" })],
+      optsOf(unsafe()),
+    );
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(results[0]!.result.code).toBe("ok");
   });
 });
