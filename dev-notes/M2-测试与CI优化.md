@@ -51,3 +51,33 @@
 - 未在旧 Node（<24）上验证 `.cjs` 判据；`engines` 已声明 `>=24`。
 - 未验证 `.js` 在「无 `"type": "module"` 的嵌套目录」下的语义。当前两个根下没有这种目录，将来若新增需重判。
 - 分支保护仍要求状态检查 `typecheck + build + test (offline)`（拆分前的旧 job 名），而实际上报的是 `typecheck + syntax (fast)` 与 `build + test (offline)`。direct push 到 main 不受影响（PR 分支保护需要 PR），但**开 PR 会被卡在「expected」**。这是仓库设置，未擅自修改。
+
+## 2026-11-07 · 覆盖率口径收窄（BACKLOG 4.4 / OPT-26）+ T-035 断言（4.6）
+
+**用户关键原话**
+- 「跑一次 coverage 看真实数字」
+- 「按推荐发子代理」（推荐 = keil/serial 只登记不设闸门）
+
+**关键产出**
+- **覆盖率实测三档**（lines，按最终文件选择规则复跑三次一致）：
+  - `src/**` 单独 → 90.99%（6837/7514）
+  - `src/**` + 全部 `mcp-servers/**` → 78.43%（9979/12722），距 85% 差 835 行
+  - `src/**` + `kb`/`datasheet`/`probe` → **90.15%（8778/9737）**，通过
+- `vitest.config.ts`：`include` 改为上述三块，新增 `exclude: ['**/tests/**']`；阈值 85% **未动**。注释写明排除理由与每块 covered/total。
+- `tests/desktop/serial-dropped.test.js`（B 代理）：2 条静态断言钉住 T-035 的赋值语义。
+- 文档同步：`docs/BACKLOG.md`（4.4 / 4.6 标完成，附实测数据表）、`docs/ledgers/deferred-issues.md`（D-157 补「覆盖率数字不构成已验证证据」）、`docs/ledgers/optimization-and-new-features.md`（OPT-25 / OPT-26 状态）、`AGENTS.md` 与 `README.md`（覆盖率口径与 `check:docs` / `verify`）。
+
+**被拒绝或纠偏的内容**
+- **没有把阈值降到 78% 去容纳 keil/serial**：那是把「测不了」写成「合格」。改为口径收窄 + 如实登记缺口。
+- **没有给 keil/serial 单独设低阈值**：低阈值容易被后人当成「达标」，比不设更糟。
+- 子代理 A 建议按它的数字改注释，我复核后**同时保留了两套分母的解释**——它用 `mcp-servers/**`（12734 行，含 4 个 3 行 `.json`），我用 `**/*.ts`（12722 行）。覆盖行数相同（9979），差异纯在分母口径。最终统一为配置实际使用的 `**/*.ts` 口径。
+
+**翻车与返工**
+- **我先前的数字是错的**：报给子代理的 kb 90.61% / datasheet 92.55% / probe 81.03% 是在**未排除 `**/tests/**`** 的口径下测的。排除测试夹具后真实值是 91.30% / 93.18% / 81.28%。子代理指出偏差后我复测确认——**它是对的**。教训：给子代理的 brief 里写「实测数字」时，必须先确认那个数字和最终配置是同一条文件选择规则，否则差异会被当成测量误差传下去。
+- 全量纳入口径的全模板 `mcp-servers/**` 会把 `.json` 也算进分母（4 个文件 12 行），产生 12734 vs 12722 的差异。已改为只取 `**/*.ts`。
+- 第一次在子代理 brief 里写「`src/**` + 全部 `mcp-servers/**` = 78.49%，差 829 行」；按最终规则复算是 78.43% / 835 行。已全部改正并留下 covered/total 便于复核。
+
+**验证（真实输出）**
+- `npm run coverage` → exit 0，Lines 90.15%（8778/9737），无 "does not meet" 错误；表中无 keil / serial / embedded 模块行，无 `fixtures.ts`。
+- 注入 `+=` 后 `npx vitest run tests/desktop/serial-dropped.test.js` → 1 failed（`expected '+=' to be '='`）；还原后 2 passed，`git diff desktop/renderer/app.js` 为空。
+- `npm run verify` → check:js 40 文件、check:docs 177 文档/96 链接、`3789 passed | 5 skipped`。

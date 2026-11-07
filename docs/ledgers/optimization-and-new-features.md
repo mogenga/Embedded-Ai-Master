@@ -243,8 +243,8 @@
 | OPT-21 | Keil 工具面读写分拆 | 整个 `keil_debug` 仍是单一 `destructiveHint: true`（`mcp-servers/keil/tools.ts:1424`） |
 | OPT-22 | Datasheet 三处截断披露 | `search()` 仍丢弃 `walkPdfFiles().truncated`、`hits.slice()` 无标记（`mcp-servers/datasheet/service.ts`） |
 | OPT-24 | 语料与查询集进 CI | `.gitignore:26-27` 仍排除，回归组在 CI 整组 skip（D-158） |
-| OPT-25 | 统一 `verify` 命令 | `package.json` 仍无 `verify` |
-| OPT-26 | 覆盖率纳入 `mcp-servers/**` | `vitest.config.ts` 的 `coverage.include` 仍只有 `src/**` |
+| OPT-25 | 统一 `verify` 命令 | **2026-11-07 已落地**：`npm run verify` = typecheck + check:js + check:docs + test |
+| ~~OPT-26~~ | ~~覆盖率纳入 `mcp-servers/**`~~ | **2026-11-07 按实测收窄后落地**。全量纳入口径实测 78.43%（9979/12722），被 keil（42.65%）/ serial（19.45%）/ embedded（0%）拖住，而这三块的剩余路径必须连真实 uVision 或 COM 口。最终口径 = `src/**` + `kb` / `datasheet` / `probe`，实测 90.15%，闸门仍是 85%。理由与数字见 `docs/BACKLOG.md` 批次 4 的 4.4 与 D-157 的 2026-11-07 补充 |
 | OPT-28 | 文档事实源对齐 | 本轮已改 README / MATRIX / frontend-design / m2-roadmap / release 五份；`docs/specs/frontend-design.md` 的其余描述性偏差仍会随实现继续漂移，没有回归守住 |
 | OPT-29~44 | 内核加固、桌面打磨、工程卫生、BR-7 夜批 | 未动；OPT-37（串口三个未接）、OPT-39（设置页草稿）、OPT-40（导航守卫）、OPT-42（工程卫生）成本最低，适合下一批 |
 

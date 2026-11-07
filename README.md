@@ -278,10 +278,15 @@ npm run test:mcp      # 领域 MCP server
 npm run typecheck     # 类型检查
 npm run lint          # 目前等同类型检查（D-006）
 npm run check:js      # 对 desktop/ 与 scripts/ 每个 JS 做语法检查
-npm run coverage      # 覆盖率（行覆盖阈值 85%）
+npm run check:docs    # 检查 docs 里所有本地链接与图片路径可达
+npm run verify        # 上面四项 + 全量测试，一次跑完
+npm run coverage      # 覆盖率（行覆盖阈值 85%，实测 90.15%）
 npm run build         # 内核
 npm run build:mcp     # 领域 MCP server
 ```
+
+> [!NOTE]
+> 覆盖率统计 `src/**` 与 `kb` / `datasheet` / `probe` 三台领域 server，**不含** `keil` / `serial` / `embedded`——它们的剩余路径必须连真实 uVision 或真实串口才能走。**不统计不等于已验证**，这两块的真机验证另见 [`docs/ledgers/deferred-issues.md`](docs/ledgers/deferred-issues.md) 的 D-157。
 
 ### 验收
 

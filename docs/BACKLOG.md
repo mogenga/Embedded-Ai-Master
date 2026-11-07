@@ -32,14 +32,27 @@
 | 4.1 | 文档按角色分目录（`specs/` / `operations/` / `ledgers/` / `archive/`），全仓引用同步 | OPT-28 的延伸 | `npm run check:docs` 0 失败 |
 | 4.2 | 本地链接检查进 CI | 新增 | quick job 含 `check:docs`；故意写坏一条链接能让 CI 红 |
 | 4.3 | 统一 `verify` 命令（typecheck + check:js + check:docs + test） | OPT-25 | `npm run verify` 一条命令跑完四项 |
-| 4.4 | 覆盖率纳入 `mcp-servers/**` | OPT-26 | `coverage.include` 含 `mcp-servers/**`；领域层 39 个测试文件受闸门约束 |
+| ~~4.4~~ | ~~覆盖率纳入 `mcp-servers/**`~~ **已落地（按实测收窄）** | OPT-26 | `coverage.include` = `src/**` + `kb` / `datasheet` / `probe`，`exclude` = `**/tests/**`；阈值仍 85%，实测 90.15% |
 | 4.5 | `git blame` 之外的状态守护：台账状态行抽检脚本（可选） | 新（2026-11-07 核对教训） | 能被 CI 跑，或者明确不做并写明理由 |
-| 4.6 | T-035 的断言（`dropped` 用赋值不用累加） | T-035 | 一条渲染层断言，把 `state.serial.dropped = …` 钉住 |
+| ~~4.6~~ | ~~T-035 的断言（`dropped` 用赋值不用累加）~~ **已落地** | T-035 | `tests/desktop/serial-dropped.test.js`：切出 `serial_lines` 分支，断言唯一写入是 `=`，排除 `+=` 与 `x = x + msg.dropped` |
 
 > [!NOTE]
-> 4.1 / 4.2 / 4.3 在本文档落地时一并完成；4.4~4.6 仍待做。
-> 4.4 可能让覆盖率一次掉到 85% 以下（领域层 39 个测试文件此前不受闸门约束），
-> 落地前先跑一次 `npm run coverage` 看真实数字，不要为了过闸门去调阈值。
+> 4.1 / 4.2 / 4.3 / 4.4 / 4.6 已在 2026-11-07 完成；**4.5 未做**（台账状态行的自动守护）。
+
+**4.4 的实测数据（2026-11-07，`npm run coverage` 真跑）**
+
+| 口径 | 行覆盖 | 对 85% 闸门 |
+|---|---:|---|
+| `src/**` 现状 | 90.99%（6837/7514） | 通过 |
+| `src/**` + 全部 `mcp-servers/**` | 78.43%（9979/12722） | **失败**，还差约 835 行 |
+| `src/**` + `kb` / `datasheet` / `probe` | **90.15%（8778/9737）** | 通过 |
+
+领域层各模块行覆盖（排除 `**/tests/**` 后）：`kb` 91.30%（714/782）、`datasheet` 93.18%（437/469）、`probe` 81.28%（790/972）、`keil` 42.65%（1144/2682）、`serial` 19.45%（57/293）、`embedded` 0%（0/10）。
+
+**定案口径**：闸门覆盖 `src/**` + `kb` / `datasheet` / `probe`，排除 `keil` / `serial` / `embedded`。理由不是"它们没测"，而是**剩余路径必须插着硬件才能走**：`mcp-servers/keil` 的 8721 行源码里，`keilSession` 要连真实 uVision 的 UVSOCK（端口 4823）；`serial/tools.ts` 的测试刻意不 spawn 泵、不碰真实 COM 口（`embed-serial.test.ts` 头注释写明）。把这两块算进闸门，等于要求离线测试覆盖真机路径——只能靠豁免或造假达成，两者都比不设闸门更糟。
+
+> [!WARNING]
+> **keil / serial / embedded 的覆盖率不设闸门，不代表它们被验证过。** 这一块的真实缺口登记在 `docs/ledgers/deferred-issues.md` 的 D-157（真机未实测）；在 D-157 关闭前，任何关于「Keil / 串口链路覆盖率」的说法都必须附带这个前提，不得只报领域层总数字。
 
 ---
 

@@ -1454,6 +1454,7 @@
 - **触发升级条件**: 获得可复现的真机/串口环境;或用户报告 OpenOCD/串口路径的实际失败。
 - **修复建议**: 在真机上执行 attach → halt → read → write → 回读 → reset → detach,并单独验证串口打开、写、读超时与断开;把实测结果写入 `dev-notes`,不把硬件依赖加入默认 `npm test`。
 - **状态**: 未解决。2026-10-20 第一轮独立审查修复进一步明确:本轮 `OpenOcdBackend.attach` 只建立 telnet transport,不 spawn `openocd`;`openocdConfig` 死参数已移除。真机启动与板卡验证仍由本条覆盖。
+- **2026-11-07 补充（覆盖率口径的连带事实）**：覆盖率闸门**不统计** `mcp-servers/keil`（行覆盖 42.65%，1144/2682）、`mcp-servers/serial`（19.45%，57/293）与 `mcp-servers/embedded`（0%，0/10）——它们的剩余路径必须连真实 uVision（UVSOCK 4823）或真实 COM 口才能走，纳入闸门只能靠豁免或造假。因此这两块的覆盖率数字**不构成任何"已验证"的证据**，`keil` / `serial` 的正确性仍完全依赖本条的真机验证。闸门实际覆盖 `src/**` + `kb` / `datasheet` / `probe`（合计 90.15%，2026-11-07 实测）。口径与理由见 `docs/BACKLOG.md` 批次 4 的 4.4。
 
 ### D-158 · KB 语料与查询集不入库导致 CI 回归覆盖缺口
 
