@@ -7851,12 +7851,13 @@ document.addEventListener("click", (event) => {
   }
 });
 
+// Legacy path: in a shell without the top layer (no `showModal`), a backdrop
+// click lands on the scrim itself. Kept for that case; in Electron the dialogs
+// retarget it, so their own listeners below are the ones that fire.
 modalScrim.addEventListener("click", () => {
   closeModal(shortcutsDialog);
-  // Settings can own an unsaved draft, so it decides (OPT-39). `#modal-scrim`
-  // is the sibling under the open dialog; a click there reaches it only in a
-  // browser without the top layer, so the dialog's own backdrop handler below
-  // is the path that actually fires — both go through the same guard.
+  // Settings can own an unsaved draft, so it decides (OPT-39). Both routes go
+  // through the same guard.
   void settings.requestClose();
 });
 
@@ -7866,6 +7867,14 @@ modalScrim.addEventListener("click", () => {
 settingsDialog.addEventListener("click", (event) => {
   if (event.target === settingsDialog) void settings.requestClose();
 });
+
+// The shortcut sheet has nothing to lose, so it closes straight away — same
+// backdrop rule, no guard. Without this listener a click beside the sheet did
+// nothing: the scrim never receives it while a modal dialog is up.
+shortcutsDialog.addEventListener("click", (event) => {
+  if (event.target === shortcutsDialog) closeModal(shortcutsDialog);
+});
+
 
 // A native close request (Escape handled by the browser, not by the chain
 // above) takes the dialog out of the top layer without touching `hidden`. The
