@@ -13,6 +13,7 @@ import {
   SERIAL_ACTIONS,
   SERIAL_EVIDENCE_ACTIONS,
   SERIAL_DESTRUCTIVE_ACTIONS,
+  SERIAL_READONLY_ACTIONS,
   SERIAL_DESCRIPTION,
   serialInputSchema,
 } from "./actions.js";
@@ -51,7 +52,10 @@ export const embedSerialTool: ProbeToolSpec = {
   meta: {
     evidence: true,
     evidenceActions: [...SERIAL_EVIDENCE_ACTIONS],
+    // 两份必须成对发出：内核看到任意一份就会按动作判读写，没被覆盖的动作是
+    // `unknown`（diagnose 下 deny）。只发破坏性那份会把读也一起拒掉。
     destructiveActions: [...SERIAL_DESTRUCTIVE_ACTIONS],
+    readOnlyActions: [...SERIAL_READONLY_ACTIONS],
   },
   handler: async (args: unknown): Promise<ProbeToolResult> => {
     const input = (args ?? {}) as Record<string, unknown>;

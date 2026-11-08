@@ -11,6 +11,16 @@ export type SerialAction = (typeof SERIAL_ACTIONS)[number];
 export const SERIAL_EVIDENCE_ACTIONS: ReadonlySet<string> = new Set(["read", "ports", "status"]);
 export const SERIAL_DESTRUCTIVE_ACTIONS: ReadonlySet<string> = new Set(["write", "open", "close"]);
 
+/**
+ * 只读动作（OPT-21）。
+ *
+ * **必须发出去**：内核看到 `_meta.destructiveActions` 就会按动作判读写（`src/mcp/tools.ts`
+ * 的 `actionAccess`），而没被任何一份白名单覆盖的动作是 `unknown` —— `diagnose`
+ * 下直接 deny。只发破坏性那份，等于把 `read` / `ports` / `status` 从「审批后可用」
+ * 变成「不可能可用」。六个动作必须全部被两份白名单覆盖，这与 keil 侧的口径一致。
+ */
+export const SERIAL_READONLY_ACTIONS: ReadonlySet<string> = new Set(["read", "ports", "status"]);
+
 export const serialInputSchema = z
   .object({
     action: z.enum(SERIAL_ACTIONS),
