@@ -49,6 +49,7 @@ docs/
 | [`datasheet-mcp.md`](operations/datasheet-mcp.md) | 数据手册检索的设计与工具面 |
 | [`serial-panel-spec.md`](operations/serial-panel-spec.md) | 串口助手调研、实现方案与事后结论 |
 | [`subagent.md`](operations/subagent.md) | 只读子代理的工具面、只读边界、事件契约与已知边界 |
+| [`hooks.md`](operations/hooks.md) | 外部命令钩子的配置格式、退出码语义、fail-closed 理由与已知边界 |
 
 ### `ledgers/` — 台账
 

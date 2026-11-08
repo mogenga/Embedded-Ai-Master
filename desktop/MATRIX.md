@@ -61,7 +61,29 @@
 
 ### 已隐藏（前端不渲染入口，宿主回显式 `notice`）
 
-git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi`）、终端（`terminalOpen`/`terminalRun`/`terminalInterrupt`/`terminalRestart`）、worktree（`worktreeStart`/`worktreeMerge`/`worktreeDiscard`/`worktreeDiff`；**顶栏与面板已在 2026-10-22 整块删除**，用户点它只得到「桌面宿主暂不支持该命令」）、browser（`browserOpen`/`browserNavigate`/…）、memory / instructions / hooks、板卡控制（`getBoardState`）。
+git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi`）、终端（`terminalOpen`/`terminalRun`/`terminalInterrupt`/`terminalRestart`）、worktree（`worktreeStart`/`worktreeMerge`/`worktreeDiscard`/`worktreeDiff`；**顶栏与面板已在 2026-10-22 整块删除**，用户点它只得到「桌面宿主暂不支持该命令」）、browser（`browserOpen`/`browserNavigate`/…）、memory / instructions、板卡控制（`getBoardState`）。
+
+> **2026-11-09：`hooks` 已从本清单移出——不是「隐藏」，是内核有了这个能力，形态是配置命令。**
+> 钩子是手编文件里的**一条命令**（`$HARNESS_HOME/hooks.json`，项目级 `<workdir>/.harness/hooks.json`
+> 需信任），工具调用前后执行：`preToolUse` 退出码 2 阻断并把 stderr 回给模型，其余失败一律
+> fail-closed；`postToolUse` 的 stdout 追加进结果正文并撤回 `evidence`。它接在权限层**之后**，
+> 所以只能收紧、不能放行。
+>
+> **没有 UI 页面，本轮也不打算加。** 宿主没有任何写钩子的命令，设置页也没有对应表单——配置是
+> 手编文件，先有契约（[`docs/operations/hooks.md`](../docs/operations/hooks.md)）。界面上的两个落点
+> 都是既有通道：工具行在 `detail.hooks` 里有 `blocked` / `failure` 时多一行说明，两条 `status`
+> （`hooks_config_failed` / `hooks_project_config_skipped`）画成 warn notice。**不新增事件类型**：
+> 钩子结果已经在 `tool_result.detail.hooks` 里，另起一种是同一事实的第二份定义。
+>
+> **宿主侧的接线只有一行**：`createRunner` 照常把 `harnessHome` 交给 runner，内核据此默认读
+> `$HARNESS_HOME/hooks.json`。宿主**不**传 `hooks` 选项、也**不**自己校验配置（`SessionRunnerOptions`
+> 里没有这个字段，传了会被静默丢弃）。代价是桌面形态**不加载项目级钩子**：宿主不传
+> `trustProjectConfig`，只会在看到 `<workdir>/.harness/hooks.json` 时画那条「未信任」warn。
+> 桌面侧还没有「信任此工作区」的入口。
+>
+> 设置页 `buildHooksPage` 与 `hook_status` / `hookTrust` 那套（`settings.js` / `settings-i18n.js`）
+> 是移植前的前端遗留，**没有宿主 handler**，该页也未注册；上面那段「不在列表里」的说明对它仍然
+> 成立。不要把它当作本次实现的界面。
 
 > **2026-11-07：subagents / goals / 检查点已从本清单移出——不是「隐藏」，是整套删除。**
 > 这三项与上列的 git / 终端不同：宿主与内核从来没有对应命令或事件（`grep -rn 'goal_start|subagent_start|checkpoints' src/ desktop/host/host.js desktop/renderer/protocol.js` 零命中），所以「隐藏入口」没有意义——被隐藏的是一个不存在的后端。渲染器里约 400 行实现（`case "goal_start"/"goal_round"/"goal_end"`、`case "subagent_start"/"subagents"/"subagent_activity"/"subagent_end"`、`case "checkpoints"`、`renderGoalBadge` / `renderSubagents` / `renderCheckpoints` / `startAutonomous` / `stopGoal` / `stopSubagent`、`#goal-badge`、`#tasks-root`、`#history-root` 与对应 i18n 键、CSS）已整块删除，按 D-185 的原则「不要保留『以后可能用』的半成品」。若将来实现子代理或自主循环，按新功能立项、重新设计事件契约，不要从 git 历史里捡回这半套。
@@ -109,14 +131,14 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 | `thinking_delta` | `thinking_start` → `thinking_text{text}`（逐条）→ `thinking_end`。内核只有 `thinking_delta` 一种事件（段落边界是纯投影状态），**start/end 由这一层补**：段落首次出现推理片段时发一次 start，遇到 `assistant` / `assistant_delta` / `tool_call` / `tool_started` / `tool_result` / `user` / `status` / `interrupted` 时发 end。只带状态的事件（`usage` / `checkpoint` / `mcp_status` / `device_status` / `compaction` / `permission_decision`）**刻意不打断**——`usage` 帧在流中途到达是常态，按它切段会把一条思路断成读者看不出原因的几块。推理文本只走这条通道，**绝不**混进 `assistant_delta`（那是模型回复的内容，且会被投影回下一次请求）。重开会话时 `session_loaded` 的 `messages` 里含 `role: "thinking"` 行（相邻片段合并成一段），否则日志里的思考会静默丢失。**渲染器侧：每个思考块自带标题栏按钮（`<button class="thinking-toggle" aria-expanded>`），展开态存在该块的 `data-expanded` 上，与 `data-view` 无关**——展开第 2 块不影响第 1 块；流式中默认展开且无 320px 上限，结束后未被动过的块收成一行，被点过的块保持读者选择；折叠态用 `max-height: 0` + `overflow: hidden`（不用 `display: none` / `visibility: hidden`，那会让按钮不可聚焦） |
 | `assistant` | `assistant_start` → 补齐尚未流式过的部分 → `assistant_end`（不重复已流式的文本） |
 | `tool_started` | `tool_start{name, summary, id, annotations?}`（summary 取 assistant 事件的 `toolCalls` 参数）。`annotations` 只带值为 `true` 的 `readOnly`/`destructive`/`evidence`；缺省即「未声明」，渲染器据此不画徽标——全 false 与不存在不能混为一谈。**同一条之后发 `turn_progress{tool, elapsedMs?}`**：协议层在工具开始/结束时发出，无定时器、无百分比，`elapsedMs` 取自日志里 `user` 事件的 `ts`（缺失就不写该字段），且只在回合进行中发 |
-| `tool_result` | `tool_end{name, ok, summary, id, evidence?}` +（成功时）`tool_output{name, content, artifactPath?, id}`；未被 `tool_started` 覆盖时先补一行 `tool_start`（被拒的调用也要留痕）。`artifactPath` 存在时输出块底部出现「打开产物」按钮与「预览」。**`evidence` 只在显式布尔时写**（缺省 = 未声明，与 `false` 不同）；它是「只看证据」筛选与导出标记的来源，不新增会话事件类型（D-135）。`tool_output.id` 让输出挂到正确的工具行（并发只读调用乱序返回时） |
+| `tool_result` | `tool_end{name, ok, summary, id, evidence?, hookNote?}` +（成功时）`tool_output{name, content, artifactPath?, id}`；未被 `tool_started` 覆盖时先补一行 `tool_start`（被拒的调用也要留痕）。`artifactPath` 存在时输出块底部出现「打开产物」按钮与「预览」。**`evidence` 只在显式布尔时写**（缺省 = 未声明，与 `false` 不同）；它是「只看证据」筛选与导出标记的来源，不新增会话事件类型（D-135）。`tool_output.id` 让输出挂到正确的工具行（并发只读调用乱序返回时）。**`hookNote` 只在 `detail.hooks` 里有 `blocked` 或 `failure` 时出现**（缺省 = 这次调用没有钩子，输出与引入钩子之前逐字段相同）；它是一行附加说明（`被钩子拦截：<command>` / `钩子未跑成…`），画在工具行内部而不是另起面板；重开会话时由 `sessionEventsToMessages` 从同一个 `detail` 重新得出，两个视图不会一个有一个没有 |
 | `approval_request` | `permission_request{id, question, detail}` |
 | `permission_decision` | `permission_closed{id}`（审批超时/中止时收起审批条）+ 拒绝时 `notice{warn}` |
 | `device_status` | `device_status{device, server, tool}`。**事件保留、当前无 UI 消费者**：板卡面板于 2026-10-26 删除，渲染器 `case "device_status"` 刻意不画任何东西（`app.js:3085-3091`），设备信息改由所调用工具的那一行与输出承载 |
 | `mcp_status` | `notice{dim\|warn}` |
 | `usage` | `usage{usage, context?, contextBreakdown?, costUsd?}`——`context` 是上下文占用（tokens/percent/window），`contextBreakdown` 是同一份测量的按类别拆分（`{used, window, percent, compactAt, parts:[{key,tokens}]}`，key ∈ `systemPrompt`/`messages`/`toolResults`/`mcpTools`，`sum(parts.tokens) === used`），`costUsd` 是会话累计成本；缺失时字段不存在，渲染器据此隐藏而不是显示 0。**占用率在发请求之前测量**（D-195：原先在 `usage` 落盘时重新投影日志，那一刻工具批次未闭合、必然抛错被吞，导致每条带工具调用的回合都没有占用率）。**`state` 事件里的 `context` 用 `null` 表示「未知」**（`protocol.measuredContext()`），`undefined`（字段缺席）表示「这条事件不带占用，别动屏幕上的数字」——两者语义不同，不得互换。`contextBreakdown` 走 `protocol.measuredBreakdown()`，语义与 `context` 一致 |
 | `status{done}` | `run_end` |
-| `status{usage_missing\|device_status_invalid\|permissions_project_config_skipped}` | `notice` |
+| `status{usage_missing\|device_status_invalid\|permissions_project_config_skipped\|hooks_config_failed\|hooks_project_config_skipped}` | `notice`。两条 hooks 的都是 warn：`hooks_config_failed` 带内核给的文件路径与 `hooks[N]` 字段路径（哪份文件哪一条坏了）；`hooks_project_config_skipped` 说清是**未信任该工作区**而不是文件坏了——两者下一步不同，不能共用一句话。两条都**不阻止运行**（钩子是加固，不是运行前提） |
 | `interrupted` | `notice{warn}` + `run_end` |
 | `compaction` | `compacted`（microcompact / summary）/ `notice`（failed）。**`no_progress` 与 `no summarizable content` 降级为 dim 提示而不是 warn 失败**：`/compact` 现在一律执行（不再看阈值），小会话上必然撞到这两种「没什么可压」，把它们印成「压缩失败」是误报 |
 | `todos` | `todos{items:[{content,status}]}`（`todo_write` 工具写的计划；渲染器画计划卡并在执行中原地打勾）。`status` 非法时该行按 `pending` 保留文字，坏项丢弃；空数组表示「清空计划」，渲染器据此移除卡片。**同一条 `items` 也画在输入框上方的计划条**（`#plan-strip`，折叠态一行：计数 + 当前步，点击展开完整列表）——两处共用 `paintPlanRows`，不是两份状态。`session_loaded` 额外带 `todos`（取最后一条 `todos` 事件），否则重开会话时计划卡会消失 |

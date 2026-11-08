@@ -250,6 +250,59 @@ export function summarizeBackgroundResult(payload) {
   return { type: "notice", level: verdict, text: parts.join("；") };
 }
 
+/** How much of a hook's own sentence reaches the tool row. */
+const MAX_HOOK_NOTE_CHARS = 200;
+
+/** One clause for an entry of `ToolResult.detail.hooks`. */
+function hookEntryClause(entry) {
+  if (entry.blocked === true) {
+    const command = textOf(entry.command);
+    return command === "" ? "被钩子拦截" : `被钩子拦截：${command}`;
+  }
+  // `failure` already reads `hook #N (source) <command>: <reason>` — it names
+  // which entry of which file did not run and why, which is what the reader
+  // needs. The two events need different clauses: a `preToolUse` failure is
+  // fail-closed and the call never executed, while a `postToolUse` failure
+  // leaves the tool's own result intact and only drops the annotation.
+  const failure = textOf(entry.failure);
+  if (failure === "") return "钩子未运行";
+  return entry.event === "preToolUse"
+    ? `钩子未跑成，调用未执行：${failure}`
+    : `钩子未跑成：${failure}`;
+}
+
+/**
+ * The extra line a tool row carries when a hook blocked it or failed to run,
+ * or `undefined` when there is nothing to say.
+ *
+ * This is a note on an existing row, not an event: the kernel already put the
+ * outcomes in `tool_result.detail.hooks`, and inventing a second event for the
+ * same fact would be a second definition of it. It is also deliberately
+ * *conditional* — a tool call with no hooks must produce exactly the message
+ * it produced before hooks existed, so no field is written when the detail
+ * carries none (or carries an empty list).
+ *
+ * Only `blocked` and `failure` are notable. A hook that ran and said nothing
+ * (or whose post-output was appended to the text) is already visible in the
+ * result body; annotating every call that merely has hooks configured would
+ * turn a quiet mechanism into a status line on every row.
+ *
+ * `detail` is `unknown` on the wire, so every step is shape-checked: a log
+ * written by another version is not a reason to throw inside the renderer.
+ */
+export function summarizeHookDetail(detail) {
+  if (!isRecord(detail)) return undefined;
+  const hooks = detail.hooks;
+  if (!Array.isArray(hooks)) return undefined;
+  const notable = hooks.filter(
+    (entry) => isRecord(entry) && (entry.blocked === true || textOf(entry.failure) !== ""),
+  );
+  if (notable.length === 0) return undefined;
+  const rest = notable.length > 1 ? `（另有 ${notable.length - 1} 条）` : "";
+  const text = `${hookEntryClause(notable[0])}${rest}`;
+  return text.length > MAX_HOOK_NOTE_CHARS ? `${text.slice(0, MAX_HOOK_NOTE_CHARS)}…` : text;
+}
+
 /** Statuses the kernel writes for a subagent's terminal state. */
 const SUBAGENT_STATUSES = new Set(["finished", "failed", "killed", "timed_out"]);
 
@@ -474,6 +527,11 @@ export function sessionEventsToMessages(events) {
       // reopening a conversation would hide rows that are in fact evidence,
       // and the two views of one log would disagree.
       if (typeof payload.evidence === "boolean") row.evidence = payload.evidence;
+      // Same argument for the hook note: after a reload a blocked call would
+      // otherwise read as an ordinary failure, and the reason the hook gave
+      // would only exist in the log. One log, one transcript.
+      const hookNote = summarizeHookDetail(payload.detail);
+      if (hookNote !== undefined) row.hookNote = hookNote;
       out.push(row);
     }
   }
@@ -828,6 +886,13 @@ export function sessionEventToHostEvents(event, ctx) {
       // `true` as evidence, but the export and the row badges must be able to
       // tell the two apart.
       if (typeof payload.evidence === "boolean") ended.evidence = payload.evidence;
+      // `detail.hooks` is the kernel's record of the hooks that ran around
+      // this call. Only the two outcomes a reader must not miss become a row
+      // annotation; everything else is already in the result text (a post
+      // hook's stdout is appended there). Absent detail means no hooks ran,
+      // so the message stays byte-for-byte what it was before hooks existed.
+      const hookNote = summarizeHookDetail(payload.detail);
+      if (hookNote !== undefined) ended.hookNote = hookNote;
       out.push(ended);
       if (ok) {
         const content = truncateUtf8(textOf(payload.text), MAX_TOOL_OUTPUT_BYTES);
@@ -1026,6 +1091,29 @@ export function sessionEventToHostEvents(event, ctx) {
           type: "notice",
           level: "warn",
           text: `项目权限配置未加载: ${textOf(payload.message)}`,
+        });
+      } else if (status === "hooks_config_failed") {
+        // The kernel carries `HookConfigError.message`, which names the file
+        // and the offending entry (`hooks[0].macher`). Passing it through is
+        // the point: "钩子配置坏了" without the path leaves the reader with
+        // two candidate files and no idea which one to fix. The run continues
+        // — hooks are hardening, not a precondition — so this is a warning
+        // about a missing safety net rather than a failure of the turn.
+        out.push({
+          type: "notice",
+          level: "warn",
+          text: `钩子配置读取失败，本次调用没有钩子在跑: ${textOf(payload.message)}`,
+        });
+      } else if (status === "hooks_project_config_skipped") {
+        // Untrusted, not broken. Saying "failed" here would send the reader to
+        // look for a syntax error in a file that is perfectly valid and simply
+        // has not been trusted; the two need different next steps.
+        out.push({
+          type: "notice",
+          level: "warn",
+          text:
+            `项目钩子配置未加载（未信任该工作区）: ${textOf(payload.message)}` +
+            `——信任后才会读取 .harness/hooks.json`,
         });
       }
       break;
