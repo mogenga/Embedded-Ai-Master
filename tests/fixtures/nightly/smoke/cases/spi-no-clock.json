@@ -1,0 +1,11 @@
+{
+  "id": "spi-no-clock",
+  "symptom": "SPI1 主机模式，逻辑分析仪上看不到 SCK 时钟，MOSI 一直为低。请取证并判断根因。",
+  "maxTurns": 4,
+  "deadlineMs": 1500000,
+  "script": [
+    { "tool": "ls", "args": {} },
+    { "tool": "echo", "args": { "text": "核对 SPI1 的 CR1 SPE/BR 与 RCC APB2ENR" } },
+    { "done": "根因：SPI1 未使能（SPI_CR1 的 SPE 位为 0），因此 SCK 不输出；同时需确认 RCC APB2ENR 的 SPI1EN。可证伪预测：置 SPE 后 SCK 应出现，否则本判断被证伪。" }
+  ]
+}

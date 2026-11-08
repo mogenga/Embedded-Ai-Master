@@ -1,0 +1,15 @@
+{
+  "id": "uart-silent",
+  "symptom": "STM32F4 板子上电后串口助手一个字节都收不到，示波器测 PA2 引脚没有波形。请用工具取证并给出根因判断。",
+  "maxTurns": 6,
+  "deadlineMs": 1500000,
+  "script": [
+    { "tool": "echo", "args": { "text": "开始诊断：串口无输出" } },
+    { "tool": "ls", "args": { "path": "." } },
+    { "tool": "todo_write", "args": { "items": [
+      { "content": "读 KB 的串口无输出鉴别步骤", "status": "in_progress" },
+      { "content": "核对 RCC 时钟使能位", "status": "pending" }
+    ] } },
+    { "done": "根因：USART2 未初始化——RCC 的 APB1ENR 未使能 USART2 时钟，且 GPIOA 的 MODER 未把 PA2/PA3 配成 AF7。判断依据：echo/ls 取到了工作区事实，后续应按 APB1ENR→MODER→CR1 的顺序核对。可证伪预测：若使能时钟并配好复用后仍无波形，则本判断被证伪。" }
+  ]
+}

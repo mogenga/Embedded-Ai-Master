@@ -1,0 +1,5 @@
+{
+  "rootCause": "USART2 未初始化",
+  "requiredTools": ["echo", "ls", "todo_write"],
+  "forbiddenClaims": ["一定是硬件坏了", "无法判断"]
+}

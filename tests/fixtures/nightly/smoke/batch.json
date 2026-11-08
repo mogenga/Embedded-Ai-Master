@@ -1,0 +1,5 @@
+{
+  "name": "smoke",
+  "description": "夜批管线的冒烟批次：不接 Renode、不接真实模型，用 mock 模型跑通「工具序列 → 最终结论 → 判分」这条链路。用于验证管线本身，不是诊断质量基准。",
+  "cases": ["uart-silent", "spi-no-clock"]
+}
