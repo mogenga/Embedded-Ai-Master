@@ -29,7 +29,7 @@
 
 ## 常用命令（以 `package.json` 与 `README.md` 为准）
 
-- 测试：`npm test`（vitest run，不触网，约 **3950 例** / 60–100 s）、`npm run coverage`（`lines ≥ 85%`，当前实测 90.15%）、`npm run test:desktop`（协议层与宿主）、`npm run test:mcp`（领域层）。
+- 测试：`npm test`（vitest run，不触网，约 **3990 例** / 60–130 s）、`npm run coverage`（`lines ≥ 85%`，当前实测 90.21%）、`npm run test:desktop`（协议层与宿主）、`npm run test:mcp`（领域层）。
 - **覆盖率口径**：`src/**` + `mcp-servers/{kb,datasheet,probe}/**`，排除 `**/tests/**`。`keil` / `serial` / `embedded` **刻意不纳入**——剩余路径必须连真实 uVision（UVSOCK 4823）或真实 COM 口，纳入只能靠豁免或造假。**不纳入 ≠ 已验证**：这两块仍由 D-157 的真机验证跟踪。理由与实测数字见 `vitest.config.ts` 的 `coverage` 注释。
 - 静态检查：`npm run typecheck`；`npm run check:js`（`desktop/` 与 `scripts/` 的 JS 语法，补 `tsc` 的盲区）；`npm run check:docs`（markdown 本地链接与 `<img src>`，移动/改名文档后必跑）；`npm run check:ledgers`（台账内部自洽）。**`npm run lint` 等同 `tsc --noEmit`**（D-006），不是独立检查。
 - **完整验证：`npm run verify`** —— typecheck + check:js + check:docs + check:ledgers + test 一次跑完。交付前用它，而不是只跑 `npm test`。
