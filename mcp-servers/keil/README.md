@@ -65,13 +65,14 @@ npx vitest run mcp-servers/keil
 - `uvsock-protocol.test.ts`：75 例报文与解析测试（framing、回复匹配、GBK、枚举流、寄存器、变量、栈、内存、菜单、trnOpt、构建命令、工程识别）
 - `keil-project-file.test.ts`：13 例，含内置脱敏 fixture（BOM + GBK，中英文混合路径）
 - `keil-selection.test.ts`：8 例选择项优先级与 `KEIL_SELECTION_JSON`
+- `diagnostics.test.ts`：29 例构建诊断解析与折叠（样本按厂商文档手写，非实测日志）
 - `tools.test.ts`：action 枚举、写前声明覆盖、evidence 集合、权限模板一致性
 - `bootstrap.test.ts`：领域代码不进 `src/` 的红线
 
 ## 已知限制
 
 1. **整片擦除不可用**：`PRJ_FLASH_ERASE` 在 MDK 5.43a 上无响应，且本工具不引入任何外部烧录 CLI；`erase` 会如实返回该限制，不伪装成功。`flash` 只擦除镜像自身占用的扇区。
-2. **构建诊断只回传日志原文**：A 侧的编译诊断解析（`diagnostics.ts`）未迁移，`build` 失败时给出 UV4 日志与退出码，不做「文件:行号」结构化。
+2. **构建诊断按文档化格式解析，未经真实工程验证**：`build` / `rebuild` 失败时，`diagnostics.ts` 会从 UV4 日志里解析出 `file(line)` / `file:line` 与 `#20` / `#177-D` / `L6218E` 码（`structuredContent.buildDiagnostics`），并把同一符号引发的重复 `L6218E` 折叠成一条。解析规则取自 **ARMCC / ARMCLANG / armlink 的文档化输出格式**——本机没有可用的 Keil、仓库里也没有一份真实 UV4 构建日志，**这一块没有在真实工程上验证过**。认不出的行仍随日志原文尾部一并返回。
 3. **只移植了 Keil 生态**：Zephyr / ESP-IDF / PlatformIO / Arduino / Cargo / CMake / Make 的工程识别与构建分支未迁移。
 4. **UVSOCK 是未公开协议**：偏移与状态码来自 MDK 5.43a 的实测报文，`UNSUPPORTED_ON_MDK_5_43` 表记录了 14 条不可用操作及其原因；换 MDK 版本需要重新验证。
 

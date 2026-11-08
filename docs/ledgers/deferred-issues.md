@@ -1985,7 +1985,12 @@
 - **影响**: 模型要自己从日志里刮文件名与行号；A 侧已经实测过的 `collapseCascades`（把一条根因引发的 12 条链接错误折叠成 1 条）在 B 侧不存在，长日志可能挤占上下文。
 - **触发升级条件**: ① 真实工程出现无法从日志原文定位的构建失败；② 有人反馈构建失败后模型反复重试而不改代码；③ 需要把构建诊断纳入 evidence 保护。
 - **修复建议**: 从 A 的 `src/embedded/diagnostics.ts` 整体搬运（纯函数、无外部依赖），在 `keilCli` 返回结果里替换 `log` 为 `diagnostics`，并补「同一条根因只报一次」的测试。
-- **状态**: 未解决。
+- **状态**: **已解决（2026-11-08，批次 8 · Task 4）**。`mcp-servers/keil/diagnostics.ts` 提供 `parseDiagnostics` / `collapseCascades` / `buildDiagnostics`（纯函数、零 I/O、零依赖，复用 `keilSession.ts` 的 `parseFileLine`）。`tools.ts` 的 build 分支在失败时先追加结构化诊断（最多 20 条，超出说明还有几条），再追加原有的日志尾部（60 行的既有行为未变）；`structuredContent.buildDiagnostics` 与 `flashVerify` 同级给出 `entries` / `total` / `collapsed`。失败码仍是 `keil_build_failed`。
+  - **`collapseCascades` 的判据比 A 侧窄，且与「12 条折叠」那组数字不可比**：只折叠 `L6218E`（`Undefined symbol X (referred from …)`），且要求前面已有一条 **error** 以**引号整名**点名同一符号（`#20: identifier "X" is undefined` / `'X'`）或已是一条同符号的 `L6218E`。编译器错误本身一律不折叠；warning 不构成折叠依据。「名称作为子串出现在别的问题里」也不算——`cannot open source input file "foo.h"` 不解释 `Undefined symbol foo`。`tools.ts` 的 build 分支接的是**内联 UVSOCK 日志**（`buildInIde`），不是 `keilCli` 的 `keil-build.log`，A 侧「替换 log 为 diagnostics」的路径没有照搬。
+  - **未验证**：解析规则取自 ARMCC / ARMCLANG / armlink 的**文档化输出格式**。本机没有可用的 Keil（注册表 `MDK` 项只有 `Version`，无 `Path`），仓库里也没有一份真实 UV4 构建日志，因此**没有在任何真实工程上跑过**。触发升级条件 ① 仍然有效：真实日志若出现认不出的行，它仍随日志尾部返回，但不会进 `entries`。
+  - **两条已知的窄**（控制器复核时实测，均为有意保守，不是疏漏）：
+    ① **路径里带空格的位置不识别**。定位段不允许空白，否则「消息正文引用了另一个文件的位置」会被当成诊断；代价是 `..\My Project\main.c(36): error: #20: …` 整行进不了 `entries`。Keil 通常打印相对工程目录的路径（`..\USER\main.c`），带空格的工程目录才会触发。放宽这条就要同时接受「`see src/main.c(36): error:` 这类正文被误判」，在没有真实日志可验的前提下不划算——按批次纪律不做投机性放宽。
+    ② **行号 ≤ 0 的位置会退化成「无位置」的诊断**：`src/main.c:0: error: #20: …` 因为 `parseFileLine` 拒绝行号 0 而落进链接器形状的回退，`file` / `line` 为空但 `code` 与 `message` 仍在。比整行丢掉好，但调用方拿不到定位。
 
 ### D-201 · 整片擦除依赖外部 CLI，且必须先关闭所有会话
 

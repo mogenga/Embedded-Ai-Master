@@ -109,6 +109,7 @@ import {
   type OptionName,
 } from "./keilSession.js";
 import { diagnoseFlashFailure } from "./flash.js";
+import { buildDiagnostics } from "./diagnostics.js";
 import { keilCli } from "./keilCli.js";
 import { NEEDS_EXTENDED_STACK, UNSUPPORTED_ON_MDK_5_43 } from "./keilExtra.js";
 import { backupProjectFiles, readProjectFacts } from "./keilProjectFile.js";
@@ -576,6 +577,11 @@ const keilDebugTool: LegacyTool = {
       // nothing. Attached to the structured result so a caller never has to
       // parse the text to learn the scope (R3).
       let flashVerify: { scope: FlashVerifyResult["scope"]; bytes: number; imageBytes: number; ok: boolean; segments?: number } | undefined;
+      // What a failed `build` / `rebuild` recognised in uVision's log: the
+      // diagnostics (file and line, code, message), how many there were, and
+      // how many repeats the cascade fold removed. Same level as `flashVerify`
+      // so a caller does not parse the text to get them.
+      let buildReport: ReturnType<typeof buildDiagnostics> | undefined;
       // The bytes a `read` returned, with the all-zero verdict. Structured, so
       // a consumer does not have to scrape the warning out of the text.
       let memoryRead:
@@ -1078,6 +1084,16 @@ const keilDebugTool: LegacyTool = {
         if (result.log) lines.push(...result.log.split(String.fromCharCode(10)).slice(-12));
       } else if (action === "build" || action === "rebuild") {
         const started = await buildInIde(session, action === "rebuild");
+        // Structured first: the file and line, the code, and the repeated
+        // linker errors folded into the one that named the symbol. Only on a
+        // failure — a successful build has no diagnostics worth the context.
+        // The raw tail still follows, because this parser recognises the
+        // documented ARMCC/ARMCLANG/armlink shapes and nothing else, and a
+        // line it did not recognise must still reach the caller.
+        if (!started.ok) {
+          buildReport = buildDiagnostics(started.lines.join("\n"));
+          lines.push(buildReport.detail);
+        }
         const wanted = started.lines.filter((line) => /error|warning|Program Size|Build target|Rebuild target/i.test(line));
         const shown = wanted.length > 0 ? wanted : started.lines;
         // A truncated log that does not say it was truncated reads as the
@@ -1199,7 +1215,20 @@ const keilDebugTool: LegacyTool = {
       }
       return {
         ...(failure ? { isError: true, errorCode: failureCode } : {}),
-        ...(flashVerify || memoryRead ? { data: { ...(flashVerify ? { flashVerify } : {}), ...(memoryRead ? { memoryRead } : {}) } } : {}),
+        ...(flashVerify || memoryRead || buildReport
+          ? {
+              data: {
+                ...(flashVerify ? { flashVerify } : {}),
+                ...(memoryRead ? { memoryRead } : {}),
+                // `detail` is the rendered text block the lines already carry;
+                // repeating it here would put prose back into the structured
+                // field that exists so the caller does not read prose.
+                ...(buildReport
+                  ? { buildDiagnostics: { entries: buildReport.entries, total: buildReport.total, collapsed: buildReport.collapsed } }
+                  : {}),
+              },
+            }
+          : {}),
         content: lines.join("\n") || "(no output)",
         display: failure ? `keil: ${action} failed` : `keil: ${action}`,
       };

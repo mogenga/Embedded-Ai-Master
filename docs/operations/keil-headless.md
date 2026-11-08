@@ -162,7 +162,7 @@
 
 ## 七、已知限制
 
-1. 构建失败只给 UV4 日志原文与退出码，不做结构化的「文件:行号」（诊断解析未迁移，D-200）。
+1. 构建失败时的结构化诊断（`file:line`、`#20` / `L6218E` 码、同一符号的重复链接错误折叠）由 `mcp-servers/keil/diagnostics.ts` 按 **ARMCC / ARMCLANG / armlink 的文档化输出格式**解析，**没有在真实工程上验证过**——本机没有可用的 Keil，仓库里也没有真实 UV4 构建日志。认不出的行随日志原文尾部一并返回，不会丢。
 2. 只支持 Keil 生态；Zephyr / ESP-IDF / PlatformIO / Arduino / Cargo / CMake / Make 不在本服务范围。
 3. UVSOCK 是未公开协议，偏移来自 MDK 5.43a 实测；换版本需要重新验证。
 4. 整片擦除不可用：`PRJ_FLASH_ERASE` 在 MDK 5.43 上无响应，本工具不做外部 CLI 替代；`flash` 只覆盖镜像自身扇区。
