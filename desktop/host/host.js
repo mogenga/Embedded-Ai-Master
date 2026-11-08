@@ -131,6 +131,14 @@ try {
       supportsReasoning,
     },
     { isValidSessionId },
+    // `resumeSession` is here rather than in the `/compact` batch below because
+    // the event pumps need it on every tick: a completion lands after its turn
+    // has ended, so writing it into the log means briefly taking the session
+    // lock again. Before this import existed the pumps called
+    // `kernel.resumeSession` while the `kernel` object never defined it, so
+    // every background result took the "session busy" branch — the failure was
+    // invisible because it read exactly like the locked case (R3).
+    { resumeSession },
     { readSessionMeta },
     {
       readAppConfig,
@@ -144,6 +152,7 @@ try {
     filesApi,
     skillsModule,
     backgroundModule,
+    subagentModule,
     protocol,
   ] = await Promise.all([
     import(dist("server/runner.js")),
@@ -152,6 +161,10 @@ try {
     import(dist("config/harness-home.js")),
     import(dist("config/providers.js")),
     import(dist("session/handle.js")),
+    // Namespace not needed: `dist/session/session.js` has shipped since P0, so
+    // a missing `resumeSession` is a broken install rather than a stale build,
+    // and a hard failure here is the honest answer.
+    import(dist("session/session.js")),
     import(dist("session/metadata.js")),
     import(dist("config/app-config.js")),
     import(dist("server/session-admin.js")),
@@ -169,11 +182,17 @@ try {
     // background terminal landed must still boot — the pump reports the gap
     // instead of the host dying at import time.
     import(dist("tools/background.js")).catch(() => undefined),
+    // Same namespace rule, plus a `catch`: `dist/subagent/runner.js` is newer
+    // than most `dist/` trees in the wild. A kernel built before the read-only
+    // subagent landed still boots; the pump then simply has no queue to drain
+    // and says nothing, which is the truth — that kernel never started one.
+    import(dist("subagent/runner.js")).catch(() => undefined),
     import("../renderer/protocol.js"),
   ]);
   kernel = {
     createSessionRunner,
     createLogTailEventSource,
+    resumeSession,
     readSessionDir,
     readSessionSnapshot,
     listSessionLogFiles,
@@ -197,6 +216,7 @@ try {
     filesApi,
     skills: skillsModule,
     background: backgroundModule,
+    subagent: subagentModule,
     protocol,
   };
 } catch (error) {
@@ -1445,60 +1465,127 @@ function stopFollow() {
 }
 
 // ---------------------------------------------------------------------------
-// Background terminal results
+// Completion results (background jobs + subagents)
 // ---------------------------------------------------------------------------
 
-/** How often a finished background job is turned into a log event. */
+/** How often a finished job is turned into a log event. */
 const BACKGROUND_PUMP_MS = 1_000;
 
 /**
- * Write every finished background job as a `background_result` event.
+ * Two properties this pump must have, both learned the hard way.
+ *
+ * **It must not take a second handle while a run holds one.** The session lock
+ * is re-entrant *within one process* (`src/session/lock.ts`: a second
+ * `resumeSession` for a directory this process already holds succeeds instead
+ * of answering `session_locked`). So "if the lock is busy the entry is
+ * dropped" was never true mid-turn — the pump got its own handle, with its own
+ * copy of the event list, and the two writers computed seq numbers from
+ * separate arrays. Measured: `run -> seq 1` and `pump -> seq 1`, after which
+ * `readSessionDir` throws `invalid_seq` and the log can never be read again.
+ * The pump's `close()` also wrote `header.status = "closed"` while the turn was
+ * still running, which ends `startFollow` early — the live transcript would
+ * have stopped mid-answer.
+ *
+ * **The two queues drain through one writer.** Background results and subagent
+ * results used to be two functions started side by side on the same tick, each
+ * opening its own handle. Same defect, one level down: whichever pair of
+ * completions landed together collided. One function, one handle, no ordering
+ * question.
+ *
+ * Both are cheap to satisfy: a completion has no deadline, so a tick that
+ * cannot write simply leaves its entries queued and the next tick (after the
+ * turn ends) writes them. Nothing is dropped for being early.
+ */
+let completionPumpInFlight = false;
+
+/**
+ * Write every finished background job / subagent as an event, in one batch.
  *
  * The log is the single source of truth in this app: a reopened session has to
  * show what that ten-minute build ended up doing, and an out-of-band message
- * would be gone the moment the window closed. So the completion goes through
- * `takeBackgroundCompletions` → an appended event → the normal event pump,
- * which is already watching the log.
+ * would be gone the moment the window closed. So a completion goes through
+ * `take*Completions` → an appended event → the normal event pump, which is
+ * already watching the log.
  *
- * The append needs a session handle, and the run's own handle is closed when
- * its turn ends — precisely the case this feature exists for. Opening one here
- * mirrors `handleCompact`: briefly take the lock, append, release. If the lock
- * is busy (the user is mid-turn in another window) the entry is dropped rather
- * than retried forever; the job's own `check` command still reports it, and
- * `background_result` is a notification, not the only record.
+ * Returns without taking anything when a run (or a `/compact`) is in flight:
+ * the entries stay in their queues for the next tick. That is deliberate —
+ * taking them here and failing to write would lose a result this app promised
+ * to keep, and the mid-turn handle is exactly what corrupted the log.
+ *
+ * Once a handle *is* available, the three failure paths are the three facts:
+ *
+ *   - no session / no kernel queue → nothing to do, silently;
+ *   - the handle cannot be opened → the result could NOT be written, and
+ *     saying only "finished" would be a lie about a line nobody can read back
+ *     (R3). The entry is dropped at this point (the job's own `check` command
+ *     still reports it) rather than retried forever;
+ *   - the append throws → the same, with the kernel's own reason.
+ *
+ * The subagent payload is the kernel's `SubagentSummary` itself — no
+ * reassembly here, so there is no second place where those fields could drift.
  */
-async function pumpBackgroundResults() {
+async function pumpCompletions() {
   if (sessionId === "") return;
-  const modules = kernel.background;
-  if (modules === undefined || typeof modules.takeBackgroundCompletions !== "function") return;
-  const pending = modules.takeBackgroundCompletions(sessionId);
-  if (pending.length === 0) return;
-  const id = sessionId;
-  let handle;
+  // A live run owns the handle for the whole turn. See the note above: taking
+  // a second one does not fail, it corrupts the log.
+  if (running) return;
+  if (completionPumpInFlight) return;
+  const background = kernel.background;
+  const subagent = kernel.subagent;
+  const canDrainBackground =
+    background !== undefined && typeof background.takeBackgroundCompletions === "function";
+  const canDrainSubagent =
+    subagent !== undefined && typeof subagent.takeSubagentCompletions === "function";
+  if (!canDrainBackground && !canDrainSubagent) return;
+
+  completionPumpInFlight = true;
   try {
-    handle = await kernel.resumeSession(path.join(sessionsRoot, id));
-  } catch (error) {
-    // Lock held by a live run: that run's own pump will not see these either,
-    // so say so once instead of swallowing them (R3).
-    send({
-      type: "notice",
-      level: "dim",
-      text: `后台作业已结束，但会话被占用，结果未能写入日志：${messageOf(error)}`,
-    });
-    return;
-  }
-  try {
-    for (const payload of pending) {
-      await handle.append({ type: "background_result", payload });
+    const id = sessionId;
+    let handle;
+    try {
+      handle = await kernel.resumeSession(path.join(sessionsRoot, id));
+    } catch (error) {
+      // Not the mid-turn case (that returned above): this is a lock held by
+      // another process, or an unreadable directory. Say so instead of
+      // swallowing it (R3).
+      const backgroundPending = canDrainBackground
+        ? background.takeBackgroundCompletions(id)
+        : [];
+      const subagentPending = canDrainSubagent ? subagent.takeSubagentCompletions(id) : [];
+      if (backgroundPending.length === 0 && subagentPending.length === 0) return;
+      send({
+        type: "notice",
+        level: "dim",
+        text:
+          `后台作业或子代理已结束，但会话被占用，结果未能写入日志：${messageOf(error)}`,
+      });
+      return;
     }
-  } catch (error) {
-    send({
-      type: "notice",
-      level: "warn",
-      text: `后台作业结果写入失败：${messageOf(error)}`,
-    });
+    try {
+      // Take inside the handle's lifetime so a failure here cannot drop an
+      // entry we never had a chance to write. Both queues drain through the
+      // same handle: one writer, one seq sequence.
+      if (canDrainBackground) {
+        for (const payload of background.takeBackgroundCompletions(id)) {
+          await handle.append({ type: "background_result", payload });
+        }
+      }
+      if (canDrainSubagent) {
+        for (const payload of subagent.takeSubagentCompletions(id)) {
+          await handle.append({ type: "subagent_result", payload });
+        }
+      }
+    } catch (error) {
+      send({
+        type: "notice",
+        level: "warn",
+        text: `作业结果写入失败：${messageOf(error)}`,
+      });
+    } finally {
+      void handle.close().catch(() => undefined);
+    }
   } finally {
-    void handle.close().catch(() => undefined);
+    completionPumpInFlight = false;
   }
 }
 
@@ -1506,7 +1593,7 @@ async function pumpBackgroundResults() {
 function startBackgroundPump() {
   if (backgroundPump !== undefined) return;
   backgroundPump = setInterval(() => {
-    void pumpBackgroundResults().catch(() => undefined);
+    void pumpCompletions().catch(() => undefined);
   }, BACKGROUND_PUMP_MS);
   // Never a reason to keep the app alive on its own; a real run has its own
   // handles.
@@ -4514,6 +4601,11 @@ const handlers = {
         text: `已终止 ${signalled} 个后台作业（仅发出终止信号，未能确认退出）`,
       });
     }
+    // Same rule, same honesty for subagents: they run inside this process, so
+    // an exit ends them — but `killAllSubagents` only aborts, and it produces
+    // no completion notice (the job table is dropped). Claiming they "were
+    // stopped" would be claiming something this path cannot observe.
+    kernel.subagent?.killAllSubagents?.();
     void runner?.close().finally(() => process.exit(0));
     setTimeout(() => process.exit(0), 2000).unref();
   },
@@ -4945,6 +5037,9 @@ rl.on("close", () => {
   serialBridge.stopMailbox();
   void serialBridge.closeAll();
   kernel.background?.killAllBackgroundJobs?.();
+  // stdin went away, so nothing is left to report a subagent's result to. Same
+  // posture as the background jobs above: abort, do not claim they exited.
+  kernel.subagent?.killAllSubagents?.();
   void runner?.close().finally(() => process.exit(0));
   setTimeout(() => process.exit(0), 2000).unref();
 });

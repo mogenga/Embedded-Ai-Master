@@ -250,6 +250,90 @@ export function summarizeBackgroundResult(payload) {
   return { type: "notice", level: verdict, text: parts.join("；") };
 }
 
+/** Statuses the kernel writes for a subagent's terminal state. */
+const SUBAGENT_STATUSES = new Set(["finished", "failed", "killed", "timed_out"]);
+
+/** How much of the conclusion's first line reaches the transcript row. */
+const MAX_SUBAGENT_SUMMARY_CHARS = 120;
+
+/**
+ * The first non-empty line of a conclusion, flattened to one row.
+ *
+ * The completion notice is a headline, not the answer: the full text is in the
+ * child session's log and one `subagent_check` away. Copying the whole body
+ * into the parent transcript would make the same conclusion appear twice, and
+ * an 8 KiB block is not a "line".
+ */
+function firstLineOf(text) {
+  for (const line of textOf(text).split("\n")) {
+    const flat = line.replace(/\s+/g, " ").trim();
+    if (flat !== "") {
+      return flat.length > MAX_SUBAGENT_SUMMARY_CHARS
+        ? `${flat.slice(0, MAX_SUBAGENT_SUMMARY_CHARS)}…`
+        : flat;
+    }
+  }
+  return "";
+}
+
+/**
+ * One line for a subagent's terminal state, or `null` when the payload carries
+ * no status this module can draw.
+ *
+ * `finished` is `dim` — it is news, not a problem, and `dim` is the level the
+ * renderer actually draws for news (anything other than warn/error/dim is
+ * dropped by `addNotice`, so "the ordinary level" has to be one of the three).
+ * `failed` / `killed` / `timed_out` are `warn`, each carrying the reason the
+ * kernel recorded: an error message, or who asked it to stop. A `failed`
+ * payload with no `error` says the reason was not recorded rather than
+ * inventing one (R3).
+ *
+ * Deliberately one notice and nothing else: the renderer has no subagent view,
+ * and a card with no content behind it would be the dead UI of D-185 again.
+ * The name comes from `label` when the caller gave one; otherwise the id is
+ * printed **as an id** (`子代理 sa_…`), never passed off as a name.
+ */
+export function summarizeSubagentResult(payload) {
+  if (!isRecord(payload)) return null;
+  const status = textOf(payload.status);
+  if (!SUBAGENT_STATUSES.has(status)) return null;
+  const label = textOf(payload.label);
+  const id = textOf(payload.id);
+  const who = label !== ""
+    ? `子代理「${label}」`
+    : id !== ""
+      ? `子代理 ${id}`
+      : "子代理";
+
+  if (status === "finished") {
+    const headline = firstLineOf(payload.text);
+    return {
+      type: "notice",
+      level: "dim",
+      text: headline === ""
+        ? `${who} 完成，但没有留下结论正文`
+        : `${who} 完成：${headline}`,
+    };
+  }
+
+  if (status === "failed") {
+    const error = textOf(payload.error);
+    return { type: "notice", level: "warn", text: `${who} 失败：${error === "" ? "未记录原因" : error}` };
+  }
+  if (status === "timed_out") {
+    return { type: "notice", level: "warn", text: `${who} 超时被终止：跑满了自身时限` };
+  }
+  // `killed`: the kernel records who asked (`kill` / `abort`), not an error.
+  const killedBy = textOf(payload.killedBy);
+  const reason =
+    killedBy === "kill"
+      ? "收到终止请求"
+      : killedBy === "abort"
+        ? "宿主中止"
+        : "未记录原因";
+  return { type: "notice", level: "warn", text: `${who} 已终止：${reason}` };
+}
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: false });
 
@@ -831,6 +915,18 @@ export function sessionEventToHostEvents(event, ctx) {
       // running the command in the background is that its ending arrives
       // without anybody asking.
       const summary = summarizeBackgroundResult(payload);
+      if (summary !== null) out.push(summary);
+      break;
+    }
+
+    case "subagent_result": {
+      // A subagent reached its terminal state. Same shape as
+      // `background_result` above and for the same reason: the turn that
+      // started it may already be over, so its ending has to arrive without
+      // anybody asking. One transcript line — the renderer has no subagent
+      // view, and the full conclusion is in the child session (`subagent_check`
+      // reads it back).
+      const summary = summarizeSubagentResult(payload);
       if (summary !== null) out.push(summary);
       break;
     }
