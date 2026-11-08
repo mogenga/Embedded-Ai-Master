@@ -10,6 +10,7 @@ import type {
   DeviceStatusPayload,
   McpStatusPayload,
   SessionEvent,
+  SubagentResultPayload,
   TodosPayload,
   ToolStartedPayload,
 } from "../src/session/types.js";
@@ -47,6 +48,22 @@ const todos: TodosPayload = {
     { content: "读 datasheet", status: "completed" },
     { content: "量波形", status: "in_progress" },
   ],
+};
+
+const subagentResult: SubagentResultPayload = {
+  id: "sa_0123456789ab",
+  sessionDir: "/sessions/parent/subagents/sa_0123456789ab",
+  status: "finished",
+  startedAt: "2026-11-08T00:00:00.000Z",
+  finishedAt: "2026-11-08T00:03:00.000Z",
+  turns: 3,
+  toolCalls: 2,
+  promptTokens: 1200,
+  completionTokens: 180,
+  text: "结论：时钟树是 72 MHz。",
+  textBytes: 42,
+  capturedBytes: 42,
+  promptPreview: "确认主频",
 };
 
 const events: SessionEvent[] = [
@@ -99,6 +116,54 @@ describe("新事件类型", () => {
     expect(buildMessages(events)).toEqual([]);
     // 桌面协议层同样不把它当消息：它走的是计划卡，不是对话。
     expect(sessionEventsToMessages(events)).toEqual([]);
+  });
+
+  it("buildMessages 忽略 subagent_result，且它可出现在工具批次中间", () => {
+    // 子代理完全可能在父轮次的 assistant 与它的 tool_result 之间结束。
+    // 与 `background_result` 同一分支：不能并进会在未闭合批次上抛错的那三类。
+    const events: SessionEvent[] = [
+      {
+        seq: 0,
+        ts: "t",
+        type: "assistant",
+        payload: { content: "", toolCalls: [{ id: "c1", name: "subagent", arguments: {} }] },
+      },
+      { seq: 1, ts: "t", type: "subagent_result", payload: { ...subagentResult } },
+      { seq: 2, ts: "t", type: "tool_result", payload: { id: "c1", text: "ok" }, parent: 0 },
+    ];
+
+    expect(() => buildMessages(events)).not.toThrow();
+    expect(buildMessages(events).map((message) => message.role)).toEqual(["assistant", "tool"]);
+  });
+
+  it("桌面协议层认识 subagent_result，不会画成「未识别的事件类型」", () => {
+    // Task 2 才画那一行提示；这里只钉住**登记**这件事——漏登记的表现不是
+    // 「少画一行」，而是屏幕上一句警告，恰好盖在子代理结论本该出现的位置。
+    const ctx = createContext({ sessionId: "s" });
+    const out = sessionEventToHostEvents(
+      { seq: 0, ts: "t", type: "subagent_result", payload: { ...subagentResult } },
+      ctx,
+    );
+
+    expect(
+      out.filter(
+        (message) =>
+          message.type === "notice" && String(message.text).includes("未识别的事件类型"),
+      ),
+    ).toStrictEqual([]);
+  });
+
+  it("subagent_result 事件往返持久化：白名单缺一项就会整份日志不可读", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "u" } });
+    await session.append({ type: "subagent_result", payload: { ...subagentResult } });
+    await session.close();
+
+    const result = readSessionDir(dir);
+
+    expect(result.events.map((event) => event.type)).toEqual(["user", "subagent_result"]);
+    expect(result.events[1]?.payload).toStrictEqual({ ...subagentResult });
   });
 
   it("todos 事件往返持久化：白名单缺一项就会整份日志不可读", async () => {

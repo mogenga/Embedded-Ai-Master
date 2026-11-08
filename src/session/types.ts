@@ -3,6 +3,7 @@ import type {
   PermissionPreset,
   PermissionSource,
 } from "../permissions/types.js";
+import type { SubagentSummary } from "../subagent/types.js";
 import type { ToolAccess } from "../tools/types.js";
 
 export type EventType =
@@ -33,7 +34,15 @@ export type EventType =
   | "permission_decision"
   | "approval_request"
   | "todos"
-  | "background_result";
+  | "background_result"
+  /**
+   * 一个只读子代理的终局，由宿主写成（`src/subagent/runner.ts` 的完成队列）。
+   *
+   * 与 `background_result` 同一类东西：**事实记录**，不是对话内容。模型已经
+   * 通过 `subagent_check` 或随后一条 user 消息看到结论，投影层再放一遍只是让它
+   * 复述自己没说过的话——所以 `build.ts` 原位跳过它。
+   */
+  | "subagent_result";
 
 export interface SessionHeader {
   id: string;
@@ -199,6 +208,15 @@ export interface BackgroundResultPayload {
   /** 保留的尾部文本（stdout 与 stderr 按到达顺序合并）。 */
   text: string;
 }
+
+/**
+ * 一条 `subagent_result` 事件的 payload。
+ *
+ * 就是 `SubagentSummary` 本身：宿主把完成队列里的那一份原样写进日志，完成提示、
+ * 回放与事后取证读的是同一份字段。不存在「事件里另算一遍」的第二个口径——
+ * 两处各算一次，迟早会对不上。
+ */
+export type SubagentResultPayload = SubagentSummary;
 
 export interface AssistantPayload {
   content: string;

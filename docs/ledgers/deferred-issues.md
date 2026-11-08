@@ -2517,6 +2517,30 @@
 - **仍未解决**: 那两条真进程用例在并行全量下仍会偶尔红。**没有**把它们放进串行组，因为那要用「绿灯好看」换掉真进程验证。要彻底消除需要 `vitest.config.ts` 的 project 分组（代价：全量多约 15 s）；当前刻意不做。
 - **状态**: **已解决**（阻塞与重复 kill 两层）。残余的真进程用例偶发红是**已知且有意的取舍**，见 `AGENTS.md` 的「并行负载下的偶发红」。
 
+### D-230 · 宿主完成泵：`resumeSession` 从未定义，修好后暴露同进程双写撞 seq
+
+- **发现**: 2026-11-09，批次 9.4 子代理的 Task 2。子代理按 brief 要求「照抄 `pumpBackgroundResults`」，抄之前核对发现 `kernel.resumeSession` 从来没有被定义过。
+- **现象一（存在 18 天）**: `518e5b4`（2026-10-22）把后台作业泵写进 `desktop/host/host.js`，调用 `kernel.resumeSession(...)`；但同一文件里 `kernel` 对象字面量**没有这个键**，也没有任何 `kernel.X = …` / `Object.assign(kernel, …)`（全文件 grep 零命中）。于是每一次都抛 `TypeError: kernel.resumeSession is not a function`，被 `catch` 渲染成「后台作业已结束，但会话被占用，结果未能写入日志」。
+  - **影响**: `background_result` **一条都没真正写进过日志**。后台作业的最终结果只活在宿主进程内存里，重开窗口就没了——而「写进日志」正是这个功能存在的全部理由。
+  - **为什么没人发现**: 失败的措辞与真正的锁冲突**逐字相同**，而「并行时锁被占」是个听起来完全合理的解释。R3 意义上的伪装成功：一句如实措辞掩盖了一个从未成功的路径。
+- **现象二（修好后才暴露）**: 同进程的会话锁**是引用计数可重入**的（`src/session/lock.ts`：本进程已持有该目录时，第二次 `acquireSessionLock` 直接成功而不是回 `session_locked`）。所以泵注释里「锁被占用就跳过」对**回合进行中**的宿主从来不成立：泵拿到**第二份 handle**，带着自己的一份事件数组，两个写入者各自用 `eventList.length` 算 seq。实测（`dist/` 真模块）：
+  ```
+  pump resumeSession while run holds the lock: OK (not 'session busy')
+  run  -> seq 1
+  pump -> seq 1
+  readSessionDir -> SessionCorruptionError: invalid_seq
+  ```
+  日志从此**永久读不回来**。同一探针还显示泵的 `close()` 把 `header.status` 写成 `"closed"`，而那一轮还在跑——`startFollow` 据此提前收尾，转录会在回答中间停住。
+  - **为什么现象二之前没发生**: 现象一让每次调用都在 `resumeSession` 处抛 `TypeError`，根本走不到 `append`。**一个 bug 挡住了另一个 bug。**
+- **另一处同源缺陷**: 后台作业与子代理原本是两个函数挂在同一个 tick 上并排跑，各自开一份 handle。同一份缺陷低一层——两边同时有完成项时照样相撞。
+- **修复**:
+  1. `resumeSession` 放进 `kernel` 对象（该模块自 P0 就在，硬失败是诚实的：缺它说明安装坏了，不是 `dist/` 陈旧）。
+  2. 两个泵合并为 **`pumpCompletions`**：一个函数排空两条队列，一个 1s 定时器，**一份 handle**。
+  3. 加 `if (running) return;` 守卫，且在**任何 `await` 之前**；被跳过的那一拍**不消费队列**（完成事件没有截止时间，下一拍再写）。
+  4. 取队列移到**拿到 handle 之后**：拿不到 handle 的那条失败路径才消费队列并发 notice。
+- **验证**: 守卫开关对照探针——无守卫 `{ok:false, "Invalid seq", status:"closed"}`；有守卫 `{ok:true, seqs:[0,1]}`。测试侧 `tests/desktop/subagent-result.test.js` 钉住「守卫必须在第一个 `await` 之前」「取队列必须在拿到 handle 之后」「只有一个 `setInterval`、没有两个旧函数名」。
+- **状态**: **已解决**（`b3f110c`）。残余：宿主泵的**运行时**行为仍无常驻测试——宿主模块一加载就起 NDJSON 循环，仓库无 jsdom，只能静态断言 + 一次性 `dist/` 探针（探针未入库）。
+
 ## 变更记录
 
 | 日期 | 变更 |

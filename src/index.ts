@@ -49,6 +49,8 @@ import { createSession, resumeSession } from "./session/session.js";
 import type { SessionHandle } from "./session/session.js";
 import { MCP_STATUS_PAYLOAD_KINDS } from "./session/types.js";
 import type { McpStatusPayload, McpStatusPayloadKind } from "./session/types.js";
+import { subagentSpendUsd } from "./subagent/runner.js";
+import { createSubagentTools } from "./subagent/tools.js";
 import { createBuiltinTools } from "./tools/builtin.js";
 import { isWindowsReservedName } from "./tools/pipeline.js";
 import { ToolRegistry } from "./tools/registry.js";
@@ -664,8 +666,35 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       budget = (messages) => checkBudgetForModel(messages, model);
     }
 
+    // 子代理的开销不在父会话日志里（它的 usage 事件写在子会话），所以父轮次的
+    // `maxCostUsd` 看不到它。账本在 `src/subagent/runner.ts` 里按**父会话**累计，
+    // 这样同一条会话的后续消息仍然带着它——父会话的 `costUsd` 本来就是整段会话
+    // 的累计值，子代理的开销必须跟着同一条时间线。
     const builtinTools = createBuiltinTools();
-    const registry = new ToolRegistry(builtinTools);
+    // 子代理工具与内置工具并列装配，但**不进** `createBuiltinTools()`：那一份
+    // 不接参数，且有断言钉着它返回 13 个纯对象工具（`tests/tools.test.ts`）。
+    // `registry` 传给子代理的是取值函数：它要先建出来，MCP 工具再往里装。
+    const subagentTools = createSubagentTools({
+      model: modelProtocol,
+      modelCfg: model,
+      registry: () => registry,
+      budget,
+      cwd: runCwd,
+      // 规则直接从这一轮加载的配置里取：`PermissionGate` 只暴露 `check()`，
+      // 为子代理去给那个公共接口加字段，改动面比受益大。
+      inheritableRules: loadedPermissions.rules,
+      systemSections,
+      // 账本由 runner 按父会话记，`LoopCtx.externalCostUsd` 从那里读；这个回调
+      // 现在没有第二个消费者。它仍是 deps 的必填项——那是「谁来对花费负责」的
+      // 接线点，将来界面要显示「本会话子代理花销」时接在这里，而不是再算一遍。
+      onSpend: () => undefined,
+      ...(compactor === undefined ? {} : { compactor }),
+      ...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
+      ...(provider.pricePerMillion === undefined
+        ? {}
+        : { pricePerMillion: provider.pricePerMillion }),
+    });
+    const registry = new ToolRegistry([...builtinTools, ...subagentTools]);
 
     if (opts.mcp?.enabled !== false) {
       try {
@@ -750,7 +779,9 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
                 onStatus: (status) => pendingStatuses.push(status),
               });
 
-              registry.replace([...builtinTools, ...mcpTools]);
+              // 子代理工具必须一起放回去：漏掉这一处的后果不是「少两个工具」，
+              // 而是**一次 MCP 工具刷新就让 `subagent` 从模型视野里消失**。
+              registry.replace([...builtinTools, ...subagentTools, ...mcpTools]);
             } catch (error) {
               enqueueMcpStatus({
                 status: "mcp_tools_refresh_failed",
@@ -792,6 +823,10 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       pricePerMillion: provider.pricePerMillion,
       permissionGate,
       systemSections,
+      // 子代理的开销计入本轮的成本判断（`maxCostUsd`）。**必须无条件给这个
+      // 闭包**：ctx 是在任何子代理启动之前组装的，那一刻账本恒为 0——按「当前
+      // 是否为零」来决定传不传，等于永远不传。
+      externalCostUsd: () => subagentSpendUsd(session.id),
       ...(opts.deadlineMs !== undefined ? { deadlineMs: opts.deadlineMs } : {}),
       ...(meter !== undefined ? { meter } : {}),
       ...(compactor !== undefined ? { compactor } : {}),
