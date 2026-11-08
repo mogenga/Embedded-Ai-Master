@@ -13,6 +13,16 @@ export interface McpToolInfo {
   readOnly?: boolean;
   destructive?: boolean;
   evidence?: boolean;
+  /**
+   * 只读动作名（`_meta.readOnlyActions`）。与 `destructiveActions` 一起，
+   * 让一个多动作工具按**本次输入**决定读写（OPT-21）。
+   */
+  readOnlyActions?: string[];
+  /**
+   * 会改变目标状态的动作名（`_meta.destructiveActions`）。名字沿用 MCP 的
+   * `destructiveHint` 语义：`diagnose` 下要审批，而不是「一定写」。
+   */
+  destructiveActions?: string[];
   /** 该 server 配置的单次调用预算，取自 `mcp.json` 的 `timeoutMs`。 */
   callTimeoutMs?: number;
 }
@@ -221,6 +231,19 @@ function isObjectSchema(schema: unknown): boolean {
     !Array.isArray(schema) &&
     (schema as { type?: unknown }).type === "object"
   );
+}
+
+/**
+ * `_meta` 里的动作白名单：只接受字符串数组，非数组返回 undefined，数组里的
+ * 非字符串项逐项丢弃。
+ *
+ * 不抛错是刻意的：白名单只是一条可选的提示，一个把 `_meta` 写坏的 server
+ * 不该让整个工具面消失。剔掉坏项后剩下的字符串仍然生效——多认一个只读动作
+ * 不会放宽任何权限（未被声明的动作一律 `unknown`，见 `src/mcp/tools.ts`）。
+ */
+function stringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((item): item is string => typeof item === "string");
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -684,6 +707,16 @@ export class McpManager {
       }
       if (tool._meta?.evidence === true) {
         info.evidence = true;
+      }
+      // 动作白名单是 per-action 的读写依据（OPT-21）。两项各自独立：只给一份
+      // 时另一类动作落进 `unknown`，不会被推断成只读。
+      const readOnlyActions = stringList(tool._meta?.readOnlyActions);
+      if (readOnlyActions !== undefined) {
+        info.readOnlyActions = readOnlyActions;
+      }
+      const destructiveActions = stringList(tool._meta?.destructiveActions);
+      if (destructiveActions !== undefined) {
+        info.destructiveActions = destructiveActions;
       }
       loaded.push(info);
     }
