@@ -28,6 +28,10 @@ export interface KbSearchHit {
 export interface KbSearchResult {
   found: boolean
   hits: KbSearchHit[]
+  // 真实命中总数，可以大于返回条数（hits 被 limit 截了）。
+  count: number
+  // hits 被 limit 截断；与 scanTruncated 是两个独立信号。
+  truncated: boolean
   // 遍历预算被用完时出现；此时 hits 只覆盖已扫描到的文件（R3：不静默）。
   scanTruncated?: boolean
 }
@@ -244,6 +248,18 @@ function compareText(left: string, right: string): number {
   if (left < right) return -1
   if (left > right) return 1
   return 0
+}
+
+/** `kb_search` 的返回顺序：path、行号、token 升序。 */
+function compareHits(
+  left: { path: string; line: number; token: string },
+  right: { path: string; line: number; token: string },
+): number {
+  return (
+    compareText(left.path, right.path) ||
+    left.line - right.line ||
+    compareText(left.token, right.token)
+  )
 }
 
 function isWithin(root: string, target: string): boolean {
@@ -717,10 +733,18 @@ export class KbService {
 
   search(tokens: string[], limit = DEFAULT_SEARCH_LIMIT): KbSearchResult {
     const needles = tokens.map((token) => token.trim()).filter((token) => token !== '')
-    if (!this.rootExists || needles.length === 0) return { found: false, hits: [] }
+    if (!this.rootExists || needles.length === 0) {
+      return { found: false, hits: [], count: 0, truncated: false }
+    }
 
-    const walk = this.walkMarkdown()
+    // 与 grep 同一口径（见上面 grep 的注释）：`count` 要报真实总数，但超过返回
+    // 上限的命中只计数、不保存文本。这里保留的是**排序后**最小的 limit 条，
+    // 不是遍历中先遇到的 limit 条——遍历顺序按目录展开，不等于 path 字典序，
+    // 只截不排会让 count 对了、返回的却不是原来那几条。
+    const cap = Math.max(0, limit)
     const hits: KbSearchHit[] = []
+    let matched = 0
+    const walk = this.walkMarkdown()
     for (const filePath of walk.files) {
       const base = path.posix.basename(toPosix(filePath))
       if (NAVIGATION_FILES.has(base) || base === INDEX_FILE) continue
@@ -741,24 +765,27 @@ export class KbService {
         if (lower === '') continue
         for (const needle of needles) {
           if (!lower.includes(needle.toLowerCase())) continue
+          matched += 1
+          if (cap === 0) continue
+          const key = { path: relative, line: index + 1, token: needle }
+          if (hits.length >= cap && compareHits(key, hits[cap - 1]!) >= 0) continue
+          // 只有确定要返回的命中才拼上下文文本：否则 kb_search(".") 会把语料
+          // 每一行都复制一遍（内核 grep 的 D-078）。
           const text = lines
             .slice(Math.max(0, index - 1), Math.min(lines.length, index + 2))
             .join('\n')
-          hits.push({ path: relative, line: index + 1, text, token: needle })
+          hits.push({ ...key, text })
+          hits.sort(compareHits)
+          if (hits.length > cap) hits.pop()
         }
       }
     }
 
-    hits.sort(
-      (left, right) =>
-        compareText(left.path, right.path) ||
-        left.line - right.line ||
-        compareText(left.token, right.token),
-    )
-
     const result: KbSearchResult = {
-      found: hits.length > 0,
-      hits: hits.slice(0, Math.max(0, limit)),
+      found: matched > 0,
+      hits,
+      count: matched,
+      truncated: matched > hits.length,
     }
     if (walk.scanTruncated) result.scanTruncated = true
     return result

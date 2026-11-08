@@ -385,7 +385,28 @@ describe('kbTools', () => {
 
     const miss = await tool.handler({ tokens: ['温度传感器漂移'] })
     expect(miss.isError).toBeUndefined()
-    expect(structured(miss)).toMatchObject({ found: false, hits: [] })
+    expect(structured(miss)).toMatchObject({ found: false, hits: [], count: 0, truncated: false })
+  })
+
+  it('kb_search 命中数超过 limit 时 count 是真实总数、truncated 为 true', async () => {
+    // 同一 token 在三个文件里各命中一行：limit=1 时必须说自己截了。
+    writeFixture(root, 'cases/a.md', '共地 one\n')
+    writeFixture(root, 'cases/b.md', '共地 two\n')
+
+    const tool = findTool(tools, 'kb_search')
+    const limited = structured(await tool.handler({ tokens: ['共地'], limit: 1 }))
+
+    expect(limited.count).toBe(3)
+    expect(limited.truncated).toBe(true)
+    expect((limited.hits as unknown[]).length).toBe(1)
+  })
+
+  it('kb_search 描述说明 truncated 的语义，与 kb_grep 同一口径', () => {
+    const description = findTool(tools, 'kb_search').description
+
+    expect(description).toContain('truncated: true')
+    expect(description).toContain('收窄')
+    expect(description).toContain('scanTruncated: true')
   })
 
   it('kb_status 报告文件数与索引状态', async () => {

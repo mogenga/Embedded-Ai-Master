@@ -783,12 +783,33 @@ describe('KbService', () => {
     })
 
     it('无命中与空 token 返回 found: false', () => {
-      expect(service.search(['zzz-not-there'])).toEqual({ found: false, hits: [] })
-      expect(service.search([])).toEqual({ found: false, hits: [] })
+      expect(service.search(['zzz-not-there'])).toEqual({ found: false, hits: [], count: 0, truncated: false })
+      expect(service.search([])).toEqual({ found: false, hits: [], count: 0, truncated: false })
     })
 
     it('token 只做字面匹配，不按正则解释', () => {
-      expect(service.search(['U.RT'])).toEqual({ found: false, hits: [] })
+      expect(service.search(['U.RT'])).toEqual({ found: false, hits: [], count: 0, truncated: false })
+    })
+
+    it('命中数超过 limit 时 count 报真实总数并标 truncated，hits 只留前 limit 条', () => {
+      writeFixture(root, 'bulk/needles.md', 'needle one\nneedle two\nneedle three\nneedle four\nneedle five\n')
+
+      const result = service.search(['needle'], 2)
+
+      expect(result.count).toBe(5)
+      expect(result.truncated).toBe(true)
+      expect(result.hits).toHaveLength(2)
+      // 返回的仍是排序后的前 limit 条（path, line, token 升序），不是遍历顺序里碰巧先遇到的。
+      expect(result.hits.map((hit) => hit.line)).toEqual([1, 2])
+      expect(result.hits.map((hit) => hit.token)).toEqual(['needle', 'needle'])
+    })
+
+    it('命中数不超过 limit 时 truncated 为 false，count 等于返回条数', () => {
+      const result = service.search(['UART'])
+
+      expect(result.truncated).toBe(false)
+      expect(result.count).toBe(result.hits.length)
+      expect(result.count).toBeGreaterThan(0)
     })
 
     it('遍历触顶时显式返回 scanTruncated，不静默少扫', () => {
@@ -854,7 +875,7 @@ describe('KbService', () => {
         candidates: [],
         reason: 'index_missing',
       })
-      expect(ghost.search(['UART'])).toEqual({ found: false, hits: [] })
+      expect(ghost.search(['UART'])).toEqual({ found: false, hits: [], count: 0, truncated: false })
     })
   })
 })

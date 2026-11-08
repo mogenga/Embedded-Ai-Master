@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { parseDeviceStatus } from "./device-status.js";
 import type { McpCallResult, McpToolInfo } from "./manager.js";
-import type { ToolDef, ToolResult } from "../tools/types.js";
+import type { ToolAccess, ToolDef, ToolResult } from "../tools/types.js";
 
 export interface McpToolSource {
   tools(): McpToolInfo[];
@@ -57,6 +57,33 @@ function isObjectSchema(schema: unknown): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function actionList(values: string[] | undefined): ReadonlySet<string> | undefined {
+  return values === undefined ? undefined : new Set(values);
+}
+
+/**
+ * 按**本次调用的 `action`** 判定读写（OPT-21）。
+ *
+ * 没有出现在任何白名单里的动作一律 `unknown`（fail-closed：`diagnose` 下拒绝，
+ * 而不是当成只读放行）。两边都声明时同样 `unknown`——两份白名单互相矛盾，
+ * 按任何一边都可能把一次真实的写放过去；宁可多问一次，不可少问一次。
+ */
+function actionAccess(
+  readOnly: ReadonlySet<string> | undefined,
+  destructive: ReadonlySet<string> | undefined,
+  input: unknown,
+): ToolAccess {
+  if (!isRecord(input)) return "unknown";
+  const action = input.action;
+  if (typeof action !== "string") return "unknown";
+  const isRead = readOnly?.has(action) === true;
+  const isDestructive = destructive?.has(action) === true;
+  if (isRead && isDestructive) return "unknown";
+  if (isDestructive) return "write";
+  if (isRead) return "read";
+  return "unknown";
 }
 
 function withDeviceStatus(result: McpCallResult, server: string): ToolResult {
@@ -130,6 +157,13 @@ export function createMcpTools(
       });
     }
     usedNames.add(name);
+    // 注解描述的是「这个工具可能有破坏性」，是给 UI 与策略表看的整工具属性；
+    // `access` 描述的是「这一次调用是哪种」。两者并存时
+    // `src/permissions/policy.ts` 的 `toolAccess` 优先用 `access`，注解仍照原样
+    // 保留——不要因为有了 per-action 判定就把 destructive 改成 false。
+    const readOnlyActions = actionList(info.readOnlyActions);
+    const destructiveActions = actionList(info.destructiveActions);
+    const perAction = readOnlyActions !== undefined || destructiveActions !== undefined;
     tools.push({
       name,
       description: info.description,
@@ -140,6 +174,13 @@ export function createMcpTools(
         destructive: info.destructive === true,
         evidence: info.evidence === true,
       },
+      // 两份白名单都缺失 → 不声明 `access`，权限层完全走注解旧路径（零行为变化）。
+      ...(perAction
+        ? {
+            access: (input: unknown): ToolAccess =>
+              actionAccess(readOnlyActions, destructiveActions, input),
+          }
+        : {}),
       // MCP 工具的自有预算来自 `mcp.json` 的 `timeoutMs`（`loadTools` 已把它
       // 带进 `McpToolInfo`）。不声明这一项，管线会一律套 120s 缺省，
       // `keil_debug` 的构建动作就在 120s 被掐断（OPT-13）。

@@ -3,6 +3,11 @@
   "preset": "diagnose",
   "rules": [
     {
+      "tool": "mcp__embedded__embed_identify",
+      "action": "allow",
+      "reason": "芯片识别(DBGMCU_IDCODE 三路探针),只读"
+    },
+    {
       "tool": "mcp__embedded__embed_build",
       "params": [],
       "action": "ask",
@@ -34,7 +39,7 @@
       "reason": "串口写为破坏性;可仿照 probe 示例按端口白名单收窄为 allow"
     },
     {
-      "tool": "mcp__embedded__embed_pack",
+      "tool": "mcp__embedded__embed_packs",
       "action": "ask",
       "reason": "工具链包安装/移除改变本机环境"
     }

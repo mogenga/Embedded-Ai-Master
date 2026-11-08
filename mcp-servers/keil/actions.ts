@@ -108,6 +108,27 @@ export const DESTRUCTIVE_ACTIONS: ReadonlySet<string> = new Set([
   "close", "close_project",
 ]);
 
+/**
+ * 会改变状态、但**没有**「写前声明」语义的动作（2026-11-08，批次 8 · OPT-21）。
+ *
+ * 它们此前既不在 `READONLY_ACTIONS` 也不在 `DESTRUCTIVE_ACTIONS`，按「未知」处理
+ * 会被 `diagnose` 预设直接拒绝——连 `open` 一个会话都做不到。逐个看过之后确认它们
+ * 都不是只读，但也都不对应一次「向目标写入什么」，所以**不放进
+ * `DESTRUCTIVE_ACTIONS`**：那个集合的契约是「每条都必须能给出 `declaration`」，
+ * 由 `tools.test.ts` 的「每个破坏性动作都有写前声明」钉着。
+ *
+ * - `open`     进入调试模式，按工程配置复位并加载镜像，目标状态会变
+ * - `halt`     改变目标运行状态，和 `run` / `step` 同一类
+ * - `evaluate` 在目标上求值，表达式可以调用函数（有副作用）
+ * - `trace` / `trace_set` 开关或重配跟踪，改的是调试器与目标的跟踪状态
+ * - `window`   改 uVision 窗口状态（最小化会挡住用户正在看的界面）
+ *
+ * 对权限层而言它们与破坏性动作同类：`diagnose` 下要审批，不是放行。
+ */
+export const STATEFUL_ACTIONS: ReadonlySet<string> = new Set([
+  "open", "halt", "evaluate", "trace", "trace_set", "window",
+]);
+
 /** 只读且无副作用的查询动作（拿不准的不标，fail-closed）。 */
 export const READONLY_ACTIONS: ReadonlySet<string> = new Set([
   "sessions", "menus", "breakpoints", "capabilities", "version", "license", "time",
@@ -162,7 +183,7 @@ export const projectInputSchema = z
 
 /** 两个工具的描述，以 A 的 keilTools.ts:369 / 1086 为底，补上落盘语义（§6.3）。 */
 export const DEBUG_DESCRIPTION =
-  "Debug a Keil MDK project through uVision's own debugger, headless: set breakpoints, run, step, halt, read registers, variables, memory and the stack. This is the path to take on a machine whose only debugger is Keil's — it uses the probe, device and flash algorithm configured in the .uvprojx/.uvoptx, so no second toolchain is needed. `target` chooses the real board (`hardware`, the default) or uVision's instruction set simulator (`simulator`). Sessions stay open between calls; pass action `close` to release the probe. After `flash` only the first 64 bytes from the image's start are read back by default (`count` asks for more, up to 8192); the whole image is not verified, and the result states the scope.";
+  "Debug a Keil MDK project through uVision's own debugger, headless: set breakpoints, run, step, halt, read registers, variables, memory and the stack. This is the path to take on a machine whose only debugger is Keil's — it uses the probe, device and flash algorithm configured in the .uvprojx/.uvoptx, so no second toolchain is needed. `target` chooses the real board (`hardware`, the default) or uVision's instruction set simulator (`simulator`). Sessions stay open between calls; pass action `close` to release the probe. After `flash` only the first 64 bytes from the image's start are read back by default; `count` asks for more, and anything past 8192 bytes is read back in 0x2000-byte segments until the whole image is covered. The result states the scope it actually reached (`spot` / `full` / `segmented-full` / `none`).";
 
 export const PROJECT_DESCRIPTION =
   "Read and change the Keil MDK project itself, headless: list targets, groups and files; add or remove a group or a source file; read and set the compile defines, include paths and optimisation for a target; switch the active target. Changes are written to the .uvprojx by uVision, so the project opens and builds exactly as edited here. Changes are written to the .uvprojx by uVision when the session closes — not by this process writing the file directly. Before an edit the project and its .uvoptx are copied to <file>.prometheus.bak; if that backup cannot be written the edit is not attempted.";

@@ -1985,7 +1985,12 @@
 - **影响**: 模型要自己从日志里刮文件名与行号；A 侧已经实测过的 `collapseCascades`（把一条根因引发的 12 条链接错误折叠成 1 条）在 B 侧不存在，长日志可能挤占上下文。
 - **触发升级条件**: ① 真实工程出现无法从日志原文定位的构建失败；② 有人反馈构建失败后模型反复重试而不改代码；③ 需要把构建诊断纳入 evidence 保护。
 - **修复建议**: 从 A 的 `src/embedded/diagnostics.ts` 整体搬运（纯函数、无外部依赖），在 `keilCli` 返回结果里替换 `log` 为 `diagnostics`，并补「同一条根因只报一次」的测试。
-- **状态**: 未解决。
+- **状态**: **已解决（2026-11-08，批次 8 · Task 4）**。`mcp-servers/keil/diagnostics.ts` 提供 `parseDiagnostics` / `collapseCascades` / `buildDiagnostics`（纯函数、零 I/O、零依赖，复用 `keilSession.ts` 的 `parseFileLine`）。`tools.ts` 的 build 分支在失败时先追加结构化诊断（最多 20 条，超出说明还有几条），再追加原有的日志尾部（60 行的既有行为未变）；`structuredContent.buildDiagnostics` 与 `flashVerify` 同级给出 `entries` / `total` / `collapsed`。失败码仍是 `keil_build_failed`。
+  - **`collapseCascades` 的判据比 A 侧窄，且与「12 条折叠」那组数字不可比**：只折叠 `L6218E`（`Undefined symbol X (referred from …)`），且要求前面已有一条 **error** 以**引号整名**点名同一符号（`#20: identifier "X" is undefined` / `'X'`）或已是一条同符号的 `L6218E`。编译器错误本身一律不折叠；warning 不构成折叠依据。「名称作为子串出现在别的问题里」也不算——`cannot open source input file "foo.h"` 不解释 `Undefined symbol foo`。`tools.ts` 的 build 分支接的是**内联 UVSOCK 日志**（`buildInIde`），不是 `keilCli` 的 `keil-build.log`，A 侧「替换 log 为 diagnostics」的路径没有照搬。
+  - **未验证**：解析规则取自 ARMCC / ARMCLANG / armlink 的**文档化输出格式**。本机没有可用的 Keil（注册表 `MDK` 项只有 `Version`，无 `Path`），仓库里也没有一份真实 UV4 构建日志，因此**没有在任何真实工程上跑过**。触发升级条件 ① 仍然有效：真实日志若出现认不出的行，它仍随日志尾部返回，但不会进 `entries`。
+  - **两条已知的窄**（控制器复核时实测，均为有意保守，不是疏漏）：
+    ① **路径里带空格的位置不识别**。定位段不允许空白，否则「消息正文引用了另一个文件的位置」会被当成诊断；代价是 `..\My Project\main.c(36): error: #20: …` 整行进不了 `entries`。Keil 通常打印相对工程目录的路径（`..\USER\main.c`），带空格的工程目录才会触发。放宽这条就要同时接受「`see src/main.c(36): error:` 这类正文被误判」，在没有真实日志可验的前提下不划算——按批次纪律不做投机性放宽。
+    ② **行号 ≤ 0 的位置会退化成「无位置」的诊断**：`src/main.c:0: error: #20: …` 因为 `parseFileLine` 拒绝行号 0 而落进链接器形状的回退，`file` / `line` 为空但 `code` 与 `message` 仍在。比整行丢掉好，但调用方拿不到定位。
 
 ### D-201 · 整片擦除依赖外部 CLI，且必须先关闭所有会话
 
@@ -2364,7 +2369,14 @@
 - **影响**: 抽检通过只证明镜像开头正确。镜像后段损坏（例如烧录中途掉电、flash 坏块）不会被发现——这一层以前被「回读校验」的措辞掩盖，现在至少如实标注，但能力缺口本身仍在。
 - **触发升级条件**: ① 出现「抽检通过但镜像后段损坏」的实测；② 用户要求整镜像校验。
 - **修复建议**: `verifyFlash` 按 `0x2000` 分段循环并合并结果，`scope` 增 `segmented-full`；补分段、超时预算与中途失败三组测试。
-- **状态**: 未解决（措辞与结构化范围已如实，能力未做）。
+- **2026-11-08 修复（批次 8 · Task 1）**: `mcp-servers/keil/keilSession.ts` 的 `verifyFlash` 改成按 `0x2000` 分段循环，`scope` 增 `segmented-full`。`FLASH_VERIFY_MAX_BYTES` 保留原名与值，语义从「总上限」改成**单段上限**。
+  - **`count` 在 8192 以内时返回形状逐字段不变**（`segments` 字段根本不出现），`spot` / `full` 的判定与文案原样。
+  - **四种 `scope` 的分工**：`full` = 一次读覆盖全镜像；`segmented-full` = 分段读覆盖全镜像；`spot` = 只覆盖一部分（`count` 小 / 地址空洞 / 预算到点 / 中途不匹配）；`none` = 比较没跑成，或**某段读不回**（此时 `bytes` 是已成功比对的字节数，不是 0）。
+  - **总预算** `FLASH_VERIFY_BUDGET_MS = 60_000`，按段检查；第一次读永远发生（小预算只缩短比较，不会关掉它）。预算耗尽按「部分」处理并说明原因，绝不把没比过的部分说成通过。
+  - **实测（控制器独立复核：假会话 + 临时 `.hex`，与子代理的夹具分开写）**：32 KiB 全量请求 → `segmented-full` / 4 段 / 地址逐段 `0x8000000, 0x8002000, 0x8004000, 0x8006000`；第 3 段坏一字节 → 报的偏移是全局的 `0x8004100`；默认 64 字节 → 结果里**没有** `segments` 键；第 2 段读不回 → `scope: none` / `bytes: 8192`；预算 0 → 只读 1 段。
+  - **一条已知的粗粒度**：`segments` 在段读失败时是「已发起」的段数（第 2 段读不回时 `segments === 2`，但只成功 1 段）。用 `segments × 0x2000` 反推覆盖量会算错——覆盖量看 `bytes`。文档里写的是「看 `bytes`」，没有让人拿 `segments` 相乘。
+  - **一处取舍**：不匹配时立即停止读（判词已定，读完只会多花最多 60 秒）。代价是 `scope` 为 `spot` 而不是 `segmented-full`，`detail` 补了「读了几段 / 共几段」。
+- **状态**: **已解决**（2026-11-08，批次 8）。
 
 ### D-224 · 切换会话不清附件条，旧图片继续阻止发送
 
