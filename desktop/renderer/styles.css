@@ -2548,6 +2548,22 @@ mark.find-hit.current {
   color: var(--success, var(--accent));
 }
 
+/* The hook note: one line appended under a tool row when a hook blocked the
+   call or failed to run. It sits in the summary column and shares its elision,
+   because it is a remark about this row, not a block of its own — a panel here
+   would be a second surface for a fact the row already owns.
+   `warn`, not `danger`: a hook refusing a call is the mechanism working, and a
+   red row would read as the tool having failed (it never ran). */
+.tool-hook-note {
+  grid-column: 2 / -1;
+  font-size: var(--text-xs);
+  color: var(--warn);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
 /* ---------- evidence filter (transcript) ----------
    The filter is one rule on the root instead of a DOM walk per event: while
    it is on, the transcript shows the tool rows the kernel marked as evidence

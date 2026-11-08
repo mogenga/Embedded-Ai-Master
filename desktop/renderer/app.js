@@ -752,6 +752,31 @@ function toolAnnotationBadges(annotations) {
   return badges.join("");
 }
 
+/**
+ * One line under a tool row saying a hook stopped it or did not run.
+ *
+ * Appended **inside** the row rather than as a sibling: `.tool-row` is a
+ * subgrid whose children declare their columns, so a fifth child spanning
+ * columns 2..-1 wraps onto a second implicit row of the same box. As a
+ * sibling it would be left behind the moment `tool_output` re-parents the row
+ * into a `.tool-item`, and the note would end up below the output it does not
+ * describe.
+ *
+ * Idempotent on `data-hook-note`: both `tool_end` and a replayed
+ * `session_loaded` describe the same call, and two identical lines under one
+ * row would read as two hooks having objected. The text is set through
+ * `textContent`, never parsed as markup — a hook's failure sentence quotes a
+ * command line the user wrote.
+ */
+function attachHookNote(row, note) {
+  if (row.dataset.hookNote === note) return;
+  row.dataset.hookNote = note;
+  const line = row.querySelector(".tool-hook-note") ?? document.createElement("div");
+  line.className = "tool-hook-note";
+  line.textContent = note;
+  if (!line.isConnected) row.appendChild(line);
+}
+
 function addToolRow(name, summary, annotations, id = "") {
   const row = document.createElement("div");
   row.className = "tool-row running";
@@ -3918,6 +3943,13 @@ function handleEvent(message) {
         // not judge the call (an older log), and nothing is written — a
         // `false` there would be this layer's claim rather than the kernel's.
         if (typeof message.evidence === "boolean") row.dataset.evidence = String(message.evidence);
+        // The protocol layer only sends this when a hook blocked the call or
+        // failed to run. It attaches to the row rather than becoming its own
+        // node type, so opening the conversation again (which draws rows from
+        // the same field) shows the same thing.
+        if (typeof message.hookNote === "string" && message.hookNote !== "") {
+          attachHookNote(row, message.hookNote);
+        }
         const summaryEl = row.querySelector(".tool-summary");
         if (message.summary) summaryEl.textContent = message.summary;
         // 失败色走类名，与同行的 .failed 同源；内联样式会绕开主题令牌。
@@ -4268,6 +4300,11 @@ function handleEvent(message) {
             `<span class="tool-glyph">${icon(toolGlyph(item.name))}</span>` +
             `<span class="tool-name"><span class="tool-label">${escapeHtml(toolLabel(item.name))}</span></span>` +
             `<span class="tool-summary">${escapeHtml(item.summary || "")}</span>`;
+          // Same annotation the live path draws: without it a blocked call
+          // would come back from the log as an ordinary failure.
+          if (typeof item.hookNote === "string" && item.hookNote !== "") {
+            attachHookNote(row, item.hookNote);
+          }
           toolGroup().appendChild(row);
         }
       }
