@@ -4,6 +4,7 @@ import { buildContextBreakdown } from "../context/breakdown.js";
 import { buildMessages } from "../context/build.js";
 import type { SystemSections } from "../context/system-sections.js";
 import type { TokenMeter } from "../context/token-meter.js";
+import type { HookRunner } from "../hooks/types.js";
 import type {
   CompletionResult,
   ModelChatMessage,
@@ -68,6 +69,14 @@ interface LoopCtxCommon {
    * 缺省时不注入任何节——与实现该机制之前的行为逐字节一致。
    */
   systemSections?: SystemSections;
+  /**
+   * 外部命令钩子。原样透传给 `executeBatch`（`BatchOptions.hooks`）。
+   *
+   * 缺省 `undefined` = 没有钩子可跑，行为与实现该机制之前逐字节一致。
+   * **只影响「能不能收紧」**：钩子挂在 `executeAuthorized` 上，被权限层拒绝的
+   * 调用根本到不了那里（见 `src/tools/pipeline.ts`）。
+   */
+  hooks?: HookRunner;
 }
 
 /**
@@ -739,6 +748,9 @@ export async function* query(
         artifactDir: ctx.artifactDir,
         ...(ctx.cwd === undefined ? {} : { cwd: ctx.cwd }),
         ...(ctx.timeoutMs === undefined ? {} : { timeoutMs: ctx.timeoutMs }),
+        // 没有钩子时整键缺席，不是「给一个空 runner」：两者的行为相同，但前者
+        // 让 BatchOptions 的形状与实现钩子之前逐字段一致。
+        ...(ctx.hooks === undefined ? {} : { hooks: ctx.hooks }),
         // 由 pipeline 在每个调用真正执行前调用;写失败会让该调用不执行。
         onToolStarted: async (call: BatchCall, access: ToolAccess) => {
           const payload: ToolStartedPayload = {

@@ -20,6 +20,9 @@ import {
 } from "./context/compact.js";
 import { createTokenMeter } from "./context/token-meter.js";
 import type { TokenMeter } from "./context/token-meter.js";
+import { createHookRunner } from "./hooks/run.js";
+import { HookConfigError, loadHookConfig } from "./hooks/config.js";
+import type { HookRunner } from "./hooks/types.js";
 import type { LoopEvent } from "./loop/events.js";
 import { query } from "./loop/query.js";
 import type { LoopCtx } from "./loop/query.js";
@@ -96,6 +99,18 @@ export interface RunOptions {
   };
   mcp?: {
     enabled?: boolean;
+    userConfigPath?: string;
+    projectConfigPath?: string;
+    trustProjectConfig?: boolean;
+  };
+  /**
+   * 外部命令钩子（`hooks.json`）。与 `mcp` 那一组同形，因为两者的信任规则相同。
+   *
+   * 读配置失败**不阻止运行**（发一条 `status: hooks_config_failed` 就继续）：
+   * 钩子是加固，不是运行的前提。一个坏掉的 `hooks.json` 不该让一次诊断跑不起来。
+   * 没有配置文件时 `hooks` 为 `undefined`，行为与没有这个字段时逐字节一致。
+   */
+  hooks?: {
     userConfigPath?: string;
     projectConfigPath?: string;
     trustProjectConfig?: boolean;
@@ -457,6 +472,31 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       `mcp.trustProjectConfig must be a boolean; got ${typeof opts.mcp.trustProjectConfig}`,
     );
   }
+  // `hooks` 与 `mcp` 同形：只校验外壳与那个布尔信任开关，两份路径按原样交给
+  // `loadHookConfig`（读不到就是「没配」，类型错误留给 fs 报出来）。
+  const rawHooks: unknown = opts.hooks;
+  if (rawHooks !== undefined) {
+    const proto =
+      typeof rawHooks === "object" && rawHooks !== null ? Object.getPrototypeOf(rawHooks) : undefined;
+    if (
+      typeof rawHooks !== "object"
+      || rawHooks === null
+      || Array.isArray(rawHooks)
+      || (proto !== Object.prototype && proto !== null)
+    ) {
+      throw new TypeError(
+        `hooks must be an object; got ${rawHooks === null ? "null" : typeof rawHooks}`,
+      );
+    }
+  }
+  if (
+    opts.hooks?.trustProjectConfig !== undefined
+    && typeof opts.hooks.trustProjectConfig !== "boolean"
+  ) {
+    throw new TypeError(
+      `hooks.trustProjectConfig must be a boolean; got ${typeof opts.hooks.trustProjectConfig}`,
+    );
+  }
   const compactionEnabled = compaction?.enabled !== false;
   if (compactionEnabled) {
     assertCompactionRatios(compaction?.keepTailRatio ?? 0.16, compaction?.softRatio ?? 0.8);
@@ -634,6 +674,51 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
     }
 
     const signal = opts.signal ?? new AbortController().signal;
+
+    // 外部命令钩子。与 `permissions` / `mcp` 同一信任门：只有显式信任（或给了
+    // 显式项目路径）才读 `<workdir>/.harness/hooks.json`。
+    //
+    // 读配置失败**不阻止运行**：钩子是加固，不是运行的前提。发一条 status 就够了，
+    // 与 `mcp_config_failed` 同一处置；直接抛错会让一个坏掉的 hooks.json 把一次
+    // 本来能跑的诊断拦死，而用户此刻最需要的正是那次诊断。
+    //
+    // 没有配置文件 → `hookRunner` 为 undefined → `LoopCtx.hooks` 整键缺席 →
+    // pipeline 的 `executeAuthorized` 完全不进钩子分支，行为与实现前逐字节一致。
+    let hookRunner: HookRunner | undefined;
+    try {
+      const explicitProjectHookPath = opts.hooks?.projectConfigPath;
+      const trustProjectHooks =
+        opts.hooks?.trustProjectConfig === true || explicitProjectHookPath !== undefined;
+      const loadedHooks = loadHookConfig({
+        home,
+        workdir: runCwd,
+        includeProject: trustProjectHooks,
+        ...(opts.hooks?.userConfigPath !== undefined
+          ? { userConfigPath: opts.hooks.userConfigPath }
+          : {}),
+        ...(explicitProjectHookPath !== undefined
+          ? { projectConfigPath: explicitProjectHookPath }
+          : {}),
+      });
+      if (loadedHooks.projectSkipped !== undefined) {
+        await session.append({
+          type: "status",
+          payload: {
+            status: "hooks_project_config_skipped",
+            message: loadedHooks.projectSkipped,
+          },
+        });
+      }
+      if (loadedHooks.hooks.length > 0) {
+        hookRunner = createHookRunner(loadedHooks.hooks);
+      }
+    } catch (error) {
+      if (!(error instanceof HookConfigError)) throw error;
+      await session.append({
+        type: "status",
+        payload: { status: "hooks_config_failed", message: error.message },
+      });
+    }
 
     let meter: TokenMeter | undefined;
     let budget: LoopCtx["budget"];
@@ -830,6 +915,9 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       ...(opts.deadlineMs !== undefined ? { deadlineMs: opts.deadlineMs } : {}),
       ...(meter !== undefined ? { meter } : {}),
       ...(compactor !== undefined ? { compactor } : {}),
+      // 没有钩子时整键缺席：把它填成 undefined 也会让 `BatchOptions` 多一个
+      // 与实现前不同的字段（形状变了，虽然行为一样）。
+      ...(hookRunner !== undefined ? { hooks: hookRunner } : {}),
     };
 
     queryStarted = true;

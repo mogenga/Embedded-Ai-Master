@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import type { HookOutcome, HookRunner } from "../hooks/types.js";
 import { heuristicCountTokens } from "../model/count.js";
 import type { PermissionGate, PermissionRequest } from "../permissions/types.js";
 import type { SessionHandle } from "../session/session.js";
@@ -30,6 +31,15 @@ interface BatchOptionsCommon {
   timeoutMs?: number;
   settleGraceMs?: number;
   onToolStarted?: (call: BatchCall, access: ToolAccess) => Promise<void>;
+  /**
+   * 外部命令钩子。缺省 `undefined` = 零行为变化。
+   *
+   * 与 `permission` **不同**，这个字段是可选的，不是「必须显式二选一」：没有钩子
+   * 配置本来就没有可执行的东西（一个空清单与不存在是同一件事），而「不经权限层」
+   * 是另一回事——那仍然必须由调用方显式声明（D-116）。给它一个 `noopHooks` 只会
+   * 逼每个调用点写一行没有意义的代码。
+   */
+  hooks?: HookRunner;
 }
 
 /**
@@ -369,6 +379,15 @@ function normalizeBudget(value: number | undefined): number | undefined {
 interface ExecuteOutcome {
   result: unknown;
   pending?: Promise<unknown>;
+  /**
+   * 本次调用原本主张 `evidence`（工具注解 + 非错误），但 `postToolUse` 往正文里
+   * 追加了钩子输出，因此这个主张被撤回。
+   *
+   * 为什么不是直接写 `result.evidence = false`：`evidence` 由 `runOne` 在
+   * `finalizeResult` 之后按工具注解赋值，那里会把它盖回去。撤回必须是一个能被
+   * 那一处读到的信号，而不是结果对象上的一个会被覆盖的字段。
+   */
+  evidenceDropped?: true;
 }
 
 interface AuthorizedCall {
@@ -475,6 +494,41 @@ async function executeAuthorized(
     return { result: failure("tool_aborted", "tool aborted before execution") };
   }
 
+  const cwd = opts.cwd ?? session.dir;
+  let preHooks: HookOutcome[] = [];
+
+  // preToolUse 挂在这里、`onToolStarted` 之前：
+  //
+  // - 被权限层拒绝的调用在 `authorizeOne` 就返回了，根本到不了本函数，所以钩子
+  //   没有机会把一次 denied 的调用放行——这是结构上的保证，不是约定。
+  // - 被钩子拦下的调用不应该留下一条 `tool_started` 事件：那会变成"已 started
+  //   但从未执行"，与授权阶段刻意不预写 started 是同一条理由。
+  if (opts.hooks !== undefined) {
+    preHooks = await opts.hooks.run(
+      "preToolUse",
+      call.name,
+      { callId: call.id, sessionId: session.id, cwd, input: authorized.input },
+      opts.signal,
+    );
+    // 钩子跑在授权之后，调用方在这期间可能已经中止。中止优先于钩子的判词——
+    // 否则一次用户取消会被记成「钩子拦截」，那不是这次调用真实发生的事。
+    if (opts.signal.aborted) {
+      return { result: failure("tool_aborted", "tool aborted before execution") };
+    }
+    // 多条钩子全部跑完（runner 不短路）：一次调用就能看到所有反对意见。
+    // 决定按「任一阻断即阻断」取，不因后面的钩子跑成功而改变。
+    const blockedHook = preHooks.find((outcome) => outcome.blocked);
+    if (blockedHook !== undefined) {
+      return { result: hookBlockedResult(blockedHook, preHooks) };
+    }
+    // 其它失败（非 0 非 2 / 超时 / 起不来 / 序列化失败）一律 fail-closed：
+    // 一个无法求值的闸门不能被当成开着的（与 `evaluatePolicy` 的 catch → deny 同姿态）。
+    const failedHook = preHooks.find((outcome) => outcome.failure !== undefined);
+    if (failedHook !== undefined) {
+      return { result: hookFailedResult(failedHook, preHooks) };
+    }
+  }
+
   // 回调失败时直接上抛,该调用不执行;不要在这里吞掉异常或预先写 started。
   if (opts.onToolStarted !== undefined) {
     await opts.onToolStarted(call, authorized.access);
@@ -486,6 +540,168 @@ async function executeAuthorized(
     return { result: failure("tool_aborted", "tool aborted before execution") };
   }
 
+  const outcome = await executeToolDef(session, authorized, opts, cwd);
+  if (opts.hooks === undefined) return outcome;
+  // postToolUse 在拿到结果之后、`finalizeResult` 之前：追加进正文的钩子输出因此
+  // 会计入 8000 token 的落盘阈值与 25000 token 的截断，随正文一起进 artifact。
+  // 放在 finalizeResult 之后改 `text`，artifact 里就会是旧正文。
+  return applyPostToolHooks({
+    session,
+    call,
+    cwd,
+    input: authorized.input,
+    evidenceTool: authorized.tool.annotations?.evidence === true,
+    hooks: opts.hooks,
+    signal: opts.signal,
+    preHooks,
+    outcome,
+  });
+}
+
+/**
+ * `preToolUse` 退出码 2：工具不执行，stderr 回给模型。
+ *
+ * 用 stderr 作为正文是刻意的——钩子作者想拦一条命令时，他写的理由就是模型唯一
+ * 需要的信号，不需要我们替他概括一句。
+ */
+function hookBlockedResult(blocked: HookOutcome, all: HookOutcome[]): ToolResult {
+  const reason = blocked.stderr.trim();
+  const text = reason.length > 0
+    ? reason
+    : `hook blocked this tool call: ${blocked.command} (exit 2, no stderr)`;
+  const detail: Record<string, unknown> = { hooks: all };
+  const message = `hook blocked this tool call: ${blocked.command}`;
+  return { isError: true, code: "hook_blocked", message, detail, text };
+}
+
+/**
+ * `preToolUse` 求值失败（超时 / 起不来 / 非 0 非 2）：**阻断**（fail-closed）。
+ *
+ * 一个无法求值的闸门不能被当成开着的。这与 `evaluatePolicy` 的 catch → deny、
+ * `permissionDenied` 的同一姿态；区别只在这条是钩子自己坏了，不是权限规则。
+ */
+function hookFailedResult(failed: HookOutcome, all: HookOutcome[]): ToolResult {
+  const reason = failed.failure ?? "unknown failure";
+  const stderrText = failed.stderr.trim();
+  const message = `hook failed: ${reason}`;
+  const text = stderrText.length > 0 ? `${message}\n\n${stderrText}` : message;
+  return {
+    isError: true,
+    code: "hook_failed",
+    message: truncateText(message, MAX_ERROR_MESSAGE_CHARS),
+    detail: { hooks: all },
+    text,
+  };
+}
+
+/**
+ * 把 `postToolUse` 的结果追加进正文并记录进 `detail.hooks`。
+ *
+ * 三条规则：
+ * 1. **追加不是替换**：替换会让日志主张工具返回了它没返回的东西（R3）。
+ * 2. **钩子失败不改变结果的成败**：工具确实成功了，是钩子没跑成。`isError`
+ *    保持工具自己的值，失败只记进 `detail.hooks`——那不进模型上下文，所以
+ *    模型不会因为一条坏钩子以为工具失败了。
+ * 3. **`evidence` 降级**：`evidence` 参与压缩保护，主张的是「这是工具的原始
+ *    输出」；一段由钩子写进去的话不在这个主张范围内（R3）。
+ *
+ * 没有匹配的 `postToolUse` 钩子时正文不动，但 `preToolUse` 的结果仍要并进
+ * `detail.hooks`——「钩子跑过但没说话」也要留痕，否则日志里看不出它跑过。
+ */
+async function applyPostToolHooks(input: {
+  session: SessionHandle;
+  call: BatchCall;
+  cwd: string;
+  input: unknown;
+  evidenceTool: boolean;
+  hooks: HookRunner;
+  signal: AbortSignal;
+  /** `preToolUse` 已经跑出的结果；一起并进 `detail.hooks`（第 6 条）。 */
+  preHooks: HookOutcome[];
+  outcome: ExecuteOutcome;
+}): Promise<ExecuteOutcome> {
+  const { outcome } = input;
+  const base = normalizeToolResult(outcome.result);
+  const outcomes = await input.hooks.run(
+    "postToolUse",
+    input.call.name,
+    {
+      callId: input.call.id,
+      sessionId: input.session.id,
+      cwd: input.cwd,
+      input: input.input,
+      result: {
+        isError: base.isError,
+        code: base.code,
+        message: base.message,
+        text: base.text,
+      },
+    },
+    input.signal,
+  );
+  // 一份结果都没产生的路径（没有匹配的钩子）：pre 的结果仍要进 detail.hooks。
+  if (outcomes.length === 0) {
+    if (input.preHooks.length === 0) return outcome;
+    return {
+      ...outcome,
+      result: { ...base, detail: mergeHookDetail(base.detail, input.preHooks) },
+    };
+  }
+
+  // 只追加「退出码 0 且 stdout 非空」的那些。非 0 的钩子它的 stdout 不追加：
+  // 那是一次失败运行的半截输出，拼进正文等于让一次没跑成的钩子改写工具结果，
+  // 而 `isError` 又保持工具自己的值——模型会得到"工具成功且说了这句话"的错觉。
+  const appended = outcomes.filter(
+    (entry) => entry.failure === undefined && entry.exitCode === 0 && entry.stdout.length > 0,
+  );
+
+  const evidenceDropped = input.evidenceTool && base.isError !== true && appended.length > 0;
+  const post: HookOutcome[] = evidenceDropped
+    ? outcomes.map((entry) =>
+        appended.includes(entry) ? { ...entry, evidenceDropped: true as const } : entry,
+      )
+    : outcomes;
+  // pre 在前、post 在后，与它们的实际执行顺序一致。
+  const hooks = [...input.preHooks, ...post];
+
+  const result: ToolResult = {
+    ...base,
+    detail: mergeHookDetail(base.detail, hooks),
+    ...(appended.length === 0
+      ? {}
+      : {
+          text: [base.text, ...appended.map(
+            (entry) => `--- hook: ${entry.command} ---\n${entry.stdout}`,
+          )].join("\n\n"),
+        }),
+  };
+  // `result.evidence` 由调用方（`runOne` / 并发分支）在 `finalizeResult` 之后
+  // 按工具注解赋值，那里会把它盖回去；撤回必须走这个信号，不能写在这里。
+  return evidenceDropped ? { ...outcome, result, evidenceDropped: true } : { ...outcome, result };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * 把钩子结果并进 `detail`，与 `mergeArtifactError` 同一写法：
+ * 已有 `detail` 是普通对象就摊平展开，不是就原样收进 `originalDetail`，两者都
+ * 没有时直接给一个新对象。**不覆盖**已有的 `detail`——那里可能有 shell 的
+ * `abortEscalated`、并发分支的 `mayStillBeRunning` 等等。
+ */
+function mergeHookDetail(detail: unknown, hooks: HookOutcome[]): unknown {
+  if (isPlainRecord(detail)) return { ...detail, hooks };
+  if (detail === undefined) return { hooks };
+  return { originalDetail: detail, hooks };
+}
+
+async function executeToolDef(
+  session: SessionHandle,
+  authorized: AuthorizedCall,
+  opts: BatchOptions,
+  cwd: string,
+): Promise<ExecuteOutcome> {
   const timeoutMs = resolveTimeoutMs(opts.timeoutMs, authorized.tool.callTimeoutMs);
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal = AbortSignal.any([opts.signal, timeoutSignal]);
@@ -493,7 +709,7 @@ async function executeAuthorized(
   // 才可能读回本会话写下的产物（不再有第二个来源）。
   const ctx: ToolCtx = {
     sessionId: session.id,
-    cwd: opts.cwd ?? session.dir,
+    cwd,
     artifactDir: opts.artifactDir,
   };
 
@@ -579,7 +795,12 @@ async function runOne(
   const result = await finalizeResult(outcome.result, call.id, opts.artifactDir);
   return {
     id: call.id,
-    result: { ...result, evidence: isEvidenceTool && result.isError !== true },
+    result: {
+      ...result,
+      // `evidenceDropped` = 正文里已经混进了钩子写的话，这个结果不能再主张
+      // 「这是工具的原始输出」（R3）。见 `applyPostToolHooks`。
+      evidence: isEvidenceTool && result.isError !== true && outcome.evidenceDropped !== true,
+    },
     ...(outcome.pending !== undefined ? { pending: outcome.pending } : {}),
   };
 }
@@ -735,13 +956,30 @@ export async function executeBatch(
         // abortEscalated/terminateFailed 同一个先例。措辞是 may 而非 is——它可能
         // 在这批其它调用收尾期间结束。带 pending 的结果必然是 executeAuthorized
         // 直接构造的 tool_timeout/tool_aborted 失败,本身不携带 detail,故直接赋值。
+        //
+        // 唯一的例外是 `detail.hooks`：钩子在超时前已经跑过，它们的结果是事实，
+        // 被这一行覆盖掉就等于「钩子跑过但日志里看不出来」。没有钩子时这一支与
+        // 从前逐字段相同。
         const disclosed =
           outcome.pending === undefined
             ? result
-            : { ...result, detail: { mayStillBeRunning: true } };
+            : {
+                ...result,
+                detail: isPlainRecord(result.detail) && result.detail.hooks !== undefined
+                  ? { ...result.detail, mayStillBeRunning: true }
+                  : { mayStillBeRunning: true },
+              };
         return {
           id: entry.call.id,
-          result: { ...disclosed, evidence: entry.evidence && disclosed.isError !== true },
+          result: {
+            ...disclosed,
+            // `evidenceDropped` 与串行分支同一判据：钩子往正文里加了话，
+            // 这个结果就不再是「工具的原始输出」（R3）。
+            evidence:
+              entry.evidence
+              && disclosed.isError !== true
+              && outcome.evidenceDropped !== true,
+          },
         };
       }),
     );
