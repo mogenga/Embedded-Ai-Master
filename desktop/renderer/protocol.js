@@ -51,6 +51,10 @@ const KNOWN_TYPES = new Set([
   // moment the operator has walked away from the window, and the one line that
   // says it finished would otherwise be a warning that it could not be read.
   "background_result",
+  // Same rule for `subagent_result`: a subagent's conclusion arrives after the
+  // turn that started it may already be over. Leaving it out would print an
+  // "unrecognised event type" warning exactly where the answer should be.
+  "subagent_result",
 ]);
 
 /**

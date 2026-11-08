@@ -51,6 +51,19 @@ interface LoopCtxCommon {
   systemPrompt?: string;
   pricePerMillion?: PricePerMillion;
   /**
+   * 本会话之外已经花掉的钱（美元），由调用方惰性提供。
+   *
+   * 子代理不在父会话的日志里，它的 `usage` 事件写在子会话——父日志的
+   * `usageTotals()` 永远看不见那笔开销。没有这个钩子，`maxCostUsd` 熔断对
+   * 子代理的开销是瞎的：设了总预算，子代理却可以一直花下去。
+   *
+   * 只在**重算** `costUsd` 的三处取值（初始化、两次压缩后重算）。轮内的
+   * `costUsd += ...` 是在这三处之一的基数上累加，因此也自动包含它。
+   *
+   * 缺省时行为与实现它之前**逐字节一致**。
+   */
+  externalCostUsd?: () => number;
+  /**
    * 投影期注入的系统提示词分节（不写会话日志，见 `context/system-sections.ts`）。
    * 缺省时不注入任何节——与实现该机制之前的行为逐字节一致。
    */
@@ -390,7 +403,22 @@ export async function* query(
   // 标签说的是「每条消息」，预算是「整段会话」。
   let turn = lastCheckpointTurn(session);
   let runTurn = 0;
-  let costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
+  // 三处重算成本的地方（这里与两次压缩后）必须用**同一个**算式：漏掉
+  // `externalCostUsd` 会让一次压缩把子代理的开销从账上抹掉，熔断随即放行。
+  //
+  // 重算之外还要在**每轮开头**补一次外部开销的增量（见下面 `externalCostSeen`
+  // 的注释）：子代理可能在两次模型调用之间结算，而 `costUsd += …` 只累加本会话
+  // 自己的用量。两处都要有，否则要么压缩后丢失、要么轮内看不见。
+  //
+  // `externalCostSeen` 只回答一件事：上一次把外部开销折进来时它是多少。
+  // 重算与「每轮补增量」两处都必须更新它，否则同一笔钱会被数两遍：
+  // 重算已经把它加进 `costUsd`，下一轮再按「增量」加一次。
+  let externalCostSeen = ctx.externalCostUsd === undefined ? 0 : ctx.externalCostUsd();
+  const recomputeCostUsd = (): number => {
+    externalCostSeen = ctx.externalCostUsd === undefined ? 0 : ctx.externalCostUsd();
+    return computeCostUsd(session.usageTotals(), ctx.pricePerMillion) + externalCostSeen;
+  };
+  let costUsd = recomputeCostUsd();
   let pending: PendingBatch | undefined;
   let exitReason: ExitReason | undefined;
   // 连续截断计数(KERNEL-4):每次截断响应 +1,任何非截断响应清零。
@@ -491,6 +519,16 @@ export async function* query(
         return;
       }
 
+      // 外部开销的**增量**并入本轮判断：子代理在上一次模型调用期间结算的钱，
+      // 这一轮开头就该拦住下一次请求。`assertBreakers` 之前是唯一的位置——
+      // 放到发请求之后，这一轮的钱已经花了。
+      if (ctx.externalCostUsd !== undefined) {
+        const current = ctx.externalCostUsd();
+        if (current > externalCostSeen) {
+          costUsd += current - externalCostSeen;
+          externalCostSeen = current;
+        }
+      }
       try {
         assertBreakers(cfg, runTurn, costUsd, costTracked);
       } catch (error) {
@@ -519,7 +557,7 @@ export async function* query(
         }
         yield { kind: "compacted" };
         messages = projectMessages(ctx);
-        costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
+        costUsd = recomputeCostUsd();
       }
 
       // 量在发请求之前:这一刻 `messages` 还是闭合的日志投影,能算占用率与分类;
@@ -581,7 +619,7 @@ export async function* query(
             return;
           }
           yield { kind: "compacted" };
-          costUsd = computeCostUsd(session.usageTotals(), ctx.pricePerMillion);
+          costUsd = recomputeCostUsd();
           // `continue` 回到循环顶部:重建消息、再发一次请求。它确实会多走一轮
           // checkpoint 与 turn 计数,但 `maxTurns` 仍按本次运行的模型调用数计,
           // 恢复重试也计入——这与"每次请求都算一轮"的既有语义一致。

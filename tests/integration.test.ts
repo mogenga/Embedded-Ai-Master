@@ -309,7 +309,10 @@ describe("runSession 端到端装配", () => {
     expect(calls[0].body.model).toBe("flash");
     expect(calls[0].body.max_tokens).toBe(512);
     expect(calls[0].body.stream).toBe(true);
-    expect(calls[0].body.tools).toHaveLength(13);
+    // 13 个内置工具 + `subagent` / `subagent_check` 两个子代理工具。后者不在
+    // `createBuiltinTools()` 里（`tests/tools.test.ts` 仍钉着 13 个纯对象工具），
+    // 但它们是 `runSession` 装进注册表的工具面的一部分，所以会出现在请求体里。
+    expect(calls[0].body.tools).toHaveLength(15);
     expect(
       (calls[0].body.tools as Array<{ type: string; function: { name: string } }>).map(
         (tool) => tool.function.name,
@@ -328,6 +331,8 @@ describe("runSession 端到端装配", () => {
       "terminal_bg_check",
       "glob",
       "grep",
+      "subagent",
+      "subagent_check",
     ]);
     expect(calls[0].body.tools).toEqual(
       expect.arrayContaining([
@@ -2768,6 +2773,10 @@ describe("runSession MCP 装配", () => {
     expect(secondTools).toContain("mcp__echo__echo");
     expect(secondTools).not.toContain("mcp__echo__multi");
     expect(secondTools).not.toContain("mcp__echo__shrink");
+    // 工具刷新走的是 `registry.replace([...])` 的另一条构造路径：那里漏掉
+    // 子代理工具，一次 MCP 刷新就会让 `subagent` 从模型视野里消失。
+    expect(secondTools).toContain("subagent");
+    expect(secondTools).toContain("subagent_check");
     expect(
       events.some(
         (event) => event.kind === "tool_result" && event.id === "echo-call" && event.ok,

@@ -324,7 +324,10 @@ export function buildMessages(
       // 投影一遍只是让它复述一条自己没说过的话。注意它**不能**被并进 `user`/
       // `system`/`assistant` 那一类:那三个在工具批次未闭合时会触发上面的守卫,
       // 而作业完全可能在 assistant 与它的 tool_result 之间结束。
-      case "background_result": {
+      case "background_result":
+      // 子代理的终局同理:它由宿主在子代理结束时写,完全可能落在父轮次的
+      // assistant 与 tool_result 之间。它是事实记录,不是模型说过的话。
+      case "subagent_result": {
         break;
       }
       default: {
