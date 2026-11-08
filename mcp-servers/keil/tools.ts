@@ -21,7 +21,7 @@
  *    read from the status and those frames rather than from the reply.
  */
 
-import { debugInputSchema, projectInputSchema, DEBUG_DESCRIPTION, PROJECT_DESCRIPTION, EVIDENCE_ACTIONS, DESTRUCTIVE_ACTIONS } from "./actions.js";
+import { debugInputSchema, projectInputSchema, DEBUG_DESCRIPTION, PROJECT_DESCRIPTION, EVIDENCE_ACTIONS, DESTRUCTIVE_ACTIONS, READONLY_ACTIONS, STATEFUL_ACTIONS } from "./actions.js";
 import { declarationFor, PROJECT_EDIT_ACTIONS } from "./declarations.js";
 import { selectionFromEnv } from "./resolve.js";
 import type { ProbeToolResult, ProbeToolSpec } from "../probe/tools.js";
@@ -1428,7 +1428,11 @@ export function createKeilTools(): ProbeToolSpec[] {
         // 一并带上，供审批层与文档使用。
         evidence: true,
         evidenceActions: [...EVIDENCE_ACTIONS],
-        destructiveActions: [...DESTRUCTIVE_ACTIONS],
+        // 内核按这两份白名单给每次调用定读写（OPT-21）：没有 `readOnlyActions`，
+        // 一个「读寄存器」也要走审批，因为工具级注解只能整工具标一次。
+        // 「会改变状态」= 破坏性 + 有状态但无写前声明的那六个（见 STATEFUL_ACTIONS）。
+        destructiveActions: [...DESTRUCTIVE_ACTIONS, ...STATEFUL_ACTIONS],
+        readOnlyActions: [...READONLY_ACTIONS],
       },
       handler: async (args: unknown): Promise<ProbeToolResult> => {
         const input = (args ?? {}) as Record<string, unknown>;
