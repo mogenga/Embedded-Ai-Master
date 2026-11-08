@@ -169,6 +169,28 @@
 
         <div class="main-body">
           <div class="chat-column">
+            <!-- The replay bar (BR-6). It is a flex child of the chat column
+                 and comes before the transcript, so it sits between the top
+                 bar and the conversation, in the flow rather than over it: a
+                 scrubber that covered the transcript would hide the very rows
+                 it scrubs. It ships hidden and only an opened session reveals
+                 it — a new conversation has no log to step through. -->
+            <div class="replay-bar" id="replay-bar" hidden>
+              <!-- `min` and the step are constants; `max` is the log's own
+                   last seq, which only the host knows. -->
+              <input
+                class="replay-range"
+                id="replay-range"
+                type="range"
+                min="0"
+                max="0"
+                step="1"
+                value="0"
+                aria-label="Replay position"
+              />
+              <span class="replay-count" id="replay-count"></span>
+              <button type="button" class="btn btn-quiet small" id="replay-latest" hidden></button>
+            </div>
             <main class="transcript" id="transcript" aria-live="polite" aria-busy="false">
               <div class="find-bar" id="find-bar" hidden>
                 <input id="find-input" type="search" spellcheck="false" autocomplete="off" />
@@ -216,6 +238,16 @@
               <div class="evidence-empty" id="evidence-empty" hidden role="status">
                 <svg class="icon" aria-hidden="true"><use href="#i-check"></use></svg>
                 <span data-i18n="evidenceFilterEmpty">No tool output in this session is marked as evidence yet.</span>
+              </div>
+
+              <!-- Why the composer is disabled while a replay is on screen. A
+                   disabled box with no sentence is a broken input; this says
+                   which position is being looked at and how to leave it. It
+                   sits beside the composer for the same reason the evidence
+                   note does: it explains the box it stands next to. -->
+              <div class="composer-lock" id="composer-lock" hidden role="status">
+                <svg class="icon" aria-hidden="true"><use href="#i-pause"></use></svg>
+                <span id="composer-lock-text"></span>
               </div>
 
               <!-- The same plan the transcript card draws, kept in view while

@@ -2608,6 +2608,80 @@ mark.find-hit.current {
   opacity: 0.7;
 }
 
+/* ---------- replay bar (BR-6) ----------
+   A strip between the top bar and the transcript. It is in the flow, not
+   floating: the rows it scrubs are directly below it, and a panel over them
+   would hide the thing being replayed. It costs height only while a stored
+   conversation is open, so a new session's first screen is unchanged. */
+
+.replay-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.replay-range {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+/* The count must not reflow the slider as it goes 9 → 10 → 100, so it is a
+   fixed-ish tabular readout with the same mono face the transcript's other
+   counted figures use. */
+.replay-count {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+
+/* Replay is a mode, and a mode the reader can be in without noticing is the
+   one that makes them send a message at the wrong timeline position. The strip
+   takes the accent while a replay is active; the composer's own lock note
+   says the same thing in words. */
+.replay-bar.replaying {
+  border-bottom-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--text);
+}
+
+.composer-lock {
+  max-width: var(--column-width);
+  margin: 0 auto 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+
+.composer-lock svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: var(--accent-text);
+}
+
+/* A locked composer still shows its draft: clearing the text would throw away
+   work the reader did at the head of the log and cannot see while scrubbing.
+   The box reads as unavailable without the content disappearing. */
+.composer textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
 /* The name and its badges share the name track, so a badge does not push the
    summary into a column of its own (that would move the summary only on rows
    that happen to carry a badge). The label elides; the badges do not. */

@@ -680,7 +680,7 @@ interface SessionEventEnvelope extends SessionEvent {
 | `sessionEventToHostEvents` | `(event, ctx) => HostEvent[]` | 单个内核事件 → 0..N 个渲染器事件 |
 | `initialState` | `(options?) => HostEvent` | boot 时的 `state` 事件 |
 | `sessionsEvent` | `(summaries) => HostEvent` | `sessions` 事件 |
-| `sessionLoadedEvent` | `(events, options?) => HostEvent` | `session_loaded` 事件 |
+| `sessionLoadedEvent` | `(events, options?) => HostEvent` | `session_loaded` 事件。`options.atSeq` 可选：截断到该事件（BR-6 回放），越界**抛错**不钳位；给了时事件额外带 `atSeq` + `lastSeq` |
 
 **`sessionEventToHostEvents` 完整映射**：
 

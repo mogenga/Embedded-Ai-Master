@@ -1,0 +1,5 @@
+{
+  "rootCause": "SPI1 未使能",
+  "requiredTools": ["ls", "echo"],
+  "forbiddenClaims": ["一定是硬件坏了", "换块板子就好了"]
+}

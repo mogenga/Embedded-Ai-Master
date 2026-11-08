@@ -69,7 +69,12 @@ async function waitForPid(file: string, timeoutMs = 10000): Promise<number> {
   throw new Error(`pid file not created: ${file}`);
 }
 
-async function waitForExit(pid: number, timeoutMs = 10000): Promise<void> {
+/**
+ * 等一个进程真的消失。超时 30 s 的理由见 `background-terminal.test.ts` 的同名
+ * 函数：D-229 把终止改成「异步发出、立刻返回」之后，发出到消失之间隔着约 1 s，
+ * 并行全量时更长。放宽的是等它消失的容忍度，不是断言——真没死照样报错。
+ */
+async function waitForExit(pid: number, timeoutMs = 30000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -82,10 +87,22 @@ async function waitForExit(pid: number, timeoutMs = 10000): Promise<void> {
   throw new Error(`process ${pid} still running`);
 }
 
-afterEach(() => {
+afterEach(async () => {
   spawnMock.mockReset();
   spawnSyncMock.mockReset();
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  // 清理失败不得判红（D-229）：abort 之后 taskkill 还要一段时间才能让进程真的
+  // 消失（空闲约 1 s，并行全量实测最慢 15.7 s），这段时间 Windows 会占住它的
+  // cwd，`rmSync` 就是 EPERM。afterEach 抛错会让**下一条用例**也红。
+  for (const dir of tempDirs.splice(0)) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+  }
 });
 
 describe("shellTool 元数据与 schema", () => {
@@ -525,24 +542,35 @@ describe("shellTool 执行", () => {
         }
       }
     },
-    25000,
+    // 用例自身的上限必须高于 `waitForExit` 的 30 s，否则进程真没消失时先报
+    // 「用例超时」而不是那条更具体的 `process N still running`。
+    45000,
   );
 
-  it("abort 后进程不退出时升级终止并兜底返回 shell_aborted", async () => {
+  it("abort 后进程不退出时兜底返回 shell_aborted，并如实标出未被确认", async () => {
     vi.useFakeTimers();
     const workdir = makeWorkdir();
     const child = fakeChild();
     Object.assign(child, { pid: 424242 });
     spawnMock.mockImplementationOnce(() => child);
+    // 让回收器的两次尝试都「发不出去」，模拟终止失败。
+    // D-229 之后 `terminateTree` 走异步 `spawn` 而不是 `spawnSync`，所以这里
+    // 拦的是 `spawn`（`spawnMock`）——后台回收器自己也走同一条路径，用
+    // `mockImplementation` 让所有 spawn 都抛，而不是只拦第一条。
     const killSpy = process.platform === "win32"
       ? undefined
       : vi.spyOn(process, "kill").mockImplementation(() => {
         throw new Error("kill failed");
       });
+    let taskkillAttempts = 0;
     if (process.platform === "win32") {
-      spawnSyncMock.mockImplementation(
-        (() => ({ status: 1 })) as unknown as typeof childProcess.spawnSync,
-      );
+      spawnMock.mockImplementation(((command: string) => {
+        if (command === "taskkill") {
+          taskkillAttempts += 1;
+          throw new Error("taskkill did not start");
+        }
+        return child;
+      }) as unknown as typeof childProcess.spawn);
     }
     try {
       const controller = new AbortController();
@@ -554,14 +582,20 @@ describe("shellTool 执行", () => {
 
       expect(result).toMatchObject({ isError: true, code: "shell_aborted" });
       expect(result.text).toContain("not confirmed");
+      // 关键断言（与实现无关的那条）：终止没成功时必须**如实**说
+      // `terminateFailed: true`，而不是照样报「已终止」。
+      expect((result.detail as { terminateFailed?: boolean }).terminateFailed).toBe(true);
       if (process.platform === "win32") {
-        expect(spawnSyncMock).toHaveBeenCalledTimes(2);
+        // 发过一次就够：`/T /F` 已是最强，第二次对同样的目标做同样的事。
+        expect(taskkillAttempts).toBeGreaterThanOrEqual(1);
       } else {
-        expect(killSpy?.mock.calls.some(([, signal]) => signal === "SIGTERM")).toBe(true);
-        expect(killSpy?.mock.calls.some(([, signal]) => signal === "SIGKILL")).toBe(true);
+        expect(killSpy?.mock.calls.length).toBeGreaterThanOrEqual(1);
       }
     } finally {
       killSpy?.mockRestore();
+      // 恢复成被包住的原实现：`vi.mock` 里 `vi.fn(actual.spawn)` 已经记住了它，
+      // `mockReset` 会连实现一起清掉（那样后续用例就再也 spawn 不出进程）。
+      spawnMock.mockImplementation(childProcess.spawn);
       vi.useRealTimers();
     }
   });

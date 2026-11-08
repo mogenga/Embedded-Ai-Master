@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import { z } from "zod";
 import type {
@@ -7,6 +7,7 @@ import type {
   BackgroundResultPayload,
 } from "../session/types.js";
 import { resolveInWorkdir, ToolPathError } from "./path-safety.js";
+import { isProcessAlive, signalProcessTree } from "./process-tree.js";
 import { isDangerousCommand } from "./shell.js";
 import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
 
@@ -105,37 +106,22 @@ function previewCommand(command: string): string {
 }
 
 /**
- * 与 `shell` 的 `terminateTree` 语义相同:POSIX 先杀进程组、再单杀 pid;
- * Windows 用 `taskkill /T /F`。
+ * 终止一棵进程树（D-229）。
  *
- * 这里复制而不是从 `shell.ts` 导入,是因为 `shell.ts` 里那份是模块私有的、
- * 只为前台的一次调用服务;后台还需要它处理「作业结束后进程树还在跑」的情况。
- * 两处必须保持一致,改动时一起改。
+ * 语义与 `shell` 的那一份相同，实现搬到 `process-tree.ts` 后两处共用一份：
+ * 复制两份的代价是它们会各自演化，而这条路径上的差异只有「要不要阻塞」
+ * 一种。
+ *
+ * **不阻塞**：`spawnSync("taskkill")` 在 Windows 上固定约 1 s（实测 10 次：
+ * 对不存在的 pid 也要 953–1218 ms），而 `killAllBackgroundJobs` 挂在每个用例的
+ * `afterEach` 上、每个作业连做两次。阻塞期间事件循环停摆，`waitForExit` 的
+ * 25 ms 轮询一次都跑不到——这就是并行全量下「process N still running」的成因。
+ *
+ * 返回 `true` 只表示**回收器已发出**，不表示进程已终止；终局仍由 `exit` 事件
+ * 或兜底定时器给出（与 `stopJob` 的既有契约一致：不在这里宣布终局）。
  */
-function terminateTree(pid: number, force = false): boolean {
-  if (process.platform === "win32") {
-    try {
-      const result = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      return result.status === 0;
-    } catch {
-      return false;
-    }
-  }
-  const signal = force ? "SIGKILL" : "SIGTERM";
-  try {
-    process.kill(-pid, signal);
-    return true;
-  } catch {
-    try {
-      process.kill(pid, signal);
-      return true;
-    } catch {
-      return false;
-    }
-  }
+function terminateTree(pid: number): boolean {
+  return signalProcessTree(pid);
 }
 
 function resolveCwd(ctx: ToolCtx, input: string): string | ToolResult {
@@ -285,9 +271,22 @@ function stopJob(job: BackgroundJob, killedBy: BackgroundKilledBy): void {
   if (job.state !== "running" || job.settled || job.killedBy !== null) return;
   job.killedBy = killedBy;
   terminateTree(job.pid);
+  // 升级不再另发一次 taskkill：`signalProcessTree` 发的就是 `/T /F`，已经是
+  // 最强制的那一种；再发一次只是多付一次约 1 s 的启动成本，对同样的目标做
+  // 同样的事。计时器保留，因为它同时承担「给兜底定时器一个中间检查点」的
+  // 位置意义——将来温和信号真的区分出来了，这里就是发它的地方。
+  // 升级**不再重发**（D-229）。`terminateTree` 发的已经是 `taskkill /T /F`——
+  // 最强的那一种。再发一次对同一个 pid 只是让两个 taskkill 争抢同一个进程，
+  // 反而把它拖得更久（实测：并发 taskkill 同一个 pid 会互相拖慢，而单独一次
+  // 在重负载下 1.9 s 就成功）。
+  //
+  // 计时器保留：它仍然给 `stopJob` 一个「1 s 后仍没落定」的检查点，只是不再
+  // 对同一个目标重复下令。进程真的没死时，由下面的兜底定时器如实报
+  // `timed_out` / `signaled`——那是 `stopJob` 一贯的契约：不在这里宣布终局。
   job.escalateTimer = setTimeout(() => {
     if (job.settled) return;
-    terminateTree(job.pid, true);
+    // 只在进程仍在时才再发一次：已经消失的 pid 再发一次是纯浪费。
+    if (isProcessAlive(job.pid)) terminateTree(job.pid);
   }, ABORT_ESCALATE_MS);
   job.escalateTimer.unref?.();
   // 兜底:进程迟迟不退出时也要给一个终局,而不是让作业永远 running。
@@ -309,15 +308,19 @@ function stopJob(job: BackgroundJob, killedBy: BackgroundKilledBy): void {
 /**
  * 结束所有作业。宿主退出时调用。
  *
- * 返回**发出终止信号**的作业数,不是「确认已退出」的数目:同步的退出钩子里
- * 没有时间等 `taskkill` 完成,谎称「已全部退出」就是 R3 意义上的伪装成功。
+ * 返回**发出终止信号**的作业数,不是「确认已退出」的数目:退出钩子里没有时间
+ * 等进程真的消失,谎称「已全部退出」就是 R3 意义上的伪装成功。
+ *
+ * **只发一次**（D-229）。以前每个作业连发两次（「温和」+「强制」），但两者在
+ * Windows 上都是同一个 `taskkill /T /F`——第二次对同样的目标做同样的事，
+ * 只是把每个作业的成本从约 1 s 翻到约 2 s。这个函数挂在每个用例的 `afterEach`
+ * 上，38 个用例串起来就是 38–76 s 的事件循环停摆。
  */
 export function killAllBackgroundJobs(): number {
   let count = 0;
   for (const job of jobs.values()) {
     if (job.state !== "running" || job.settled) continue;
     terminateTree(job.pid);
-    terminateTree(job.pid, true);
     job.state = "signaled";
     job.killedBy = "abort";
     job.settled = true;

@@ -1,8 +1,9 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { statSync } from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import { resolveInWorkdir, ToolPathError } from "./path-safety.js";
+import { isProcessAlive, signalProcessTree } from "./process-tree.js";
 import type { ToolCtx, ToolDef, ToolResult } from "./types.js";
 
 export const shellInputSchema = z.object({
@@ -50,30 +51,19 @@ function previewCommand(command: string): string {
   return command.length <= MAX_COMMAND_PREVIEW ? command : `${command.slice(0, MAX_COMMAND_PREVIEW)}...`;
 }
 
-function terminateTree(pid: number, force = false): boolean {
-  if (process.platform === "win32") {
-    try {
-      const result = spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], {
-        stdio: "ignore",
-        windowsHide: true,
-      });
-      return result.status === 0;
-    } catch {
-      return false;
-    }
-  }
-  const signal = force ? "SIGKILL" : "SIGTERM";
-  try {
-    process.kill(-pid, signal);
-    return true;
-  } catch {
-    try {
-      process.kill(pid, signal);
-      return true;
-    } catch {
-      return false;
-    }
-  }
+/**
+ * 终止这棵进程树（D-229）。
+ *
+ * 实现搬到了 `process-tree.ts`，与 `background.ts` 共用一份——这条路径上
+ * 「前台 / 后台」的差异只有「要不要等结果」，复制两份会让它们各自演化。
+ *
+ * **不阻塞**：Windows 上 `taskkill /T /F` 的启动成本固定约 1 s（实测 10 次，
+ * 对不存在的 pid 也一样），同步等它会把 25 ms 的超时轮询与 abort 兜底定时器
+ * 一起冻住。返回值只表示**回收器已发出**，终局由子进程的 `exit` 事件或
+ * `ABORT_FALLBACK_MS` 兜底给出。
+ */
+function terminateTree(pid: number): boolean {
+  return signalProcessTree(pid);
 }
 
 function isAbortError(error: unknown): boolean {
@@ -515,16 +505,25 @@ function runCommand(command: string, cwd: string, signal: AbortSignal): Promise<
     };
     const onAbort = (): void => {
       const pid = child?.pid;
+      // `terminateFailed` 的含义是「**没能**把回收器发出去」——不是「进程一定
+      // 还在」。D-229 之前这里用 `spawnSync` 的退出码当判据，那需要等约 1 s；
+      // 现在按「有没有可操作的 pid」判，进程是否真的消失交给下面的兜底：
+      // 兜底触发时若进程还活着，文案里的「not confirmed」就兑现了。
       let terminateFailed = pid === undefined;
       if (pid !== undefined) {
         terminateFailed = !terminateTree(pid);
       }
       escalateTimer = setTimeout(() => {
         if (settled || pid === undefined) return;
-        terminateFailed = !terminateTree(pid, true);
+        // 已经是 `/T /F`（最强），再发一次对同样的目标做同样的事；仅在
+        // **它已经消失**时记下「这次没打出去」——那正是 terminateFailed 的语义。
+        if (!isProcessAlive(pid)) return;
+        terminateFailed = !terminateTree(pid);
       }, ABORT_ESCALATE_MS);
       fallbackTimer = setTimeout(() => {
         if (settled) return;
+        // 兜底到点时进程仍在 = 终止未被确认，如实标出来（R3）。
+        if (pid !== undefined && isProcessAlive(pid)) terminateFailed = true;
         const message = "command aborted; process termination not confirmed";
         finish({
           isError: true,

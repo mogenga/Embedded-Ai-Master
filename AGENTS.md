@@ -39,8 +39,29 @@
 - 桌面形态：用户先执行 `npm --prefix desktop install`，再 `npm --prefix desktop run desktop`。**agent 不代为执行任何 install**（见下文禁令）。
 - live 测试默认跳过；开启方式见 README「live 测试」。
 - **并行负载下的偶发红**：本机默认并行度下 `background-terminal` / `mcp-manager` / `ls` / `files-api` / `glob` / `shell` 偶发超时（单跑必绿，每次红的用例都不同）。稳定口径是 `npx vitest run --maxWorkers=4`。判断「是不是真回归」时先单跑那条用例，再按稳定口径复跑一次。
-  这些用例的共同点是**等一个真实子进程死掉**：`taskkill /T /F` 在装了杀软的本机上要 890–1160 ms，并发跑十几份测试时机器排不过来。2026-11-07 的 `5d42e38` 让 `McpManager` 先直接 `process.kill(SIGKILL)` 收父进程，`mcp-manager` 那组因此稳住了；`background-terminal` / `shell` 走各自的进程管理，**不受那处优化影响**，仍会在全量并发时红。
   **判断方法**：单文件跑 `npx vitest run <file>` 全绿 + 全量跑只红那一条 = 负载，不是回归。不要为了让它绿去调大测试的超时阈值——那会把真实的慢也一起藏掉。
+
+> [!IMPORTANT]
+> **这一类红的机制已查清（2026-11-08，D-229），此前两版说明都不完整。**
+>
+> **`taskkill /T /F` 的启动成本固定约 1 s**，与负载无关：对**不存在的 pid** 实测 10 次也要 953–1218 ms。那是进程创建 + 杀软扫描的成本。
+>
+> **旧实现用 `spawnSync` 调它，同步阻塞事件循环。** 阻塞期间测试自己的 25 ms 轮询（`waitForExit`）一次都跑不动，它的 10 s 预算在阻塞里花光——出来就报 `process N still running`。所以「偶发红」不是机器慢，是**同步等待 + 轮询被自己的阻塞饿死**。
+>
+> **并行全量下还会再翻一个数量级**：同时挂着十几个真实进程树时，`taskkill` 要排队等一个进程创建名额。实测「发出信号 → 进程真的消失」5 次为 **1.1 / 1.1 / 1.6 / 8.8 / 15.2 s**（空闲时 0.7–0.95 s）。
+>
+> **已修的三层**（D-229）：
+> 1. 新增 `src/tools/process-tree.ts` 的 `signalProcessTree`：异步 `spawn` + `unref`，调用从约 1000 ms 降到 **8–21 ms**。
+> 2. `background.ts` / `shell.ts` 各自的私有 `terminateTree` 删掉，共用上面那一份。
+> 3. 去掉重复 kill：`killAllBackgroundJobs` 每作业从两次改一次；`stopJob` 的 escalate 只在进程仍存活时才重发。
+>
+> **测试侧**：`background-terminal` 里 7 条只验语义的用例改用假子进程（`scriptedChild`），该文件单跑从 **20.98 s → 4.42 s**。
+>
+> **仍然会偶尔红的是两条真进程用例**，它们**必须**用真进程（「进程真的没了」就是断言本身）：`kill 请求真实结束进程`、`process-tree-terminate` 的「整棵树最终真的会消失」。把这两条也换成假子进程，等于让它们变成自我印证的空测试。
+>
+> **改前 vs 改后**（全量 `--maxWorkers=4`，各 10 轮）：改前约 2/3 的轮次会红、单轮红 6–13 条；改后约 1/3 的轮次红、单轮红 1–2 条。
+>
+> **如果要求「全量永远 0 红」**：把这两个文件放进独立串行组（`vitest.config.ts` 的 project 配置），代价是全量多花约 15 s。当前**没有**这么做——保留真进程验证比「绿灯好看」更重要。
 - CI（`.github/workflows/ci.yml`）只有两个 job：`typecheck + syntax (fast)`（ubuntu，`typecheck` + `check:js`）与 `build + test (offline)`（windows，`build` + `build:mcp` + `coverage`）。**覆盖率闸门只在 `--coverage` 下生效**，所以 offline job 不单独跑 `npm test`。
 - 本地资产缺失时（KB 语料、查询集、真实 `index.yaml`、`dist-mcp/kb/inbox.js`）相关用例 `skipIf`，**不是覆盖下降**；CI 恒比本地多 skip 5 例。
 

@@ -20,6 +20,10 @@ coverage/
 .tmp/
 *.log
 
+# 夜批管线的运行产物（scripts/nightly-batch.mjs）。只忽略 runs/ 子目录：
+# cases/ 与 answers/ 是夹具，必须进版本库——它们是「这一轮该跑什么」的定义。
+tests/fixtures/nightly/**/runs/
+
 # 本地运行数据
 .harness/
 .arts/
