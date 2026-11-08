@@ -84,14 +84,18 @@
 **内核有**
 
 - 13 个内置工具（顺序固定）：`echo` / `read` / `artifact` / `ls` / `todo_write` / `write` / `edit` / `multiedit` / `shell` / `terminal_bg` / `terminal_bg_check` / `glob` / `grep`（`src/tools/builtin.ts`）。
+  **另有 2 个子代理工具不在这个清单里**：`subagent` / `subagent_check`（`src/subagent/tools.ts`）需要 `model` / `registry` / 权限规则，所以由 `src/index.ts` 与内置工具**并列装配**（两条 `ToolRegistry` 构造路径都要，漏 `registry.replace` 那一处会让它们在一次 MCP 工具刷新后消失）。`createBuiltinTools()` 仍然返回 13 个，`tests/tools.test.ts` 钉着这个数。
 - 会话级 MCP 连接、工具名命名空间、权限四档预设（`read-only` / `workspace-write` / `diagnose` / `danger-full-access`）、参数级规则。
+- **只读子代理**：同进程嵌套 `query()`，工具面由 `read-only` 预设钉死（不是第二张白名单），最多 4 并发、缺省 30 轮 / 10 分钟，子会话落在 `<父会话目录>/subagents/<id>`，完成时宿主写一条 `subagent_result`。契约见 `docs/operations/subagent.md`。**父轮次结束不杀子代理**；子代理**读不到**父会话的 artifacts。
+- **外部命令钩子**：`$HARNESS_HOME/hooks.json` 的 `preToolUse` / `postToolUse`，退出码 2 阻断、其它非 0 fail-closed，`postToolUse` 的 stdout 追加进结果正文并把 `evidence` 降为 false。接在权限层**之后**（`executeAuthorized`），所以只能收紧不能放行。契约见 `docs/operations/hooks.md`。**桌面形态不加载项目级钩子**（与 MCP / permissions 同一姿态：宿主不传 `trustProjectConfig`）。
 - 主循环：流式片段落盘、`thinking_delta` 推理通道、三级上下文压缩、`deadlineMs` 整跑墙钟、连续截断上限 3 次、`context_length_exceeded` 恢复一次。
 - 系统提示词**只有 `environment` 一节**（工作目录 / 平台 / shell / 会话日期），投影期注入、不写日志。
 
 **内核没有（不要假装有）**
 
 - **没有 `base` / `tools` / `instructions` / `memory` 四节系统提示词**——措辞是产品决定（D-221），未定稿前不要凭空补写。
-- **没有子代理 / 钩子 / 记忆系统**：`grep -rn "subagent|hook" src/` 零命中；渲染层里 `goal_*` / `subagent_*` / `checkpoints` 是死 UI（D-185）。
+- **没有记忆系统**：内核没有持久记忆、没有 CLAUDE.md 式项目记忆、没有跨会话沉淀通道。
+- **子代理与钩子已在 2026-11-09 落地，但形态与 Claude Code 那套不同**（见下面「当前能力边界」的补充说明）：子代理是**只读**的（`src/subagent/`，`subagent` / `subagent_check` 两个工具），钩子是**外部命令**（`src/hooks/`，`hooks.json` 里的命令，不是进程内 JS 模块）。渲染层里 `goal_*` / `checkpoints` 仍是死 UI（D-185），旧的 `subagent_*` 卡片 UI 已整块删除且**没有**被捡回来。
 - **没有多模态输入**：`ModelChatMessage.content` 是 `string`，图片发不出去（D-188 短期方案：有附件即拒绝发送）。
 - **没有多会话并发**：`runner.start` 单会话串行，运行中追加/取消都不支持（D-148）。
 - **MCP 只有 stdio transport**，没有 HTTP（D-190）。
@@ -118,7 +122,7 @@
 
 - **BR-6 诊断过程可视化**：设备面板已删（不是「隐藏」），会话回放只做到「从日志重建转录」，没有独立的回放控件。
 - **BR-7 夜批管线**：仓库里只有单场景的 `scripts/diagnosis-e2e.mjs`；缺夹具格式、幂等、整跑超时、exit code 表（OPT-44）。
-- **P2 其余项**：子代理、观测里的工具 trace、hooks 均未建。
+- **P2 其余项**：子代理与 hooks 已落地（见下），**观测里的工具 trace 未建且用户明确不做**（2026-11-08，`docs/BACKLOG.md` 批次 9 已摘除）。
 - **外部验证**（D-111 / D-157）：live 网关、真实第三方 MCP、真机串口与 OpenOCD 未实测。
 
 ## 危险命令测试禁令（强制，2026-10-18 事故后新增）
