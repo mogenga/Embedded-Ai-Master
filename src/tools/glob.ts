@@ -13,7 +13,6 @@ export const globInputSchema = z.object({
 export type GlobInput = z.infer<typeof globInputSchema>;
 
 const MAX_RESULTS = 200;
-const REGEX_SPECIAL = /[.*+?^${}()|[\]\\]/;
 
 function failure(code: string, message: string): ToolResult {
   return { isError: true, code, message, text: message };
@@ -30,65 +29,167 @@ function isAbortError(error: unknown): boolean {
 const MAX_PATTERN_LENGTH = 256;
 const MAX_PATTERN_SEGMENTS = 64;
 
-function compilePattern(raw: string): RegExp | undefined {
-  const normalized = raw.replace(/\\/g, "/");
+/**
+ * 旧实现把模式编译成带可选「任意前缀 + 斜杠」组的正则；每个可选组都让失败匹配在
+ * 长路径上回溯，globstar-a 前缀重复 12 次对 32 段路径实测 7.7–9.0 s（D-086）。
+ *
+ * 这里把同一份正则**逐 token 翻译**成一组只前进的转移，再按字符位置做 DP。
+ * 语义与旧正则逐条对应（每个 token 就是旧源码里生成的那一小段），但每一步只保留
+ * 「可达的位置集合」，不回退，复杂度 O(token 数 × 路径长度)。
+ */
+type GlobToken =
+  /** 字面量（正则里被转义或原样输出的普通字符）。 */
+  | { kind: "literal"; char: string }
+  /** `*` → `[^/]*` */
+  | { kind: "star" }
+  /** `?` → `[^/]` */
+  | { kind: "qmark" }
+  /** 整段 `**` 且后面还有 `/` → 可选的「任意前缀 + 斜杠」组，斜杠也由本 token 吃掉。 */
+  | { kind: "globstar" }
+  /** 末尾的整段 `**` → `.*`。 */
+  | { kind: "dotall" };
+
+function isLineTerminator(char: string): boolean {
+  // JS 正则的 `.` 不匹配这四个行终止符（且没有 `s` 标志）。
+  return char === "\n" || char === "\r" || char === "\u2028" || char === "\u2029";
+}
+
+export function isValidGlob(pattern: string): boolean {
+  const normalized = pattern.replace(/\\/g, "/");
   if (
     normalized.length === 0
     || normalized.length > MAX_PATTERN_LENGTH
     || normalized.includes("\0")
   ) {
-    return undefined;
+    return false;
   }
-  const pattern = normalized.replace(/(^|\/)(?:\*\*\/){2,}/g, "$1**/");
-  if (pattern.split("/").filter((segment) => segment.length > 0).length > MAX_PATTERN_SEGMENTS) {
-    return undefined;
-  }
-  let source = "";
-  for (let index = 0; index < pattern.length; index++) {
-    const char = pattern[index]!;
+  const collapsed = normalized.replace(/(^|\/)(?:\*\*\/){2,}/g, "$1**/");
+  return collapsed.split("/").filter((segment) => segment.length > 0).length <= MAX_PATTERN_SEGMENTS;
+}
+
+/**
+ * 按旧 `compilePattern` 的字符循环逐条翻译成 token；非法模式返回 undefined。
+ * 校验（`\` 归一、长度、段数、`\0`）与旧实现完全一致，见 `isValidGlob`。
+ */
+function compileGlob(pattern: string): GlobToken[] | undefined {
+  if (!isValidGlob(pattern)) return undefined;
+  const normalized = pattern.replace(/\\/g, "/");
+  const collapsed = normalized.replace(/(^|\/)(?:\*\*\/){2,}/g, "$1**/");
+  const chars = Array.from(collapsed);
+  const tokens: GlobToken[] = [];
+  for (let index = 0; index < chars.length; index++) {
+    const char = chars[index]!;
     if (char === "*") {
-      const double = pattern[index + 1] === "*";
-      const startsSegment = index === 0 || pattern[index - 1] === "/";
+      const double = chars[index + 1] === "*";
+      const startsSegment = index === 0 || chars[index - 1] === "/";
       const after = double ? index + 2 : index + 1;
-      const endsSegment = after >= pattern.length || pattern[after] === "/";
+      const endsSegment = after >= chars.length || chars[after] === "/";
       if (double && startsSegment && endsSegment) {
-        if (pattern[after] === "/") {
-          source += "(?:.*/)?";
+        if (chars[after] === "/") {
+          tokens.push({ kind: "globstar" });
           index = after;
         } else {
-          source += ".*";
+          tokens.push({ kind: "dotall" });
           index = after - 1;
         }
         continue;
       }
-      source += "[^/]*";
+      tokens.push({ kind: "star" });
       continue;
     }
     if (char === "?") {
-      source += "[^/]";
+      tokens.push({ kind: "qmark" });
       continue;
     }
-    source += REGEX_SPECIAL.test(char) ? `\\${char}` : char;
+    tokens.push({ kind: "literal", char });
   }
-  return new RegExp(`^${source}$`, "u");
+  return tokens;
 }
 
-export function isValidGlob(pattern: string): boolean {
-  return compilePattern(pattern) !== undefined;
+/**
+ * 单 token 的位置转移：`next[j]` 表示从某个 `current[i]` 出发能走到路径的第 j 个
+ * 码点位置。四个分支都只做一次前向扫描，没有回溯。
+ */
+function advance(
+  current: Uint8Array,
+  token: GlobToken,
+  pathChars: readonly string[],
+): Uint8Array {
+  const length = pathChars.length;
+  const next = new Uint8Array(length + 1);
+  switch (token.kind) {
+    case "literal": {
+      for (let index = 0; index < length; index++) {
+        if (current[index] === 1 && pathChars[index] === token.char) next[index + 1] = 1;
+      }
+      return next;
+    }
+    case "qmark": {
+      for (let index = 0; index < length; index++) {
+        if (current[index] === 1 && pathChars[index] !== "/") next[index + 1] = 1;
+      }
+      return next;
+    }
+    case "star": {
+      let open = false;
+      for (let index = 0; index <= length; index++) {
+        if (current[index] === 1) open = true;
+        if (!open) continue;
+        next[index] = 1;
+        if (index < length && pathChars[index] === "/") open = false;
+      }
+      return next;
+    }
+    case "dotall": {
+      let open = false;
+      for (let index = 0; index <= length; index++) {
+        if (current[index] === 1) open = true;
+        if (!open) continue;
+        next[index] = 1;
+        if (index < length && isLineTerminator(pathChars[index]!)) open = false;
+      }
+      return next;
+    }
+    case "globstar": {
+      // 零次（保持原位），或「任意前缀 + 一个 `/`」，且前缀里不能有行终止符。
+      let open = false;
+      for (let index = 0; index <= length; index++) {
+        if (current[index] === 1) {
+          open = true;
+          next[index] = 1;
+        }
+        if (!open) continue;
+        if (pathChars[index] === "/") next[index + 1] = 1;
+        if (index < length && isLineTerminator(pathChars[index]!)) open = false;
+      }
+      return next;
+    }
+  }
+}
+
+function matchesTokens(tokens: readonly GlobToken[], relPath: string): boolean {
+  const pathChars = Array.from(relPath);
+  let current: Uint8Array = new Uint8Array(pathChars.length + 1);
+  current[0] = 1;
+  for (const token of tokens) {
+    current = advance(current, token, pathChars);
+    if (!current.some((value) => value === 1)) return false;
+  }
+  return current[pathChars.length] === 1;
 }
 
 export function matchesGlob(relPath: string, pattern: string): boolean {
-  const regex = compilePattern(pattern);
-  return regex ? regex.test(relPath) : false;
+  const tokens = compileGlob(pattern);
+  return tokens ? matchesTokens(tokens, relPath) : false;
 }
 
 // 供批量过滤场景预编译一次,避免每个文件重复编译(D-090)。
 export function compileGlobMatcher(
   pattern: string,
 ): ((relPath: string) => boolean) | undefined {
-  const regex = compilePattern(pattern);
-  if (regex === undefined) return undefined;
-  return (relPath: string) => regex.test(relPath);
+  const tokens = compileGlob(pattern);
+  if (tokens === undefined) return undefined;
+  return (relPath: string) => matchesTokens(tokens, relPath);
 }
 
 export const globTool: ToolDef<GlobInput> = {
@@ -101,8 +202,8 @@ export const globTool: ToolDef<GlobInput> = {
     if (signal.aborted) {
       return failure("aborted", "glob aborted");
     }
-    const regex = compilePattern(input.pattern);
-    if (!regex) {
+    const matchesPattern = compileGlobMatcher(input.pattern);
+    if (!matchesPattern) {
       return failure("invalid_pattern", `invalid pattern: ${JSON.stringify(input.pattern)}`);
     }
 
@@ -137,7 +238,7 @@ export const globTool: ToolDef<GlobInput> = {
         root,
         workdir,
         (_absolute, relative) => {
-          if (regex.test(relative)) matches.push(relative);
+          if (matchesPattern(relative)) matches.push(relative);
         },
         MAX_SCANNED_FILES,
         signal,

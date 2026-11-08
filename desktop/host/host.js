@@ -107,7 +107,19 @@ try {
     // that survived is the checked variant (it also insists on at least one
     // log file), so a session directory with a header but no log reads as
     // corrupt here rather than as an empty conversation.
-    { readSessionDir, readSessionSnapshot, readSessionHeader },
+    {
+      readSessionDir,
+      readSessionSnapshot,
+      readSessionHeader,
+      // The generation order (`session.v1.jsonl`, `v2`, …) is the kernel's
+      // rule, not the host's: a second copy of that pattern here is a second
+      // thing to keep in step with the writer.
+      listSessionLogFiles,
+      assertGenerationsContiguous,
+      // Same decoder the kernel's full reader uses, so "a `\r` before the
+      // newline is not part of the line" has one definition.
+      decodeEventLine,
+    },
     { resolveHarnessHome },
     // `supportsReasoning` / `isReasoningEffort` are the kernel's own rules for
     // the reasoning parameter; the host reads them rather than keeping a second
@@ -164,6 +176,9 @@ try {
     createLogTailEventSource,
     readSessionDir,
     readSessionSnapshot,
+    listSessionLogFiles,
+    assertGenerationsContiguous,
+    decodeEventLine,
     resolveHarnessHome,
     loadProviders,
     resolveModelRef,
@@ -566,6 +581,97 @@ function compactModules() {
  */
 let searchUnavailableWarned = false;
 
+/**
+ * How much of one log file is read per `readSync` while deriving a title.
+ *
+ * A title lives in the first user event, which is near the head of the log;
+ * 64 KiB is several turns of headroom and one page-sized read on the sizes
+ * this host actually sees.
+ */
+const TITLE_CHUNK_BYTES = 64 * 1024;
+/** A derived title is the first message, cut here and marked with `…`. */
+const TITLE_MAX_CHARS = 80;
+
+/**
+ * The title the first qualifying `user` event of one log file carries.
+ *
+ * Reads incrementally and stops at the first hit: the full-log reader this
+ * replaces parsed every event of every generation (`readSessionDir`) to reach
+ * the same line, which made each sidebar push cost time proportional to the
+ * whole conversation. Only a leading slice is touched now.
+ *
+ * A line that does not parse is **skipped**, not fatal: one bad line further
+ * down the log must not cost the row its title (the old behaviour for that
+ * shape was to fall back to the id). A read error — the file disappearing
+ * under us, a permission change — still ends the derivation; the caller's
+ * `try/catch` turns that into the id, which is what it did before.
+ *
+ * Returns `undefined` when this file holds no qualifying event.
+ */
+function firstUserTitleIn(file) {
+  const fd = openSync(file, "r");
+  try {
+    // A line's bytes are collected as chunks, never as a decoded string: a
+    // multi-byte character can straddle the chunk boundary, and decoding each
+    // chunk on its own would turn the halves into replacement characters and
+    // lose the line. The pieces are joined only when the newline arrives, so a
+    // long line costs one copy rather than one copy per chunk.
+    let parts = [];
+    let position = 0;
+    for (;;) {
+      const chunk = Buffer.allocUnsafe(TITLE_CHUNK_BYTES);
+      const read = readSync(fd, chunk, 0, TITLE_CHUNK_BYTES, position);
+      if (read === 0) break;
+      position += read;
+      let view = chunk.subarray(0, read);
+      for (;;) {
+        const newline = view.indexOf(0x0a);
+        if (newline < 0) break;
+        const head = view.subarray(0, newline);
+        const title = titleFromLine(parts.length === 0 ? head : Buffer.concat([...parts, head]));
+        parts = [];
+        if (title !== undefined) return title;
+        view = view.subarray(newline + 1);
+      }
+      if (view.length > 0) parts.push(view);
+    }
+    // A log whose last line carries no newline still holds an event; the
+    // writer appends one per event, so this is a torn tail rather than the
+    // normal shape — parse it anyway when it happens to be complete.
+    if (parts.length === 0) return undefined;
+    return titleFromLine(parts.length === 1 ? parts[0] : Buffer.concat(parts));
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * The title one log line carries, or `undefined` when it is not a hit.
+ *
+ * The bytes go through the kernel's own line decoder, which is also what the
+ * full reader uses: one definition of "a `\r` before the newline is not part
+ * of the line".
+ */
+function titleFromLine(bytes) {
+  const line = kernel.decodeEventLine(bytes);
+  if (line.trim() === "") return undefined;
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    // One unreadable line is not an unreadable session; keep looking.
+    return undefined;
+  }
+  if (event?.type !== "user") return undefined;
+  const content = event.payload?.content;
+  if (typeof content !== "string") return undefined;
+  const trimmed = content.trim();
+  if (trimmed === "") return undefined;
+  return trimmed.length > TITLE_MAX_CHARS
+    ? `${trimmed.slice(0, TITLE_MAX_CHARS)}…`
+    : trimmed;
+}
+
 const sessions = (() => {
   return {
     list() {
@@ -625,15 +731,26 @@ const sessions = (() => {
       const snapshot = await kernel.readSessionSnapshot(dir, { allowTrailingPartial: true });
       return { header, events: snapshot.events };
     },
+    /**
+     * The title derived from the log, or the id when there is none.
+     *
+     * Generations are read in order (`session.v1.jsonl`, `v2`, …) and each one
+     * only as far as its first qualifying `user` event — see
+     * `firstUserTitleIn`. The generation order and the "no gaps" rule are the
+     * kernel's own (`listSessionLogFiles` / `assertGenerationsContiguous`), not
+     * a second copy kept here: a directory whose `v2` exists without a `v1`
+     * is a corrupt session in the kernel's eyes, and its title must not be
+     * read past that.
+     */
     titleOf(id) {
       try {
-        const { events } = sessions.detail(id);
-        for (const event of events) {
-          if (event.type !== "user") continue;
-          const content = event.payload?.content;
-          if (typeof content !== "string" || content.trim() === "") continue;
-          const trimmed = content.trim();
-          return trimmed.length > 80 ? `${trimmed.slice(0, 80)}…` : trimmed;
+        const dir = path.join(sessionsRoot, id);
+        const files = kernel.listSessionLogFiles(dir);
+        if (files.length === 0) return id;
+        kernel.assertGenerationsContiguous(files, dir);
+        for (const name of files) {
+          const title = firstUserTitleIn(path.join(dir, name));
+          if (title !== undefined) return title;
         }
       } catch {
         // Fall through to the id.
