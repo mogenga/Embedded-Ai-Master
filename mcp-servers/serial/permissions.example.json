@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "preset": "diagnose",
+  "rules": [
+    {
+      "tool": "mcp__serial__embed_serial",
+      "params": [{ "key": "action", "in": ["read"] }],
+      "action": "allow",
+      "reason": "读取串口输出（面板环形缓冲或一次性捕获）是取证，不改变端口状态"
+    },
+    {
+      "tool": "mcp__serial__embed_serial",
+      "params": [{ "key": "action", "in": ["write", "open", "close"] }],
+      "action": "ask",
+      "reason": "串口写与开关端口都是破坏性操作,默认人工确认;可仿照 probe 示例按端口白名单收窄为 allow"
+    }
+  ]
+}

@@ -185,7 +185,7 @@ export function kbTools(service: KbService): KbToolSpec[] {
   const search: KbToolSpec = {
     name: 'kb_search',
     description:
-      '按关键词或十六进制 token 在知识库中逐行检索，返回命中行及上下文。字面多 token 检索，不支持正则；需要正则时用 kb_grep。无命中时返回 found=false，必须如实告知用户，不得编造。scanTruncated: true 表示遍历被截，命中只覆盖已扫描部分，未命中不等于不存在。',
+      '按关键词或十六进制 token 在知识库中逐行检索，返回命中行及上下文。字面多 token 检索，不支持正则；需要正则时用 kb_grep。无命中时返回 found=false，必须如实告知用户，不得编造。count 是真实命中总数，可以大于返回条数。truncated: true 表示返回条数被 limit 截断（count 仍报真实总数），应收窄 tokens 或调整 limit，不要当成「只有这些」；scanTruncated: true 表示遍历被截，命中只覆盖已扫描部分，未命中不等于不存在。',
     inputSchema: searchSchema,
     annotations: { readOnlyHint: true },
     handler: withSchema(searchSchema, async (args) => {
