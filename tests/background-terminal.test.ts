@@ -99,7 +99,18 @@ async function waitForSettledReport(
   }, timeoutMs);
 }
 
-async function waitForExit(pid: number, timeoutMs = 10_000): Promise<void> {
+/**
+ * 等一个进程真的消失。
+ *
+ * **超时从 10 s 放宽到 30 s，理由是语义变了而不是「机器慢」**（D-229）：
+ * `terminateTree` 从「同步等 `taskkill` 跑完（约 1 s + 不确定）」改成「异步发出、
+ * 立刻返回」之后，从「调用了终止」到「进程不在进程表里」中间真的隔着约 1 s
+ * （实测：发信号 21 ms，消失 950 ms）。并行全量时这一段还要再被争用拉长。
+ *
+ * 放宽的是**等它消失**的容忍度，不是断言：进程如果真的没死，30 s 后照样报
+ * `still running`。别把它调到分钟级——那会把「终止没生效」也一起藏掉。
+ */
+async function waitForExit(pid: number, timeoutMs = 30_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -130,11 +141,70 @@ function fakeChild(): ChildProcess & {
   return child;
 }
 
-afterEach(() => {
+/**
+ * 一个「真的会结束」的假子进程：收到终止请求后按脚本自行退出。
+ *
+ * ## 为什么需要它（D-229）
+ *
+ * `taskkill /T /F` 在 Windows 上固定约 1 s 启动成本，而这次全量跑挂在
+ * `--maxWorkers=4` 下时，十几个真实进程树同时回收会把单次拖到十几秒。
+ * 于是「等进程真的消失」变成了在测机器负载，不是测代码。
+ *
+ * **判据**：只有断言**依赖「进程表里真的少了这个 pid」** 时才必须用真进程
+ * （`kill 请求真实结束进程` / `超时终止整棵进程树` / 一个新的回收冒烟用例）。
+ * 其余用例验的是「发出终止 → 作业状态与回报」，用假子进程更准也更快——
+ * 真进程那点延迟只会给断言加噪声。
+ *
+ * `onTerminate` 由测试注入：假 pid 上 `taskkill` 必然失败，所以这里直接模拟
+ * 「信号生效后子进程自己 close」，与真实 child 的 `exit` → `close` 顺序一致。
+ */
+function scriptedChild(options: {
+  pid?: number;
+  /** 终止请求到达后多久发出 close（0 = 下一个 tick）。 */
+  exitAfterMs?: number;
+  exitCode?: number | null;
+  signal?: string | null;
+} = {}) {
+  const child = fakeChild();
+  const pid = options.pid ?? 616_000;
+  Object.assign(child, { pid });
+  const exitCode = options.exitCode ?? null;
+  const signal = options.signal ?? "SIGKILL";
+  return {
+    child,
+    /** 让子进程「跑完」：发 exit 再发 close，与 Node 的顺序一致。 */
+    finish(): void {
+      (child as unknown as EventEmitter).emit("exit", exitCode, signal);
+      (child as unknown as EventEmitter).emit("close", exitCode, signal);
+    },
+    /** 安排一次自动结束（用于「被杀之后确实结束」的场景）。 */
+    scheduleExit(ms = 0): void {
+      setTimeout(() => this.finish(), ms).unref?.();
+    },
+  };
+}
+
+afterEach(async () => {
   killAllBackgroundJobs();
   spawnMock.mockReset();
   spawnSyncMock.mockReset();
-  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  // **清理失败不得判红**（D-229）。`killAllBackgroundJobs()` 现在是「发出回收
+  // 就返回」而不是「等到回收完成」：taskkill 真正让进程消失还要约 1 s，并行
+  // 全量下实测最慢到过 15.7 s。在这段时间里 Windows 会把该进程的 cwd 占住，
+  // 立刻 `rmSync` 就是 EPERM——而 afterEach 抛错会让**下一条用例**也红，
+  // 于是一条真实失败会放大成一片。
+  //
+  // 重试几次拿掉绝大多数情况；仍失败就放着——目录在系统临时目录里，不归仓库管。
+  for (const dir of tempDirs.splice(0)) {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+        break;
+      } catch {
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+      }
+    }
+  }
 });
 
 describe("terminal_bg 元数据与 schema", () => {
@@ -251,12 +321,16 @@ describe("危险命令与中止", () => {
 
 describe("后台作业执行", () => {
   it("立即返回 job id，不等待命令结束", async () => {
+    // 假子进程（D-229）：这条验的是**立即返回**与 id 形状，与进程表无关。
+    // 用真进程反而更差——「没有等它跑完」这件事，假子进程根本不会跑完。
     const workdir = makeWorkdir();
     const ctx = makeCtx(workdir, "s-immediate");
+    const scripted = scriptedChild({ pid: 616_400 });
+    spawnMock.mockImplementationOnce(() => scripted.child);
     const started = Date.now();
 
     const r = await terminalBgTool.execute(
-      { command: nodeCommand("setTimeout(() => {}, 30000)") },
+      { command: "sleep forever" },
       ctx,
       new AbortController().signal,
     );
@@ -279,13 +353,13 @@ describe("后台作业执行", () => {
     expect(detailOf(running).status).toBe("running");
     expect(running.isError).toBe(false);
 
-    // 真正结束它，避免留下残留进程。
+    // 结束它，让作业落到终局（假子进程不会自己退出）。
     await terminalBgCheckTool.execute(
       { id: String(detail.id), kill: true },
       ctx,
       new AbortController().signal,
     );
-    await waitForExit(Number(detail.pid));
+    scripted.finish();
   });
 
   it("cwd 生效", async () => {
@@ -389,7 +463,7 @@ describe("后台作业执行", () => {
     expect(completion.status).toBe("timed_out");
     expect(completion.killedBy).toBe("timeout");
     await waitForExit(pid);
-  });
+  }, 60_000);
 
   it("kill 请求真实结束进程", async () => {
     const workdir = makeWorkdir();
@@ -416,7 +490,7 @@ describe("后台作业执行", () => {
     const after = await waitForSettledReport(id, ctx);
     expect(detailOf(after).status).toBe("signaled");
     expect(detailOf(after).killedBy).toBe("kill");
-  });
+  }, 60_000);
 
   it("进程赖着不退时兜底给出终局，而不是永远 running", async () => {
     vi.useFakeTimers();
@@ -482,19 +556,26 @@ describe("后台作业执行", () => {
     expect(takeBackgroundCompletions(sessionId)).toEqual([]);
   });
 
-  it("killAllBackgroundJobs 结束所有运行中的作业", async () => {
+  it("killAllBackgroundJobs 对每个运行中的作业发出回收，并立刻清空", async () => {
+    // 假子进程（D-229）：这条验的是「清空 + 计数 + 发出回收」，不验进程表。
+    // 真正「进程消失了」由下面的 `kill 请求真实结束进程` 覆盖。
     const workdir = makeWorkdir();
     const ctx = makeCtx(workdir, "s-kill-all");
+    const scripted = scriptedChild({ pid: 616_100 });
+    spawnMock.mockImplementationOnce(() => scripted.child);
 
     const r = await terminalBgTool.execute(
-      { command: nodeCommand("setTimeout(() => {}, 30000)") },
+      { command: "sleep forever" },
       ctx,
       new AbortController().signal,
     );
-    const pid = Number(detailOf(r).pid);
+    expect(r.isError).toBe(false);
 
     expect(killAllBackgroundJobs()).toBeGreaterThanOrEqual(1);
-    await waitForExit(pid);
+
+    // 回收器发出后，作业不该再被列出——它已经 settled 并被移出表。
+    const after = await terminalBgCheckTool.execute({}, ctx, new AbortController().signal);
+    expect(after.text).not.toContain(String(detailOf(r).id));
   });
 
   it("输出超过上限时保留尾部并显式标记截断", async () => {
@@ -588,10 +669,13 @@ describe("terminal_bg_check 查询", () => {
   });
 
   it("别的会话看不到本会话的作业", async () => {
+    // 假子进程（D-229）：这条验的是**会话隔离**，与进程表无关。
     const workdir = makeWorkdir();
     const owner = makeCtx(workdir, "s-owner");
+    const scripted = scriptedChild({ pid: 616_200 });
+    spawnMock.mockImplementationOnce(() => scripted.child);
     const r = await terminalBgTool.execute(
-      { command: nodeCommand("setTimeout(() => {}, 30000)") },
+      { command: "sleep forever" },
       owner,
       new AbortController().signal,
     );
@@ -606,18 +690,19 @@ describe("terminal_bg_check 查询", () => {
     expect(other.isError).toBe(true);
     expect(other.code).toBe("background_job_unknown");
 
-    // 由属主会话收掉，而不是留给 afterEach：`killAllBackgroundJobs` 对
-    // Windows 上的每个作业先跑两次 `taskkill /T /F`（实测各约 1 s），
-    // 一条用例在 afterEach 里省下的两秒比它自己跑的还长。
+    // 由属主会话收掉，而不是留给 afterEach：这条用例验的是「会话隔离」，
+    // 顺手把作业结束掉，免得 afterEach 为它多跑一次回收。
     await terminalBgCheckTool.execute({ id, kill: true }, owner, new AbortController().signal);
-    await waitForExit(Number(detailOf(r).pid));
   });
 
   it("不带 id 时列出本会话的作业", async () => {
+    // 假子进程（D-229）：这条验的是**列表内容**，与进程表无关。
     const workdir = makeWorkdir();
     const ctx = makeCtx(workdir, "s-list");
+    const scripted = scriptedChild({ pid: 616_300 });
+    spawnMock.mockImplementationOnce(() => scripted.child);
     const r = await terminalBgTool.execute(
-      { command: nodeCommand("setTimeout(() => {}, 30000)") },
+      { command: "sleep forever" },
       ctx,
       new AbortController().signal,
     );
@@ -630,9 +715,8 @@ describe("terminal_bg_check 查询", () => {
     expect(list.text).toContain("running");
     expect(Array.isArray(detailOf(list).jobs)).toBe(true);
 
-    // 同上：在用例里收掉，别让 afterEach 为它付两次 taskkill。
+    // 在用例里收掉，别留给 afterEach。
     await terminalBgCheckTool.execute({ id, kill: true }, ctx, new AbortController().signal);
-    await waitForExit(Number(detailOf(r).pid));
   });
 
   it("空会话的列表不是错误", async () => {
