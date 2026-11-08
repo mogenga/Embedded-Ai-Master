@@ -26,6 +26,8 @@ import { decodeGbk, encodeGbk } from "./gbk.js";
 import { decodeXmlText } from "./xmlText.js";
 import { findUv4 } from "./keilInstall.js";
 import { findUvprojx } from "./projectLookup.js";
+import { KEIL_ERROR_CODES } from "./errors.js";
+import type { KeilErrorCode } from "./errors.js";
 import {
   connect,
   isStopNotification,
@@ -246,6 +248,8 @@ export interface OpenResult {
   /** What happened, in the order it happened, for the transcript. */
   log: string[];
   reason?: string;
+  /** Machine-readable failure kind, when the caller can act on it differently. */
+  code?: KeilErrorCode;
 }
 
 /**
@@ -263,6 +267,7 @@ export async function openKeilSession(options: OpenOptions): Promise<OpenResult>
     return {
       ok: false,
       log,
+      code: KEIL_ERROR_CODES.notInstalled,
       reason:
         "Keil MDK is not installed on this machine (UV4.exe was not found). Its debugger is licensed and is never bundled with this app, " +
         "so headless Keil debugging needs a local MDK install. Install MDK, or use embed_debug with an OpenOCD/pyOCD/J-Link probe instead.",
@@ -305,6 +310,7 @@ export async function openKeilSession(options: OpenOptions): Promise<OpenResult>
       return {
         ok: false,
         log,
+        code: KEIL_ERROR_CODES.notDebugging,
         reason:
           `the open session for this project on port ${port} is not in debug mode. ` +
           `Close it first (keil_debug action \`close\`) and open again, or pass connectOnly.`,
@@ -1780,30 +1786,45 @@ export async function flashInIde(session: KeilSession, timeoutMs = 5 * 60_000): 
 export const FLASH_VERIFY_SPOT_BYTES = 64;
 
 /**
- * The most one comparison can read back.
+ * The most one read can bring back — the segment size of a whole-image
+ * comparison.
  *
  * `DBG_MEM_READ` reads at most 0x2000 bytes per request (`readMemory` clamps
- * to it), so a larger request would compare a short reply against a long
- * expectation. Whole-image read-back needs segmentation, which is a separate
- * task — until then this is the ceiling and the result says so.
+ * to it), so a comparison bigger than this runs one read per 0x2000-byte
+ * segment (see `verifyFlash`). This is no longer a ceiling on what was
+ * compared, only on how much arrives per request.
  */
 export const FLASH_VERIFY_MAX_BYTES = 0x2000;
+
+/**
+ * Wall clock for the whole segmented read-back.
+ *
+ * Each segment is one `readMemory` with its own 12 s timeout; without a
+ * total the loop could keep going for a minute per segment on a slow or
+ * failing probe. When the budget runs out the comparison stops and reports
+ * the bytes it did cover (`scope: "spot"`), never a pass for the rest.
+ */
+export const FLASH_VERIFY_BUDGET_MS = 60_000;
 
 export interface FlashVerifyResult {
   ok: boolean;
   /**
-   * `spot` = only a window at the start of the image was compared; `full` =
-   * every byte the image contains was compared; `none` = the comparison
-   * never ran (unreadable file, no records, the debugger refused the read).
+   * `spot` = only part of the image was compared; `full` = a single read
+   * covered every byte the image contains; `segmented-full` = a segmented
+   * read covered every byte the image contains; `none` = the comparison
+   * never ran, or a segment could not be read back (unreadable file, no
+   * records, the debugger refused a read).
    * Never report a spot check as if it covered the image.
    */
-  scope: "spot" | "full" | "none";
+  scope: "spot" | "full" | "segmented-full" | "none";
   /** Bytes actually compared; 0 when no comparison could run. */
   bytes: number;
   /** Bytes the image contains (compared + not compared). */
   imageBytes: number;
-  /** What the caller asked for (the default is 64, capped at 0x2000). */
+  /** What the caller asked for (the default is 64; larger requests are read in segments). */
   requestedBytes: number;
+  /** How many reads a segmented comparison made; absent when one read sufficed. */
+  segments?: number;
   detail: string;
   expected?: string;
   got?: string;
@@ -1817,18 +1838,29 @@ export interface FlashVerifyResult {
  * image's load address match the `.hex` record byte for byte, which is what
  * turns "the log said OK" into "the flash holds this image".
  *
- * **This is a spot check by default.** Only `bytes` bytes from the image's
- * start are read back and compared; the rest of the image is not verified.
- * The result says which of the two it did through `scope` and `bytes`, and
- * the detail repeats it, so a caller cannot mistake 64 compared bytes for a
- * whole-image verification. `scope` is `full` only when every byte the image
- * contains was compared.
+ * **Default: a spot check of the first 64 bytes.** A request of up to
+ * `FLASH_VERIFY_MAX_BYTES` is one read, exactly as before. A larger request
+ * is read back in `FLASH_VERIFY_MAX_BYTES` segments from the image's lowest
+ * address, stopping at the first address gap or when `FLASH_VERIFY_BUDGET_MS`
+ * runs out; only a comparison that covered every byte the image contains is
+ * `segmented-full`. The result carries `scope`, `bytes` and (for a segmented
+ * read) `segments`, so a caller cannot mistake 64 compared bytes — or three
+ * of four segments — for a whole-image verification. A segment that cannot
+ * be read back makes the result `scope: "none"` with the bytes compared so
+ * far, never a pass.
  *
  * The comparison starts at the image's own start address (from the `.hex`
  * record), not at byte zero of the file — an `.axf` is an ELF and its first
  * bytes are `7f 45 4c 46`, not the vector table.
  */
-export async function verifyFlash(session: KeilSession, hexPath: string, bytes = FLASH_VERIFY_SPOT_BYTES): Promise<FlashVerifyResult> {
+export async function verifyFlash(
+  session: KeilSession,
+  hexPath: string,
+  bytes = FLASH_VERIFY_SPOT_BYTES,
+  // The total budget is a parameter with the constant as its default so a test
+  // can exercise the stop-after-a-few-segments path without waiting a minute.
+  budgetMs = FLASH_VERIFY_BUDGET_MS,
+): Promise<FlashVerifyResult> {
   const requestedBytes = Math.max(1, Math.trunc(bytes));
   const failed = (detail: string): FlashVerifyResult => ({ ok: false, scope: "none", bytes: 0, imageBytes: 0, requestedBytes, detail });
   let records: { address: number; bytes: number[] }[] = [];
@@ -1860,63 +1892,128 @@ export async function verifyFlash(session: KeilSession, hexPath: string, bytes =
   // from there and a gap would be its own answer.
   const all = [...image.keys()].sort((a, b) => a - b);
   const start = all[0];
-  const addresses: number[] = [];
-  const window = Math.min(requestedBytes, FLASH_VERIFY_MAX_BYTES, all.length);
-  for (let offset = 0; offset < window; offset++) {
-    if (!image.has(start + offset)) break;
-    addresses.push(start + offset);
-  }
-  if (addresses.length === 0) {
+  // The contiguous run the caller's `count` reaches, stopping at the first
+  // address gap — the same "one run from the lowest address" the single read
+  // always used.
+  let runLength = 0;
+  while (runLength < requestedBytes && image.has(start + runLength)) runLength++;
+  if (runLength === 0) {
     return { ok: false, scope: "none", bytes: 0, imageBytes: all.length, requestedBytes, detail: `${hexPath} has no data records at its start address` };
   }
-  const memory = await readMemory(session, addresses[0], addresses[addresses.length - 1] - addresses[0] + 1);
-  if (!memory) {
+  // A request within one read keeps the single-read path (and its wording)
+  // exactly as it was. Anything bigger is read one 0x2000 segment at a time:
+  // `readMemory` clamps every request to that, so a single big read would
+  // compare a short reply against a long expectation.
+  const segmented = runLength > FLASH_VERIFY_MAX_BYTES;
+  const gapAt = runLength < all.length && !image.has(start + runLength) ? start + runLength : undefined;
+  const started = Date.now();
+  // Bytes the reads have covered so far; `got` holds what came back, so a
+  // short reply leaves `undefined` in the comparison — a mismatch, never a
+  // pass.
+  let covered = 0;
+  let segments = 0;
+  let failedAt: number | undefined;
+  let stoppedByBudget = false;
+  let mismatched = -1;
+  const got: number[] = [];
+  for (let offset = 0; offset < runLength; offset += FLASH_VERIFY_MAX_BYTES) {
+    // One read is always made; the budget only stops the ones after it, so a
+    // small budget shortens the comparison instead of turning it off.
+    if (segmented && segments > 0 && Date.now() - started >= budgetMs) {
+      stoppedByBudget = true;
+      break;
+    }
+    const size = Math.min(FLASH_VERIFY_MAX_BYTES, runLength - offset);
+    const memory = await readMemory(session, start + offset, size);
+    segments++;
+    if (!memory) {
+      failedAt = offset;
+      break;
+    }
+    got.push(...memory.bytes.slice(0, size));
+    covered += size;
+    for (let index = 0; index < size; index++) {
+      if (memory.bytes[index] !== image.get(start + offset + index)) {
+        mismatched = offset + index;
+        break;
+      }
+    }
+    if (mismatched >= 0) break;
+  }
+  const indexed = (from: number, to: number) => ({
+    expected: Array.from({ length: to - from }, (_, index) => image.get(start + from + index)!.toString(16).padStart(2, "0")).join(" "),
+    got: Array.from({ length: to - from }, (_, index) => (got[from + index] ?? -1).toString(16).padStart(2, "0")).join(" "),
+  });
+  // `segments` is present only when the comparison made more than one read,
+  // so a request within one read returns exactly the shape it always did.
+  const segmentedFields = segmented ? { segments } : {};
+  if (failedAt !== undefined) {
+    // Bytes compared so far are real evidence and are reported as such; the
+    // failure itself is "none", because the rest of the image was not seen.
     return {
       ok: false,
       scope: "none",
-      bytes: 0,
+      bytes: covered,
       imageBytes: all.length,
       requestedBytes,
-      detail: `the debugger could not read flash at 0x${addresses[0].toString(16)}`,
+      ...segmentedFields,
+      detail: segmented
+        ? `the debugger could not read flash at 0x${(start + failedAt).toString(16)} — segment ${segments} of ` +
+          `${Math.ceil(runLength / FLASH_VERIFY_MAX_BYTES)} could not be read back after ${covered} byte(s) were compared`
+        : `the debugger could not read flash at 0x${(start + failedAt).toString(16)}`,
     };
   }
-  // The image's bytes are not necessarily one contiguous run from `start`; a
-  // gap means some bytes past it were never in the compared window. The scope
-  // reflects what was actually covered, not what was asked for.
-  const contiguous = addresses.length;
-  const full = contiguous === all.length && requestedBytes >= all.length;
-  const scope: FlashVerifyResult["scope"] = full ? "full" : "spot";
-  const got = memory.bytes;
-  const mismatched = addresses.findIndex((address, index) => got[index] !== image.get(address));
-  const expectedText = addresses.map((address) => image.get(address)!.toString(16).padStart(2, "0")).join(" ");
-  const gotText = addresses.map((_, index) => (got[index] ?? -1).toString(16).padStart(2, "0")).join(" ");
-  const coverage =
-    scope === "full"
-      ? `every byte of the image (${all.length})`
-      : `the first ${addresses.length} of ${all.length} image byte(s) from 0x${addresses[0].toString(16)} — ` +
-        `the rest of the image was NOT compared`;
+  // Scope is what was covered, not what was asked for: a gap, the budget or a
+  // mismatch stops the run early, and none of them is a pass for the bytes it
+  // never reached.
+  const whole = covered === all.length;
+  const scope: FlashVerifyResult["scope"] = whole ? (segmented ? "segmented-full" : "full") : "spot";
   if (mismatched >= 0) {
+    // The evidence is the segment that holds the mismatch: dumping a 32 KiB
+    // image twice would bury the one byte that differs.
+    const from = segmented ? mismatched - (mismatched % FLASH_VERIFY_MAX_BYTES) : 0;
+    const to = segmented ? Math.min(covered, from + FLASH_VERIFY_MAX_BYTES) : covered;
     return {
       ok: false,
       scope,
-      bytes: addresses.length,
+      bytes: covered,
       imageBytes: all.length,
       requestedBytes,
-      detail: `flash differs from ${hexPath} at 0x${addresses[mismatched].toString(16)} ` +
-        `(byte ${mismatched + 1} of ${addresses.length} compared; ${scope === "full" ? "whole image" : "spot check only"})`,
-      expected: expectedText,
-      got: gotText,
+      ...segmentedFields,
+      // The offset is the byte's place in the image, not in its segment.
+      detail: `flash differs from ${hexPath} at 0x${(start + mismatched).toString(16)} ` +
+        `(byte ${mismatched + 1} of ${covered} compared; ${whole ? "whole image" : "spot check only"}` +
+        `${segmented ? `, ${segments} segment(s) of ${Math.ceil(runLength / FLASH_VERIFY_MAX_BYTES)} read back` : ""})`,
+      ...indexed(from, to),
     };
   }
+  const coverage = whole
+    ? `every byte of the image (${all.length})`
+    : `the first ${covered} of ${all.length} image byte(s) from 0x${start.toString(16)} — the rest of the image was NOT compared` +
+      // Why it stopped matters as much as that it stopped, and a whole-image
+      // request that stopped short owes the reason. A request within one read
+      // keeps the wording it always had.
+      (requestedBytes > FLASH_VERIFY_MAX_BYTES
+        ? ` (${
+            stoppedByBudget
+              ? `stopped at the ${budgetMs} ms read-back budget after ${segments} segment(s)`
+              : gapAt !== undefined
+                ? `the image has an address gap at 0x${gapAt.toString(16)}`
+                : `the caller asked for ${requestedBytes} byte(s)`
+          })`
+        : "");
   return {
     ok: true,
     scope,
-    bytes: addresses.length,
+    bytes: covered,
     imageBytes: all.length,
     requestedBytes,
-    detail: `flash at 0x${addresses[0].toString(16)} matches ${hexPath}: ${coverage}`,
-    expected: expectedText,
-    got: gotText,
+    ...segmentedFields,
+    detail: `flash at 0x${start.toString(16)} matches ${hexPath}: ${coverage}` +
+      (segmented ? `; read back in ${segments} segment(s) of up to ${FLASH_VERIFY_MAX_BYTES} byte(s)` : ""),
+    // A matching comparison is stated in `detail`; two hex dumps the size of
+    // the image would say nothing more, and a segmented one is not shipped.
+    ...(segmented ? {} : indexed(0, covered)),
   };
 }
 

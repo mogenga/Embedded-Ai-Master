@@ -43,7 +43,6 @@ import {
   cleanInIde,
   closeKeilSession,
   verifyFlash,
-  FLASH_VERIFY_MAX_BYTES,
   FLASH_VERIFY_SPOT_BYTES,
   currentLocation,
   currentTarget,
@@ -115,6 +114,8 @@ import { NEEDS_EXTENDED_STACK, UNSUPPORTED_ON_MDK_5_43 } from "./keilExtra.js";
 import { backupProjectFiles, readProjectFacts } from "./keilProjectFile.js";
 import { toolEnv } from "./toolEnv.js";
 import { stopReasonName } from "./uvsock.js";
+import { KEIL_ERROR_CODES } from "./errors.js";
+import type { KeilErrorCode } from "./errors.js";
 
 /** A 侧工具的返回形状；注册层再转换成 probe 的 ProbeToolResult。 */
 interface LegacyResult {
@@ -122,6 +123,11 @@ interface LegacyResult {
   isError?: boolean;
   display?: string;
   data?: unknown;
+  /**
+   * 失败结果的机器可读分类；`isError` 为真时必须给（否则调用方只能解析文案）。
+   * 取值见 `errors.ts` —— 词表只有那一处定义。
+   */
+  errorCode?: KeilErrorCode;
 }
 
 interface ToolContext {
@@ -247,7 +253,10 @@ async function sessionFor(
   cwd: string,
   selection: KeilSelection | undefined,
   options: { target?: "hardware" | "simulator"; connectOnly?: boolean; forDownload?: boolean } = {},
-): Promise<{ ok: true; session: KeilSession; key: string; log: string[] } | { ok: false; content: string }> {
+): Promise<
+  | { ok: true; session: KeilSession; key: string; log: string[] }
+  | { ok: false; content: string; code?: KeilErrorCode }
+> {
   const resolved = resolveKeil(input, selection, { ...(options.connectOnly ? { connectOnly: true } : {}) });
   // 没有显式 project、也没有服务级选中项时，回退到已经打开的会话：上一轮
   // `open` 已经确定了工程，后续 `registers` / `run` 不该要求调用方重复传路径。
@@ -271,7 +280,11 @@ async function sessionFor(
     ...(options.connectOnly ? { connectOnly: true } : {}),
   });
   if (!opened.ok || !opened.session) {
-    return { ok: false, content: [opened.reason ?? "could not open a Keil session", ...opened.log].join("\n") };
+    return {
+      ok: false,
+      content: [opened.reason ?? "could not open a Keil session", ...opened.log].join("\n"),
+      ...(opened.code !== undefined ? { code: opened.code } : {}),
+    };
   }
   return { ok: true, session: opened.session, key: opened.key!, log: opened.log };
 }
@@ -459,7 +472,7 @@ const keilDebugTool: LegacyTool = {
       kind: { type: "string", enum: ["exec", "read", "write", "readwrite"], description: "Breakpoint kind (default exec)" },
       address: { type: "integer", description: "For read/write/run_to/disassemble: the address" },
       width: { type: "string", enum: ["u8", "u16", "u32"], description: "For read/write: access width (default u32)" },
-      count: { type: "integer", description: "For read: how many values; for step_many: how many steps (default 1); for disassemble: how many instructions' worth of bytes (default 8); for flash: how many image bytes to read back for the comparison (default 64, max 8192 — the rest of the image is not verified)" },
+      count: { type: "integer", description: "For read: how many values; for step_many: how many steps (default 1); for disassemble: how many instructions' worth of bytes (default 8); for flash: how many image bytes to read back for the comparison (default 64; larger requests are read back in 0x2000-byte segments, covering the whole image, and the result reports whether it did)" },
       frame: { type: "integer", description: "For variables: which stack frame to list the locals of (0, the default, lists the globals)" },
       value: { type: "integer", description: "For write: the value to store" },
       expression: { type: "string", description: "For evaluate: a debugger expression, e.g. `uwTick` or `&g_state`" },
@@ -518,7 +531,7 @@ const keilDebugTool: LegacyTool = {
       ...(projectAction || cliAction ? { connectOnly: true } : {}),
       ...(action === "flash" ? { forDownload: true } : {}),
     });
-    if (!opened.ok) return { isError: true, content: opened.content, display: "Keil unavailable" };
+    if (!opened.ok) return { isError: true, content: opened.content, display: "Keil unavailable", errorCode: opened.code ?? KEIL_ERROR_CODES.actionFailed };
     const session = opened.session;
     // Every inspection below answers an empty list when the debugger is not
     // entered, and an empty list is also a legitimate answer inside it — so
@@ -534,6 +547,7 @@ const keilDebugTool: LegacyTool = {
           "this session is no longer in the debugger (a command-window `EXIT`, or it was never entered). " +
           "Run `keil_debug` with action `open` first; reading breakpoints, registers or memory now would report empty results as if they were the truth.",
         display: "not in debug mode",
+        errorCode: KEIL_ERROR_CODES.notDebugging,
       };
     }
     // The debug session and the project session are two uVision instances on
@@ -550,14 +564,18 @@ const keilDebugTool: LegacyTool = {
       // Marking them here keeps the single return at the end of the action
       // honest instead of forcing every branch to build its own result.
       let failure: string | undefined;
-      const fail = (reason: string) => {
+      // The code that goes with `failure`. Defaults to the catch-all; a branch
+      // that the caller can act on differently names its own (OPT-43).
+      let failureCode: KeilErrorCode = KEIL_ERROR_CODES.actionFailed;
+      const fail = (reason: string, code: KeilErrorCode = KEIL_ERROR_CODES.actionFailed) => {
         failure = reason;
+        failureCode = code;
         lines.push(reason);
       };
       // What the flash read-back covered: a spot window, the whole image, or
       // nothing. Attached to the structured result so a caller never has to
       // parse the text to learn the scope (R3).
-      let flashVerify: { scope: FlashVerifyResult["scope"]; bytes: number; imageBytes: number; ok: boolean } | undefined;
+      let flashVerify: { scope: FlashVerifyResult["scope"]; bytes: number; imageBytes: number; ok: boolean; segments?: number } | undefined;
       // The bytes a `read` returned, with the all-zero verdict. Structured, so
       // a consumer does not have to scrape the warning out of the text.
       let memoryRead:
@@ -1070,7 +1088,7 @@ const keilDebugTool: LegacyTool = {
         // 3 errors, 4 cancelled, 5 cleaned.
         if (!started.ok) {
           lines.push(`the build failed (uVision build code ${started.status}); no image was produced`);
-          fail(`the build failed with uVision build code ${started.status}`);
+          fail(`the build failed with uVision build code ${started.status}`, KEIL_ERROR_CODES.buildFailed);
         } else if (started.status === 2) lines.push("the build completed with warnings (uVision build code 2)");
       } else if (action === "flash") {
         // 下载跑在 plain 会话上，而调试会话占着探针：先关掉同工程的调试会话，
@@ -1104,22 +1122,32 @@ const keilDebugTool: LegacyTool = {
             const check = await openKeilSession({ cwd: ctx.cwd, project: session.project, target: "hardware", port: 4823, timeoutMs: 40_000 });
             if (check.ok && check.session) {
               // `count` is the explicit request for a bigger window; the
-              // default stays the 64-byte spot check. The read-back is capped
-              // at `FLASH_VERIFY_MAX_BYTES` (one DBG_MEM_READ), and the result
-              // says what was actually compared either way.
+              // default stays the 64-byte spot check. Past 0x2000 the
+              // comparison is read back in segments, so `count` reaches the
+              // whole image; the result says what was actually compared.
               const asked = Number(input.count);
-              const verifyBytes = Number.isFinite(asked) && asked > 0 ? Math.min(FLASH_VERIFY_MAX_BYTES, Math.trunc(asked)) : FLASH_VERIFY_SPOT_BYTES;
+              const verifyBytes = Number.isFinite(asked) && asked > 0 ? Math.trunc(asked) : FLASH_VERIFY_SPOT_BYTES;
               const compared = await verifyFlash(check.session, hex, verifyBytes);
               // The comparison reads a bounded window back from the image's
               // start; saying "verified" without the window let a 64-byte
-              // spot check read as a whole-image check. The line and the
+              // spot check read as a whole-image check, and a segmented read
+              // must not read like a spot check either. The line and the
               // structured result both carry the scope.
-              lines.push(`flash check (${compared.scope === "full" ? "whole image" : compared.scope === "spot" ? "spot check" : "not run"}): ${compared.detail}`);
+              const scopeLabel =
+                compared.scope === "full"
+                  ? "whole image"
+                  : compared.scope === "segmented-full"
+                    ? "whole image (segmented)"
+                    : compared.scope === "spot"
+                      ? "spot check"
+                      : "not run";
+              lines.push(`flash check (${scopeLabel}): ${compared.detail}`);
               flashVerify = {
                 scope: compared.scope,
                 bytes: compared.bytes,
                 imageBytes: compared.imageBytes,
                 ok: compared.ok,
+                ...(compared.segments !== undefined ? { segments: compared.segments } : {}),
               };
               // Fail closed: a verify that could not read the chip back is not
               // a pass. The old condition (`expected && got`) treated "the
@@ -1129,9 +1157,9 @@ const keilDebugTool: LegacyTool = {
               if (!compared.ok) {
                 if (compared.expected && compared.got) {
                   lines.push(`  image: ${compared.expected}`, `  chip:  ${compared.got}`);
-                  fail(`the chip does not match ${basename(hex)} after the download`);
+                  fail(`the chip does not match ${basename(hex)} after the download`, KEIL_ERROR_CODES.verifyFailed);
                 }
-                fail(`flash verify could not confirm the download — ${compared.detail}`);
+                fail(`flash verify could not confirm the download — ${compared.detail}`, KEIL_ERROR_CODES.verifyFailed);
               }
               await closeKeilSession(check.key!);
             } else {
@@ -1139,7 +1167,7 @@ const keilDebugTool: LegacyTool = {
               // succeeded but the check did not run, and fail loudly.
               flashVerify = { scope: "none", bytes: 0, imageBytes: 0, ok: false };
               lines.push(`flash check: skipped — the debugger could not be opened to read the chip back (${check.reason ?? "no session"})`);
-              fail(`flash verify could not run — the debugger could not be opened to read the chip back (${check.reason ?? "no session"})`);
+              fail(`flash verify could not run — the debugger could not be opened to read the chip back (${check.reason ?? "no session"})`, KEIL_ERROR_CODES.verifyFailed);
             }
           } else {
             flashVerify = { scope: "none", bytes: 0, imageBytes: 0, ok: false };
@@ -1153,14 +1181,24 @@ const keilDebugTool: LegacyTool = {
           // `FLASH_ERASE_LIMITATION`), and a download is not a full-chip
           // erase: it erases only its own image's sectors. Full-chip erase is
           // not offered here by design; the limitation is the honest answer.
-          return { isError: true, content: erased.message ?? erased.statusName, display: "erase unavailable" };
+          return {
+            isError: true,
+            content: erased.message ?? erased.statusName,
+            display: "erase unavailable",
+            errorCode: KEIL_ERROR_CODES.eraseUnavailable,
+          };
         }
         lines.push("flash erase accepted by the configured algorithm");
       } else {
-        return { isError: true, content: `unknown action \`${action}\``, display: "unknown action" };
+        return {
+          isError: true,
+          content: `unknown action \`${action}\``,
+          display: "unknown action",
+          errorCode: KEIL_ERROR_CODES.unsupportedAction,
+        };
       }
       return {
-        ...(failure ? { isError: true } : {}),
+        ...(failure ? { isError: true, errorCode: failureCode } : {}),
         ...(flashVerify || memoryRead ? { data: { ...(flashVerify ? { flashVerify } : {}), ...(memoryRead ? { memoryRead } : {}) } } : {}),
         content: lines.join("\n") || "(no output)",
         display: failure ? `keil: ${action} failed` : `keil: ${action}`,
@@ -1216,7 +1254,7 @@ const keilProjectTool: LegacyTool = {
     // point there is nothing this session can do, so the list falls back to
     // uVision's own `PRJ_ENUM_*` stream rather than showing an empty project.
     const opened = await sessionFor(input, ctx.cwd, ctx.selection, { connectOnly: true });
-    if (!opened.ok) return { isError: true, content: opened.content, display: "Keil unavailable" };
+    if (!opened.ok) return { isError: true, content: opened.content, display: "Keil unavailable", errorCode: opened.code ?? KEIL_ERROR_CODES.actionFailed };
     const session = opened.session;
     const group = input.group ? String(input.group) : "";
     const lines: string[] = [];
@@ -1232,8 +1270,10 @@ const keilProjectTool: LegacyTool = {
     // A project operation that the debugger refused is a failed call, not a
     // successful one with a sad sentence in it.
     let failure: string | undefined;
-    const fail = (reason: string) => {
+    let failureCode: KeilErrorCode = KEIL_ERROR_CODES.actionFailed;
+    const fail = (reason: string, code: KeilErrorCode = KEIL_ERROR_CODES.actionFailed) => {
       failure = reason;
+      failureCode = code;
       lines.push(reason);
     };
 
@@ -1384,10 +1424,15 @@ const keilProjectTool: LegacyTool = {
       const name = await getOutputName(session);
       lines.push(name ? `output: ${name}` : "the project did not report an output name");
     } else {
-      return { isError: true, content: `unknown action \`${action}\``, display: "unknown action" };
+      return {
+        isError: true,
+        content: `unknown action \`${action}\``,
+        display: "unknown action",
+        errorCode: KEIL_ERROR_CODES.unsupportedAction,
+      };
     }
     return {
-      ...(failure ? { isError: true } : {}),
+      ...(failure ? { isError: true, errorCode: failureCode } : {}),
       content: lines.join("\n"),
       display: failure ? `keil: ${action} failed` : `keil: ${action}`,
     };
@@ -1442,7 +1487,7 @@ export function createKeilTools(): ProbeToolSpec[] {
         try {
           result = await legacy.execute(input, { cwd: process.cwd(), selection: selectionFromEnv() });
         } catch (error) {
-          return failResult("keil_error", error instanceof Error ? error.message : String(error));
+          return failResult(KEIL_ERROR_CODES.internal, error instanceof Error ? error.message : String(error));
         }
         const structured: Record<string, unknown> = {
           tool: legacy.name,
@@ -1451,6 +1496,14 @@ export function createKeilTools(): ProbeToolSpec[] {
           ...(declaration ? { declaration } : {}),
           ...(result.data && typeof result.data === "object" ? (result.data as Record<string, unknown>) : {}),
         };
+        if (result.isError) {
+          // Every failure names its kind. The action branches name the ones a
+          // caller can act on differently (`keil_not_debugging`,
+          // `keil_erase_unavailable`, …); the parameter errors and the rest of
+          // the early returns get the catch-all here rather than repeating it
+          // on fifty returns. OPT-43.
+          structured.code = result.errorCode ?? KEIL_ERROR_CODES.actionFailed;
+        }
         return {
           content: [{ type: "text", text: result.content }],
           structuredContent: structured,
