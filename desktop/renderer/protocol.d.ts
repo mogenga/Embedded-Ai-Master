@@ -97,5 +97,15 @@ export function initialState(options?: {
 export function sessionsEvent(summaries: readonly unknown[]): HostEvent;
 export function sessionLoadedEvent(
   events: readonly KernelSessionEvent[],
-  options?: { cwd?: string; mode?: string },
+  options?: {
+    cwd?: string;
+    mode?: string;
+    /**
+     * Replay only up to this event (BR-6). Must be an integer in
+     * `0..lastSeq`; anything else throws rather than clamping, because a
+     * clamped position makes "replay to event 3" indistinguishable from
+     * "replay to the end".
+     */
+    atSeq?: number;
+  },
 ): HostEvent;

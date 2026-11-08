@@ -1193,24 +1193,86 @@ function latestTodos(events) {
   return latest;
 }
 
-/** `session_loaded` event for a freshly opened or created conversation. */
+/**
+ * The last seq in a log, or -1 for a log that has none.
+ *
+ * The kernel appends in order, so the tail is the end; a file whose last line
+ * was cut mid-write has already been dropped by the reader before it gets
+ * here. `-1` is not a position — it is "this log has no events to replay",
+ * which is why an `atSeq` of any value is out of range for an empty session.
+ */
+function lastSeqOf(events) {
+  if (!Array.isArray(events) || events.length === 0) return -1;
+  const seq = events.at(-1)?.seq;
+  return Number.isInteger(seq) ? seq : -1;
+}
+
+/**
+ * `session_loaded` event for a freshly opened or created conversation.
+ *
+ * `atSeq` replays the conversation only up to that event (BR-6). This is the
+ * single truncation point: the bubbles, the plan and the usage totals are all
+ * projected from the same prefix, so a replayed position cannot show a plan
+ * the replay has not reached or a cost it has not spent.
+ *
+ * An `atSeq` outside `0..lastSeq` **throws** rather than clamping. The reason
+ * is the same one `forkSession` has: a silently clamped index makes "replay to
+ * event 3" look exactly like "replay to the end", which is the one thing the
+ * reader would use this control to tell apart. The host turns the error into a
+ * warning; the caller learns the legal range from the message.
+ *
+ * A cut in the middle of a tool call is legal and needs no special case:
+ * `sessionEventsToMessages` emits a tool row when the `tool_result` arrives,
+ * so a prefix that has the call's announcement and not its result produces the
+ * assistant text and no row — never half a call.
+ */
 export function sessionLoadedEvent(events, options = {}) {
-  const costUsd = sessionCostUsd(events);
+  const list = Array.isArray(events) ? events : [];
+  const lastSeq = lastSeqOf(list);
+  let view = list;
+  let atSeq;
+  if (options.atSeq !== undefined) {
+    atSeq = options.atSeq;
+    if (!Number.isInteger(atSeq) || atSeq < 0 || atSeq > lastSeq) {
+      throw new Error(
+        `atSeq 必须是 0..${lastSeq} 之间的整数（收到 ${JSON.stringify(atSeq)}）`,
+      );
+    }
+    // A position at the end of the log is not a cut; filtering there would
+    // only rebuild the same array. It is still echoed below, so "the caller
+    // asked for position N" stays a fact of the event rather than something
+    // the reader has to infer from two fields agreeing.
+    if (atSeq < lastSeq) {
+      // An event without a numeric `seq` has no position in the log, so no
+      // `atSeq` can include it. The kernel always writes one; this only keeps
+      // a malformed line from being replayed as if it belonged to the prefix.
+      view = list.filter((event) => isRecord(event) && Number.isInteger(event.seq) && event.seq <= atSeq);
+    }
+  }
+  const costUsd = sessionCostUsd(view);
   return {
     type: "session_loaded",
-    messages: sessionEventsToMessages(events),
+    messages: sessionEventsToMessages(view),
     // The plan card is rebuilt from this, not from `messages`:
     // `sessionEventsToMessages` only produces chat bubbles, and the plan is
     // interface state the transcript replay never contained. The last
     // translatable `todos` is the answer because that is where the work
     // stopped; a malformed one is skipped rather than erasing a plan the
     // session really had. `null` means this session never carried one.
-    todos: latestTodos(events),
+    todos: latestTodos(view),
     cwd: textOf(options.cwd),
     mode: textOf(options.mode) || "diagnose",
     effort: "auto",
-    usage: usageTotals(events),
+    usage: usageTotals(view),
     ...(costUsd === undefined ? {} : { costUsd }),
+    // The two fields of a truncated projection, together and only when one was
+    // asked for. `atSeq` is the position that was projected; `lastSeq` is how
+    // far the log goes, so the caller can draw "第 N / M 条" from the same
+    // prefix it was handed instead of reading the log again for its maximum.
+    // A whole-log event says neither: its reader is not scrubbing, and a
+    // second spelling of "the log ends here" would have to agree with the
+    // host's own cursor forever.
+    ...(atSeq === undefined ? {} : { atSeq, lastSeq }),
   };
 }
 

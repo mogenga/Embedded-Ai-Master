@@ -2355,7 +2355,31 @@ function adoptSessionWorkdir(workdir) {
   return cwd;
 }
 
-async function handleLoadSession(id) {
+/**
+ * The `atSeq` a command asked for, or `undefined` when it asked for none.
+ *
+ * One rule for both callers (`forkSession` / `loadSession`): an absent field
+ * means "the end of the log", and a present one must be a non-negative
+ * integer. It returns `null` for a value that is present and unusable — the
+ * caller sends its own sentence, because "会话未分叉" and "会话未打开" are
+ * different answers to the same bad number.
+ *
+ * The **upper bound is deliberately not checked here**. The log's last seq is
+ * a fact each operation already owns: `fork` reads it in the kernel and rejects
+ * an out-of-range position with its own message ("atSeq 必须是 0..N 之间的
+ * 整数"), and `sessionLoadedEvent` projects the log and does the same. Checking
+ * it again here would be a second read that could disagree with the one that
+ * actually truncates.
+ */
+function requestedAtSeq(payload) {
+  if (payload.atSeq === undefined) return undefined;
+  if (typeof payload.atSeq !== "number" || !Number.isInteger(payload.atSeq) || payload.atSeq < 0) {
+    return null;
+  }
+  return payload.atSeq;
+}
+
+async function handleLoadSession(id, atSeq) {
   if (ctx.running) {
     send({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
     return;
@@ -2399,10 +2423,34 @@ async function handleLoadSession(id) {
     send({ type: "notice", level: "error", text: `会话读取失败：${messageOf(error)}` });
     return;
   }
+  // Project before touching any host state. `sessionLoadedEvent` is the one
+  // place that validates a replay position, and a position it rejects must
+  // leave the operator looking at the conversation they already had — not at
+  // a session that switched and then failed to draw.
+  const lastSeq = detail.events.at(-1)?.seq ?? -1;
+  let loaded;
+  try {
+    loaded = kernel.protocol.sessionLoadedEvent(detail.events, {
+      // The record's own workdir, even when it no longer exists: the replay is
+      // describing that conversation, and `adoptSessionWorkdir` runs after
+      // this and says why the topbar is not moving there. When the record has
+      // no workdir the host's own folder is the fallback `adoptSessionWorkdir`
+      // would also have returned for an absent one.
+      cwd: detail.header.workdir ?? cwd,
+      mode,
+      ...(atSeq === undefined ? {} : { atSeq }),
+    });
+  } catch (error) {
+    // R3: an out-of-range position is said out loud, with the legal range the
+    // projector named. A clamped replay would read as "replay to the end".
+    send({ type: "notice", level: "warn", text: `会话未打开：${messageOf(error)}` });
+    return;
+  }
   // Switching conversations releases the MCP connections of the one being left
   // (same act as in `handleNewSession`). Reopening the current session is not
-  // a switch and keeps them. Done here, after the read succeeded: a failed
-  // load leaves the operator where they were, still needing those tools.
+  // a switch and keeps them. Done here, after the read and the projection
+  // succeeded: a failed load leaves the operator where they were, still
+  // needing those tools.
   if (id !== sessionId) releaseSessionMcp(sessionId);
   sessionId = id;
   running = false;
@@ -2412,17 +2460,18 @@ async function handleLoadSession(id) {
   // between the decision and the events that report it.
   const sessionCwd = adoptSessionWorkdir(detail.header.workdir);
   ctx = kernel.protocol.createContext({ sessionId: id, cwd: sessionCwd });
-  const lastSeq = detail.events.at(-1)?.seq ?? -1;
   ctx.lastSeq = lastSeq;
   lastSessionId = id;
-  lastSessionMeasure = lastMeasure(detail.events);
-  const loaded = kernel.protocol.sessionLoadedEvent(detail.events, {
-    // The record's own workdir, even when it no longer exists: the replay is
-    // describing that conversation, and `adoptSessionWorkdir` has already
-    // said why the topbar is not moving there.
-    cwd: detail.header.workdir ?? sessionCwd,
-    mode,
-  });
+  // The meter follows the same position as the transcript (BR-6 item 6): a
+  // replay of event 3 must not show the spend and occupancy of event 40.
+  lastSessionMeasure = lastMeasure(
+    atSeq === undefined ? detail.events : detail.events.filter((event) => event.seq <= atSeq),
+  );
+  // The scrubber's maximum, always — a whole-log open still has to draw
+  // "第 M / M 条". The projector emits `lastSeq` itself on a truncated
+  // projection; this is the same fact for the untruncated one, taken from the
+  // array the host already holds.
+  loaded.lastSeq = lastSeq;
   // The shared protocol module emits a literal `auto` here. Overwritten with
   // the real choice so the transcript's header and the `state` that follows
   // do not disagree about what the next request will carry.
@@ -3244,7 +3293,19 @@ const handlers = {
 
   loadSession(payload) {
     if (runner === undefined) return;
-    return handleLoadSession(payload.id);
+    // `atSeq` is optional: absent opens the whole log, present replays a
+    // prefix. Validated here rather than inside `handleLoadSession` so a bad
+    // number is answered before the session files are read.
+    const atSeq = requestedAtSeq(payload);
+    if (atSeq === null) {
+      send({
+        type: "notice",
+        level: "warn",
+        text: `会话未打开：atSeq 必须是非负整数（收到 ${JSON.stringify(payload.atSeq)}）`,
+      });
+      return;
+    }
+    return handleLoadSession(payload.id, atSeq);
   },
 
   /**
@@ -3897,21 +3958,20 @@ const handlers = {
     }
     // Optional fork position (OPT-37): absent means "the end of the log", as
     // before. A present value must be a non-negative integer — a typo must not
-    // silently fork at the end, which is what dropping the field did.
-    // The upper bound is the kernel's to check: it owns the log's last seq, so
-    // its own message ("atSeq 必须是 0..N 之间的整数") goes out verbatim rather
-    // than a bound derived here from a second read.
-    let atSeq;
-    if (payload.atSeq !== undefined) {
-      if (typeof payload.atSeq !== "number" || !Number.isInteger(payload.atSeq) || payload.atSeq < 0) {
-        send({
-          type: "notice",
-          level: "warn",
-          text: `会话未分叉：atSeq 必须是非负整数（收到 ${JSON.stringify(payload.atSeq)}）`,
-        });
-        return;
-      }
-      atSeq = payload.atSeq;
+    // silently fork at the end, which is what dropping the field did. The
+    // rule itself lives in `requestedAtSeq`, shared with `loadSession`: the
+    // two commands take the same argument and may not disagree about what it
+    // means. The upper bound is the kernel's to check (it owns the log's
+    // last seq), so its own message ("atSeq 必须是 0..N 之间的整数") goes out
+    // verbatim rather than a bound derived here from a second read.
+    const atSeq = requestedAtSeq(payload);
+    if (atSeq === null) {
+      send({
+        type: "notice",
+        level: "warn",
+        text: `会话未分叉：atSeq 必须是非负整数（收到 ${JSON.stringify(payload.atSeq)}）`,
+      });
+      return;
     }
     const admin = kernel.createSessionAdmin({ harnessHome });
     let outcome;

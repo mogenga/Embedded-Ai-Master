@@ -17,7 +17,7 @@
 | `abort` | 走 `runner.abort` |
 | `permission` | `yes`/`no` → allow/deny；`always` 降级为本次 allow 并显式提示 |
 | `newSession` | 清空转录，会话 id 留到首个 prompt 才产生 |
-| `loadSession` | 读整篇日志重建转录，并把**会话记录的工作目录采纳为当前 cwd**（`adoptSessionWorkdir`）：顶栏、文件树、`getFile` 边界三处一起跟随；目录已消失/不是目录/读不了时**不改 cwd** 并发 warn notice（「已不存在」与「无法访问」分开说） |
+| `loadSession` | 读整篇日志重建转录，并把**会话记录的工作目录采纳为当前 cwd**（`adoptSessionWorkdir`）：顶栏、文件树、`getFile` 边界三处一起跟随；目录已消失/不是目录/读不了时**不改 cwd** 并发 warn notice（「已不存在」与「无法访问」分开说）。`atSeq` 可选（2026-11-08，BR-6）：给了就只回放到该事件为止（宿主交给 `sessionLoadedEvent` 的同一个截断入口），越界**抛错并回 warn notice**、不换会话、不静默钳位；校验规则与 `forkSession` 共用 `requestedAtSeq`（非负整数），**上界由拥有日志的那一方判定**——分叉是内核、回放是 `sessionLoadedEvent`，宿主不读第二遍。渲染层由回放条发它（见下方「`session_loaded`」）。**回放只改屏幕，不改日志**：`sessionId` 不变，`ctx.lastSeq` 仍是日志头，所以退出回放后 resume 仍从这里继续 |
 | `listSessions` | 标题取首条 user 事件（缓存，最多扫 30 条）。支持 `includeArchived` / `cwd` / `limit`：归档行默认隐藏，`total` 是过滤后的总数（`slice` 前算），分页按 `updatedAt` 倒序稳定切片。`status` 筛选只认 `working` |
 | `getSettings` | UI 偏好 + 三份配置文件（`mcpServers` / `permissions` / `run`）及其路径，外加模型服务的两种形状：`providers`（选单用的扁平列表）与 `providerConfig`（`providers.json` 本身，设置页整份写回）。`providersError` 在文件读坏时给出原因，页面据此说明为什么表单是空的 |
 | `saveProviders` | 整份写 `providers.json`，直写后从磁盘重新 `loadProviders`（不信任入参）。模型引用失效时自动回退到首个可用引用并重建 runner。设置页每张服务卡片第一行的**厂商下拉**只是填表（`desktop/renderer/provider-presets.js` 的静态数据 + `vendor-marks.js` 的图标），走的仍是这条命令——没有第二套保存路径；旧的页顶七张「快速添加」卡片已删除。**显示名称与厂商归属不走这条命令**：内核 schema 会剥掉未知键，两者存在渲染层 localStorage（`desktop/renderer/provider-meta.js` 的 `prometheus.providerMeta`），`providers.json` 里只有服务名——因此宿主与内核都没有对应字段，模型面板的按服务分组也完全在渲染层完成 |
@@ -112,6 +112,8 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 
 宿主另发：`hello`、`ready`、`state`、`sessions`、`session_loaded`、`session_matches`、`sessions_archived`、`commands`、`skills`、`setup_checklist`、`settings`、`usage_summary`、`models`、`locale`、`ui_preference`、`tree`、`file_matches`、`export_ready`、`notice`、`error`、`fatal`、`run_start`、`run_end`、`permission_closed`。
 
+**`session_loaded` 的两个位置字段（2026-11-08，BR-6 回放）**：`lastSeq` 是日志最后一条的 seq（宿主每次打开都带，渲染器据此设滑块的 `max` 并判断「已是最新」）；`atSeq` **只在截断投影时出现**，等于这次投影到的那条事件。两者都来自宿主手里那份事件数组，渲染器**没有**第二次读日志的入口——拖动只按已收到的投影重画读数，松手（`pointerup` / `change`）才发一条 `loadSession{atSeq}`。回放态（`atSeq < lastSeq`）下输入框与发送按钮禁用并显示原因，Esc 与「回到最新」都走 `exitReplay()`（重发 `loadSession{atSeq:lastSeq}`）。**新会话没有回放条**：`newSession` 的 `session_loaded` 不带 `lastSeq`，`setReplay` 据此清空状态。
+
 **`notice` 按 `domain` 路由**：`domain:"skills"` → 技能设置页；`domain:"settings"` + `page`（`mcp` / `behavior` / `connection`）→ 对应设置页就地显示 `role="alert"` 错误条（`settingsFailure` 纯函数判定；页面已切走或不在该页时返回 `false`，落回转录）。无 `domain` 的一律进转录。宿主侧由 `settingsNotice(page, text)` 统一发出（`host.js:1463-1475`），用于 `saveMcpServer` / `removeMcpServer` / `savePermissions` / `saveRunLimits` / `saveProviders` 的失败路径——设置页是模态对话框，转录在它后面，不归页的提示等于看不见（D-198 同类，R3）。
 
 **启动不再自动打开上次的会话。** 用户明确要求「开启时应该默认无会话」。原先 `ready` 会读 `localStorage` 的 `prometheus.lastSession` 发 `loadSession`，上次那个会话被删或 header 损坏时，这条自动请求会把一条报错推到刚打开、用户还没做任何事的空界面上（D-214）。现在启动停在空会话，打开会话只能从侧栏点；`prometheus.lastSession` / `prometheus.restartSession` 两个键与设置页的「恢复上次会话」开关一并删除，避免留下只写不读的死键与假控件。
@@ -151,6 +153,8 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 `docs/superpowers/specs/2026-10-20-m2-stage4-interaction-design.md` 的 §7（回放）、§8（导出）、§9（设备控制）原设计基于已删除的 `src/ui`，需按本前端重写。三项在当前内核上都是可做的：回放只需按事件下标截断后重建消息列表；**导出已接通**（宿主 `exportSession` 把日志渲染成 Markdown，经 `saveFile` 存盘——`GET /api/sessions/:id` 随 HTTP 层于 2026-10-22 删除，不要照旧 spec 读）；设备控制把预置指令发进会话、仍经权限与审批。详见 D-166。
 
 > **2026-11-07 复核：§7/§9 仍未实现，§8 已实现。** 板卡面板（原 §9 的落点）已随目标板页面在 2026-10-26 删除，设备信息改由所调用工具的那一行与输出承载——若重启 §9，先定「面板还是行」这个形态问题，不要复活 `getBoardState`。
+
+> **2026-11-08：§7（回放）的「按事件下标截断」已实现**（批次 9 / BR-6 验收②）。形态不是原 spec 的控件：`#replay-bar` 只有滑块 + 只读「第 N / M 条事件」+ 条件出现的「回到最新」，没有播放/暂停/倍速——那三样都要一个时钟，而内核的日志是**事实**不是录像，按时间轴重放会把工具结果的到达顺序画成假象。截断入口只有一个（`sessionLoadedEvent` 的 `atSeq`），宿主 `loadSession` 透传。宿主实时泵（`startFollow`）在会话打开后不运行（`handleLoadSession` 不发 `follow`），所以回放期间不会有新事件追上来把回放位挤掉；发消息在回放态被 `submit()` / `runSlashCommand()` 双重拒绝。
 
 > 2026-10-21 第四轮（用户「模型配置没有、无法打开本地文件夹」）：新增 `saveProviders`（整份写 `providers.json`）、`setWorkspace`（登记目录后委托 `setCwd`）、真实 `getTree`（接 `listDirectory` / `GET /api/tree`）；`searchFiles` 仍是空匹配，原因改为写在代码里。设置页恢复「模型服务」页，`apiKeyEnv` 明确标注为环境变量名、未定价时成本显示「未知」。浏览器形态的 `pickDirectory` 不再静默返回 `null`，改为说明拿不到绝对路径并提示手输。
 
