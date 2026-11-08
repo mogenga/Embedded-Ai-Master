@@ -11,6 +11,7 @@ import { createPermissionGate } from "../permissions/gate.js";
 import { createSession } from "../session/session.js";
 import type { SessionHandle } from "../session/session.js";
 import type { SystemSections } from "../context/system-sections.js";
+import type { SubagentStartedPayload } from "../session/types.js";
 import type { ToolRegistry } from "../tools/registry.js";
 import { randomUUID } from "node:crypto";
 import type { SubagentStatus, SubagentSummary } from "./types.js";
@@ -83,6 +84,13 @@ export interface SubagentDeps {
   pricePerMillion?: PricePerMillion;
   /** 计入父会话的成本（累计），让 `maxCostUsd` 看得见子代理的开销。 */
   onSpend: (usd: number) => void;
+  /**
+   * 子代理开跑时写一条 `subagent_started`。失败不阻止启动（见 `startSubagent`）。
+   *
+   * runner 没有 session handle，所以写入是调用方的事：宿主知道父会话在哪，
+   * 而同一条 `SubagentDeps` 会被同一个父会话的多次调用复用。
+   */
+  onStarted?: (payload: SubagentStartedPayload) => Promise<void>;
 }
 
 interface SubagentJob {
@@ -341,10 +349,18 @@ function ownershipOf(parentSessionId: string, id: string): SubagentJob | undefin
   return job;
 }
 
+/**
+ * 跑一个子代理。
+ *
+ * `maxTurns` / `timeoutMs` 收的是 `startSubagent` 已经解析过的数字，这里**不再
+ * 解析一次**：同一对数字既要写进 `subagent_started`、又要交给 `query()` 与定时器，
+ * 两处各解析一次就等于有两个口径。解析点是 `startSubagent`（那里还要把它们报给
+ * 调用方）。
+ */
 async function runJob(
   job: SubagentJob,
   prompt: string,
-  opts: { maxTurns?: number; timeoutMs?: number; deps: SubagentDeps },
+  opts: { maxTurns: number; timeoutMs: number; deps: SubagentDeps },
 ): Promise<void> {
   const { deps } = opts;
   const childDir = job.sessionDir;
@@ -369,12 +385,13 @@ async function runJob(
     });
 
     // 寿命定时器从子代理**真正开跑**算起：建目录、拿锁不属于它的调查时间。
-    const timeoutMs = resolveSubagentTimeoutMs(opts.timeoutMs);
+    // `opts.timeoutMs` 由 `startSubagent` 解析好传进来——同一对数字已经写进
+    // `subagent_started`，这里再解析一次就是第二个口径。
     job.timeoutTimer = setTimeout(() => {
       if (job.settled || job.killedBy !== undefined) return;
       job.killedBy = "timeout";
       job.controller.abort();
-    }, timeoutMs);
+    }, opts.timeoutMs);
     job.timeoutTimer.unref?.();
 
     const ctx: LoopCtx = {
@@ -396,11 +413,11 @@ async function runJob(
       // 兜底墙钟比 runner 的 abort 晚一分钟：**正常路径必须由 abort 收尾**，
       // 否则 `query` 会自己报 `deadline` 正常结束，终局就成了 finished 而不是
       // timed_out。这一条只是「定时器没发出来的意外」的最后一道。
-      deadlineMs: timeoutMs + 60_000,
+      deadlineMs: opts.timeoutMs + 60_000,
     };
 
     let finishReason: LoopFinishReason | undefined;
-    for await (const event of query(ctx, prompt, { maxTurns: resolveSubagentMaxTurns(opts.maxTurns) })) {
+    for await (const event of query(ctx, prompt, { maxTurns: opts.maxTurns })) {
       if (event.kind === "done") finishReason = event.finishReason;
     }
 
@@ -457,6 +474,10 @@ async function runJob(
  *
  * 同步段只做三件事：查并发上限、登记作业、算预览；子会话目录与 `query()`
  * 都在不 await 的后台任务里。因此模型请求挂着时它仍然立即返回 id。
+ *
+ * 唯一的例外是 `deps.onStarted`：它必须在返回 id **之前**完成。反过来的话
+ * 一次跑得极快的子代理可能先推完成事件、后写开始事件，渲染器就会先看到它结束
+ * 再看到它开始——而「运行中」那一侧真正依赖的就是这一步的先后。
  */
 export async function startSubagent(
   parentSessionId: string,
@@ -482,6 +503,12 @@ export async function startSubagent(
     };
   }
 
+  // 两个上限在这里解析**一次**：同一对数字既写进 `subagent_started`，也交给
+  // `runJob` 的定时器与 `query()`。`subagent` 工具正文用的是同一对 resolver，
+  // 所以三处报的是同一个数——填 0 的人看到的是夹过的边界值，不是 0。
+  const maxTurns = resolveSubagentMaxTurns(opts.maxTurns);
+  const timeoutMs = resolveSubagentTimeoutMs(opts.timeoutMs);
+
   const id = newSubagentId();
   const job: SubagentJob = {
     id,
@@ -505,8 +532,28 @@ export async function startSubagent(
   };
   jobs.set(job.id, job);
 
+  // 开始事件先于作业本体，但它**不是**作业的一部分：写失败只降级为一行 stderr，
+  // 不取消一个已经登记、马上要跑的子代理（`appendMcpStatus` 的姿态——观测性
+  // 记录写不进去，不该让被观测的那件事失败）。
+  if (opts.deps.onStarted !== undefined) {
+    const payload: SubagentStartedPayload = {
+      id: job.id,
+      sessionDir: job.sessionDir,
+      promptPreview: job.promptPreview,
+      ...(job.label === undefined ? {} : { label: job.label }),
+      startedAt: job.startedAt,
+      maxTurns,
+      timeoutMs,
+    };
+    try {
+      await opts.deps.onStarted(payload);
+    } catch (error) {
+      console.error(`[subagent] started event append failed: ${errorMessage(error)}`);
+    }
+  }
+
   // 不 await：这条 promise 的终局只能经完成队列或 `getSubagent` 看见。
-  void runJob(job, prompt, opts).catch((error) => {
+  void runJob(job, prompt, { maxTurns, timeoutMs, deps: opts.deps }).catch((error) => {
     // runJob 自己已兜住一切；这里只兜住「finalize 本身抛了」这种意外，
     // 免得留下一个永远 running 的作业。
     finalize(job, "failed", opts.deps, { error: errorMessage(error) });

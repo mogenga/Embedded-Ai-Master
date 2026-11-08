@@ -27,6 +27,7 @@ const MAX_ARTIFACT_COPY_ATTEMPTS = 1_000;
 // `background_result` 由宿主在后台作业结束时写入(不是本轮 query 写的),
 // 同样必须在这里登记:漏了它,用户重开一个有后台作业的会话就再也读不出来了。
 // `subagent_result` 完全同理:它由宿主在子代理结束时写,漏登记即整份父日志不可读。
+// `subagent_started` 也一样:它在 runner 起作业时写,漏登记即整份父日志不可读。
 const EVENT_TYPES: Record<EventType, true> = {
   system: true,
   user: true,
@@ -48,6 +49,7 @@ const EVENT_TYPES: Record<EventType, true> = {
   todos: true,
   background_result: true,
   subagent_result: true,
+  subagent_started: true,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
