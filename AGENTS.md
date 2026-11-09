@@ -1,6 +1,6 @@
 # AGENTS.md — Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 工具。当前已发布 **v0.2.0**（2026-11-06）：P0 内核（`src/`）、桌面前端（`desktop/`）与领域层 MCP server（`mcp-servers/`：probe / serial / keil / kb / embedded / datasheet）均已实现，测试在 `tests/`（`tests/desktop` 为协议层与宿主，`mcp-servers/*/tests` 为领域层）。按 `docs/BRD.md` 的里程碑口径，M2（领域层建设 + 扩展与安全）的主体已落地，**当前推进的是 M3**（交互与自动化：观测、todo 外化、BR-6 设备面板、BR-7 夜批管线，见「M3 剩余范围」）；阶段判断以用户确认为准，不要自行宣布进入下一阶段。构建与脚本配置见 `package.json` / `tsconfig*.json` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/ledgers/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
+面向嵌入式调试场景的 agent 工具。当前已发布 **v0.3.0**（2026-11-09）：P0 内核（`src/`）、桌面前端（`desktop/`）与领域层 MCP server（`mcp-servers/`：probe / serial / keil / kb / embedded / datasheet）均已实现，测试在 `tests/`（`tests/desktop` 为协议层与宿主，`mcp-servers/*/tests` 为领域层）。按 `docs/BRD.md` 的里程碑口径，M2（领域层建设 + 扩展与安全）的主体已落地，**当前推进的是 M3**（交互与自动化：观测、todo 外化、BR-6 设备面板、BR-7 夜批管线，见「M3 剩余范围」）；阶段判断以用户确认为准，不要自行宣布进入下一阶段。构建与脚本配置见 `package.json` / `tsconfig*.json` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/ledgers/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
 
 ## 事实源（先读这些，别猜）
 
