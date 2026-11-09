@@ -1994,73 +1994,9 @@ describe("desktop host", () => {
     expect(event.error).toContain("baseUrl");
   }, HOST_TIMEOUT_MS);
 
-  it("getArtifacts 在没有打开的会话时回空数组", async () => {
-    const home = await tempHome();
-    const events = await runHost(
-      home,
-      [
-        { cmd: "init", cwd: home },
-        { cmd: "getArtifacts" },
-      ],
-      { until: (all) => all.some((event) => event.type === "artifacts") },
-    );
-    expect(events.find((event) => event.type === "artifacts")).toStrictEqual({
-      type: "artifacts",
-      artifacts: [],
-    });
-    // An empty sidebar is the expected state here, not an error.
-    expect(events.some((event) => event.type === "error")).toBe(false);
-    expect(events.some((event) => event.type === "notice")).toBe(false);
-  }, HOST_TIMEOUT_MS);
-
-  it("getArtifacts/getArtifact 列出并读取当前会话的产物", async () => {
-    const home = await tempHome();
-    const created = await runHost(
-      home,
-      [{ cmd: "init", cwd: home }, { cmd: "prompt", text: "串口没输出" }],
-      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
-    );
-    const sessionId = created
-      .filter((event) => event.type === "sessions")
-      .flatMap((event) => event.sessions)
-      .at(-1)?.id;
-    expect(sessionId).toBeDefined();
-    const artifactDir = path.join(home, "sessions", sessionId, "artifacts");
-    await mkdir(artifactDir, { recursive: true });
-    await writeFile(path.join(artifactDir, "call-1.txt"), "full output", "utf8");
-    // A directory inside the artifact folder is not an artifact.
-    await mkdir(path.join(artifactDir, "nested"), { recursive: true });
-
-    const events = await runHost(
-      home,
-      [
-        { cmd: "init", cwd: home },
-        { cmd: "loadSession", id: sessionId },
-        { cmd: "getArtifacts" },
-        { cmd: "getArtifact", path: path.join(artifactDir, "call-1.txt") },
-        { cmd: "getArtifact", path: path.join(artifactDir, "..", "header.json") },
-      ],
-      {
-        until: (all) =>
-          all.some((event) => event.type === "artifact")
-          && all.some((event) => event.type === "notice"),
-      },
-    );
-    const list = events.find((event) => event.type === "artifacts");
-    expect(list.artifacts).toHaveLength(1);
-    expect(list.artifacts[0]).toMatchObject({ name: "call-1.txt", kind: "text", size: 11 });
-
-    const artifact = events.find((event) => event.type === "artifact");
-    expect(artifact.artifact).toStrictEqual({
-      path: path.join(artifactDir, "call-1.txt"),
-      kind: "text",
-      content: "full output",
-      truncated: false,
-    });
-    // `..` out of the artifact directory is refused, not read.
-    const escape = events.filter((event) => event.type === "notice").at(-1);
-    expect(escape.text).toContain("不在当前会话的 artifacts 目录内");
-  }, HOST_TIMEOUT_MS);
+  // 这里原本有两条产物用例（getArtifacts 空列表 / 列出并读取产物）。
+  // 2026-11-09 `getArtifacts` / `getArtifact` / `revealArtifact` 三个 handler
+  // 随产物面板一起删除，用例没有可调用的对象。
 
   it("setEffort 对未声明支持的模型回 warn 且不发 state", async () => {
     // `tempHome` 的模型没有声明 supportsReasoning；这仍必须是一条拒绝，

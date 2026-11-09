@@ -121,37 +121,6 @@ export function checkNavigationTarget(raw, indexPath) {
   return { ok: true, protocol: parsed.protocol };
 }
 
-/**
- * May this string be handed to `shell.showItemInFolder`?
- *
- * The only caller reveals a produced artifact, and artifacts are files with
- * absolute paths. A relative path is not a refusal the user can see — the
- * shell simply does nothing — and a URL string is not a path at all. Both are
- * refused here so the caller can say why (R3).
- *
- * Not checked here: whether the path is under the open session's
- * `artifacts/` directory. The main process does not know which session is
- * open — the host owns that — so a containment check would have to re-derive
- * `$HARNESS_HOME/sessions/<id>/artifacts` in a second place. The renderer only
- * receives artifact paths from the kernel, and this check keeps the "any
- * string" hole closed without inventing a second source of truth.
- *
- * @param {unknown} raw
- * @returns {{ ok: true, path: string } | { ok: false, reason: string }}
- */
-export function checkRevealTarget(raw) {
-  if (typeof raw !== "string" || raw.trim() === "") {
-    return { ok: false, reason: "产物路径为空" };
-  }
-  if (raw.includes("\u0000")) {
-    return { ok: false, reason: "产物路径包含空字符" };
-  }
-  if (!path.isAbsolute(raw)) {
-    return { ok: false, reason: "产物路径不是绝对路径" };
-  }
-  return { ok: true, path: raw };
-}
-
 /** The line shown when an external link is refused. */
 export function blockedExternalText(raw, reason) {
   return `链接未打开（${reason}）：${oneLine(raw)}`;
@@ -162,7 +131,3 @@ export function blockedNavigationText(raw, reason) {
   return `已阻止窗口跳转（${reason}）：${oneLine(raw)}`;
 }
 
-/** The line shown when a reveal is refused. */
-export function blockedRevealText(raw, reason) {
-  return `未在文件管理器中显示（${reason}）：${oneLine(raw)}`;
-}

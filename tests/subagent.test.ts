@@ -702,31 +702,13 @@ describe("subagent 运行语义", () => {
     expect(killSubagent("another-parent", outcome.id)).toBe(false);
   });
 
-  it("子代理读不到父产物：父 artifacts 里的文件在子代理那里是明确错误码", async () => {
-    const h = await harness({
-      steps: [
-        toolReply("", [{ id: "a1", name: "artifact", args: { path: "secret.txt" } }]),
-        reply("读不到父会话的产物。"),
-      ],
-    });
-    const parentArtifacts = path.join(h.parentDir, "artifacts");
-    await mkdir(parentArtifacts, { recursive: true });
-    await writeFile(path.join(parentArtifacts, "secret.txt"), "PARENT-ONLY\n", "utf8");
-
-    const outcome = await startSubagent(h.parentSessionId, h.parentDir, "读 secret", {
-      deps: h.deps,
-    });
-    if (!("id" in outcome)) throw new Error(outcome.error);
-    await waitFor(() => getSubagent(h.parentSessionId, outcome.id)?.status !== "running");
-
-    const results = toolResultsOf(path.join(h.parentDir, "subagents", outcome.id));
-    expect(results).toHaveLength(1);
-    expect(results[0]).toMatchObject({ id: "a1", ok: false });
-    // 子代理的 artifact 根是它自己的 `<childDir>/artifacts`，那里根本没有东西。
-    // 明确错误码而不是「空文件」：读不到与读到空是两件事（R3）。
-    expect(results[0]?.code).toBe("artifact_dir_missing");
-    expect(String(results[0]?.text)).not.toContain("PARENT-ONLY");
-  });
+  // 这里原本有一条「子代理读不到父产物」：让它调 `artifact` 读父会话 artifacts
+  // 里的文件，断言拿到 `artifact_dir_missing`。2026-11-09 `artifact` 工具随产物
+  // 面板一起删掉了，这条用例没有可调用的对象，一并删除。
+  //
+  // 那条边界的设计本身仍然正确（子代理的产物根是它自己的 `<childDir>/artifacts`，
+  // `runner.ts` 的 `artifactDir` 一行没动），只是现在没有任何工具会把它暴露成
+  // 一个可观察的结果。
 });
 
 describe("subagent_started 生命周期事件", () => {

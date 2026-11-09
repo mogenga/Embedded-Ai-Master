@@ -119,33 +119,5 @@ describe("main.js 的 open-external 处理器", () => {
   });
 });
 
-describe("main.js 的 reveal-artifact 处理器", () => {
-  function handlerBody() {
-    const at = source.indexOf('ipcMain.handle("reveal-artifact"');
-    expect(at, "找不到 reveal-artifact 处理器").toBeGreaterThan(-1);
-    const braceStart = source.indexOf("{", source.indexOf("=>", at));
-    let depth = 0;
-    for (let cursor = braceStart; cursor < source.length; cursor += 1) {
-      if (source[cursor] === "{") depth += 1;
-      else if (source[cursor] === "}") {
-        depth -= 1;
-        if (depth === 0) return source.slice(braceStart + 1, cursor);
-      }
-    }
-    return "";
-  }
-
-  it("先判定再 reveal：showItemInFolder 收到的是判定过的路径", () => {
-    const body = handlerBody();
-    expect(body).toContain("checkRevealTarget(target)");
-    expect(body).toContain("shell.showItemInFolder(decision.path)");
-    expect(body).not.toContain("shell.showItemInFolder(String(target");
-  });
-
-  it("拒绝时返回原因并发 notice（按钮点了没反应是最糟的结果）", () => {
-    const body = handlerBody();
-    expect(body).toContain("ok: false");
-    expect(body).toContain("blockedRevealText(");
-    expect(body).toContain('type: "notice"');
-  });
-});
+// 这里原本有两条 `reveal-artifact` 处理器用例。2026-11-09 产物面板删除，
+// 那条 IPC 链路（preload → ipcMain → shell.showItemInFolder）一并删掉。

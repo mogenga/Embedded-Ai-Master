@@ -1,4 +1,3 @@
-import { artifactTool } from "./artifact.js";
 import { terminalBgCheckTool, terminalBgTool } from "./background.js";
 import { echoTool } from "./echo.js";
 import { editTool, multieditTool, readTool, writeTool } from "./fs.js";
@@ -22,14 +21,14 @@ import type { ToolDef } from "./types.js";
 // (「跑一条命令」),区别只在要不要等。放远了,模型会在该用后台的时候仍然选 `shell`,
 // 然后被十分钟的构建卡住整轮。check 排在 bg 后面,因为先有作业才谈得上查。
 //
-// `artifact` 紧跟在 `read` 之后:tool_result 里出现「full output at <路径>」时,
-// 模型要做的下一件事就是把它读回来。它是 `read` 的补充而不是替代——`read` 锁
-// workdir,`artifact` 锁会话产物根,两者根不同,不能互相顶替。
+// 12 个工具，没有 `artifact`：那个工具读会话产物目录，随产物面板一起删掉了
+// （2026-11-09，用户「直接删掉」）。**内核仍然把超大输出落盘**（`pipeline.ts`
+// 的 `ARTIFACT_TOKEN_THRESHOLD`），只是没有任何工具或界面再把它读回来——落盘
+// 的作用剩下压缩时用它代替被省略的正文（`context/microcompact.ts`）。
 export function createBuiltinTools(): ToolDef<unknown>[] {
   return [
     echoTool,
     readTool,
-    artifactTool,
     lsTool,
     todoWriteTool,
     writeTool,

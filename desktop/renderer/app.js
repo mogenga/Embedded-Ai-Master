@@ -98,8 +98,6 @@ const state = {
   selectedFile: null,
   /** Pending "the preview never arrived" timeout; cleared on the reply. */
   fileLoadTimer: null,
-  /** The same, for an artifact preview opened from a tool row. */
-  artifactLoadTimer: null,
   cwd: "",
   /**
    * Occupancy of the current transcript, or null when nothing measured it.
@@ -139,8 +137,6 @@ const state = {
    * endpoint switch), so the panel never opens onto an empty column.
    */
   modelRailProvider: null,
-  artifacts: [],
-  selectedArtifact: null,
   /**
    * Whether the transcript shows only tool output the kernel marked as
    * evidence. Renderer-local state: it filters what is drawn, it is not a host
@@ -1013,133 +1009,14 @@ function lastToolRow() {
   return state.lastToolNode && state.lastToolNode.isConnected ? state.lastToolNode : null;
 }
 
-/**
- * The two actions a tool result whose full text was written to disk offers.
- *
- * They live inside the `<pre>` that holds the output, so they open and close
- * with the details block instead of floating above a collapsed row.
- *
- *   - "show in file manager" goes through the preload's `revealArtifact`:
- *     the renderer cannot open a `file://` URL itself (Electron blocks it),
- *     and a window that has no file manager answers with a notice, which is
- *     the honest degradation.
- *   - "preview in the panel" opens the artifact pane on this file. The pane
- *     asks the host for the file by path (`getArtifact`), so the preview is
- *     the kernel's own read, not a second copy of the text that is already in
- *     the transcript.
- */
-function attachArtifactLink(container, artifactPath) {
-  // The details arrive after the block is built (and a later `tool_output`
-  // reuses it), so existing buttons are updated rather than stacked.
-  const existing = container.querySelector(".artifact-open");
-  if (existing) {
-    existing.dataset.path = artifactPath;
-    existing.title = `${t.artifactRevealHint} ${artifactPath}`;
-    const preview = container.querySelector(".artifact-preview");
-    if (preview) preview.dataset.path = artifactPath;
-    return existing;
-  }
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "btn btn-quiet small artifact-open";
-  button.dataset.path = artifactPath;
-  button.textContent = t.artifactOpen;
-  button.title = `${t.artifactRevealHint} ${artifactPath}`;
-  button.addEventListener("click", (event) => {
-    event.stopPropagation();
-    const target = button.dataset.path;
-    // The preload is the only route that can actually select the file in a
-    // window. Without it the command goes to the host, which answers with a
-    // notice naming the path: a notice is honest, while a `file://` anchor
-    // would be blocked and look like a broken button.
-    if (typeof api.revealArtifact === "function") {
-      void api.revealArtifact(target);
-      return;
-    }
-    api.send({ cmd: "revealArtifact", path: target });
-  });
-  const preview = document.createElement("button");
-  preview.type = "button";
-  preview.className = "btn btn-quiet small artifact-preview";
-  preview.dataset.path = artifactPath;
-  preview.textContent = t.artifactPreview;
-  preview.title = `${t.artifactPreviewHint} ${artifactPath}`;
-  preview.addEventListener("click", (event) => {
-    event.stopPropagation();
-    previewArtifact(preview.dataset.path);
-  });
-  // A leading newline puts the buttons on their own line at the end of the
-  // output; the container is a `<pre>` with pre-wrap, so without it they
-  // would sit on the same line as the last line of text.
-  container.append("\n", button, " ", preview);
-  return button;
-}
-
-/**
- * Open one artifact in the workbench pane, by path.
- *
- * This is the second way into the artifact pane (the ⋯ menu is the first).
- * It does not wait for the list: `getArtifact` answers with the file itself,
- * and `renderArtifact` opens the pane and reveals the tab on the way through.
- */
-function previewArtifact(path) {
-  if (typeof path !== "string" || path === "") return;
-  state.selectedArtifact = path;
-  // The answer is a host round trip; say so in the pane instead of showing
-  // the previous artifact while the new one loads.
-  openWorkbench("artifact");
-  const root = $("artifact-root");
-  root.hidden = false;
-  root.innerHTML = `<div class="diff-empty">…</div>`;
-  // A refusal (a path outside this session's artifacts folder) arrives as a
-  // transcript notice only, so the pane would sit on the ellipsis forever.
-  // `openFile` uses the same guard for the same reason; the timer is separate
-  // because the two panes can be loading different things.
-  const wanted = path;
-  clearTimeout(state.artifactLoadTimer);
-  state.artifactLoadTimer = setTimeout(() => {
-    if (state.selectedArtifact !== wanted) return;
-    if (root.textContent.trim() !== "…") return;
-    root.innerHTML = `<div class="diff-empty">${escapeHtml(t.artifactLoadFailed)}</div>`;
-  }, 5000);
-  api.send({ cmd: "getArtifact", path });
-}
-
-/**
- * Open the artifact pane on its list.
- *
- * The list is the pane's home: `openWorkbench("artifact")` alone would keep
- * whatever artifact was selected last, because `state.selectedArtifact` is
- * remembered while the window is open. Reaching the pane from the ⋯ menu means
- * "show me what was produced", not "show me the file I happened to look at
- * before".
- */
-function openArtifactPane({ opener = null } = {}) {
-  state.selectedArtifact = null;
-  // A preview opened from a tool row may have a load still in flight; its
-  // failure guard reads `state.selectedArtifact`, which was just cleared, so
-  // it will not paint over the list. Clearing the timer is the belt to that
-  // brace.
-  clearTimeout(state.artifactLoadTimer);
-  openWorkbench("artifact", { opener });
-  // The caption still describes the artifact that was open; the pane below it
-  // now shows the list.
-  workbenchMeta.textContent = "";
-}
-
-function attachToolOutput(node, name, output, artifactPath) {
-  // A large result keeps only a summary in the transcript and writes the full
-  // text to a file. That path is the only way to see all of it, so a call with
-  // an artifact is worth rendering even when the summary is empty.
-  const hasArtifact = typeof artifactPath === "string" && artifactPath !== "";
-  if ((!output || output.trim() === "") && !hasArtifact) return;
+function attachToolOutput(node, name, output) {
+  if (!output || output.trim() === "") return;
   const row = node;
   const existing = row.nextElementSibling;
   if (existing && existing.classList.contains("tool-output")) {
     // Rewriting the text drops any button the block already had, so it is
     // re-attached below; a result that arrives without a path leaves none.
     existing.textContent = output ?? "";
-    if (hasArtifact) attachArtifactLink(existing, artifactPath);
     return;
   }
   const outputNode = document.createElement("pre");
@@ -1149,7 +1026,6 @@ function attachToolOutput(node, name, output, artifactPath) {
   const expanded = state.transcriptView === "verbose";
   outputNode.hidden = !expanded;
   outputNode.textContent = output ?? "";
-  if (hasArtifact) attachArtifactLink(outputNode, artifactPath);
   // A detail block belongs to its call, so it is wrapped with it rather than
   // being a sibling inside the activity group.
   const block = document.createElement("div");
@@ -3921,15 +3797,6 @@ function handleEvent(message) {
       if (state.pane === "diff" && !workbench.hidden) renderDiff();
       break;
 
-    case "artifacts":
-      state.artifacts = message.artifacts ?? [];
-      renderArtifacts();
-      break;
-
-    case "artifact":
-      renderArtifact(message.artifact);
-      break;
-
     case "file_matches":
       // `unavailable` is the stale-`dist/` state (D-184 ②). It rides on every
       // answer, not just the first, because a one-time notice is easy to miss
@@ -4325,7 +4192,7 @@ function handleEvent(message) {
       const row =
         (message.id ? transcript.querySelector(`.tool-row[data-call-id="${CSS.escape(message.id)}"]`) : null) ??
         lastToolRow();
-      if (row) attachToolOutput(row, message.name, message.content, message.artifactPath);
+      if (row) attachToolOutput(row, message.name, message.content);
       scrollToBottom();
       break;
     }
@@ -4708,14 +4575,6 @@ function handleEvent(message) {
       // were just rebuilt; recomputing here keeps the badge from counting the
       // previous conversation's evidence.
       renderEvidenceFilter();
-      // The artifact pane belongs to the session that produced it. It became
-      // reachable from the menu, so a list left over from the previous
-      // conversation would now be presented as this one's; clear it, and ask
-      // again when the pane is the one on screen.
-      state.artifacts = [];
-      state.selectedArtifact = null;
-      renderArtifacts();
-      if (!workbench.hidden && state.pane === "artifact") openArtifactPane();
       scrollToBottom(true);
       break;
     }
@@ -4860,7 +4719,7 @@ function handleEvent(message) {
  * landed: `serialOpen`/`serialStatus`/… have real handlers, the events feed
  * the pane below, and the agent reads the same ring through `embed_serial`.
  */
-const SUPPORTED_PANES = new Set(["file", "artifact", "serial"]);
+const SUPPORTED_PANES = new Set(["file", "serial"]);
 
 /**
  * Which pane the workbench was on last time it was open.
@@ -4898,9 +4757,9 @@ function openWorkbench(pane, { opener = null } = {}) {
   // Use the attribute directly: a stale hidden="false" still matches
   // [hidden]{display:none} and would keep the pane invisible.
   workbench.removeAttribute("hidden");
-  // A pane that is opened only by an action (a tool row, an artifact from a
-  // different one) reveals its tab the first time it is reached; leaving it
-  // hidden would leave the strip claiming a pane that is on screen.
+  // A pane that is opened only by an action reveals its tab the first time it
+  // is reached; leaving it hidden would leave the strip claiming a pane that
+  // is on screen.
   const activeTab = workbenchTabs.querySelector(`button[data-pane="${state.pane}"]`);
   if (activeTab) activeTab.hidden = false;
   state.workbenchOpen = true;
@@ -4917,7 +4776,6 @@ function openWorkbench(pane, { opener = null } = {}) {
   });
   const showDiff = state.pane === "diff";
   const showTerminal = state.pane === "terminal";
-  const showArtifact = state.pane === "artifact";
   const showBrowser = state.pane === "browser";
   const showFile = state.pane === "file";
   const showSerial = state.pane === "serial";
@@ -4926,14 +4784,11 @@ function openWorkbench(pane, { opener = null } = {}) {
   diffFilelist.hidden = !showDiff || state.changes.files.length === 0;
   $("diff-scope").hidden = !showDiff;
   $("changes-list").hidden = !showDiff;
-  $("artifact-list-pane").hidden = !showArtifact || Boolean(state.selectedArtifact);
   fileRoot.hidden = !showFile;
   terminalRoot.hidden = !showTerminal;
-  $("artifact-root").hidden = !showArtifact || !state.selectedArtifact;
   $("browser-root").hidden = !showBrowser;
   $("serial-root").hidden = !showSerial;
   if (showDiff) renderDiff();
-  if (showArtifact) api.send({ cmd: "getArtifacts" });
   if (showTerminal) {
     openTerminal();
   }
@@ -6070,102 +5925,6 @@ $("browser-use").addEventListener("click", async () => {
 window.addEventListener("resize", scheduleBrowserBounds);
 api.onBrowserState?.(renderBrowserState);
 
-/* ---------- artifacts ---------- */
-
-function renderArtifacts() {
-  const list = $("artifact-list");
-  list.innerHTML = "";
-  if (state.artifacts.length === 0) {
-    list.innerHTML = `<div class="sidebar-empty">${escapeHtml(t.noArtifacts)}</div>`;
-    return;
-  }
-  for (const artifact of state.artifacts) {
-    const row = document.createElement("button");
-    row.className = "artifact-row";
-    row.innerHTML =
-      `<span class="artifact-kind">${escapeHtml(artifact.kind)}</span>` +
-      `<span class="artifact-path">${escapeHtml(artifact.path)}</span>`;
-    row.title = `${artifact.path} · ${Math.round(artifact.size / 1024)} KB`;
-    row.addEventListener("click", () => {
-      state.selectedArtifact = artifact.path;
-      api.send({ cmd: "getArtifact", path: artifact.path });
-    });
-    list.appendChild(row);
-  }
-}
-
-/** Render one artifact in the right-hand workbench. */
-function renderArtifact(artifact) {
-  // Open the artifact's own tab through the normal path so every other pane
-  // is hidden consistently; `openWorkbench` reveals the tab on first reach.
-  state.selectedArtifact = artifact.path;
-  clearTimeout(state.artifactLoadTimer);
-  openWorkbench("artifact");
-  $("artifact-list-pane").hidden = true;
-  const root = $("artifact-root");
-  root.hidden = false;
-  workbenchMeta.textContent = `${artifact.kind} · ${artifact.path}${artifact.truncated ? " · truncated" : ""}`;
-  if (artifact.kind === "html") {
-    // Scripts stay disabled: an agent-written page should not run in the app.
-    root.innerHTML = `<iframe class="artifact-frame" sandbox="" referrerpolicy="no-referrer" srcdoc="${escapeHtml(artifact.content)}"></iframe>`;
-  } else if (artifact.kind === "svg") {
-    root.innerHTML = `<div class="artifact-svg">${artifact.content}</div>`;
-  } else if (artifact.kind === "markdown") {
-    root.innerHTML = `<div class="artifact-markdown markdown">${md(artifact.content)}</div>`;
-  } else if (artifact.kind === "csv") {
-    renderCsvTable(root, artifact.content);
-  } else {
-    root.innerHTML = `<pre class="artifact-json">${escapeHtml(artifact.content)}</pre>`;
-  }
-}
-
-function renderCsvTable(root, text) {
-  const rows = parseCsvLocal(text);
-  if (rows.length === 0) {
-    root.innerHTML = `<div class="diff-empty">${escapeHtml(t.emptyFile)}</div>`;
-    return;
-  }
-  const head = rows[0].map((cell) => `<th>${escapeHtml(cell)}</th>`).join("");
-  const body = rows
-    .slice(1)
-    .map((row) => `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`)
-    .join("");
-  root.innerHTML = `<div class="artifact-table-wrap"><table class="artifact-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
-}
-
-/** Local CSV parse (the host parser is not importable from the renderer). */
-function parseCsvLocal(text) {
-  const rows = [];
-  let row = [];
-  let field = "";
-  let quoted = false;
-  for (let i = 0; i < text.length && rows.length < 500; i++) {
-    const ch = text[i];
-    if (quoted) {
-      if (ch === '"' && text[i + 1] === '"') {
-        field += '"';
-        i++;
-      } else if (ch === '"') quoted = false;
-      else field += ch;
-    } else if (ch === '"') quoted = true;
-    else if (ch === ",") {
-      row.push(field);
-      field = "";
-    } else if (ch === "\n" || ch === "\r") {
-      if (ch === "\r" && text[i + 1] === "\n") i++;
-      row.push(field);
-      field = "";
-      if (row.some((cell) => cell !== "")) rows.push(row);
-      row = [];
-    } else field += ch;
-  }
-  if (field !== "" || row.length > 0) {
-    row.push(field);
-    if (row.some((cell) => cell !== "")) rows.push(row);
-  }
-  return rows;
-}
-
 /* ---------- sessions ---------- */
 
 function relativeDate(iso) {
@@ -6289,7 +6048,15 @@ function renderSessions(sessions) {
   if (visible.length === 0 && !showActiveOnly) {
     const empty = document.createElement("div");
     empty.className = "sidebar-empty";
-    empty.textContent = state.sessions.length === 0 ? t.noSessions : t.noSessionMatches;
+    // Three different facts, three different sentences. With no workspace open
+    // the list is empty because nothing has been chosen yet — saying "no saved
+    // conversations" there would be answering a question the operator did not
+    // ask, about a folder they have not picked.
+    empty.textContent = activeProject === ""
+      ? t.workspaceNoneHint
+      : state.sessions.length === 0
+        ? t.noSessions
+        : t.noSessionMatches;
     sessionList.appendChild(empty);
     return;
   }
@@ -8119,8 +7886,12 @@ function renderTopbarLocation() {
   const cwd = state.cwd ?? "";
   const parts = cwd.split(/[\\/]/).filter(Boolean);
   const name = parts.length > 0 ? parts[parts.length - 1] : "";
-  $("topbar-cwd-name").textContent = name || t.appName;
-  $("topbar-cwd").title = cwd || t.appName;
+  // No workspace is a real state, not a missing name: say 暂无 rather than
+  // showing the product name in a slot that means "which folder". The product
+  // name there read as "this conversation lives in the app's own folder",
+  // which was exactly the wrong idea (2026-11-09).
+  $("topbar-cwd-name").textContent = name || t.workspaceNone;
+  $("topbar-cwd").title = cwd || t.workspaceChoose;
   renderStatusTab(name);
   // The sidebar's folder button is an icon: the current folder is a row in the
   // list below it (the active workspace), so repeating the name here would
@@ -8180,22 +7951,8 @@ $("terminal-button").addEventListener("click", () => {
 });
 
 
-/**
- * Reaching the Artifact tab by hand — a click or the arrow keys — always lands
- * on the list.
- *
- * The pane has two roots: the list and one artifact's preview. A preview
- * leaves the list hidden, so without this the only way back to it would be
- * closing and reopening the pane. Reaching the tab is a request to browse what
- * was produced, not to revisit the file that happened to be open last.
- */
-function openWorkbenchPane(pane) {
-  if (pane === "artifact") openArtifactPane();
-  else openWorkbench(pane);
-}
-
 workbenchTabs.querySelectorAll("button").forEach((button) => {
-  button.addEventListener("click", () => openWorkbenchPane(button.dataset.pane));
+  button.addEventListener("click", () => openWorkbench(button.dataset.pane));
   button.addEventListener("keydown", (event) => {
     if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
     event.preventDefault();
@@ -8211,7 +7968,7 @@ workbenchTabs.querySelectorAll("button").forEach((button) => {
     const step = event.key === "ArrowRight" ? 1 : -1;
     const next = tabs[(index + step + tabs.length) % tabs.length];
     next.focus();
-    openWorkbenchPane(next.dataset.pane);
+    openWorkbench(next.dataset.pane);
   });
 });
 
@@ -8436,7 +8193,6 @@ topbarMenu.addEventListener("click", (event) => {
   if (!row) return;
   setTopbarMenu(false);
   if (row.id === "menu-export") api.send({ cmd: "exportSession" });
-  else if (row.id === "menu-artifacts") openArtifactPane({ opener: $("more-button") });
   else if (row.id === "menu-shortcuts") openShortcuts();
   else if (row.id === "menu-open-serial") openWorkbench("serial", { opener: $("more-button") });
   else if (row.id === "menu-clear") clearConversation();

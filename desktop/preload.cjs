@@ -30,9 +30,6 @@ contextBridge.exposeInMainWorld("prometheus", {
     ipcRenderer.invoke("save-file", { suggestedName, content, filters }),
   appVersion: () => ipcRenderer.invoke("app-version"),
   openExternal: (url) => ipcRenderer.invoke("open-external", url),
-  // Show a produced file in Explorer/Finder. The host is headless; only the
-  // window process can reach the shell.
-  revealArtifact: (target) => ipcRenderer.invoke("reveal-artifact", target),
   notify: (title, body) => ipcRenderer.invoke("notify", { title, body }),
   // In-app updates. Each call returns the resulting status, and every change
   // also arrives as a `update_status` message on `onEvent` — the same channel

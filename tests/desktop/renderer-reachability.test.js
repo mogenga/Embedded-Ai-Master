@@ -18,71 +18,9 @@ import { dictionaries } from "../../desktop/renderer/i18n.js";
 const RENDERER = path.join(import.meta.dirname, "..", "..", "desktop", "renderer");
 const read = (name) => readFileSync(path.join(RENDERER, name), "utf8");
 
-describe("产物面板可达（OPT-04 的界面侧）", () => {
-  it("⋯ 菜单里有一行「产物」，并绑定了打开它的处理", () => {
-    const html = read("index.html");
-    expect(html).toContain('id="menu-artifacts"');
-    expect(html).toContain('data-i18n="menuOpenArtifacts"');
-    const app = read("app.js");
-    // The row is dead unless the menu's click handler names it; that is how
-    // the artifact pane stayed unreachable before.
-    expect(app).toContain('row.id === "menu-artifacts"');
-    expect(app).toContain("openArtifactPane()");
-  });
-
-  it("打开产物面板会清掉上一次选中的产物并发 getArtifacts", () => {
-    const app = read("app.js");
-    const start = app.indexOf("function openArtifactPane(");
-    expect(start).toBeGreaterThan(-1);
-    const end = app.indexOf("\n}", start);
-    const body = app.slice(start, end);
-    // Selecting an old artifact would show the viewer instead of the list.
-    expect(body).toContain("state.selectedArtifact = null");
-    expect(body).toContain('openWorkbench("artifact"');
-    // `openWorkbench` is what sends the list request, so the handler has to be
-    // in that branch; without it the menu opens an empty pane.
-    const workbench = app.slice(app.indexOf("function openWorkbench("));
-    expect(workbench).toContain('if (showArtifact) api.send({ cmd: "getArtifacts" })');
-  });
-
-  it("点 Artifact 页签回到列表，而不是停在上一次的预览里", () => {
-    const app = read("app.js");
-    // Both entrances to the tab (click and arrow keys) go through the same
-    // helper; either one alone would leave the other stranded on a preview.
-    expect(app).toContain("function openWorkbenchPane(pane)");
-    expect(app.match(/openWorkbenchPane\(/g)?.length ?? 0).toBeGreaterThanOrEqual(3);
-    const helper = app.slice(app.indexOf("function openWorkbenchPane(pane)"));
-    expect(helper.slice(0, 200)).toContain('if (pane === "artifact") openArtifactPane()');
-  });
-
-  it("工具输出的「打开产物」旁边有「预览」入口，且它会走 getArtifact", () => {
-    const app = read("app.js");
-    expect(app).toContain("artifact-preview");
-    expect(app).toContain("function previewArtifact(path)");
-    const start = app.indexOf("function previewArtifact(path)");
-    const body = app.slice(start, app.indexOf("\n}", start));
-    expect(body).toContain('api.send({ cmd: "getArtifact", path })');
-    expect(body).toContain('openWorkbench("artifact")');
-    // `attachToolOutput` has to actually attach it, or the class is dead CSS.
-    expect(app).toContain("attachArtifactLink(existing, artifactPath)");
-    expect(app).toContain("attachArtifactLink(outputNode, artifactPath)");
-  });
-
-  it("空态文案说清「还没有产物」并解释产物从哪来，两种语言都在", () => {
-    for (const locale of ["en", "zh"]) {
-      const text = dictionaries[locale].noArtifacts;
-      expect(typeof text).toBe("string");
-      expect(text.trim()).not.toBe("");
-      // It must not claim the folder is empty when the host could not read
-      // it: the sentence names where artifacts come from instead.
-      expect(text.toLowerCase()).toContain(locale === "zh" ? "artifacts" : "artifacts");
-    }
-    expect(dictionaries.en.noArtifacts).toContain("artifacts");
-    expect(dictionaries.zh.noArtifacts).toContain("artifacts");
-    // The two languages are different sentences, not one copied twice.
-    expect(dictionaries.en.noArtifacts).not.toBe(dictionaries.zh.noArtifacts);
-  });
-});
+// 这里原本是「产物面板可达」一整组（⋯ 菜单入口、getArtifacts、页签回到列表、
+// 工具行的「预览」入口、空态文案）。2026-11-09 产物面板按用户要求删除，
+// 这一组没有可断言的界面了。
 
 describe("evidence 出口（OPT-19 的渲染侧）", () => {
   it("转录里有「只看证据」开关，并绑定了翻转处理", () => {

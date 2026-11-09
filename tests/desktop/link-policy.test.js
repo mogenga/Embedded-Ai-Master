@@ -8,7 +8,6 @@ import {
   blockedNavigationText,
   checkExternalUrl,
   checkNavigationTarget,
-  checkRevealTarget,
 } from "../../desktop/link-policy.js";
 
 /**
@@ -209,28 +208,8 @@ describe("checkNavigationTarget 只放行窗口自己的页面", () => {
   });
 });
 
-describe("checkRevealTarget", () => {
-  it("绝对路径通过，原样返回", () => {
-    const target = path.resolve("/repo/home/sessions/s1/artifacts/out.txt");
-    expect(checkRevealTarget(target)).toEqual({ ok: true, path: target });
-  });
-
-  it("空路径、相对路径、URL 形态的串都拒绝", () => {
-    // `shell.showItemInFolder` 对相对路径是静默无操作；URL 串则会被当成本地路径
-    // 拼出来。两种都让按钮看起来坏了，拒绝并说明比静默强（R3）。
-    for (const raw of ["", "   ", "artifacts/out.txt", "./out.txt", "file:///C:/Windows/calc.exe"]) {
-      const decision = checkRevealTarget(raw);
-      expect(decision.ok, `竟然放行了 ${JSON.stringify(raw)}`).toBe(false);
-      expect(decision.reason.length).toBeGreaterThan(0);
-    }
-  });
-
-  it("非字符串拒绝", () => {
-    for (const raw of [null, undefined, 0, {}, []]) {
-      expect(checkRevealTarget(raw).ok).toBe(false);
-    }
-  });
-});
+// 这里原本有一组 `checkRevealTarget` 用例（产物「在文件夹中显示」的路径判定）。
+// 2026-11-09 产物面板删除，那条 IPC 链路与判定函数一并删掉。
 
 describe("拒绝文案", () => {
   it("说明被拒绝的原因与目标，且压成一行", () => {

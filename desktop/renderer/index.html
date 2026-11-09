@@ -110,14 +110,6 @@
               <svg class="icon" aria-hidden="true"><use href="#i-download"></use></svg>
               <span data-i18n="menuExport">Export conversation</span>
             </button>
-            <!-- The artifact pane lists what the kernel's pipeline wrote to
-                 `artifacts/` for oversized tool output. Until this row existed
-                 the pane could only be opened by previewing an artifact, and
-                 previewing required the pane to be open — a closed loop. -->
-            <button class="menu-row" id="menu-artifacts" role="menuitem">
-              <svg class="icon" aria-hidden="true"><use href="#i-file"></use></svg>
-              <span data-i18n="menuOpenArtifacts">Open artifacts</span>
-            </button>
             <!-- New window and split view both need a second BrowserWindow.
                  This shell holds a single-instance lock and one window, so a
                  row here could only fail; the hosts are one per window and the
@@ -486,20 +478,17 @@
             ></div>
             <div class="workbench-head">
               <div class="workbench-tabs" id="workbench-tabs" role="tablist">
-                <!-- Panes with a real source: the file pane reads `getFile`,
-                     the artifact pane lists what `pipeline.writeArtifact`
-                     wrote, and the serial pane is fed by the host's
-                     PowerShell serial bridge. File and artifact start hidden
-                     because they are opened by an action (a tool row click),
-                     not by browsing. Serial is the only always-present pane
-                     with a backend in this kernel, so it is the default. -->
+                <!-- Two panes with a real source: the file pane reads
+                     `getFile`, and the serial pane is fed by the host's
+                     PowerShell serial bridge. File starts hidden because it is
+                     opened by an action, not by browsing. The artifact pane
+                     was removed on 2026-11-09 — the kernel still writes
+                     oversized output to `artifacts/`, but nothing in the UI
+                     lists it any more. -->
                 <!-- `aria-controls` names the pane each tab shows, so a
-                     screen reader announces what the selection changes. The
-                     artifact tab drives two roots: the list before one is
-                     picked, the viewer after. -->
+                     screen reader announces what the selection changes. -->
                 <button id="workbench-tab-serial" role="tab" aria-selected="true" aria-controls="serial-root" tabindex="0" data-pane="serial" class="active" data-i18n="paneSerial">Serial</button>
                 <button id="workbench-tab-file" role="tab" aria-selected="false" aria-controls="file-root" tabindex="-1" data-pane="file" data-i18n="paneFile" hidden>File</button>
-                <button id="workbench-tab-artifact" role="tab" aria-selected="false" aria-controls="artifact-list-pane artifact-root" tabindex="-1" data-pane="artifact" data-i18n="paneArtifact" hidden>Artifact</button>
               </div>
               <div class="workbench-meta" id="workbench-meta"></div>
               <button class="icon-button small" id="close-workbench" data-i18n-title="closePane">
@@ -548,9 +537,6 @@
                 </div>
               </div>
               <div class="changes-list" id="changes-list" hidden></div>
-              <div class="artifact-list-pane" id="artifact-list-pane" hidden>
-                <div class="artifact-list" id="artifact-list"></div>
-              </div>
               <div class="file-root" id="file-root" hidden></div>
               <div class="terminal-root" id="terminal-root" hidden>
                 <pre class="terminal-output" id="terminal-output" tabindex="0"></pre>
@@ -648,7 +634,6 @@
                   <p class="serial-send-error" id="serial-send-error" role="status" aria-live="polite" hidden></p>
                 </div>
               </div>
-              <div class="artifact-root" id="artifact-root" hidden></div>
               <div class="browser-root" id="browser-root" hidden>
                 <div class="browser-toolbar">
                   <button class="icon-button small" id="browser-back" data-i18n-title="back">

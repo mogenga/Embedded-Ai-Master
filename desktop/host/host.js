@@ -514,7 +514,20 @@ let providersPath = path.join(harnessHome, "providers.json");
 let providersError = "";
 let modelRef = "";
 let modelList = [];
-let cwd = process.cwd();
+/**
+ * The workspace, or `""` for "the operator has not chosen one".
+ *
+ * **Not `process.cwd()`.** A packaged app's process starts in its install
+ * directory, so seeding this with the process's own directory made the sidebar
+ * show `embedded-ai-master-desktop` as if it were someone's project (2026-11-09).
+ * The value now comes from `init` alone; absent means the topbar says "choose a
+ * folder" and the sidebar says there is nothing yet — which is the truth.
+ *
+ * `""` is handled throughout: sessions record no workdir, no tree root is
+ * registered, and the file tools refuse rather than resolving against the
+ * install directory.
+ */
+let cwd = "";
 let locale = "zh";
 let mode = "diagnose";
 let sessionId = "";
@@ -1116,7 +1129,11 @@ function createRunner() {
   return kernel.createSessionRunner({
     harnessHome,
     ...(modelRef === "" ? {} : { model: modelRef }),
-    cwd,
+    // Omitted when no workspace is open. The runner's `resolveRunCwd` rejects
+    // an empty string outright ("cwd 不能为空"), and passing the host's own
+    // directory would put every new session in the install folder — the
+    // phantom workspace again, this time recorded in `header.json`.
+    ...(cwd === "" ? {} : { cwd }),
     permissions: { preset: mode },
     // OPT-15 / D-134: the kernel is in this same process, so every event it
     // commits is handed to us as soon as it is on disk — instead of waiting
@@ -1378,12 +1395,12 @@ function looksBinary(buffer) {
 }
 
 /**
- * Answer a read request with one of the renderer's file/artifact shapes.
+ * Answer a file-preview request.
  *
  * Every failure path is a notice: a pane that shows nothing looks exactly like
  * an empty file, so a refused or unreadable path has to say why (R3).
  */
-function readPreview(absolute, requested, kind) {
+function readPreview(absolute, requested) {
   let stat;
   try {
     // `lstat`, then `realpath`: a symlink is not the file the operator thinks
@@ -1413,76 +1430,7 @@ function readPreview(absolute, requested, kind) {
   const truncated = stat.size > MAX_PREVIEW_BYTES;
   const binary = looksBinary(buffer);
   const content = binary ? "" : buffer.toString("utf8");
-  if (kind === "file") {
-    send({ type: "file", file: { path: requested, content, truncated, binary } });
-    return;
-  }
-  // Artifacts are the kernel's own text output; a NUL byte there means the
-  // file is not what the manifest said, so the caller is told rather than
-  // handed an empty artifact that renders as "no content".
-  if (binary) {
-    send({ type: "notice", level: "warn", text: `产物不是文本文件：${requested}` });
-    return;
-  }
-  send({
-    type: "artifact",
-    artifact: { path: requested, kind: "text", content, truncated },
-  });
-}
-
-/** Extension → artifact kind. The kernel only writes `.txt`; the other text
- *  extensions cover a file the operator dropped in by hand. */
-const ARTIFACT_KINDS = new Map([
-  [".txt", "text"],
-  [".log", "text"],
-  [".json", "text"],
-  [".md", "text"],
-]);
-
-/** The current session's artifact directory, or "" when none is open. */
-function artifactsDirOf() {
-  if (sessionId === "") return "";
-  return path.join(sessionsRoot, sessionId, "artifacts");
-}
-
-/**
- * Ordinary files in the current session's artifact directory.
- *
- * A missing directory (no artifacts yet, or no session) is an empty list, not
- * an error: the sidebar is meant to be empty until the first artifact lands.
- */
-function listArtifacts() {
-  const dir = artifactsDirOf();
-  if (dir === "") return [];
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-  const out = [];
-  for (const entry of entries) {
-    const absolute = path.join(dir, entry.name);
-    let stat;
-    try {
-      stat = lstatSync(absolute);
-    } catch {
-      continue;
-    }
-    // `lstat().isFile()` is false for a symlink even when it resolves to a
-    // file, which is exactly the exclusion wanted here.
-    if (!stat.isFile()) continue;
-    out.push({
-      path: absolute,
-      name: entry.name,
-      kind: ARTIFACT_KINDS.get(path.extname(entry.name).toLowerCase()) ?? "unknown",
-      size: stat.size,
-    });
-  }
-  // Newest names last in the kernel's `<callId>-<n>.txt` scheme, so a plain
-  // name sort is stable and predictable without touching mtimes.
-  out.sort((left, right) => left.name.localeCompare(right.name));
-  return out;
+  send({ type: "file", file: { path: requested, content, truncated, binary } });
 }
 
 // ---------------------------------------------------------------------------
@@ -4353,23 +4301,6 @@ const handlers = {
   },
 
   /**
-   * Answer an artifact-path request from a client without a preload.
-   *
-   * The renderer reveals through the preload's `revealArtifact`, which the
-   * host process cannot do — it has no window. A client that sends the command
-   * anyway gets the path back in a notice, so the file is findable instead of
-   * the click being a silent no-op.
-   */
-  revealArtifact(payload) {
-    const target = typeof payload.path === "string" ? payload.path : "";
-    if (target === "") {
-      send({ type: "notice", level: "warn", text: "产物路径为空" });
-      return;
-    }
-    send({ type: "notice", level: "dim", text: `产物：${target}` });
-  },
-
-  /**
    * Preview one text file.
    *
    * Only the workspace and the open session's directory are readable: the
@@ -4389,39 +4320,7 @@ const handlers = {
       send({ type: "notice", level: "warn", text: `路径不在工作目录内：${requested}` });
       return;
     }
-    readPreview(absolute, requested, "file");
-  },
-
-  /**
-   * The open session's artifacts.
-   *
-   * No session means an empty list, not an error: the sidebar opens before any
-   * conversation does and must not greet the operator with a warning.
-   */
-  getArtifacts() {
-    send({ type: "artifacts", artifacts: listArtifacts() });
-  },
-
-  /** One artifact's text, restricted to the open session's artifact directory. */
-  getArtifact(payload = {}) {
-    const requested = payload.path;
-    if (typeof requested !== "string" || requested.trim() === "") {
-      send({ type: "error", message: "缺少产物路径" });
-      return;
-    }
-    const dir = artifactsDirOf();
-    if (dir === "") {
-      send({ type: "notice", level: "warn", text: `没有打开的会话，无法读取产物：${requested}` });
-      return;
-    }
-    // Both a full path and a bare file name are accepted: the manifest hands
-    // out absolute paths, but a client may send back only the name it drew.
-    const absolute = path.isAbsolute(requested) ? path.resolve(requested) : path.resolve(dir, requested);
-    if (!isInside(dir, resolveForCheck(absolute))) {
-      send({ type: "notice", level: "warn", text: `产物不在当前会话的 artifacts 目录内：${requested}` });
-      return;
-    }
-    readPreview(absolute, requested, "artifact");
+    readPreview(absolute, requested);
   },
 
   /**
@@ -4741,12 +4640,19 @@ const handlers = {
    * opening, and both mean "the folder I am working in".
    */
   async getTree(payload = {}) {
+    // No workspace, nothing to list. Falling back to the process's own
+    // directory would answer with the install directory's contents — the same
+    // phantom-folder problem, one layer down. Answer the truth instead.
+    if (cwd === "") {
+      send({ type: "tree", nodes: [] });
+      return;
+    }
     const raw =
       typeof payload.path === "string" && payload.path.trim() !== "" ? payload.path : cwd;
     // A relative path is taken against the workspace, not the host process's
     // own directory: the renderer sends `"."` and means "the folder I am
     // working in". Resolving here also keeps the boundary check meaningful.
-    const requested = path.resolve(cwd === "" ? process.cwd() : cwd, raw);
+    const requested = path.resolve(cwd, raw);
     await settleRoot();
     const list = kernel.filesApi?.listDirectory;
     if (typeof list !== "function") {

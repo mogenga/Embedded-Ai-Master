@@ -83,10 +83,10 @@
 
 **内核有**
 
-- 13 个内置工具（顺序固定）：`echo` / `read` / `artifact` / `ls` / `todo_write` / `write` / `edit` / `multiedit` / `shell` / `terminal_bg` / `terminal_bg_check` / `glob` / `grep`（`src/tools/builtin.ts`）。
+- 12 个内置工具（顺序固定）：`echo` / `read` / `ls` / `todo_write` / `write` / `edit` / `multiedit` / `shell` / `terminal_bg` / `terminal_bg_check` / `glob` / `grep`（`src/tools/builtin.ts`）。**`artifact` 工具已于 2026-11-09 随产物面板一起删除**——内核仍把超大输出落盘，但没有工具或界面再读回它。
   **另有 2 个子代理工具不在这个清单里**：`subagent` / `subagent_check`（`src/subagent/tools.ts`）需要 `model` / `registry` / 权限规则，所以由 `src/index.ts` 与内置工具**并列装配**（两条 `ToolRegistry` 构造路径都要，漏 `registry.replace` 那一处会让它们在一次 MCP 工具刷新后消失）。`createBuiltinTools()` 仍然返回 13 个，`tests/tools.test.ts` 钉着这个数。
 - 会话级 MCP 连接、工具名命名空间、权限四档预设（`read-only` / `workspace-write` / `diagnose` / `danger-full-access`）、参数级规则。
-- **只读子代理**：同进程嵌套 `query()`，工具面由 `read-only` 预设钉死（不是第二张白名单），最多 4 并发、**轮数与寿命缺省不限**（2026-11-09；原来的 30 轮 / 10 分钟默认值已删除），子会话落在 `<父会话目录>/subagents/<id>`，开跑写 `subagent_started`、完成写 `subagent_result`。契约见 `docs/operations/subagent.md`。**父轮次结束不杀子代理**；子代理**读不到**父会话的 artifacts。
+- **只读子代理**：同进程嵌套 `query()`，工具面由 `read-only` 预设钉死（不是第二张白名单），最多 4 并发、**轮数与寿命缺省不限**（2026-11-09；原来的 30 轮 / 10 分钟默认值已删除），子会话落在 `<父会话目录>/subagents/<id>`，开跑写 `subagent_started`、完成写 `subagent_result`。契约见 `docs/operations/subagent.md`。**父轮次结束不杀子代理**；子代理的产物根是它自己的 `<childDir>/artifacts`（父会话的不可见）。
   **界面**：对话区上方一行子代理条（几个在跑、各跑了多久），展开后逐条可点；点开是子会话的**只读回放**（宿主 `sessionId` 留在父会话，`prompt` 被拒），顶部有返回父会话的提示。路径由 `desktop/host/subagent-session.js` 解析——父子 id 各自过 `isValidSessionId`，`subagents` 是字面量。
 - **外部命令钩子**：`$HARNESS_HOME/hooks.json` 的 `preToolUse` / `postToolUse`，退出码 2 阻断、其它非 0 fail-closed，`postToolUse` 的 stdout 追加进结果正文并把 `evidence` 降为 false。接在权限层**之后**（`executeAuthorized`），所以只能收紧不能放行。契约见 `docs/operations/hooks.md`。**桌面形态不加载项目级钩子**（与 MCP / permissions 同一姿态：宿主不传 `trustProjectConfig`）。**`/hook` 列出当前生效的条目，`/hook reload` 重读——只重读给界面看，正在跑的会话仍用它启动时那份。**
 - 主循环：流式片段落盘、`thinking_delta` 推理通道、三级上下文压缩、`deadlineMs` 整跑墙钟、连续截断上限 3 次、`context_length_exceeded` 恢复一次。
@@ -115,7 +115,7 @@
 
 **首启自动接入四台**（`kb` / `serial` / `keil` / `datasheet`）：桌面宿主第一次启动时按「产物存在就写、用户已配不覆盖、失败如实上报」写进用户 `mcp.json`。**`probe` 不在种子清单里**——探针要用户自己配（需要真实后端路径与权限模板）。`embedded` 是统一门面，经 Keil 路由与工具链 packs 挂载。
 
-**桌面前端**：工作台三 pane（`serial` 常驻；`file` / `artifact` 由动作打开）。没有文件树、没有板卡面板、没有终端面板。
+**桌面前端**：工作台两 pane（`serial` 常驻；`file` 由动作打开）。**产物面板已于 2026-11-09 删除**。没有文件树、没有板卡面板、没有终端面板。
 
 ## M3 剩余范围（BRD M3 里程碑，未完成部分）
 

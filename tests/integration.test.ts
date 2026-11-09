@@ -309,10 +309,11 @@ describe("runSession 端到端装配", () => {
     expect(calls[0].body.model).toBe("flash");
     expect(calls[0].body.max_tokens).toBe(512);
     expect(calls[0].body.stream).toBe(true);
-    // 13 个内置工具 + `subagent` / `subagent_check` 两个子代理工具。后者不在
-    // `createBuiltinTools()` 里（`tests/tools.test.ts` 仍钉着 13 个纯对象工具），
+    // 12 个内置工具 + `subagent` / `subagent_check` 两个子代理工具。后者不在
+    // `createBuiltinTools()` 里（`tests/tools.test.ts` 钉着 12 个纯对象工具），
     // 但它们是 `runSession` 装进注册表的工具面的一部分，所以会出现在请求体里。
-    expect(calls[0].body.tools).toHaveLength(15);
+    // 2026-11-09 起 `artifact` 已随产物面板一起删除。
+    expect(calls[0].body.tools).toHaveLength(14);
     expect(
       (calls[0].body.tools as Array<{ type: string; function: { name: string } }>).map(
         (tool) => tool.function.name,
@@ -320,7 +321,6 @@ describe("runSession 端到端装配", () => {
     ).toEqual([
       "echo",
       "read",
-      "artifact",
       "ls",
       "todo_write",
       "write",

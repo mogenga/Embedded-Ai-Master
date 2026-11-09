@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { dictionaries } from "../../desktop/renderer/i18n.js";
 
 /**
  * 会话生命周期的两处用户可见行为（2026-11-09 反馈）：
@@ -39,26 +40,87 @@ function bodyOf(text, header) {
   throw new Error(`unterminated ${header}`);
 }
 
-describe("装好的应用不把安装目录当工作区", () => {
-  it("打包形态用文档目录，开发形态保留 process.cwd()", () => {
+describe("装好的应用不硬塞一个工作区", () => {
+  it("打包形态一开始没有工作区，开发形态保留仓库根", () => {
     const main = read("main.js");
-    // The whole point: `app.isPackaged` decides, and the packaged branch is
-    // NOT `process.cwd()` (which is the install directory).
-    expect(main).toContain('app.isPackaged ? app.getPath("documents") : process.cwd()');
+    // Three attempts, and the third is the rule (2026-11-09):
+    //   1. process.cwd()  → the install directory
+    //   2. documents      → someone else's folder, still not chosen
+    //   3. null           → "nothing chosen yet"; the UI says 暂无
+    expect(main).toContain("const startCwd = app.isPackaged ? null : process.cwd();");
     expect(main).not.toContain("const startCwd = process.cwd();");
   });
 
-  it("那个路径必须是用户能自己换掉的普通目录", () => {
-    // A folder the user can point at something else, and that exists without
-    // the app being installed — `documents` is exactly that. `userData` (the
-    // app's own storage) would be the wrong answer: it is internal state, and
-    // sessions recorded there would look like a project called
-    // `embedded-ai-master-desktop`'s sibling.
+  it("不猜任何目录：文档 / 家目录 / 用户数据都不许成为工作区", () => {
     const main = read("main.js");
     const line = main.split("\n").find((entry) => entry.includes("const startCwd ="));
-    expect(line).toContain('app.getPath("documents")');
-    expect(line).not.toContain('app.getPath("userData")');
-    expect(line).not.toContain("process.execPath");
+    for (const guess of [
+      'getPath("documents")',
+      'getPath("home")',
+      'getPath("userData")',
+      "homedir()",
+    ]) {
+      expect(line, `startCwd 不该猜 ${guess}`).not.toContain(guess);
+    }
+  });
+
+  it("没工作区时 init 不带 cwd，宿主据此显示「暂无」", () => {
+    const main = read("main.js");
+    // The workspace is a separate fact from the process's startup directory;
+    // this is the wire where they could get confused again.
+    expect(main).toContain('...(hostCwd === null || hostCwd === "" ? {} : { cwd: hostCwd })');
+    const host = read("host/host.js");
+    expect(host).toContain('let cwd = "";');
+    expect(host).not.toContain("let cwd = process.cwd();");
+  });
+
+  it("没工作区时不去列安装目录，也不把它写进 header", () => {
+    const host = read("host/host.js");
+    const tree = bodyOf(host, "  async getTree(payload = {}) {");
+    // Falling back to `process.cwd()` here meant "no workspace" listed the
+    // install directory — the phantom folder one layer down.
+    expect(tree).toContain('if (cwd === "")');
+    expect(tree).not.toContain('path.resolve(cwd === "" ? process.cwd() : cwd, raw)');
+    const runner = bodyOf(host, "function createRunner()");
+    expect(runner).toContain('...(cwd === "" ? {} : { cwd })');
+    // And the host process itself must not start in the install directory:
+    // `runSession` falls back to `process.cwd()` for a new session's workdir.
+    const main = read("main.js");
+    expect(main).toContain("const spawnCwd = homedir();");
+    expect(main).toContain("      cwd: spawnCwd,");
+  });
+});
+
+describe("没有工作区时说「暂无」，不硬塞也不冒充", () => {
+  it("顶栏显示「暂无」，不拿产品名占那个位置", () => {
+    const app = read("renderer/app.js");
+    const body = bodyOf(app, "function renderTopbarLocation() {");
+    expect(body).toContain("t.workspaceNone");
+    // The product name in a folder slot reads as "this conversation lives in
+    // the app's own folder" — the exact idea the phantom workspace created.
+    expect(body).not.toContain("name || t.appName");
+  });
+
+  it("侧栏区分「没有工作区」与「没有会话」与「搜不到」", () => {
+    const app = read("renderer/app.js");
+    const body = bodyOf(app, "function renderSessions(sessions) {");
+    expect(body).toContain("t.workspaceNoneHint");
+    expect(body).toContain("t.noSessions");
+    expect(body).toContain("t.noSessionMatches");
+    // Three facts, three sentences — the workspace one must come first.
+    expect(body.indexOf("t.workspaceNoneHint")).toBeLessThan(body.indexOf("t.noSessions"));
+  });
+
+  it("两种语言都有这两句，且与「没有会话」不是同一句", () => {
+    for (const locale of ["en", "zh"]) {
+      for (const key of ["workspaceNone", "workspaceNoneHint"]) {
+        const text = dictionaries[locale][key];
+        expect(typeof text, `${locale}.${key}`).toBe("string");
+        expect(text.trim()).not.toBe("");
+      }
+      expect(dictionaries[locale].workspaceNoneHint).not.toBe(dictionaries[locale].noSessions);
+    }
+    expect(dictionaries.zh.workspaceNone).toBe("暂无");
   });
 });
 

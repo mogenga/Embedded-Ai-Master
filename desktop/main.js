@@ -22,6 +22,7 @@ import {
 } from "electron";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -50,20 +51,40 @@ const RENDERER = join(here, "renderer", "index.html");
 const pkg = JSON.parse(readFileSync(join(here, "package.json"), "utf8"));
 
 /**
- * Workspace the host is started in; the renderer can narrow it, not widen it.
+ * The workspace the host is told to use, or `null` for "the operator has not
+ * picked one yet".
  *
- * **装好的应用不能用 `process.cwd()`。** 安装形态下进程的工作目录是**安装
- * 目录**（`%LOCALAPPDATA%\Programs\embedded-ai-master-desktop`），于是宿主把
- * 它当成一个"项目"，侧栏里真的出现一行叫 `embedded-ai-master-desktop` 的
- * 工作区——那不是用户的项目，是程序自己躺的地方（2026-11-09 用户报的）。
- * 更糟的是它只在启动那一刻存在：切到别的会话后 `adoptSessionWorkdir` 改了 cwd，
- * 这一行就消失，看起来像"文件夹掉了"。
+ * Three attempts, three failures, and the third one is the rule:
  *
- * 开发形态保留 `process.cwd()`：从仓库根跑 `npm run desktop` 时，那正是操作者
- * 想要的默认工作区。装好的应用则从「文档」开始 —— 它是一个可由用户自己换掉的
- * 普通目录（顶栏点一下就能改），而不是只有装了才能写的一个内部路径。
+ *   1. `process.cwd()` —在安装形态下那是**安装目录**
+ *      （`%LOCALAPPDATA%\Programs\embedded-ai-master-desktop`），于是侧栏里真
+ *      出现一行叫 `embedded-ai-master-desktop` 的"工作区"。那不是用户的项目。
+ *   2. `app.getPath("documents")` — 换成「文档」只是把**另一个**用户没选过的
+ *      目录塞给他。用户 2026-11-09 的原话：「没有文件夹工作区的时候就显示暂无，
+ *      不要硬塞」。
+ *   3. **不猜。** 打包形态下一开始**没有**工作区：顶部显示「选择本地文件夹」，
+ *      侧栏显示「暂无」，全部由操作者点一下决定。开发形态保留 `process.cwd()`
+ *      ——从仓库根跑 `npm run desktop` 时，那正是开发者在用的项目。
+ *
+ * 注意它与 `spawnCwd` 是两件事：进程总得有个启动目录（`spawn` 的 `cwd` 不能是
+ * 空串），但「进程在哪启动」不该被当成「用户的工作区」。
  */
-const startCwd = app.isPackaged ? app.getPath("documents") : process.cwd();
+const startCwd = app.isPackaged ? null : process.cwd();
+
+/**
+ * Where the host **process** starts. Not the workspace — but not nothing either.
+ *
+ * `spawn` needs a real directory, and a packaged app's own directory is the
+ * install folder. That matters beyond tidiness: when no workspace is open the
+ * kernel's `runSession` falls back to `process.cwd()` for a new session's
+ * workdir, so an install-directory spawn would record the install folder in
+ * `header.json` — the phantom workspace again, this time persisted.
+ *
+ * `homedir()` exists on every machine and is never an install location. In
+ * development it is also harmless: the workspace comes from `startCwd`
+ * (`process.cwd()`, the repo root), not from here.
+ */
+const spawnCwd = homedir();
 
 /**
  * Update state goes to every open window over the same `host-event` channel
@@ -451,6 +472,7 @@ function startWindow(options = {}) {
   win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
 
   let host = null;
+  // May be `null`: "no workspace chosen yet" is a real state, not a fallback.
   let hostCwd = options.cwd ?? startCwd;
   let sessionToLoad = options.loadSession ?? null;
 
@@ -465,7 +487,7 @@ function startWindow(options = {}) {
    * window or losing the workspace.
    */
   function startHost(cwd) {
-    hostCwd = cwd || hostCwd;
+    if (cwd !== undefined && cwd !== null && cwd !== "") hostCwd = cwd;
     if (!existsSync(HOST)) {
       sendToRenderer({
         type: "fatal",
@@ -474,7 +496,7 @@ function startWindow(options = {}) {
       return;
     }
     host = spawn(process.execPath, [HOST], {
-      cwd: hostCwd,
+      cwd: spawnCwd,
       // Node, not a second Electron app: the host imports the compiled kernel
       // and has no Electron API in scope.
       //
@@ -516,7 +538,14 @@ function startWindow(options = {}) {
       host = null;
       sendToRenderer({ type: "host_exit", code });
     });
-    sendToHost({ cmd: "init", cwd: hostCwd, mode: process.env.HARNESS_PERMISSION_MODE });
+    // `cwd: null` says the operator has not picked a workspace. The host
+    // treats an absent `cwd` as exactly that (no workdir recorded, no tree
+    // root registered) instead of this layer picking one for them.
+    sendToHost({
+      cmd: "init",
+      ...(hostCwd === null || hostCwd === "" ? {} : { cwd: hostCwd }),
+      mode: process.env.HARNESS_PERMISSION_MODE,
+    });
   }
 
   /**
@@ -632,21 +661,6 @@ function startWindow(options = {}) {
       sendToRenderer({ type: "notice", level: "warn", text: blockedExternalText(url, reason) });
       return { ok: false, reason };
     }
-  });
-
-  // Reveal a produced artifact rather than opening it: an artifact can be a
-  // binary capture, and handing it to its default application would launch a
-  // program the operator did not ask for. The path still has to be a path —
-  // `showItemInFolder` on a relative path is a silent no-op, and on a URL
-  // string it reveals something nobody asked for.
-  ipcMain.handle("reveal-artifact", (_event, target) => {
-    const decision = checkRevealTarget(target);
-    if (decision.ok === false) {
-      sendToRenderer({ type: "notice", level: "warn", text: blockedRevealText(target, decision.reason) });
-      return { ok: false, reason: decision.reason };
-    }
-    shell.showItemInFolder(decision.path);
-    return { ok: true, path: decision.path };
   });
   ipcMain.handle("notify", (_event, payload) => {
     if (Notification.isSupported()) {
