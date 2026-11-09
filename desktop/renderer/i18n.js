@@ -59,6 +59,10 @@ export const dictionaries = {
     effortTierMedium: "Medium",
     effortTierHigh: "High",
     effortTierExtra: "Extra",
+    /* What the selected tier actually puts on the wire, when it differs from
+       the tier name. Three tiers map to one value by default, and a slider
+       that showed only names would claim three strengths where there is one. */
+    effortSends: (value) => `sends ${value}`,
     effortTierMax: "Max",
     effortTierGalaxy: "Galaxy",
     plusMenuTitle: "Add to this message",
@@ -553,6 +557,9 @@ export const dictionaries = {
     effortTierMedium: "中",
     effortTierHigh: "高",
     effortTierExtra: "加强",
+    /* 选中的档位实际会发出的协议值。三档默认落到同一个 high；只显示档位名
+       会让人以为那是三种不同的强度。 */
+    effortSends: (value) => `发出 ${value}`,
     effortTierMax: "极强",
     effortTierGalaxy: "星系",
     plusMenuTitle: "添加到这条消息",

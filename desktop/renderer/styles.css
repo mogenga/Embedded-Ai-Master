@@ -5131,13 +5131,17 @@ mark.find-hit.current {
   opacity: 1;
 }
 
+/* A 2px dot is already a dot; the chromatic halo it used to carry added
+   nothing but the "AI-generated UI" glow the design rules warn about. The
+   top tier's identity comes from the pulsing `.effort-glow` underneath and
+   the dot density, both of which the user asked for by naming the reference
+   component. */
 .effort-particles i {
   position: absolute;
   width: 2px;
   height: 2px;
   border-radius: 50%;
   background: var(--accent-text);
-  box-shadow: 0 0 6px var(--accent);
   opacity: 0;
   animation: effort-drift 5s linear infinite;
 }

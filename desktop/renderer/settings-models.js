@@ -97,6 +97,14 @@ export function carriedFromModel(model) {
     // level the composer was offering a moment earlier.
     ...(model?.supportsReasoning !== undefined ? { supportsReasoning: model.supportsReasoning } : {}),
     ...(model?.reasoningEffort !== undefined ? { reasoningEffort: model.reasoningEffort } : {}),
+    // `effortMap` is hand-written (`providers.json` only — no control here),
+    // and the whole model object is rebuilt from this function on save. Omit
+    // it and one click on 保存 drops the operator's tier mapping, silently
+    // re-pointing every tier at `DEFAULT_EFFORT_MAP`. A spread of the model
+    // would carry it, but it would also carry keys this form has no business
+    // round-tripping (and keys the kernel's schema would then receive); the
+    // whitelist is the contract, so a new field is added here on purpose.
+    ...(model?.effortMap !== undefined ? { effortMap: model.effortMap } : {}),
   };
 }
 

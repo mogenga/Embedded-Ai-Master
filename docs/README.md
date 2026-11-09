@@ -36,6 +36,7 @@ docs/
 | [`framework-architecture-inventory.md`](specs/framework-architecture-inventory.md) | 框架能力清单 24 项 + 10 个决策点 |
 | [`harness-comparison.md`](specs/harness-comparison.md) | 七工具横向调研 |
 | [`ontology-scope-note.md`](specs/ontology-scope-note.md) | Ontology 暂缓纳入检索比对的**范围决策** |
+| [`effort-tiers.md`](specs/effort-tiers.md) | 思考强度六档界面语言与逐模型映射（唯一契约源） |
 
 ### `operations/` — 操作手册与契约
 

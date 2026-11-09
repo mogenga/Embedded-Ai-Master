@@ -250,3 +250,60 @@ describe("上下文窗口往返", () => {
     expect(carriedFromModel(undefined)).toEqual({});
   });
 });
+
+describe("effortMap 在设置页保存后仍在（Task 1 新增字段带来的缺口）", () => {
+  // `carriedFromModel` is an explicit whitelist and the page rebuilds each
+  // model from it on save. A field missing from the list is not "left alone" —
+  // it is erased the first time the operator presses 保存, and the composer
+  // then silently maps every tier through `DEFAULT_EFFORT_MAP`.
+  const withMap = {
+    contextWindow: 200000,
+    maxOutput: 8192,
+    supportsReasoning: true,
+    effortMap: { extra: "medium", max: "high", galaxy: "high" },
+  };
+
+  it("carriedFromModel 原样带出手写映射表", () => {
+    expect(carriedFromModel(withMap)).toEqual(withMap);
+    // Same reference semantics are not required, but the value must be
+    // identical to what the file holds — a partial map must not be filled in.
+    expect(carriedFromModel(withMap).effortMap).toStrictEqual({
+      extra: "medium",
+      max: "high",
+      galaxy: "high",
+    });
+  });
+
+  it("经过建行与保存的整条往返，映射表仍逐键相同", () => {
+    const row = modelRowState(withMap, labels);
+    // The select owns `contextWindow`; `effortMap` is not a control here, so it
+    // stays in `carried` and `modelEntryForSave` writes it back untouched.
+    expect(row.carried.effortMap).toStrictEqual(withMap.effortMap);
+    const written = modelEntryForSave(row.carried, row.select.selected);
+    expect(written).toEqual(withMap);
+    expect(written.effortMap).toStrictEqual(withMap.effortMap);
+  });
+
+  it("切换上下文窗口档位不会弄丢映射表", () => {
+    const row = modelRowState(withMap, labels);
+    const written = modelEntryForSave(row.carried, "65536");
+    expect(written.contextWindow).toBe(65536);
+    expect(written.effortMap).toStrictEqual(withMap.effortMap);
+  });
+
+  it("没有 effortMap 的模型，保存后也不凭空多出这个键", () => {
+    // Same rule as `contextWindow`: an absent key stays absent rather than
+    // becoming `{}`, which the kernel would read as "mapped to nothing".
+    const written = modelEntryForSave(modelRowState({ supportsReasoning: true }, labels).carried, "");
+    expect(Object.hasOwn(written, "effortMap")).toBe(false);
+    expect(written).toEqual({ supportsReasoning: true });
+  });
+
+  it("白名单没有被整对象展开替换（否则 schema 拒绝的键也会被写回去）", async () => {
+    // The brief forbids swapping the whitelist for `{...model}`: unknown keys
+    // must not ride through. Pinned on behaviour, not on source text.
+    const carried = carriedFromModel({ supportsReasoning: true, unknownKey: "x" });
+    expect(Object.hasOwn(carried, "unknownKey")).toBe(false);
+    expect(carried).toEqual({ supportsReasoning: true });
+  });
+});

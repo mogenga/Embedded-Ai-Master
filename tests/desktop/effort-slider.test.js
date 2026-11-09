@@ -370,3 +370,33 @@ describe("中英文两种语言都有六个档位名", () => {
     expect(applyLocale).toContain("setEffort(state.effort)");
   });
 });
+
+describe("映射结果显示：三档默认落同一值时必须说出来", () => {
+  it("宿主算的 resolved 被渲染层读了，而不是自己再算一遍", () => {
+    const app = read("app.js");
+    const body = bodyOf(app, "function renderEffortPanel() {");
+    // The host folds a tier through the model's `effortMap`; deriving the same
+    // answer here would be a second source of truth for one question.
+    expect(body).toContain("choices.resolved?.");
+    expect(body).toContain("t.effortSends");
+  });
+
+  it("只在映射值与档位名不同时才显示（同名时不重复说一遍）", () => {
+    const app = read("app.js");
+    const body = bodyOf(app, "function renderEffortPanel() {");
+    // `low` sends `low`; printing "Low · sends low" would be noise.
+    expect(body).toContain("resolved !== state.effort");
+  });
+
+  it("两种语言都有那句话，且带上真正要发的值", () => {
+    for (const locale of ["en", "zh"]) {
+      const text = dictionaries[locale].effortSends("high");
+      expect(typeof text, locale).toBe("string");
+      expect(text).toContain("high");
+      expect(text.trim()).not.toBe("high");
+    }
+    // The three top tiers collapse onto one value by default; this sentence is
+    // what keeps the slider from implying three different strengths.
+    expect(dictionaries.zh.effortSends).not.toBe(dictionaries.en.effortSends);
+  });
+});

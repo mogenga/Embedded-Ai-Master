@@ -180,7 +180,7 @@ describe("desktop host 的推理强度", () => {
     expect(state.models[0].supportsReasoning).toBe(false);
   }, HOST_TIMEOUT_MS);
 
-  it("模型声明支持时提供四个等级，并如实报告能力", async () => {
+  it("模型声明支持时提供六档，并如实报告能力", async () => {
     const gateway = await completionGateway();
     const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
 
@@ -189,7 +189,10 @@ describe("desktop host 的推理强度", () => {
     });
     const state = states(events)[0];
 
-    expect(state.effortChoices.levels).toStrictEqual(["minimal", "low", "medium", "high"]);
+    // Six tiers since 2026-11-09, not the four protocol levels: the slider's
+    // stops are tiers, and a protocol value in this list would be a stop the
+    // control cannot reach.
+    expect(state.effortChoices.levels).toStrictEqual(["low", "medium", "high", "extra", "max", "galaxy"]);
     expect(state.effort).toBe("auto");
     expect(state.models[0].supportsReasoning).toBe(true);
   }, HOST_TIMEOUT_MS);
@@ -281,7 +284,7 @@ describe("desktop host 的推理强度", () => {
     expect(run.reasoningEffortByModel ?? {}).toStrictEqual({});
   }, HOST_TIMEOUT_MS);
 
-  it("非法等级回 warn 并列出合法值", async () => {
+  it("非法值回 warn 并列出合法值（两套词汇都列出）", async () => {
     const gateway = await completionGateway();
     const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
 
@@ -289,7 +292,9 @@ describe("desktop host 的推理强度", () => {
       home,
       [
         { cmd: "init", cwd: home },
-        { cmd: "setEffort", effort: "max" },
+        // `max` was the example here before the six tiers landed; it is a real
+        // tier now, so the case needs a value that is in neither vocabulary.
+        { cmd: "setEffort", effort: "turbo" },
         { cmd: "listSessions" },
       ],
       { until: (all) => all.some((event) => event.type === "sessions") },
@@ -297,8 +302,11 @@ describe("desktop host 的推理强度", () => {
 
     const warn = notices(events).at(-1);
     expect(warn.level).toBe("warn");
-    expect(warn.text).toContain("max");
+    expect(warn.text).toContain("turbo");
+    // Both halves of the accepted set are named, or an operator holding an old
+    // run.json value would read the message as "your saved choice is invalid".
     expect(warn.text).toContain("minimal");
+    expect(warn.text).toContain("galaxy");
     expect(states(events)).toHaveLength(1);
   }, HOST_TIMEOUT_MS);
 
@@ -361,7 +369,164 @@ describe("desktop host 的推理强度", () => {
     // menu says which level auto will send.
     expect(state.effort).toBe("auto");
     expect(state.effortChoices.default).toBe("low");
-    expect(state.effortChoices.levels).toStrictEqual(["minimal", "low", "medium", "high"]);
+    expect(state.effortChoices.levels).toStrictEqual(["low", "medium", "high", "extra", "max", "galaxy"]);
     expect(state.models[0].supportsReasoning).toBe(true);
+  }, HOST_TIMEOUT_MS);
+});
+
+/**
+ * What each tier will actually put on the wire, per model.
+ *
+ * This is the half of the feature the six tiers cannot carry on their own: the
+ * stops are UI language, and for a model with no `effortMap` the top three all
+ * send `high`. Without `resolved` the panel can only say "Galaxy", and the
+ * operator has to guess whether the top of the track does anything at all.
+ */
+describe("宿主报告每一档实际会发的协议值", () => {
+  it("没有 effortMap 的模型：六档各自折算，后三档都是 high", async () => {
+    const gateway = await completionGateway();
+    const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
+
+    const events = await runHost(home, [{ cmd: "init", cwd: home }], {
+      until: (all) => all.some((event) => event.type === "ready"),
+    });
+    const state = states(events)[0];
+
+    expect(state.effortChoices.resolved).toStrictEqual({
+      low: "low",
+      medium: "medium",
+      high: "high",
+      extra: "high",
+      max: "high",
+      galaxy: "high",
+    });
+    // One key per offered tier and no others: a resolved entry for a tier the
+    // menu does not offer would be a value nothing can select.
+    expect(Object.keys(state.effortChoices.resolved).sort())
+      .toStrictEqual([...state.effortChoices.levels].sort());
+  }, HOST_TIMEOUT_MS);
+
+  it("手写 effortMap 覆盖后，报告的折算结果跟着改", async () => {
+    const gateway = await completionGateway();
+    const home = await tempHome(
+      {
+        flash: {
+          contextWindow: 8192,
+          maxOutput: 512,
+          supportsReasoning: true,
+          // Only one tier overridden: the rest must fall back to the default
+          // map, not to `undefined` and not to the override.
+          effortMap: { extra: "medium" },
+        },
+      },
+      gateway.baseUrl,
+    );
+
+    const events = await runHost(home, [{ cmd: "init", cwd: home }], {
+      until: (all) => all.some((event) => event.type === "ready"),
+    });
+    const resolved = states(events)[0].effortChoices.resolved;
+
+    expect(resolved.extra).toBe("medium");
+    expect(resolved.high).toBe("high");
+    expect(resolved.max).toBe("high");
+    expect(resolved.galaxy).toBe("high");
+  }, HOST_TIMEOUT_MS);
+
+  it("不支持推理的模型没有档位，也没有折算表", async () => {
+    const gateway = await completionGateway();
+    const home = await tempHome(PLAIN_MODELS, gateway.baseUrl);
+
+    const events = await runHost(home, [{ cmd: "init", cwd: home }], {
+      until: (all) => all.some((event) => event.type === "ready"),
+    });
+    const state = states(events)[0];
+
+    // Reporting a mapping here would claim the model sends these values; its
+    // requests carry no `reasoning_effort` at all.
+    expect(state.effortChoices.levels).toStrictEqual([]);
+    expect(state.effortChoices.resolved).toStrictEqual({});
+  }, HOST_TIMEOUT_MS);
+});
+
+describe("setEffort 接受档位，档位原样落盘、按映射上线", () => {
+  it("选 Galaxy：state 回报 galaxy，run.json 存档位名而不是折算后的 high", async () => {
+    const gateway = await completionGateway();
+    const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
+
+    const events = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "setEffort", effort: "galaxy" }],
+      { until: (all) => states(all).some((event) => event.effort === "galaxy") },
+    );
+
+    expect(notices(events).some((notice) => notice.level === "warn")).toBe(false);
+    expect(states(events).at(-1).effort).toBe("galaxy");
+    // Stored as the tier, not folded: the folding needs the model's map *at
+    // run time*, and a stored `high` could never follow a later map edit.
+    const run = JSON.parse(await readFile(path.join(home, "run.json"), "utf8"));
+    expect(run.reasoningEffortByModel).toStrictEqual({ "gw/flash": "galaxy" });
+  }, HOST_TIMEOUT_MS);
+
+  it("档位真的上线：默认映射下 Galaxy 发的是 high", async () => {
+    const gateway = await completionGateway();
+    const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
+
+    await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "setEffort", effort: "galaxy" },
+        { cmd: "prompt", text: "hi" },
+      ],
+      { until: (all) => all.some((event) => event.type === "run_end") },
+    );
+
+    expect(gateway.bodies).toHaveLength(1);
+    // The tier never reaches the wire — the kernel's whitelist is unchanged.
+    expect(gateway.bodies[0].reasoning_effort).toBe("high");
+  }, HOST_TIMEOUT_MS);
+
+  it("模型的 effortMap 决定上线值：Galaxy 映射到 medium 就发 medium", async () => {
+    const gateway = await completionGateway();
+    const home = await tempHome(
+      {
+        flash: {
+          contextWindow: 8192,
+          maxOutput: 512,
+          supportsReasoning: true,
+          effortMap: { galaxy: "medium" },
+        },
+      },
+      gateway.baseUrl,
+    );
+
+    await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "setEffort", effort: "galaxy" },
+        { cmd: "prompt", text: "hi" },
+      ],
+      { until: (all) => all.some((event) => event.type === "run_end") },
+    );
+
+    expect(gateway.bodies[0].reasoning_effort).toBe("medium");
+  }, HOST_TIMEOUT_MS);
+
+  it("协议值仍然接受（旧 run.json 的选择不会被判非法）", async () => {
+    const gateway = await completionGateway();
+    const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
+
+    const events = await runHost(
+      home,
+      [{ cmd: "init", cwd: home }, { cmd: "setEffort", effort: "minimal" }],
+      { until: (all) => states(all).some((event) => event.effort === "minimal") },
+    );
+
+    // `minimal` has no tier; refusing it would strand a choice a previous
+    // build wrote and the kernel can still send.
+    expect(notices(events).some((notice) => notice.level === "warn")).toBe(false);
+    expect(states(events).at(-1).effort).toBe("minimal");
   }, HOST_TIMEOUT_MS);
 });

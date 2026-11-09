@@ -125,12 +125,18 @@ try {
     { resolveHarnessHome },
     // `supportsReasoning` / `isReasoningEffort` are the kernel's own rules for
     // the reasoning parameter; the host reads them rather than keeping a second
-    // copy that could drift from what the request actually sends.
+    // copy that could drift from what the request actually sends. The four tier
+    // exports are the same rule one level up: the six UI tiers and the mapping
+    // that turns each of them into a value the request may carry.
     {
       isReasoningEffort,
       loadProviders,
       resolveModelRef,
       supportsReasoning,
+      EFFORT_TIERS,
+      isEffortTier,
+      DEFAULT_EFFORT_MAP,
+      resolveEffortTier,
     },
     { isValidSessionId },
     // `resumeSession` is here rather than in the `/compact` batch below because
@@ -217,6 +223,10 @@ try {
     readProviders,
     isReasoningEffort,
     supportsReasoning,
+    EFFORT_TIERS,
+    isEffortTier,
+    DEFAULT_EFFORT_MAP,
+    resolveEffortTier,
     writeMcpServers,
     writePermissionConfig,
     writeProviders,
@@ -606,6 +616,12 @@ function compactModules() {
       resolveModelRef: providersModule.resolveModelRef,
       resolveProviderApiKey: providersModule.resolveProviderApiKey,
       resolveContextWindow: providersModule.resolveContextWindow,
+      // The stored choice may be a tier (`galaxy`), and the adapter refuses
+      // anything outside the protocol vocabulary at construction time. The
+      // mapping belongs to the kernel (`resolveEffortTier` reads the model's
+      // `effortMap`); the host only asks it.
+      isEffortTier: providersModule.isEffortTier,
+      resolveEffortTier: providersModule.resolveEffortTier,
       createOpenAIProvider: openaiModule.createOpenAIProvider,
       resumeSession: sessionModule.resumeSession,
       compactSession: compactModule.compactSession,
@@ -838,6 +854,11 @@ const sessions = (() => {
  * for most models `minimal` is the practical floor), so the picker offers the
  * four levels a model is chosen between. `auto` is the renderer's own sentinel
  * and is not listed here.
+ *
+ * Since the six tiers landed this list is no longer offered as a menu — the
+ * slider sends tiers. It survives as the protocol half of `setEffort`'s accept
+ * list and of the refusal message, so a `run.json` written by an older build
+ * (or by hand) still applies instead of being rejected as unknown.
  */
 const EFFORT_LEVELS = ["minimal", "low", "medium", "high"];
 
@@ -935,6 +956,19 @@ function effortTable() {
 /**
  * What the effort popover may offer for the selected model.
  *
+ * `levels` is the **six tiers**, not protocol values: the slider's six stops
+ * are the tiers, and the tiers are the only thing `setEffort` is meant to
+ * receive from a click. The protocol values are still accepted (see
+ * `setEffort`) so a `run.json` written by an older build keeps working, but
+ * they are not what this menu is made of.
+ *
+ * `resolved` is the load-bearing half: for each tier, the `reasoning_effort`
+ * value this particular model would actually send. Without it the UI can only
+ * say "Galaxy", which for a model with no `effortMap` sends exactly what
+ * "High" sends — the operator is left guessing whether the top of the track
+ * does anything. `effortTier` in the kernel owns the mapping, including the
+ * per-model `effortMap` override; this function only reports its answers.
+ *
  * `levels: []` means "auto only" — the renderer prepends `auto` itself. A model
  * that does not declare reasoning support gets that, plus a note saying why:
  * the alternative is a menu of levels whose parameter the request would drop.
@@ -942,7 +976,7 @@ function effortTable() {
  * the model will do without the operator having to read providers.json.
  */
 function effortChoices() {
-  const choices = { levels: [], default: "", fixed: "", note: "" };
+  const choices = { levels: [], resolved: {}, default: "", fixed: "", note: "" };
   const cfg = currentModelCfg();
   if (cfg === undefined) {
     choices.note = "没有可用模型，无法调整推理强度";
@@ -953,7 +987,10 @@ function effortChoices() {
     choices.note = `${modelRef} 未声明支持推理强度（providers.json 里该模型的 supportsReasoning 不是 true），请求不会携带该参数`;
     return choices;
   }
-  choices.levels = [...EFFORT_LEVELS];
+  choices.levels = [...kernel.EFFORT_TIERS];
+  for (const tier of kernel.EFFORT_TIERS) {
+    choices.resolved[tier] = kernel.resolveEffortTier(cfg, tier);
+  }
   if (typeof cfg.reasoningEffort === "string") choices.default = cfg.reasoningEffort;
   return choices;
 }
@@ -2211,7 +2248,16 @@ async function handleCompact() {
     // different level than the conversation would be a second, invisible
     // setting. Keyed by the *session's* model (`model`), not `modelRef` —
     // `handleCompact` already resolves the header's model for the same reason.
-    const summaryEffort = runLimits.reasoningEffortByModel?.[model];
+    const storedEffort = runLimits.reasoningEffortByModel?.[model];
+    // Same rule as `runSession` (`src/index.ts`): a tier is folded through this
+    // model's `effortMap`, a protocol value goes as itself. Passing `galaxy`
+    // straight to the adapter would throw here, and `/compact` is not the place
+    // to discover that the composer's top tier is unrepresentable.
+    const summaryEffort = storedEffort === undefined
+      ? undefined
+      : modules.isEffortTier(storedEffort)
+        ? modules.resolveEffortTier(modelCfg, storedEffort)
+        : storedEffort;
     const modelProtocol = modules.createOpenAIProvider({
       baseUrl: provider.baseUrl,
       model: modelName,
@@ -4333,9 +4379,17 @@ const handlers = {
    *
    * Refusals are specific rather than generic. A model that never declared
    * `supportsReasoning` gets a warning naming the field to edit; an unknown
-   * level gets the accepted set. Either way nothing is written and no `state`
+   * value gets the accepted set. Either way nothing is written and no `state`
    * is sent — a `state` is the host's claim that the value now applies, and
    * that would be false.
+   *
+   * The accepted set is **tiers ∪ protocol values**. Tiers are what the slider
+   * sends; protocol values stay accepted because a `run.json` written before
+   * the tiers existed holds them, and a value the kernel can legitimately send
+   * being refused here would strand that choice with no way to keep it. Both
+   * vocabularies are stored verbatim (the kernel's `run.json` schema takes
+   * either) and resolved to a protocol value when the run starts: a tier is
+   * mapped through this model's `effortMap`, a protocol value goes as itself.
    */
   async setEffort(payload = {}) {
     const wanted = typeof payload.effort === "string" ? payload.effort : "";
@@ -4362,11 +4416,12 @@ const handlers = {
       });
       return;
     }
-    if (wanted !== "auto" && !kernel.isReasoningEffort(wanted)) {
+    if (wanted !== "auto" && !kernel.isEffortTier(wanted) && !kernel.isReasoningEffort(wanted)) {
       send({
         type: "notice",
         level: "warn",
-        text: `不支持的推理强度：${JSON.stringify(wanted)}；该模型支持 auto, ${EFFORT_LEVELS.join(", ")}`,
+        text: `不支持的推理强度：${JSON.stringify(wanted)}；该模型支持 auto, `
+          + `档位 ${[...kernel.EFFORT_TIERS].join(", ")}, 协议值 ${EFFORT_LEVELS.join(", ")}`,
       });
       return;
     }

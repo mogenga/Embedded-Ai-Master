@@ -2992,9 +2992,19 @@ function renderEffortPanel() {
   paintEffortTrack(index);
 
   $("effort-auto").setAttribute("aria-pressed", String(state.effort === "auto"));
-  // What `auto` will actually send, so the user does not have to open
-  // providers.json to find out.
-  $("effort-auto-hint").textContent = state.effort === "auto" ? choices.default ?? "" : "";
+  // The hint slot answers one question in both states: what will actually go on
+  // the wire. Under `auto` that is the model's default level; under a picked
+  // tier it is the mapped protocol value — shown only when it differs from the
+  // tier's own name. Three tiers collapse onto `high` by default, and a slider
+  // showing only names would claim three strengths where there is one request.
+  // `choices.resolved` is what the host computed with the model's `effortMap`;
+  // deriving it here would be a second answer to the same question.
+  const resolved = index >= 0 ? choices.resolved?.[state.effort] : undefined;
+  $("effort-auto-hint").textContent = state.effort === "auto"
+    ? choices.default ?? ""
+    : typeof resolved === "string" && resolved !== state.effort
+      ? t.effortSends(resolved)
+      : "";
 
   // Why there is nothing to choose, when the host gave a reason — dim, not a
   // warning: "this model takes no effort parameter" is a property of the
