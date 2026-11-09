@@ -41,6 +41,40 @@
   transform-origin: top left;
 }
 
+/* ---------- 免疫宿主图标语言的全局规则 ----------
+ *
+ * `styles.css` 有一条全局 `svg { width: 16px; height: 16px; fill: none;
+ * stroke: currentColor; stroke-width: 1.75; … }`——那是应用自己的 16px 图标
+ * 语言，对 sprite 里的字形是对的。但组件里的两个 SVG **不在那个图标集里**：
+ * 脑形是 48×48 的插画，问号是按 24px / 2px 描边规定的。
+ *
+ * CSS 声明胜过 SVG 的呈现属性，所以那条全局规则会把这两个都改成 16×16：
+ * 脑形缩成插画框左上角的一小坨（2026-11-09 用户截图报的「脑子大小、位置
+ * 不对」），问号在 70px 按钮的 24px 内边距里偏到左上角。两处都显式写回
+ * 规格值，别指望呈现属性自己顶住。
+ *
+ * 子路径的 `stroke` / `stroke-width` 不受影响：它们自己声明了（类规则或
+ * 呈现属性），继承来的值只在元素自己没有声明时才生效。
+ */
+.ge-brain svg {
+  width: 48px;
+  height: 48px;
+  fill: none;
+  flex: none;
+  stroke-width: 0;
+}
+
+.ge-help svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
+}
+
 /* 卡片。尺寸含边框（规格 §1「尺寸含边框」），所以 width/height 用
    border-box 的口径直接写成 440×258。 */
 .ge-card {

@@ -5054,10 +5054,34 @@ mark.find-hit.current {
   font-variant-numeric: tabular-nums;
 }
 
-/* The disclosure sentence ("this model takes no effort parameter"). Dim, not a
-   warning: it is a property of the model, not a fault the operator caused. */
-.effort-fixed {
+/* The disclosure sentence, drawn *inside* the card (2026-11-09, by request:
+   "声明融合进卡片"). It is a property of the model, the same kind of fact as
+   the tier name and the mapped value, so it belongs on the same surface.
+
+   The card's own 258px is the spec's checked size and the note is not part of
+   it, so the note sits **below** that box and the card grows by exactly the
+   note's measured height (`--ge-note-h`, written by `layoutEffortNote()` in
+   app.js). A fixed larger height would clip a three-line note on a narrow
+   window; measuring is the only version that cannot. */
+.effort-panel #effort-note {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  top: 258px;
+  padding: 6px 0 12px;
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #848484;
+}
+
+/* Before the component exists the note has no card to live in; it falls back
+   to the plain block so the sentence is never invisible. `layoutEffortNote()`
+   moves it into `.ge-card` on the first open. */
+.effort-panel > #effort-note {
+  position: static;
   padding: 6px 2px 0;
+  font-family: inherit;
   font-size: var(--text-xs);
   line-height: 1.5;
   color: var(--text-faint);

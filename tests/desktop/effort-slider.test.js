@@ -184,16 +184,25 @@ describe("面板换成脑形滑块之后，接线仍然完整", () => {
     expect(css).toContain("--ge-scale: 0.68");
     expect(css).toContain("#effort-galaxy-mount");
     // transform 不改变父级布局盒：不给占位尺寸的话，弹层会按 440×258 留白。
+    // 高度不写死 —— 声明句多长它就得长多高，由 `layoutEffortNote()` 量出来写。
     const mount = css.slice(css.indexOf("#effort-galaxy-mount {"), css.indexOf("}", css.indexOf("#effort-galaxy-mount {")));
     expect(mount).toContain("width: 300px");
-    expect(mount).toContain("height: 176px");
+    const layout = bodyOf(app, "function layoutEffortNote() {");
+    expect(layout).toContain("offsetHeight");
+    expect(layout).toContain("mount.style.height");
+    expect(layout).toContain("card.style.minHeight");
     // 组件那一侧只认变量、有自己的默认值，演示页因此仍是 1:1。
     const galaxy = read("galaxy-effort.css");
     expect(galaxy).toContain("scale(var(--ge-scale, 1))");
     expect(galaxy).toContain("width: 440px");
     expect(galaxy).toContain("height: 258px");
-    // app.js 不该有自己的缩放数学：缩放是样式的事。
-    expect(app).not.toContain("ge-scale");
+    // 缩放系数只能有一处定义。app.js 读数（占位高度要乘它），但那必须是
+    // 从样式里读，不能自己再写一个 0.68 —— 两份数字迟早会分家。
+    expect(app).toContain('getPropertyValue("--ge-scale")');
+    // Strip comments first: the code may *talk* about 0.68, but it must not
+    // compute with it. Searching the raw text would fail on the explanation.
+    const code = app.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(code.match(/0\.68/g) ?? []).toHaveLength(0);
   });
 
   it("样式表两处都 link 了（应用与演示页看的是同一张卡片）", () => {

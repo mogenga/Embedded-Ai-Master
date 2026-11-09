@@ -2988,6 +2988,39 @@ function renderEffortPanel() {
   const noteNode = $("effort-note");
   noteNode.textContent = note;
   noteNode.hidden = note === "";
+  layoutEffortNote();
+}
+
+/**
+ * Make the card as tall as the note needs.
+ *
+ * The card's 258px comes from the spec and is not ours to change; the note is
+ * *ours*, and its height depends on the text and the window width. So the
+ * card's `min-height` and the panel's height are set from the note's own
+ * measured height each time the text changes — a fixed extra height would clip
+ * a three-line note and leave a gap under a one-line one.
+ *
+ * `#effort-note` is absolutely positioned below the card's 258px box, so
+ * measuring it does not feed back into the card's height and oscillate.
+ */
+function layoutEffortNote() {
+  const note = $("effort-note");
+  const card = note.parentElement;
+  if (card === null || !card.classList.contains("ge-card")) return;
+  // 弹层关着的时候整棵子树是 `display: none`，`offsetHeight` 量出来是 0。
+  // `renderEffortPanel` 每个 `state` 事件都会跑（包括面板没打开的时候），
+  // 所以这里必须自己识别这个状态，否则会把卡片的 `min-height` 写回 258px ——
+  // 面板真打开时声明句就会压到 `Auto` 那一行上。打开时 `setEffortPanel`
+  // 会再调一次，那次量得到。
+  if ($("effort-panel").hidden) return;
+  const mount = $("effort-galaxy-mount");
+  const scale = Number.parseFloat(getComputedStyle(mount).getPropertyValue("--ge-scale")) || 1;
+  // `offsetHeight` 是**未缩放**坐标空间里的布局高度：声明句在缩放的那棵树里，
+  // 但它自己的 border-box 不受祖先 transform 影响。
+  const extra = note.hidden ? 0 : note.offsetHeight;
+  card.style.minHeight = `${258 + extra}px`;
+  // 占位盒要跟着长，否则 `Auto` 那一行会压在声明句上。乘同一个 `--ge-scale`。
+  mount.style.height = `${(258 + extra) * scale}px`;
 }
 
 function setEffort(effort) {
@@ -7528,6 +7561,12 @@ function ensureEffortSlider() {
     reducedMotion: document.documentElement.dataset.motion === "reduced",
     onChange: (detail) => commitEffort(detail.level.toLowerCase()),
   });
+  // 声明句画进卡片里（2026-11-09 用户要求）。它说的是这个模型的性质，与档位
+  // 名、映射结果是一类信息；留在卡片外面时读起来像一条与应用其余部分无关的
+  // 附着物。卡片是组件建的，所以只能在这里接管一个节点——`#effort-note` 在
+  // 标记里仍然写在 `#effort-panel` 内，作为「组件没建起来」时的位置。
+  const card = $("effort-galaxy-mount").querySelector(".ge-card");
+  if (card !== null) card.append($("effort-note"));
 }
 
 function setEffortPanel(open) {
@@ -7536,17 +7575,22 @@ function setEffortPanel(open) {
     // into the instance, and an instance built after that push would sit at
     // Low for one frame.
     ensureEffortSlider();
-    renderEffortPanel();
   }
+  // Unhide **before** painting: `layoutEffortNote` measures the note, and a
+  // subtree under `display: none` measures zero — it would write the card back
+  // to its bare 258px and let the note overlap the Auto row.
   effortPanel.hidden = !open;
   effortPicker.setAttribute("aria-expanded", String(open));
-  if (open && effortSlider !== null) {
-    // The panel was `hidden`, so the slider could not take focus when the
-    // chip was clicked. Handing focus over is what makes the arrow keys work
-    // immediately after opening, and it is what the closed-chip → open-panel
-    // gesture implies.
-    const focusTarget = effortPanel.querySelector('[role="slider"]');
-    if (focusTarget !== null) focusTarget.focus();
+  if (open) {
+    renderEffortPanel();
+    if (effortSlider !== null) {
+      // The panel was `hidden`, so the slider could not take focus when the
+      // chip was clicked. Handing focus over is what makes the arrow keys work
+      // immediately after opening, and it is what the closed-chip → open-panel
+      // gesture implies.
+      const focusTarget = effortPanel.querySelector('[role="slider"]');
+      if (focusTarget !== null) focusTarget.focus();
+    }
   }
 }
 
