@@ -254,11 +254,18 @@ describe("createSessionRunner", () => {
     expect(fake.calls[1]?.reasoningEffort).toBeUndefined();
     expect(Object.hasOwn(fake.calls[1] as object, "reasoningEffort")).toBe(false);
 
-    const error = await startError(runner, { text: "x", reasoningEffort: "max" as never });
+    // 界面档位与协议值都收；runner 不折算（它看不到模型配置），原样交给
+    // 内核——`runSession` 按该模型的 `effortMap` 折算成协议值再上线。
+    await runner.start({ text: "tier", reasoningEffort: "galaxy" });
+    expect(fake.calls[2]?.reasoningEffort).toBe("galaxy");
+
+    // 例子里原本是 `"max"`：Task 1 之后它是合法档位，不再是拒绝的样本。
+    // 断言本身没变——仍必须有一个非协议值、非档位的字符串在启动前被拒。
+    const error = await startError(runner, { text: "x", reasoningEffort: "xhigh" as never });
     expect(error.code).toBe("invalid_run_limits");
     expect(error.message).toContain("reasoningEffort");
     // 被拒绝的调用从未到达 runSession。
-    expect(fake.calls).toHaveLength(2);
+    expect(fake.calls).toHaveLength(3);
   });
 
   it("等待 onSession 后才 resolve", async () => {

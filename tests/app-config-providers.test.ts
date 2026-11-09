@@ -374,8 +374,10 @@ describe("run.json 的推理强度选择", () => {
     ).rejects.toMatchObject({ code: "invalid_config" });
   });
 
+  // `max` 原本是这里的「未知等级」样本。六档之后它是合法档位，所以样本换成
+  // 一个两套词汇里都没有的名字；断言的意思没变：未知值必须在落盘前被拒。
   it.each<[string, unknown]>([
-    ["未知等级", { "gw/flash": "max" }],
+    ["未知等级", { "gw/flash": "xhigh" }],
     ["非字符串值", { "gw/flash": 3 }],
     ["空模型引用", { "": "high" }],
     ["不是对象", ["high"]],
@@ -384,6 +386,17 @@ describe("run.json 的推理强度选择", () => {
 
     await expect(writeRunLimits(home, { reasoningEffortByModel })).rejects.toMatchObject({
       code: "invalid_config",
+    });
+  });
+
+  it("界面档位可以存，且原样读回（不提前折算成协议值）", async () => {
+    const home = makeHome();
+
+    await writeRunLimits(home, { reasoningEffortByModel: { "gw/flash": "galaxy" } });
+
+    // 存成折算后的 `high` 会让「选了 Galaxy」在改过 effortMap 之后回不到新映射。
+    expect(readAppConfig(home).run.reasoningEffortByModel).toStrictEqual({
+      "gw/flash": "galaxy",
     });
   });
 

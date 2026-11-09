@@ -4,8 +4,10 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { resolveHarnessHome } from "./config/harness-home.js";
 import {
+  isEffortTier,
   loadProviders,
   parseProviders,
+  resolveEffortTier,
   resolveModelRef,
   resolveProviderApiKey,
   resolveReasoningEffort,
@@ -36,7 +38,7 @@ import type { McpToolAdapterStatus } from "./mcp/tools.js";
 import { heuristicCountTokens } from "./model/count.js";
 import { createOpenAIProvider } from "./model/openai.js";
 import { loadPermissionConfig, parseInlinePermissionConfig } from "./permissions/config.js";
-import type { ReasoningEffort } from "./config/providers.js";
+import type { EffortTier, ReasoningEffort } from "./config/providers.js";
 import type { InlinePermissionConfig, LoadedPermissionConfig } from "./permissions/config.js";
 import { PermissionConfigError } from "./permissions/errors.js";
 import { createPermissionGate } from "./permissions/gate.js";
@@ -85,10 +87,14 @@ export interface RunOptions {
   /**
    * 本次运行的推理强度覆盖；缺省表示用 `providers.json` 里该模型的默认值。
    *
+   * 接受两种词汇：协议值（`none` / `minimal` / `low` / `medium` / `high`，
+   * 原样发上线）与界面档位（`extra` / `max` / `galaxy` 等，经该模型的
+   * `effortMap` 折算后再发）。`low` / `medium` / `high` 两边同值，不需要区分。
+   *
    * 显式写成 `undefined` 与不写同义。注意它**不能**表达「不发这个字段而忽略
    * 模型配置」——那是两回事，目前也没有调用方需要。
    */
-  reasoningEffort?: ReasoningEffort;
+  reasoningEffort?: ReasoningEffort | EffortTier;
   home?: string;
   onSession?: (session: SessionHandle) => void;
   compaction?: {
@@ -540,8 +546,20 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
   const apiKey = resolveProviderApiKey(provider);
   // 推理强度：单次覆盖优先，其次是模型配置。两边都没有时是 `undefined`，
   // 适配器就不发 `reasoning_effort`——不是「发默认值」，而是「不提要求」。
+  //
+  // 覆盖值可能是**界面档位**（`extra` / `max` / `galaxy`），也可能直接是协议值
+  // （`none` / `minimal`）。靠 `isEffortTier` 判别：档位先按该模型的 `effortMap`
+  // 折算成协议值；不是档位的值原样交给 `resolveReasoningEffort`，由适配器在
+  // 构造期拒绝非法值（既有行为不变）。`low` / `medium` / `high` 同属两边，
+  // 走哪条路结果都一样。
+  const effortOverride: ReasoningEffort | undefined =
+    opts.reasoningEffort === undefined
+      ? undefined
+      : isEffortTier(opts.reasoningEffort)
+        ? resolveEffortTier(model, opts.reasoningEffort)
+        : opts.reasoningEffort;
   // 校验覆盖值的合法性由调用方负责（runner 会在 start 前拒绝），这里只合并。
-  const reasoningEffort = resolveReasoningEffort(model, opts.reasoningEffort);
+  const reasoningEffort = resolveReasoningEffort(model, effortOverride);
   const modelProtocol = createOpenAIProvider({
     baseUrl: provider.baseUrl,
     model: modelName,

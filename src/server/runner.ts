@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import {
+  EFFORT_TIERS,
+  isEffortTier,
   isReasoningEffort,
   loadProviders,
   parseProviders,
@@ -9,7 +11,7 @@ import {
   REASONING_EFFORTS,
   supportsReasoning,
 } from "../config/providers.js";
-import type { ProvidersConfig, ReasoningEffort } from "../config/providers.js";
+import type { EffortTier, ProvidersConfig, ReasoningEffort } from "../config/providers.js";
 import type { PermissionPreset } from "../permissions/types.js";
 import { runSession } from "../index.js";
 import type { RunOptions, RunPermissionOptions } from "../index.js";
@@ -64,11 +66,14 @@ export interface ActionInput {
   /**
    * 本次运行的推理强度覆盖；`"auto"` 与缺省同义（用模型配置里的默认值）。
    *
-   * `auto` 是界面的哨兵值，不是协议取值：协议里只有
-   * `none|minimal|low|medium|high`。把它当字面量发上线会得到一个 400，所以
-   * 这一层就把它转成「没有覆盖」，而不是让它继续往下走。
+   * 接受协议值（`none|minimal|low|medium|high`）与界面档位（`extra` / `max` /
+   * `galaxy` 等六档）。两者都原样交给 `runSession`，由它按模型的 `effortMap`
+   * 把档位折算成协议值——这里不折算，因为这一层看不到模型配置。
+   *
+   * `auto` 是界面的哨兵值，不是协议取值，也不是档位。把它当字面量发上线会得到
+   * 一个 400，所以这一层就把它转成「没有覆盖」，而不是让它继续往下走。
    */
-  reasoningEffort?: ReasoningEffort | "auto";
+  reasoningEffort?: ReasoningEffort | EffortTier | "auto";
   /** 本次运行的工作目录（新会话写入 header.workdir；续聊时内核以 header 为准）。
    *  必须是已存在的绝对路径目录，否则 RunnerError("invalid_cwd")。 */
   cwd?: string;
@@ -88,7 +93,7 @@ interface RunLimits {
   timeoutMs?: number;
   deadlineMs?: number;
   systemPrompt?: string;
-  reasoningEffort?: ReasoningEffort;
+  reasoningEffort?: ReasoningEffort | EffortTier;
 }
 
 function readRunLimits(input: ActionInput): RunLimits {
@@ -132,10 +137,14 @@ function readRunLimits(input: ActionInput): RunLimits {
     // accepted here and then dropped, so the field really is absent downstream
     // — passing the literal through would send `reasoning_effort: "auto"`.
     if (input.reasoningEffort === "auto") return limits;
-    if (!isReasoningEffort(input.reasoningEffort)) {
+    // 两个词汇都收：协议值直接上线，界面档位由 `runSession` 按模型的
+    // `effortMap` 折算。这里看不到模型配置，所以不做折算——但也不能把
+    // `galaxy` 当成非法值拒绝，那会让界面上一档合法的选择变成报错。
+    if (!isReasoningEffort(input.reasoningEffort) && !isEffortTier(input.reasoningEffort)) {
       throw new RunnerError(
         "invalid_run_limits",
-        `reasoningEffort 非法: ${JSON.stringify(input.reasoningEffort)}；合法值: auto, ${REASONING_EFFORTS.join(", ")}`,
+        `reasoningEffort 非法: ${JSON.stringify(input.reasoningEffort)}；合法值: auto, `
+          + `${REASONING_EFFORTS.join(", ")}, 档位 ${EFFORT_TIERS.join(", ")}`,
       );
     }
     limits.reasoningEffort = input.reasoningEffort;
