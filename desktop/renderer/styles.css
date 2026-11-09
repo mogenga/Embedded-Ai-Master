@@ -4592,6 +4592,108 @@ mark.find-hit.current {
   color: var(--text-faint);
 }
 
+/* ---------- /hook report ----------
+   An answer to a question, drawn as a block rather than a notice: it is a
+   list, and the alignment between event / matcher / command / origin is what
+   makes "which file, which entry" readable. Same card tokens as
+   `.background-report`, with a mono column for the command because it is
+   something the reader copies into a file. */
+.hooks-report {
+  max-width: var(--column-width);
+  margin: 4px auto 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.hooks-title {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.hooks-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+/* The command column takes the free space and may be long; the other three
+   are labels and stay at their natural width. */
+.hooks-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.hooks-event {
+  flex: 0 0 auto;
+  color: var(--accent-text);
+}
+
+.hooks-matcher {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.hooks-command {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hooks-source {
+  flex: 0 0 auto;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+.hooks-empty,
+.hooks-error {
+  margin-bottom: 8px;
+}
+
+.hooks-error {
+  color: var(--danger);
+}
+
+.hooks-error-detail {
+  margin-bottom: 8px;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  word-break: break-word;
+}
+
+.hooks-path {
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  word-break: break-all;
+}
+
+.hooks-skipped {
+  margin-top: 4px;
+  font-size: var(--text-xs);
+  color: var(--warn);
+}
+
+.hooks-note {
+  margin-top: 8px;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
 /* ---------- tool density ---------- */
 
 :root[data-density="compact"] .tool-row {

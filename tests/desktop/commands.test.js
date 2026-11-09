@@ -10,12 +10,20 @@ import {
 import { SKILL_NAME_PATTERN } from "../../src/skills/store.js";
 
 describe("commands: catalogue", () => {
-  it("三个内置命令都没有参数", () => {
-    expect(COMMANDS.map((command) => command.name)).toStrictEqual(["clear", "context", "compact"]);
+  it("四个内置命令，只有 /hook 带参数", () => {
+    // `hook` joined the catalogue with `/hook`'s one argument (`reload`). The
+    // other three still take none, and the split is asserted rather than the
+    // whole list being loosened: "no argument syntax" is a promise about those
+    // three verbs (the kernel's compaction has no focus/keep option), and
+    // dropping the per-command check would stop enforcing it.
+    expect(COMMANDS.map((command) => command.name)).toStrictEqual([
+      "clear",
+      "context",
+      "compact",
+      "hook",
+    ]);
     for (const command of COMMANDS) {
-      // No argument syntax: the kernel's compaction has no focus/keep option,
-      // so advertising one would be a promise nothing honours.
-      expect(command.argumentHint).toBe("");
+      expect(command.argumentHint).toBe(command.name === "hook" ? "[reload]" : "");
       expect(command.description.zh).not.toBe("");
       expect(command.description.en).not.toBe("");
     }

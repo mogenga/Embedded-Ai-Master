@@ -366,11 +366,16 @@ describe("desktop host", () => {
     expect(sessions.sessions).toStrictEqual([]);
     expect(events.find((event) => event.type === "commands")).toStrictEqual({
       type: "commands",
-      commands: [{ name: "clear" }, { name: "context" }, { name: "compact" }],
+      commands: [
+        { name: "clear" },
+        { name: "context" },
+        { name: "compact" },
+        { name: "hook" },
+      ],
     });
   }, HOST_TIMEOUT_MS);
 
-  it("listCommands 报三个内置命令，boot 与应答同一份清单", async () => {
+  it("listCommands 报四个内置命令，boot 与应答同一份清单", async () => {
     const home = await tempHome();
     const events = await runHost(
       home,
@@ -383,7 +388,7 @@ describe("desktop host", () => {
     );
     const commands = events.filter((event) => event.type === "commands");
     expect(commands).toHaveLength(2);
-    const expected = [{ name: "clear" }, { name: "context" }, { name: "compact" }];
+    const expected = [{ name: "clear" }, { name: "context" }, { name: "compact" }, { name: "hook" }];
     expect(commands[0].commands).toStrictEqual(expected);
     expect(commands[1].commands).toStrictEqual(expected);
   }, HOST_TIMEOUT_MS);
@@ -2332,7 +2337,7 @@ describe.skipIf(!SKILLS_BUILT)("skills", () => {
     await writeFile(path.join(dir, `${name}.md`), `${front.join("\n")}\n`, "utf8");
   }
 
-  it("init 发空 skills 事件，commands 只有三个内置命令", async () => {
+  it("init 发空 skills 事件，commands 只有四个内置命令", async () => {
     const home = await tempHome();
     // No `skills/` directory at all: a library nobody created is empty, not an
     // error, and the page's empty state is what the operator sees first.
@@ -2346,6 +2351,7 @@ describe.skipIf(!SKILLS_BUILT)("skills", () => {
       { name: "clear" },
       { name: "context" },
       { name: "compact" },
+      { name: "hook" },
     ]);
     expect(events.some((event) => event.type === "fatal")).toBe(false);
   }, HOST_TIMEOUT_MS);

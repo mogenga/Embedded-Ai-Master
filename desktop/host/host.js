@@ -35,6 +35,7 @@ import {
 } from "./roots.js";
 import { SerialBridge, listSerialPorts } from "./serial-bridge.js";
 import { subagentSessionDir } from "./subagent-session.js";
+import { hooksDefaultPaths, hooksView } from "./hooks-view.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // `distParent` is the directory that holds `dist/` — the checkout root in
@@ -154,6 +155,7 @@ try {
     skillsModule,
     backgroundModule,
     subagentModule,
+    hooksModule,
     protocol,
   ] = await Promise.all([
     import(dist("server/runner.js")),
@@ -188,6 +190,12 @@ try {
     // subagent landed still boots; the pump then simply has no queue to drain
     // and says nothing, which is the truth — that kernel never started one.
     import(dist("subagent/runner.js")).catch(() => undefined),
+    // Same namespace rule, plus a `catch`: `dist/hooks/config.js` is newer than
+    // most `dist/` trees in the wild. The hooks feature itself belongs to the
+    // kernel (`runSession` reads the file on every run); this import exists only
+    // so `/hook` can show what that reader would see. An un-rebuilt kernel boots
+    // and answers "run npm run build" rather than losing the window.
+    import(dist("hooks/config.js")).catch(() => undefined),
     import("../renderer/protocol.js"),
   ]);
   kernel = {
@@ -218,6 +226,7 @@ try {
     skills: skillsModule,
     background: backgroundModule,
     subagent: subagentModule,
+    hooks: hooksModule,
     protocol,
   };
 } catch (error) {
@@ -1816,22 +1825,31 @@ function handleLiveEvent(session, event) {
 /**
  * The built-in slash commands this form can actually run.
  *
- * All three have a real handler here: `/clear` maps to `newSession`,
+ * All four have a real handler here: `/clear` maps to `newSession`,
  * `/context` is answered by the renderer from the kernel's own measurement,
- * and `/compact` runs the kernel's compaction. A verb with no route behind it
- * would be a menu row that fails on click (R3), so the list is short on
- * purpose.
+ * `/compact` runs the kernel's compaction, and `/hook` reads the same config
+ * the next run will load. A verb with no route behind it would be a menu row
+ * that fails on click (R3), so the list is short on purpose.
  *
  * One function, called by both `init` and `listCommands`: the boot push and
  * the answer to the renderer's own request have to be the same list, and two
  * literals for one catalogue is exactly how they drift apart.
  */
 function builtinCommands() {
-  return [{ name: "clear" }, { name: "context" }, { name: "compact" }];
+  return [{ name: "clear" }, { name: "context" }, { name: "compact" }, { name: "hook" }];
 }
 
 /** What the settings page and the transcript show when the store is absent. */
 const SKILLS_MISSING = "内核未导出技能存储，请重新执行 npm run build";
+
+/**
+ * What `/hook` says when this `dist/` has no hooks config reader.
+ *
+ * The kernel itself may well have the hooks feature and simply be compiled
+ * before the reader was split into its own module; either way the honest
+ * answer is "this build cannot show them", not an empty list (R3).
+ */
+const HOOKS_MISSING = "钩子配置读取不可用：内核未编译到这一版，请先 npm run build";
 
 /**
  * A settings-page refusal, tagged so the renderer can route it to that page.
@@ -4565,6 +4583,39 @@ const handlers = {
       return;
     }
     send({ type: "skills", ...snapshot });
+  },
+
+  /**
+   * What the hooks configuration says, for `/hook`.
+   *
+   * A read-only answer to a read-only question: it reports what the *next* run
+   * would load, and never changes what the current process does. The payload's
+   * `reload` only chooses the wording of the answer — whether the list was
+   * re-read is a fact the answer has to be able to state, and the renderer must
+   * not infer it. The read itself happens on every call either way: the file is
+   * hand-editable, so a remembered list describes a file nobody re-read.
+   *
+   * `hooksView` owns the two outcomes (configured vs unreadable) and the
+   * `includeProject: false` decision; this handler only chooses which event to
+   * send. A kernel with no reader is answered, not ignored: the warn names the
+   * fix and an `error`-shaped `hooks` event releases the renderer's pending
+   * request — an empty list would claim "nothing is configured" about a build
+   * that cannot look (R3).
+   */
+  getHooks(payload = {}) {
+    const reload = payload.reload === true;
+    const snapshot = hooksView({ module: kernel.hooks, home: harnessHome, workdir: cwd });
+    if (snapshot === undefined) {
+      send({ type: "notice", level: "warn", text: HOOKS_MISSING });
+      send({
+        type: "hooks",
+        reload,
+        error: { code: "module_missing", message: HOOKS_MISSING },
+        ...hooksDefaultPaths(harnessHome, cwd),
+      });
+      return;
+    }
+    send({ type: "hooks", reload, ...snapshot });
   },
 
   /**

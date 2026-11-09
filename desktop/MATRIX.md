@@ -41,10 +41,11 @@
 | `setCwd` | 仅在无会话时切换；内核把 workdir 固定在 header 里，不能中途改 |
 | `getUsage` | 汇总当前会话的 `usage` 事件 |
 | `getSetupChecklist` | 只报真实检查项（providers、模型引用） |
-| `listCommands` | 内核无斜杠命令，但前端内置三个：`clear` / `context` / `compact`，其后再跟每个技能一行（`source: "skill"`，带 `description` / `argumentHint`）。技能来源有四个根（见 `src/skills/store.ts` 头注释）：应用库 `$HARNESS_HOME/skills` 与 `<workdir>/.harness/skills`、skill CLI 库 `~/.agents/skills` 与 `<workdir>/.agents/skills`；项目级压用户级，同层里 CLI 压应用。CLI 的技能是**目录式**（`<name>/SKILL.md`），目录里其它文件不读。`/compact` **不接受参数**——内核 `compactSession` 没有 focus / keep 选项，`--keep N` 会是一个没人兑现的承诺。**命令真正执行时，敲进去的原文会作为一条普通用户消息留在转录里**（`/clear` 也一样，虽然它紧接着的 `session_loaded` 会清空转录）；未知命令与带参数被拒的命令**不 echo**，只出提示并把草稿留在输入框——先留消息再报错会让人以为它跑过。每次调用都重读磁盘，没有缓存：技能文件是可以手改的，缓存下来的清单描述的是一个没人重新列过的目录 |
+| `listCommands` | 内核无斜杠命令，但前端内置四个：`clear` / `context` / `compact` / `hook`（`hook` 自 2026-11-09 起，见下方 `getHooks`），其后再跟每个技能一行（`source: "skill"`，带 `description` / `argumentHint`）。技能来源有四个根（见 `src/skills/store.ts` 头注释）：应用库 `$HARNESS_HOME/skills` 与 `<workdir>/.harness/skills`、skill CLI 库 `~/.agents/skills` 与 `<workdir>/.agents/skills`；项目级压用户级，同层里 CLI 压应用。CLI 的技能是**目录式**（`<name>/SKILL.md`），目录里其它文件不读。`/compact` **不接受参数**——内核 `compactSession` 没有 focus / keep 选项，`--keep N` 会是一个没人兑现的承诺。**命令真正执行时，敲进去的原文会作为一条普通用户消息留在转录里**（`/clear` 也一样，虽然它紧接着的 `session_loaded` 会清空转录）；未知命令与带参数被拒的命令**不 echo**，只出提示并把草稿留在输入框——先留消息再报错会让人以为它跑过。每次调用都重读磁盘，没有缓存：技能文件是可以手改的，缓存下来的清单描述的是一个没人重新列过的目录 |
 | `getSkills` | 按需重读整份技能库，回 `skills` 事件：`skills[{name, description, argumentHint, scope, body}]` + `problems[{file, message}]`。**`problems` 与 `skills` 必须分开**——frontmatter 没闭合是可以修的文件，把它并进空列表会让技能库读成「什么都没有」（R3）。单文件读失败、名称非法、与内置命令同名都进 `problems` 并跳过该文件，其余技能照常可用；项目作用域同名覆盖用户作用域，`scope` 字段如实说是哪一份。内核没有技能存储（旧 `dist/`）时回 warn notice「请先 npm run build」**再发一条空 `skills`**——空事件是渲染器释放等待的信号，不能只报错不回答。渲染器在**每次打开「技能」页时**发这条命令：技能是手工可编辑的文件，开机时推的那一份是关于「一个没人重读过的目录」的断言，与知识库页打开即刷新是同一条理由 |
 | `saveSkill` | 写一个技能文件，`skill{name, description, argumentHint, scope, body}`，落盘位置由 `scope` 决定（`user` → `$HARNESS_HOME/skills/`，`project` → `<cwd>/.harness/skills/`）。名称是文件名，所以**名字不合法就是路径问题**。宿主**不做第二份校验**：`SKILL_NAME_PATTERN` 与内置命令表都归存储层，宿主把 `name` / `scope` 原样交下去，让拥有这条约束的组件给出措辞——两处各判一次，迟早会给出两个结论（尤其 `scope`：把 `"projct"` 兜底成 `"user"` 会把技能写进错误的库，还不告诉任何人）。成功后**从磁盘重读**再广播 `skills` + `commands`，不把入参回显——存储会规范化 frontmatter 与正文，页面要显示的是下次启动会看到的东西。**失败什么都不广播**，只发一条带 `domain: "skills"` 的 warn notice 说明原因：先刷页面再报错，界面会像是保存成功了，而下一次读盘又把改动悄悄撤掉。`domain` 是路由键——设置页是 `showModal()` 的对话框，压在转录上面，普通 `notice` 会被写进用户看不见的转录（R3）；带这个标记的提示由 `settings.js` 就地显示在技能页，并且**表单不再关闭**，草稿留在原处 |
 | `removeSkill` | 按 `{name, scope}` 删一个技能文件，两个字段都必填——同一个名字可能同时存在于两个作用域，只有被点的那一份该消失。存储回 `false`（文件已被手删）时**如实报「没有这个技能」**并把作用域写进提示，不静默重画：重画而没有提示，看起来就像删除成功了。成功同样重播 `skills` + `commands`。失败提示与 `saveSkill` 一样带 `domain: "skills"`，否则会落在被对话框遮住的转录里 |
+| `getHooks` | `/hook` 的读命令（2026-11-09）：回 `hooks` 事件 `{hooks:[{event, matcher?, command, args?, source, index, timeoutMs?}], userConfigPath, projectConfigPath, projectSkipped?, error?}`，另带 `reload` 回显（`/hook reload` 才为 true）。数据来自内核 `loadHookConfig`，**校验只有那一份**（`src/hooks/config.ts`）；宿主只是把结果摊成上面那几行（`desktop/host/hooks-view.js`），不解析、不判 schema。**`includeProject: false`**：桌面宿主从不把 `trustProjectConfig` 交给 runner，所以项目级文件本就不在「下一轮会用的配置」里；文件存在时照实回 `projectSkipped`（「有但没加载」≠「没有」）。**坏配置回 `error` 而不是 `hooks: []`**：空列表会主张「什么都没配」，与文件说的正好相反（R3）；`error.message` 原样转述内核那句（含文件名与 `hooks[N]`）。`reload` **只重读给界面看**，不改变正在跑的会话——钩子是 `runSession` 每次运行开始读的。没有任何写路径。旧 `dist/` 缺 `hooks/config.js` 时回 warn「请先 npm run build」**再回一条 `error` 形的 `hooks`**，不崩宿主也不留渲染器干等。渲染层把它画成转录里的一段（`renderHooksReport`），不是 notice |
 | `getFile` | 只读预览一个文本文件，256 KiB 上限；越界（工作目录与会话目录之外）、符号链接、目录一律拒绝并说明原因；含 NUL 字节按二进制处理且不给文本预览 |
 | `getArtifacts` | 列当前会话 `artifacts/` 下的普通文件（跳过目录与符号链接）；目录不存在或没有打开的会话 → 空列表。**入口**：⋯ 菜单「打开产物」/ 工具输出块「预览」/ Artifact 页签（点或方向键到达页签 = 回到列表） |
 | `getArtifact` | 读一个产物文件；只允许当前会话 artifacts 目录内的路径 |
@@ -75,6 +76,11 @@ git（`gitStatus`/`gitCommit`）、PR（`prStatus`/`createPr`/`prRerun`/`prFixCi
 > 都是既有通道：工具行在 `detail.hooks` 里有 `blocked` / `failure` 时多一行说明，两条 `status`
 > （`hooks_config_failed` / `hooks_project_config_skipped`）画成 warn notice。**不新增事件类型**：
 > 钩子结果已经在 `tool_result.detail.hooks` 里，另起一种是同一事实的第二份定义。
+>
+> **2026-11-09（同批）：新增了 `/hook`，只读。** 它不是页面，是一条斜杠命令：`/hook` 列出
+> 当前会生效的钩子，`/hook reload` 重读给界面看（不改正在跑的会话，生效仍在下一轮
+> `runSession`）。宿主侧是 `getHooks` 一条读命令（见上表）。**仍然没有写入口**：编辑钩子只有
+> 手改文件这一条路，一个能改配置的斜杠命令等于在权限层之外再开一个写入面。
 >
 > **宿主侧的接线只有一行**：`createRunner` 照常把 `harnessHome` 交给 runner，内核据此默认读
 > `$HARNESS_HOME/hooks.json`。宿主**不**传 `hooks` 选项、也**不**自己校验配置（`SessionRunnerOptions`

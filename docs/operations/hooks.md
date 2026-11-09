@@ -263,15 +263,58 @@ post 钩子的 stdout 被追加到正文末尾：
 
 ## 界面
 
-**没有钩子面板，也没有设置页。** 钩子结果通过两条既有通道到达界面：
+**没有钩子面板，也没有设置页。** 钩子相关的事实通过三条既有通道到达界面：
 
 | 通道 | 形态 |
 |---|---|
 | 工具行 | 有 `blocked` 或 `failure` 时，行下多一行说明（`被钩子拦截：<command>` / `钩子未跑成…`）。重开会话后仍在（回放读同一个 `detail`） |
 | 状态 notice | `hooks_config_failed` → warn，带内核给的文件名与 `hooks[N]`；`hooks_project_config_skipped` → warn，说明是「未信任」而不是「坏了」 |
+| `/hook` | 只读列出当前配置（见下一节）。它回答「配了什么」，不参与任何一次调用 |
 
-两条都**不新增事件类型**：钩子结果已经在 `tool_result.detail.hooks` 里，另起一种
-事件是同一事实的第二份定义。
+前两条都**不新增事件类型**：钩子结果已经在 `tool_result.detail.hooks` 里，另起一种
+事件是同一事实的第二份定义。`/hook` 也不新增内核事件——它是宿主的一条读命令
+（`getHooks`），数据来自 `loadHookConfig`，与运行期的事件流无关。
+
+## 用 `/hook` 查看
+
+`/hook` 把当前配置读给你看，`/hook reload` 重读一遍再画。两者都**只读**。
+
+**它显示什么**（一次一行，每条钩子一行）：
+
+```
+preToolUse   shell     node deny-rm.mjs    用户级 #0
+postToolUse  全部工具   log                用户级 #1
+用户级文件: C:/Users/you/.harness/hooks.json
+项目级文件: E:/work/.harness/hooks.json
+```
+
+- `event` / `matcher` / `command`（含 `args`）/ 来源与序号，全部来自
+  `loadHookConfig` 自己的输出——`source` 与 `index` 就是错误信息里用的那两个字段，
+  所以「哪份文件的第几条」在列表和报错里指的是同一件事。
+- 没写 `matcher` 的钩子显示「全部工具」：那不是缺省值，是内核实际的行为。
+- 两份文件路径始终列出。
+- 项目级文件那行之后**必有一句**二选一：文件在但没被加载（warn，带绝对路径），或者
+  这个工作区根本没有项目级文件。少这一句会让读者把「没有」误读成「有且已加载」，
+  而桌面形态从不加载它。见上文「项目级配置的信任规则」。
+
+**配置坏了，它回一条 error，不回空列表。** 「没有钩子」和「读不出来」是两件事，
+而一个空列表会安安静静地主张前者（R3）。错误信息就是 `HookConfigError` 自己的
+那句，带文件名与 `hooks[N]`——例如
+`钩子配置无效: C:/Users/you/.harness/hooks.json（hooks[0]: 未知字段 "macher"）`。
+下一轮仍会照常开跑，只是没有钩子（见「状态事件」）。
+
+**`reload` 只是重读给界面看。** 它不改变正在跑的会话——钩子是 `runSession` 在
+**每次**运行开始时读的（`src/index.ts`，在 `try` 里调 `loadHookConfig`），一次运行
+用的是它启动时读到的那份。所以：改完文件后 `/hook reload` 立刻显示新内容，但**正在
+跑的这一轮仍然用它手里那份**；要让新配置生效，开下一轮——同会话发下一条消息就是
+一次新的 `runSession`，它会在开始时重新读文件。
+
+**它不会替你改文件。** 编辑仍然是手改 `hooks.json`。一个能写配置的斜杠命令等于在
+权限层之外再开一个写入面，那是这个功能刻意不做的事。
+
+宿主侧的实现分两处：`desktop/host/host.js` 的 `getHooks` 只决定发哪条事件，
+`desktop/host/hooks-view.js` 负责把内核的读取结果摊成上面那几行。校验只有一处
+（`src/hooks/config.ts`），宿主不解析、不判 schema。
 
 ## 已知边界
 

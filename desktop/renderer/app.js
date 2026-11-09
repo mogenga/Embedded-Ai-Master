@@ -2256,7 +2256,7 @@ function reportUnknownCommand(name, available) {
  * a stale host catalogue, not a command, so it must not echo into the
  * transcript on its way to the "unknown" notice.
  */
-const RUNNABLE_COMMANDS = new Set(["clear", "context", "compact"]);
+const RUNNABLE_COMMANDS = new Set(["clear", "context", "compact", "hook"]);
 
 /**
  * Run one built-in command locally.
@@ -2331,9 +2331,20 @@ function runSlashCommand({ name, args }, rawText = `/${name}`) {
     reportUnknownCommand(name, available);
     return "kept";
   }
-  if (String(args ?? "").trim() !== "") {
-    // None of these verbs takes an argument, and the kernel's compaction has
-    // no focus/keep option. Silently dropping the text would be the same
+  const argsText = String(args ?? "").trim();
+  if (name === "hook") {
+    // `/hook` takes exactly one argument and it is `reload`. Anything else is
+    // refused by name rather than passed on: a host that silently ignored
+    // `foo` would answer with a list that looks like the answer to `/hook
+    // foo`, which is not a question this window can answer.
+    if (argsText !== "" && argsText !== "reload") {
+      addNotice("warn", t.commandHookUnknownArgument(argsText));
+      scrollToBottom();
+      return "kept";
+    }
+  } else if (argsText !== "") {
+    // None of the other verbs takes an argument, and the kernel's compaction
+    // has no focus/keep option. Silently dropping the text would be the same
     // broken promise `--keep N` made before it was removed.
     addNotice("warn", t.commandTakesNoArguments(name));
     scrollToBottom();
@@ -2356,6 +2367,13 @@ function runSlashCommand({ name, args }, rawText = `/${name}`) {
       // The host answers with the kernel's own result: a compaction marker, a
       // "nothing to compact" note, or a warning.
       api.send({ cmd: "compact" });
+      return "ran";
+    case "hook":
+      // The answer is drawn from the host's `hooks` event, not from here: the
+      // list is the kernel's reading of the file, and this window has never
+      // seen it. `reload` asks for the same read again — it changes what the
+      // next `/hook` shows, not what the running session does.
+      api.send(argsText === "reload" ? { cmd: "getHooks", reload: true } : { cmd: "getHooks" });
       return "ran";
     default:
       // Unreachable: `RUNNABLE_COMMANDS` is the same set these cases cover.
@@ -2470,6 +2488,91 @@ function reportContextLines() {
   if (report.headroom !== null && report.headroom > 0) {
     addNotice("dim", `· ${t.contextCompactionBuffer} ${formatTokens(report.headroom)}`);
   }
+}
+
+/**
+ * One `/hook` answer, drawn as a block in the transcript.
+ *
+ * A block rather than a notice because it is a list: one row per hook, plus
+ * the two file paths and the project-file disclosure. A line-per-notice version
+ * lost the alignment that makes "which file, which entry" readable, and a
+ * notice is the shell talking — this is an answer to a question the operator
+ * asked (the echoed `/hook` message sits directly above it).
+ *
+ * The host owns every fact here: the rows are `loadHookConfig`'s own output
+ * (`source` / `index` included), and the renderer only joins `command` and
+ * `args` for display. Nothing is inferred from a missing field — an absent
+ * `matcher` is drawn as "all tools" because that is what the kernel does with
+ * it, not because a default was filled in on the way here.
+ *
+ * `error` and `hooks` are mutually exclusive in practice (the host never sends
+ * both), and the error branch draws no rows at all: a broken file must never
+ * render as an empty list, which would say "nothing is configured" about a
+ * file that says the opposite (R3).
+ */
+function renderHooksReport(message) {
+  const rows = [];
+  const headingSuffix = message.reload === true ? ` (${t.hooksReRead})` : "";
+  rows.push(`<div class="hooks-title">${escapeHtml(t.hooksTitle + headingSuffix)}</div>`);
+  if (message.error !== undefined && message.error !== null) {
+    const code = typeof message.error.code === "string" ? message.error.code : "";
+    const text = typeof message.error.message === "string" ? message.error.message : "";
+    rows.push(
+      `<div class="hooks-error">${escapeHtml(t.hooksErrorTitle)}</div>` +
+        `<div class="hooks-error-detail">${escapeHtml(t.hooksErrorEntry(code, text))}</div>`,
+    );
+  } else {
+    const hooks = Array.isArray(message.hooks) ? message.hooks : [];
+    if (hooks.length === 0) {
+      rows.push(`<div class="hooks-empty">${escapeHtml(t.hooksEmpty)}</div>`);
+    } else {
+      const list = hooks.map((hook) => {
+        const command = [hook?.command ?? "", ...(Array.isArray(hook?.args) ? hook.args : [])]
+          .filter((part) => String(part) !== "")
+          .join(" ");
+        const source = hook?.source === "project" ? t.hooksSourceProject : t.hooksSourceUser;
+        const index = Number.isSafeInteger(hook?.index) ? hook.index : 0;
+        return (
+          `<div class="hooks-row">` +
+          `<span class="hooks-event">${escapeHtml(String(hook?.event ?? ""))}</span>` +
+          `<span class="hooks-matcher">${escapeHtml(
+            typeof hook?.matcher === "string" && hook.matcher !== "" ? hook.matcher : t.hooksAllTools,
+          )}</span>` +
+          `<span class="hooks-command">${escapeHtml(command)}</span>` +
+          `<span class="hooks-source">${escapeHtml(source(index))}</span>` +
+          `</div>`
+        );
+      });
+      rows.push(`<div class="hooks-rows">${list.join("")}</div>`);
+    }
+  }
+  if (typeof message.userConfigPath === "string" && message.userConfigPath !== "") {
+    rows.push(
+      `<div class="hooks-path">${escapeHtml(t.hooksUserFile)}: ${escapeHtml(message.userConfigPath)}</div>`,
+    );
+  }
+  if (typeof message.projectConfigPath === "string" && message.projectConfigPath !== "") {
+    const skipped =
+      typeof message.projectSkipped === "string" && message.projectSkipped !== ""
+        ? message.projectSkipped
+        : null;
+    rows.push(`<div class="hooks-path">${escapeHtml(`${t.hooksProjectFile}: ${message.projectConfigPath}`)}</div>`);
+    // Always one of the two sentences. The path alone leaves the reader unable
+    // to tell "there is no project file" from "there is one and it is loaded" —
+    // and in this window it is never loaded. A missing sentence would read as
+    // the second, which is the one thing that is not true.
+    rows.push(
+      skipped === null
+        ? `<div class="hooks-path">${escapeHtml(t.hooksProjectAbsent)}</div>`
+        : `<div class="hooks-skipped">${escapeHtml(t.hooksProjectSkipped(skipped))}</div>`,
+    );
+  }
+  // The two facts that keep this from reading like "something was applied":
+  // `reload` is a display refresh, and this command never writes.
+  rows.push(`<div class="hooks-note">${escapeHtml(t.hooksReloadNote)}</div>`);
+  rows.push(`<div class="hooks-note">${escapeHtml(t.hooksNoWriteNote)}</div>`);
+  addNode(`<div class="hooks-report">${rows.join("")}</div>`);
+  scrollToBottom();
 }
 
 function moveCommand(delta) {
@@ -4602,7 +4705,7 @@ function handleEvent(message) {
       // rows, and appending them onto the ones already drawn would show the
       // future the reader just scrubbed away from.
       target
-        .querySelectorAll(".turn, .tool-row, .tool-group, .tool-item, .tool-output, .notice, .plan, .thinking, .compact-marker")
+        .querySelectorAll(".turn, .tool-row, .tool-group, .tool-item, .tool-output, .notice, .plan, .thinking, .compact-marker, .hooks-report")
         .forEach((node) => node.remove());
       state.currentAssistant = null;
       state.currentThinking = null;
@@ -4758,6 +4861,10 @@ function handleEvent(message) {
       scrollToBottom();
       break;
     }
+
+    case "hooks":
+      renderHooksReport(message);
+      break;
 
     case "session_status":
       // The sidebar row for this conversation reflects what the task is doing.
