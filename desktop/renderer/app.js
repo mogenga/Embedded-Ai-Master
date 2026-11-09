@@ -11,6 +11,7 @@ import { providerMark } from "./provider-presets.js";
 import { providerRailRows, readProviderMeta } from "./provider-meta.js";
 import { VENDOR_MARKS } from "./vendor-marks.js";
 import { nextThinkingExpanded, normalizeTranscriptView, thinkingExpandedOnEnd } from "./thinking-view.js";
+import { EFFORT_TIER_LABELS, effortTierAt, effortTierIndex } from "./effort-tiers.js";
 
 /** Saved preferences are restored here; the host gets them on init. */
 const savedLocale = localStorage.getItem("prometheus.locale");
@@ -394,6 +395,10 @@ function applyLocale(locale, { announce = false } = {}) {
   // The sentence explaining a locked composer is derived text with no
   // `data-i18n` to sweep; repaint it from the state already held.
   renderComposerLock();
+  // The tier names are dictionary entries reached through a computed key
+  // (`effortTier${label}`), so the `[data-i18n]` sweep above cannot find the
+  // fallback path, and the chip's own label is a tier name too.
+  setEffort(state.effort);
   // Last, after the sweep: this caption's name follows the window's state, and
   // the sweep just painted the resting one.
   applyWindowState();
@@ -2875,60 +2880,131 @@ function effortLevels() {
 }
 
 /**
+ * Is a `setEffort` command awaiting the host's answer?
+ *
+ * A host that refuses a tier answers with a `notice` and no `state`, so the
+ * thumb would keep the position the drag left it at while the next request
+ * carries the old value. This flag is what tells that refusal apart from an
+ * unrelated notice arriving mid-drag.
+ */
+let effortPending = false;
+
+/**
  * Show or hide the chip for the model the host just described.
  *
  * A model with no levels has nothing to choose: `auto` is the only value and
- * the request sends nothing, so the control would be a menu with one row that
- * cannot change anything. It stays hidden and the reason lives in the menu's
- * `note`, which the settings page and the refusal notice also carry.
+ * the request sends nothing, so a slider would be a control whose stops cannot
+ * take effect on this model — the exact thing R3 forbids. It stays hidden; the
+ * reason (the host's `note`) is drawn in the panel, so it is there whole for
+ * any surface that opens it rather than being re-worded here.
  */
 function syncEffortControl() {
-  effortControl.hidden = effortLevels().length === 0;
+  const unavailable = effortLevels().length === 0;
+  effortControl.hidden = unavailable;
+  // A model switch that takes the control away must also close its panel: the
+  // panel would otherwise still be `hidden = false` the next time a reasoning
+  // model comes back, popping open with nobody having asked for it. Direct
+  // lookups rather than the `effortPanel` / `effortPicker` constants, which
+  // are declared far below this and would be in their temporal dead zone if
+  // this ever ran during module evaluation.
+  if (unavailable) {
+    $("effort-panel").hidden = true;
+    $("effort-picker").setAttribute("aria-expanded", "false");
+  }
+}
+
+/**
+ * The tier's name in the current language, or the English fallback.
+ *
+ * The dictionary key is built from the constant (`effortTier` + `Low`), so the
+ * two lists cannot drift apart by a typo; a locale that is missing an entry
+ * shows the English name rather than an empty stop on the track.
+ */
+function effortTierLabel(index) {
+  const fallback = EFFORT_TIER_LABELS[index] ?? "";
+  const text = t[`effortTier${fallback}`];
+  return typeof text === "string" && text.trim() !== "" ? text : fallback;
+}
+
+/**
+ * Paint the intensity ramp for an index, without touching the range itself.
+ *
+ * `--tier` (0-5) is what every layer in the CSS derives its width, density and
+ * glow from; `data-tier` is the state the top tier's pulse keys off. An index
+ * below zero — `auto`, or a protocol-only value such as `minimal` from a host
+ * that predates tiers — lights nothing: no stop is highlighted, and claiming
+ * "Low" for a setting that is not "Low" would be the lie this rule exists to
+ * avoid.
+ */
+function paintEffortTrack(index) {
+  const panel = $("effort-panel");
+  panel.style.setProperty("--tier", String(index >= 0 ? index : 0));
+  if (index >= 0) panel.dataset.tier = String(index);
+  else delete panel.dataset.tier;
+  panel.querySelectorAll("[data-tier-index]").forEach((node) => {
+    node.classList.toggle("active", Number(node.dataset.tierIndex) === index);
+  });
 }
 
 function setEffort(effort) {
+  // The host answered (applied or not): any in-flight commit is settled, and
+  // a later `notice` for something else must not yank the thumb.
+  effortPending = false;
   state.effort = effort;
-  $("effort-label").textContent = effort === "auto" ? t.effortAuto : effort;
+  const index = effortTierIndex(effort);
+  $("effort-label").textContent = effort === "auto"
+    ? t.effortAuto
+    : index >= 0
+      ? effortTierLabel(index)
+      : effort;
   syncEffortControl();
-  renderEffortMenu();
+  renderEffortPanel();
 }
 
-function renderEffortMenu() {
-  const menu = $("effort-menu");
+/**
+ * Repaint the panel from the state the host last confirmed.
+ *
+ * Called on every `state`/`session_loaded` (through `setEffort`) and after a
+ * refused `setEffort` — the host answers a refusal with a `notice` and no new
+ * `state`, so without this the thumb would stay where the drag left it while
+ * the request carried the old value.
+ */
+function renderEffortPanel() {
   const choices = state.effortChoices ?? {};
-  // A model with one fixed level takes no parameter at all; saying so is
-  // clearer than showing a single row the user cannot change.
-  if (choices.fixed && effortLevels().length === 0) {
-    menu.innerHTML =
-      `<div class="effort-fixed">${escapeHtml(t.effortFixed.replace("{level}", choices.fixed))}</div>`;
-    return;
-  }
-  // Only the levels the host says this model accepts — an empty list renders
-  // no rows instead of a made-up `low`/`medium`/`high` set. `auto` is always
-  // present: it is the way back to whatever `providers.json` defaults to, and
-  // without it a level could never be un-set from this menu.
-  const rows = [{ level: "auto", label: t.effortAuto }]
-    .concat(effortLevels().map((level) => ({ level, label: level })));
-  menu.innerHTML =
-    rows
-      .map((row) => {
-        const active = row.level === state.effort;
-        // What `auto` will actually send, so the user does not have to open
-        // providers.json to find out.
-        const hint = row.level === "auto" && choices.default
-          ? `<span class="effort-hint">${escapeHtml(choices.default)}</span>`
-          : "";
-        return (
-          `<button role="menuitemradio" data-effort="${escapeHtml(row.level)}" aria-checked="${active}"` +
-          ` class="${active ? "active" : ""}">` +
-          `<span>${escapeHtml(row.label)}</span>${hint}</button>`
-        );
-      })
-      .join("") +
-    // Why there is nothing to choose, when the host gave a reason. Dim, not a
-    // warning: "this model takes no effort parameter" is a property of the
-    // model, not a fault the operator caused.
-    (choices.note ? `<div class="effort-fixed">${escapeHtml(choices.note)}</div>` : "");
+  const panel = $("effort-panel");
+  // Both names come from the dictionary and change with the language: the
+  // headless sweep (`[data-i18n]`) cannot reach an attribute, and the range
+  // has no visible text of its own to be named by.
+  panel.setAttribute("aria-label", t.effortLabel);
+  $("effort-range").setAttribute("aria-label", t.effortLabel);
+  panel.querySelectorAll("[data-tier-index]").forEach((node) => {
+    node.textContent = effortTierLabel(Number(node.dataset.tierIndex));
+  });
+
+  const index = effortTierIndex(state.effort);
+  // A range has no "unset" position: when the value is `auto` (or a protocol
+  // value that is not a tier) the thumb parks at the low end, but the ramp is
+  // unlit and no stop is highlighted, so the track never claims a selection.
+  const range = $("effort-range");
+  range.value = String(index >= 0 ? index : 0);
+  if (index >= 0) range.setAttribute("aria-valuetext", effortTierLabel(index));
+  else range.removeAttribute("aria-valuetext");
+  paintEffortTrack(index);
+
+  $("effort-auto").setAttribute("aria-pressed", String(state.effort === "auto"));
+  // What `auto` will actually send, so the user does not have to open
+  // providers.json to find out.
+  $("effort-auto-hint").textContent = state.effort === "auto" ? choices.default ?? "" : "";
+
+  // Why there is nothing to choose, when the host gave a reason — dim, not a
+  // warning: "this model takes no effort parameter" is a property of the
+  // model, not a fault the operator caused. `fixed` is the same sentence for
+  // a model locked to one level.
+  const note = choices.note
+    || (choices.fixed ? t.effortFixed.replace("{level}", choices.fixed) : "");
+  const noteNode = $("effort-note");
+  noteNode.textContent = note;
+  noteNode.hidden = note === "";
 }
 
 /* ---------- model picker ---------- */
@@ -4337,6 +4413,15 @@ function handleEvent(message) {
       }
       if (message.domain === "settings" && settings.handleEvent(message) === true) {
         break;
+      }
+      // A refused `setEffort` answers with a warn and no `state`, so the thumb
+      // would keep the position the drag left it at while the request carries
+      // the old tier. Repaint from the confirmed state — only when a commit is
+      // actually in flight, so an unrelated notice cannot yank a thumb the
+      // user is still dragging.
+      if (effortPending) {
+        effortPending = false;
+        renderEffortPanel();
       }
       addNotice(message.level, message.text);
       scrollToBottom();
@@ -7425,35 +7510,67 @@ function addMentionPath(path) {
 }
 
 const effortPicker = $("effort-picker");
-const effortMenu = $("effort-menu");
+const effortPanel = $("effort-panel");
+const effortRange = $("effort-range");
 
-function setEffortMenu(open) {
-  if (open) renderEffortMenu();
-  effortMenu.hidden = !open;
+function setEffortPanel(open) {
+  if (open) renderEffortPanel();
+  effortPanel.hidden = !open;
   effortPicker.setAttribute("aria-expanded", String(open));
 }
 
 effortPicker.addEventListener("click", (event) => {
   event.stopPropagation();
-  setEffortMenu(effortMenu.hidden);
+  setEffortPanel(effortPanel.hidden);
 });
 
-// Delegated: the menu is rebuilt whenever the model's level list changes, so
-// per-row listeners would go stale after a model switch.
-effortMenu.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-effort]");
-  if (!button) return;
-  setEffortMenu(false);
-  if (button.dataset.effort === state.effort) return;
-  // The label moves when the host answers with a `state`, not here. This host
-  // can refuse a level (a stale menu, a model reloaded from disk), and moving
-  // the chip first would show a value the next request does not carry — the
-  // exact lie this control used to tell. The refusal notice is the feedback.
-  api.send({ cmd: "setEffort", effort: button.dataset.effort });
+/**
+ * A committed tier choice.
+ *
+ * Sends, then lets the host's answering `state` move everything. This host can
+ * refuse a tier (a model reloaded from disk, a stale panel), and moving the
+ * chip first would show a value the next request does not carry — the exact
+ * lie this control used to tell.
+ */
+function commitEffort(tier) {
+  if (tier === state.effort) return;
+  effortPending = true;
+  api.send({ cmd: "setEffort", effort: tier });
+}
+
+// `input` fires while the thumb is dragged. The ramp follows immediately
+// because the slider is the thing being manipulated, but no command is sent
+// until the drag ends — a range throws one `change` per gesture, while `input`
+// fires on every pixel and a command per pixel would queue hundreds of
+// `setEffort` writes.
+effortRange.addEventListener("input", () => {
+  paintEffortTrack(Number(effortRange.value));
+});
+
+// Keyboard and pointer both end here: the browser fires `change` for an arrow
+// key, a Home/End jump and a thumb release alike. ArrowLeft/Right are NOT
+// handled by us — the native range already moves by `step` and fires this.
+effortRange.addEventListener("change", () => {
+  commitEffort(effortTierAt(effortRange.value));
+});
+
+$("effort-auto").addEventListener("click", (event) => {
+  event.stopPropagation();
+  commitEffort("auto");
 });
 
 document.addEventListener("click", (event) => {
-  if (!event.target.closest("#effort-control")) setEffortMenu(false);
+  if (!event.target.closest("#effort-control")) setEffortPanel(false);
+});
+
+// Escape closes the panel like every other composer popover. Escape on a
+// focused range is not otherwise meaningful, and the window-level chain runs
+// after this one, so the panel closes before "abort the turn" is considered.
+effortControl.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || effortPanel.hidden) return;
+  event.stopPropagation();
+  setEffortPanel(false);
+  effortPicker.focus();
 });
 
 modelPicker.addEventListener("click", (event) => {

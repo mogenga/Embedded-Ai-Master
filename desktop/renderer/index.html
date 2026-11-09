@@ -447,13 +447,49 @@
                     <!-- Visible only when the current model declares reasoning
                          support. `syncEffortControl()` in app.js removes
                          `hidden` from the host's reported levels, and leaves it
-                         on for a model that would drop the parameter. -->
+                         on for a model that would drop the parameter. The chip
+                         opens a six-tier slider: a native
+                         `<input type="range">` carries keyboard, screen-reader
+                         and touch behaviour, and every visual layer above it is
+                         driven by the `--tier` custom property. -->
                     <div class="effort-control" id="effort-control" hidden>
-                      <button class="chip-button effort-picker" id="effort-picker" aria-haspopup="menu" aria-expanded="false">
+                      <button class="chip-button effort-picker" id="effort-picker" aria-expanded="false" aria-controls="effort-panel">
                         <span id="effort-label">Auto</span>
                         <svg class="icon" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
                       </button>
-                      <div class="effort-menu" id="effort-menu" role="menu" hidden></div>
+                      <div class="effort-panel" id="effort-panel" role="group" aria-label="Thinking effort" hidden>
+                        <div class="effort-panel-head">
+                          <span class="effort-panel-title" data-i18n="effortLabel">Thinking</span>
+                          <button type="button" class="effort-auto" id="effort-auto" aria-pressed="true" data-i18n="effortAuto">Auto</button>
+                          <span class="effort-auto-hint" id="effort-auto-hint"></span>
+                        </div>
+                        <div class="effort-track">
+                          <div class="effort-visual" aria-hidden="true">
+                            <div class="effort-rail"></div>
+                            <div class="effort-lit"></div>
+                            <div class="effort-dots"></div>
+                            <div class="effort-glow"></div>
+                            <div class="effort-particles"><i></i><i></i><i></i><i></i><i></i><i></i></div>
+                          </div>
+                          <input
+                            type="range" min="0" max="5" step="1"
+                            id="effort-range"
+                            class="effort-range"
+                            value="0"
+                            aria-label="Thinking effort"
+                            aria-describedby="effort-note"
+                          />
+                        </div>
+                        <div class="effort-scale" aria-hidden="true">
+                          <span data-tier-index="0" data-i18n="effortTierLow">Low</span>
+                          <span data-tier-index="1" data-i18n="effortTierMedium">Medium</span>
+                          <span data-tier-index="2" data-i18n="effortTierHigh">High</span>
+                          <span data-tier-index="3" data-i18n="effortTierExtra">Extra</span>
+                          <span data-tier-index="4" data-i18n="effortTierMax">Max</span>
+                          <span data-tier-index="5" data-i18n="effortTierGalaxy">Galaxy</span>
+                        </div>
+                        <div class="effort-fixed" id="effort-note" hidden></div>
+                      </div>
                     </div>
                     <div class="composer-actions">
                       <button class="stop-button" id="stop-button" data-i18n="stop" data-i18n-title="stopTitle" hidden>Stop</button>

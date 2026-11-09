@@ -52,6 +52,15 @@ export const dictionaries = {
     effortHigh: "High",
     effortLabel: "Thinking",
     effortFixed: "This model always reasons at {level}.",
+    /* The six tiers, in track order. The keys are built from the constant
+       names in `effort-tiers.js` (`effortTier` + `Low` …); order is pinned by
+       the slider test, not by the dictionary's key order. */
+    effortTierLow: "Low",
+    effortTierMedium: "Medium",
+    effortTierHigh: "High",
+    effortTierExtra: "Extra",
+    effortTierMax: "Max",
+    effortTierGalaxy: "Galaxy",
     plusMenuTitle: "Add to this message",
     plusAddFiles: "Add files or photos",
     plusAddFolder: "Add folder",
@@ -540,6 +549,12 @@ export const dictionaries = {
     effortHigh: "高",
     effortLabel: "思考",
     effortFixed: "该模型固定以 {level} 强度推理。",
+    effortTierLow: "低",
+    effortTierMedium: "中",
+    effortTierHigh: "高",
+    effortTierExtra: "加强",
+    effortTierMax: "极强",
+    effortTierGalaxy: "星系",
     plusMenuTitle: "添加到这条消息",
     plusAddFiles: "添加文件或图片",
     plusAddFolder: "添加文件夹",

@@ -3961,23 +3961,10 @@ mark.find-hit.current {
   text-transform: capitalize;
 }
 
-.effort-hint {
-  margin-left: auto;
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  text-transform: none;
-}
-
 .effort-fixed {
   padding: 7px 10px;
   font-size: var(--text-sm);
   color: var(--text-faint);
-}
-
-.effort-menu button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
 }
 
 #input {
@@ -4987,44 +4974,293 @@ mark.find-hit.current {
   position: relative;
 }
 
-.effort-menu {
+/* The six-tier panel. Every amount in it is derived from `--tier` (0-5, set by
+   `paintEffortTrack()` in app.js); the top tier's pulse and particles are keyed
+   by `data-tier="5"` because "is the highest" is a state, not an amount. */
+.effort-panel {
   position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  min-width: 150px;
-  padding: 4px;
+  bottom: calc(100% + 8px);
+  /* Anchored right: the chip sits at the composer's right edge, and a panel
+     growing rightwards from `left: 0` would leave the window. */
+  right: 0;
+  width: 268px;
+  padding: 10px 12px 12px;
   background: var(--surface-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow-popover);
   z-index: 20;
-}
-
-.effort-menu[hidden] {
-  display: none;
-}
-
-.effort-menu {
-  display: flex;
-  flex-direction: column;
   animation: slide-up 120ms ease-out;
 }
 
-.effort-menu button {
-  padding: 6px 10px;
+.effort-panel[hidden] {
+  display: none;
+}
+
+.effort-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.effort-panel-title {
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  letter-spacing: 0.02em;
+}
+
+/* The way back to "whatever providers.json defaults to". A pressed button, not
+   a seventh stop on the track: auto is the absence of a tier, and a track that
+   included it would claim a seventh intensity exists. */
+.effort-auto {
+  padding: 2px 8px;
+  border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  text-align: left;
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   color: var(--text-secondary);
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
 
-.effort-menu button:hover {
-  background: var(--surface-hover);
+.effort-auto:hover {
   color: var(--text);
+  border-color: var(--border-strong);
 }
 
-.effort-menu button.active {
+.effort-auto[aria-pressed="true"] {
+  background: var(--accent-soft);
+  border-color: var(--accent);
   color: var(--accent-text);
+}
+
+/* What `auto` will actually send ("low", "high" …). It sits at the far end of
+   the head row so the button keeps the left edge beside its title. */
+.effort-auto-hint {
+  margin-left: auto;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.effort-track {
+  position: relative;
+  height: 30px;
+}
+
+/* The visual stack sits under the real `<input type="range">`: it must never
+   take a pointer event, or dragging the thumb would stop working. The 8px
+   inset is half the 16px thumb — a range's thumb centre travels from half a
+   thumb in to half a thumb from the far end — so the ramp starts and ends
+   exactly under the thumb. */
+.effort-visual {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+}
+
+.effort-rail,
+.effort-lit,
+.effort-dots,
+.effort-glow {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-radius: 999px;
+}
+
+.effort-rail {
+  top: 50%;
+  height: 6px;
+  margin-top: -3px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+/* The lit segment grows with the tier and ends under the thumb, because the
+   visual layer is inset by half a thumb at each end (see `.effort-visual`). */
+.effort-lit {
+  top: 50%;
+  height: 6px;
+  margin-top: -3px;
+  width: calc(var(--tier, 0) / 5 * 100%);
+  background: linear-gradient(90deg, var(--accent-2), var(--accent) 55%, var(--accent-3));
+  box-shadow: 0 0 10px var(--accent-soft);
+  transition: width 160ms var(--ease);
+}
+
+/* Dot density: the pitch tightens as the tier rises, so the ramp reads as
+   "more going on" before the colour change is noticeable. */
+.effort-dots {
+  top: 50%;
+  height: 18px;
+  margin-top: -9px;
+  opacity: calc(var(--tier, 0) / 5 * 0.85);
+  background-image: radial-gradient(circle, var(--accent-text) 1px, transparent 1.6px);
+  background-size: calc(18px - var(--tier, 0) * 2.4px) 9px;
+  background-repeat: repeat-x;
+  -webkit-mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+  mask-image: linear-gradient(90deg, transparent, #000 10%, #000 90%, transparent);
+}
+
+.effort-glow {
+  top: 50%;
+  height: 24px;
+  margin-top: -12px;
+  opacity: calc(var(--tier, 0) / 5 * 0.55);
+  background: radial-gradient(ellipse at 50% 50%, var(--accent-soft), transparent 70%);
+  transition: opacity 200ms var(--ease);
+}
+
+/* Top tier only: a slow pulse and a handful of drifting particles. Both are
+   switched off wholesale under `prefers-reduced-motion` below. */
+.effort-particles {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 300ms var(--ease);
+}
+
+.effort-panel[data-tier="5"] .effort-glow {
+  animation: effort-pulse 3.6s ease-in-out infinite;
+}
+
+.effort-panel[data-tier="5"] .effort-particles {
+  opacity: 1;
+}
+
+.effort-particles i {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: var(--accent-text);
+  box-shadow: 0 0 6px var(--accent);
+  opacity: 0;
+  animation: effort-drift 5s linear infinite;
+}
+
+.effort-particles i:nth-child(1) { left: 8%; bottom: 34%; animation-delay: -0.4s; }
+.effort-particles i:nth-child(2) { left: 24%; bottom: 24%; animation-delay: -2.1s; }
+.effort-particles i:nth-child(3) { left: 43%; bottom: 38%; animation-delay: -3.4s; }
+.effort-particles i:nth-child(4) { left: 61%; bottom: 27%; animation-delay: -1.2s; }
+.effort-particles i:nth-child(5) { left: 78%; bottom: 36%; animation-delay: -2.8s; }
+.effort-particles i:nth-child(6) { left: 92%; bottom: 25%; animation-delay: -4.2s; }
+
+/* Only ever attached at tier 5 (see the selector above), so the two ends are
+   written as plain numbers rather than re-derived from `--tier`. */
+@keyframes effort-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.85;
+    transform: scale(1.06);
+  }
+}
+
+@keyframes effort-drift {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 8px, 0) scale(0.7);
+  }
+  25% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(6px, -22px, 0) scale(1);
+  }
+}
+
+/* The real control. Appearance is stripped so the custom rail shows through;
+   keyboard, screen-reader and touch behaviour stay the browser's, which is the
+   whole reason this is a range input and not a div. */
+.effort-range {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 30px;
+  margin: 0;
+  background: transparent;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+
+.effort-range:focus-visible {
+  outline: none;
+}
+
+.effort-range::-webkit-slider-runnable-track {
+  height: 30px;
+  background: transparent;
+}
+
+.effort-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 0 0 1px var(--border-strong), 0 2px 6px var(--scrim);
+}
+
+.effort-range:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--accent-soft), 0 0 0 1px var(--accent);
+}
+
+.effort-scale {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 5px;
+  font-family: var(--sans);
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+  user-select: none;
+}
+
+.effort-scale span {
+  transition: color 120ms ease;
+}
+
+.effort-scale span.active {
+  color: var(--accent-text);
+}
+
+.effort-panel .effort-fixed {
+  padding: 6px 0 0;
+}
+
+/* Reduced motion: no particles, no pulsing glow, no width/opacity easing — the
+   static ramp and the dot density still say which tier is selected. */
+@media (prefers-reduced-motion: reduce) {
+  .effort-particles,
+  .effort-particles i {
+    display: none;
+    animation: none;
+  }
+  .effort-glow {
+    animation: none;
+    transition: none;
+  }
+  .effort-lit,
+  .effort-dots {
+    transition: none;
+  }
+}
+
+/* The in-app motion switch (`data-motion`) is a second way to ask for the
+   same restraint; the global rule above already drops the animations, and this
+   drops the decorative particles with them. */
+:root[data-motion="reduced"] .effort-particles {
+  display: none;
 }
 
 /* ---------- model picker ---------- */
@@ -5099,7 +5335,7 @@ mark.find-hit.current {
 @media (prefers-reduced-motion: reduce) {
   .model-menu,
   .mode-menu,
-  .effort-menu,
+  .effort-panel,
   .plus-menu {
     animation: none;
   }
