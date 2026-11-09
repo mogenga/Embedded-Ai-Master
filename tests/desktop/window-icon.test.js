@@ -89,3 +89,49 @@ describe("窗口 / 任务栏图标", () => {
     expect(readPkg().build.win.icon).toBe("build/icon.ico");
   });
 });
+
+/**
+ * 运行时 AppUserModelID 必须与 `build.appId` 逐字相同（2026-11-09）。
+ *
+ * 这一条守的是一个**只看代码看不出来**的缺陷：任务栏按钮的图标不读窗口
+ * `icon`，它按运行时 AUMID 去找认领该 AUMID 的快捷方式，再用那个快捷方式的
+ * 目标 exe 的图标。当时 `main.js` 写的是 `com.embedded-ai.master`，而
+ * `package.json` 的 `appId` 是 `com.embedded-ai-master.app`——两个值不一致，
+ * 前者还被本机一个指向 `electron.exe` 的开发期快捷方式认领，于是任务栏画的是
+ * Electron 的原子。窗口图标与 exe 资源当时**都是对的**，所以怎么查图标文件都
+ * 查不出来。
+ *
+ * 安装器用 `${APP_ID}`（= `build.appId`）给快捷方式设 AUMID。两边一致，快捷方式
+ * 才会指向本应用的 exe；不一致时 shell 要么找到别人的快捷方式，要么谁都找不到
+ * 而回退。断言的是**两个值是同一个字符串**，不是其中某个具体写法——将来改
+ * appId 只需要改一处，这条会替你把 main.js 一起拽过去。
+ */
+describe("运行时 AUMID 与 appId 一致（任务栏图标按它选图标）", () => {
+  it("main.js 里的 setAppUserModelId 参数等于 package.json 的 build.appId", () => {
+    const source = readMain();
+    const match = source.match(/app\.setAppUserModelId\(\s*"([^"]+)"\s*\)/);
+    expect(match, "main.js 里应当有一句 app.setAppUserModelId(\"…\")").not.toBeNull();
+    expect(match[1], "运行时 AUMID 与 build.appId 不一致").toBe(readPkg().build.appId);
+  });
+
+  it("AUMID 在 whenReady 内、第一个窗口创建之前设置", () => {
+    // 窗口创建之后再设 AUMID，Windows 已经按旧值给按钮分了组。
+    const source = readMain();
+    const readyAt = source.indexOf("app.whenReady()");
+    // Search the **call**, not the bare name: two comments mention
+    // `setAppUserModelId` by name, and a plain `indexOf` finds one of those
+    // first — the assertion then measures a sentence, not the statement.
+    const aumidAt = source.indexOf("app.setAppUserModelId(");
+    const windowAt = source.indexOf("function startWindow(");
+    expect(readyAt, "找不到 app.whenReady()").toBeGreaterThan(-1);
+    expect(aumidAt, "setAppUserModelId 应当存在于文件中").toBeGreaterThan(-1);
+    expect(aumidAt, "AUMID 必须在 whenReady 之后设").toBeGreaterThan(readyAt);
+    expect(windowAt, "找不到 startWindow").toBeGreaterThan(-1);
+    // `startWindow` 定义在模块作用域，`whenReady` 里调用它。AUMID 那行必须在
+    // `whenReady` 回调内部、并且在它调用 `startWindow()` 之前——用两者在文件里
+    // 出现的先后近似判断，够抓住「挪到窗口创建之后」这一类改动。
+    const callAt = source.indexOf("startWindow();", readyAt);
+    expect(callAt, "whenReady 里应当调用 startWindow()").toBeGreaterThan(-1);
+    expect(aumidAt, "AUMID 必须在 startWindow() 之前设").toBeLessThan(callAt);
+  });
+});
