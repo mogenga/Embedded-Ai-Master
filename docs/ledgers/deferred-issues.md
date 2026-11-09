@@ -2159,7 +2159,9 @@
 
 ### D-212 · GitHub Releases 发布链路配置就位，但从未真正发过一次 release；`electron-updater` 未接入
 
-> **2026-10-25 状态更新**：本条的两半都已落地——`v0.1.0` 已发布到 Releases（3 个资产，匿名 HTTP 206 可下载），**应用内自动更新已接入**（见下方「修复」）。拆分保留条目，是因为「一次真实更新从未跑过」这部分仍未验证。
+> **2026-10-25 状态更新**：本条的两半都已落地——`v0.1.0` 已发布到 Releases（3 个资产，匿名 HTTP 206 可下载），**应用内自动更新已接入**（见下方「修复」）。
+>
+> **2026-11-09 状态更新：本条关闭。** 两件原本没跑过的事都在同一天由用户实测：①**干净机器安装 v0.3.0 通过**；②**一次真实的更新跑通**——旧版收到新版提示 → 下载 → 重启安装完成。下方「残余边界」的第 1、2 条据此关闭（原文保留并加注记），第 3–5 条仍然成立（未签名 = 不做签名校验；per-user 提权分支未实测；`latest.yml` 格式兼容性属源码依据）。**只跑过一次**不等于这条路径已经稳，后续版本仍应在发布后各做一次同样验证。
 
 - **发现**: 2026-10-25，接发布渠道（用户「处理签名、发布渠道是github Releases，图标后面再说」）时。
 - **现象**: 配置与流程文档齐备，但没有一条走过真实链路——（详见下方「修复」与「残余边界」两段；本段保留 2026-10-25 发现时的原样描述。）
@@ -2181,12 +2183,12 @@
   - **日志不泄密**：`sanitizeMessage` 抹掉 URL 的 query/fragment（GitHub provider 的下载 URL 可能带签名参数）与 `token` / `bearer` / `api_key` 的值，并截断到首行 300 字符。接到 `autoUpdater.logger` 的是 `createUpdaterLogger()`，不是裸 `console`。
   - `desktop/package.json` 加 `"electron-updater": "^6.8.11"`（版本取自 npm registry `dist-tags.latest` 实测，非记忆），并把 `updater.js` 加进 `build.files`——**不加就不会进 asar**，安装版会退化成 `unsupported/missing`。
 - **残余边界（这一半仍未关闭）**:
-  1. **从未跑过一次真实更新。** 本轮硬约束禁止调用 GitHub Releases API、禁止下载、禁止安装；所有测试都用注入的假 updater。`v0.1.0` 是第一个"旧版"，要验证「旧版提示新版」必须先有 `v0.1.1`。
-  2. **`quitAndInstall` 的 NSIS 行为未实测。** 源码依据：`BaseUpdater.quitAndInstall(isSilent=false, isForceRunAfter)` 在非静默时忽略第二个参数、改用 `autoRunAppAfterInstall`（默认 `true`）；`NsisUpdater.doInstall` 拼 `--updated`，静默才加 `/S`。所以调用是 `quitAndInstall(false, true)`——**不静默**，用户看得见安装进度。`--updated` 让 `CHECK_APP_RUNNING` 走「Sleep 300 → 再查 → Sleep 1000 → `doStopProcess`」的免确认路径，但这条路径同样只有源码依据。
+  1. ~~**从未跑过一次真实更新。**~~ **2026-11-09 已跑通**（用户实测：旧版收到新版提示 → 下载 → 重启安装完成）。原文保留：本轮硬约束禁止调用 GitHub Releases API、禁止下载、禁止安装；所有测试都用注入的假 updater。`v0.1.0` 是第一个"旧版"，要验证「旧版提示新版」必须先有 `v0.1.1`。
+  2. ~~**`quitAndInstall` 的 NSIS 行为未实测。**~~ **2026-11-09 已随那次真实更新走过**，与源码推断一致。以下是当初的源码依据：`BaseUpdater.quitAndInstall(isSilent=false, isForceRunAfter)` 在非静默时忽略第二个参数、改用 `autoRunAppAfterInstall`（默认 `true`）；`NsisUpdater.doInstall` 拼 `--updated`，静默才加 `/S`。所以调用是 `quitAndInstall(false, true)`——**不静默**，用户看得见安装进度。`--updated` 让 `CHECK_APP_RUNNING` 走「Sleep 300 → 再查 → Sleep 1000 → `doStopProcess`」的免确认路径，但这条路径同样只有源码依据。
   3. **`v0.1.0` 未签名，因此 `publisherName` 不在 `app-update.yml` 里。** `NsisUpdater.verifySignature` 在 `publisherName == null` 时**直接返回 `null`（视为通过）**。这意味着在当前配置下，下载到的更新包**不做签名校验**。签名子代理接上证书后，`win.verifyUpdateCodeSignature`（默认 `true`）会自动把 `publisherName` 写进 `app-update.yml` 并开始校验——在此之前，完整性只靠 `latest.yml` 的 sha512。
   4. **`latest.yml` 的现代格式要求**：`electronUpdaterCompatibility` 默认 `>=2.16`。v6.8.11 读 `files[]`，也能读旧的顶层 `path`/`sha512`（v27 才删）。本仓库产物两者都有，v6 客户端不受影响。
   5. **应用安装在 `%LOCALAPPDATA%\Programs\`（per-user），不需要提权。** `isAdminRightsRequired` 由下载时的 `downloadedFileInfo` 决定；per-machine 安装才走 `elevate.exe`。本仓库是默认 per-user NSIS，未实测提权分支。
-- **状态**: **应用内自动更新已解决（2026-10-25）**；「一次真实更新从未跑过」与上述 5 条残余边界仍未关闭，保留条目。文档见 `docs/operations/release.md` §13。
+- **状态**: **已解决（2026-10-25 接入；2026-11-09 跑通第一次真实更新）**。残余边界第 1、2 条同日关闭；第 3–5 条仍成立，见上方 2026-11-09 注记。文档见 `docs/operations/release.md` §1 / §12 / §13。
 
 ### D-213 · `resources/` 缺 ESM 模块声明，所有安装用户多付一次重解析
 

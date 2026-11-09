@@ -5,7 +5,7 @@
 相关文档：
 
 - `docs/operations/code-signing.md` —— Windows 代码签名（证书从哪来、怎么配、怎么验）。
-- `docs/ledgers/deferred-issues.md` **D-212** —— 发布链路已跑通（`v0.1.0`–`v0.2.0` 七个 release）；应用内自动更新**已接入**（见 §12），但「一次真实的更新」仍未跑过，残余边界见 §12.6。
+- `docs/ledgers/deferred-issues.md` **D-212** —— 发布链路已跑通（`v0.1.0`–`v0.3.0` 八个 release）；应用内自动更新**已接入且跑通过一次真实更新**（2026-11-09，见 §12），残余边界见 §12.6。
 - `docs/ledgers/deferred-issues.md` **D-217** —— 未签名构建下，下载到的更新包不做签名校验。
 - `docs/ledgers/deferred-issues.md` **D-211** —— 签名配置就位但从未验证过真实签名。
 - `docs/ledgers/deferred-issues.md` **D-209** —— 根与 `desktop/` 的 Electron 版本不一致。
@@ -13,19 +13,19 @@
 
 ---
 
-## 1. 当前状态（2026-11-06 更新）
+## 1. 当前状态（2026-11-09 更新）
 
-> 下表保留 2026-10-25 的实测依据；`Releases` 一行已于 2026-11-06 按 `v0.2.0` 实际发布结果改写，`签名` 与干净机器安装两行沿用 2026-11-03 的结论。
+> 下表保留 2026-10-25 的实测依据；`Releases` 与 `干净机器安装` 两行已于 2026-11-09 按 `v0.3.0` 改写，`应用内自动更新` 一行同日由「已接入」改为「已跑通」。`签名` 一行沿用旧结论（仍未签）。
 
 | 项 | 状态 | 依据 |
 |---|---|---|
 | 仓库 | `mogenga/Embedded-Ai-Master`，**public** | GitHub API 实测 `private: false`、`visibility: public` |
-| Releases | **`v0.2.0` 为最新**（`v0.1.0`–`v0.2.0` 七个 release，各含安装包 / `.blockmap` / `latest.yml` 三个资产；`v0.2.0` 的安装包 118,319,613 字节） | `gh release list` / `gh release view v0.2.0 --json assets` 实测（2026-11-06） |
-| 干净机器安装 | **已通过，仅限 v0.1.5**（2026-11-03）；v0.2.0 未重复该验证 | 用户报告；D-208 关闭。v0.2.0 的安装路径未单独验证 |
+| Releases | **`v0.3.0` 为最新**（`v0.1.0`–`v0.3.0` 八个 release，各含安装包 / `.blockmap` / `latest.yml` 三个资产；`v0.3.0` 的安装包 118,399,565 字节） | `gh release view v0.3.0 --json assets` 实测（2026-11-09）：三个资产均为 `uploaded`，sha512 与 `latest.yml` 逐字一致 |
+| 干净机器安装 | **已通过**：v0.1.5（2026-11-03）、**v0.3.0（2026-11-09）**。v0.2.0 未单独验证 | 用户报告；D-208 关闭 |
 | `desktop/package.json` 的 `build.publish` | 已配置 GitHub provider | `npx electron-builder --win --x64 --dir` 退出 0，schema 接受 |
 | `gh` CLI | **已安装且已登录**，但**不在 `PATH` 里** | 版本 2.103.2，路径 `C:\Program Files\GitHub CLI\gh.exe`；`gh auth status` 退出 0，账号 `mogenga` |
 | `electron-updater` | **已安装（6.8.11）** | 声明在 `desktop/package.json`（`^6.8.11`），`desktop/node_modules/electron-updater/package.json` 实测为该版本 |
-| 应用内自动更新 | **已接入**（`desktop/updater.js` + 主进程 IPC + 关于页） | 见 §12 |
+| 应用内自动更新 | **已接入并跑通一次真实更新**（`desktop/updater.js` + 主进程 IPC + 关于页） | 用户实测（2026-11-09）：旧版收到新版提示 → 下载 → 重启安装完成。实现见 §12，边界见 §12.6 |
 | 签名 | 配置就位，**从未真实签过** | 本机无证书，见 `docs/operations/code-signing.md` §7 |
 | 图标 | 已配置 `build/icon.ico` | `desktop/package.json` 的 `win.icon` |
 
@@ -557,9 +557,9 @@ main.js ──createUpdater()──> updater.js ──> electron-updater
 
 ### 12.6 已知边界
 
-1. **一次真实的更新从未跑过。** 接入时 `v0.1.0` 是最新版，没有更新的版本可装；此后虽然连发了 `v0.1.1`–`v0.2.0`（七个 release），但没有任何一次记录的「旧版收到新版提示并完成下载安装」验证——**版本号变了不等于这条路径跑过**。`v0.2.0` 发布后首次具备真实验证条件：装 v0.1.5，等 About 页提示 v0.2.0，点下载与重启安装。（D-212 残余）
+1. ~~**一次真实的更新从未跑过。**~~ **2026-11-09 已跑通**：旧版收到新版提示 → 下载 → 重启安装完成，用户实测。D-212 的这条残余关闭。**但只跑过一次**——一次成功不等于这条路径在各个中间版本、各种网络条件下都稳；后续版本仍应在发布后做一次同样的验证。
 2. **未签名期间，下载到的更新包不做签名校验。** `electron-updater` 在 `app-update.yml` 没有 `publisherName` 时直接放行；而 `publisherName` 只在有证书时才写得进去。完整性目前只靠 `latest.yml` 的 `sha512`。见 **D-217**。
-3. **`quitAndInstall` 的 NSIS 行为只有源码依据。** 调用是非静默的（`quitAndInstall(false, true)`），用户看得见安装进度；安装器收到 `--updated` 后走「等待应用退出 → 仍在就结束进程」的免确认路径。这条路径没有在真实更新里跑过。
+3. **`quitAndInstall` 的 NSIS 行为**：调用是非静默的（`quitAndInstall(false, true)`），用户看得见安装进度；安装器收到 `--updated` 后走「等待应用退出 → 仍在就结束进程」的免确认路径。**2026-11-09 的那次真实更新走过这条路径**，与源码推断一致。
 4. **更新要重启应用。** 没有热替换；正在跑的回合会随退出结束。
 5. **`electron-updater` 是运行时依赖，必须真的装进包。** `desktop/package.json` 的 `build.files` 里已加 `updater.js`；依赖本身由 `scripts/package-prepare.mjs` 的运行时闭包带进 `resources/node_modules`（与内核依赖同一条路）。**装完 `npm --prefix desktop install` 后要重新完整打包**，否则旧包里没有它，用户会看到「当前构建缺少更新模块」。
 
@@ -567,7 +567,7 @@ main.js ──createUpdater()──> updater.js ──> electron-updater
 
 ## 13. 相关条目
 
-- **D-212** —— 发布链路已跑通（`v0.1.0`–`v0.2.0` 七个 release）；应用内自动更新已接入（**2026-10-25 已解决**），但「一次真实的更新」仍未跑过，残余见 §12.6。
+- **D-212** —— 发布链路已跑通（`v0.1.0`–`v0.3.0` 八个 release）；应用内自动更新已接入（**2026-10-25 已解决**），**一次真实的更新已于 2026-11-09 跑通**，残余见 §12.6。
 - **D-217** —— 未签名构建下 `publisherName == null` 时下载包不做签名校验。
 - **D-211** —— 签名配置就位但从未验证过真实签名。
 - **D-208** —— 真实安装包从未产出（**2026-11-03 已解决**：v0.1.5 安装包在干净机器上安装验证通过）。
