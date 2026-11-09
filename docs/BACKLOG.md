@@ -133,12 +133,12 @@
 
 **2026-11-08 结果**：9.1 只做了离线可验的部分（真实 Renode 移到批次 10）；9.2 / 9.3 已落地；9.4 的子代理与 hooks 延后，工具 trace 按用户决定不做、已从排期摘除。
 
-**2026-11-09 结果**：9.4 的子代理与 hooks 都已落地（用户选定形态：子代理「只读 + 后台并发」、hooks「外部命令钩子」）。见下表的 9.4 一行。
+**2026-11-09 结果**：9.4 的子代理与 hooks 都已落地（用户选定形态：子代理「只读 + 后台并发」、hooks「外部命令钩子」）。同日按用户反馈做了四处修正：9.2 的**回放控件被移除**（能力与参数保留）、子代理**取消轮数与寿命默认上限**、**批次 10 标不做**、`@` 空查询**改为列出全部**。过程记录见 `dev-notes/批次9.4-子代理与界面修正.md`。
 
 | # | 项 | 来源 | 验收 |
 |---|---|---|---|
 | 9.1 | BR-7 夜批管线：夹具格式 + 幂等 + 整跑超时 + exit code 表 | OPT-44 / BRD BR-7 | **离线部分已落地**：`scripts/nightly-batch.mjs` + `docs/operations/nightly-batch.md`（契约唯一源）。exit code 表 `0/1/2/3/4/5/124`，两层超时，产物按 `(batch, case, round)` 落盘不覆盖。**未验证的部分**：不接 Renode、不接真实模型——夹具描述期望的工具调用序列，模型由注入的 `fetchImpl` 合成。10 条仿真用例的真实运行原本留给批次 10，**该批次已标不做（2026-11-09），所以这件事仍然没有做** |
-| ~~9.2~~ | ~~BR-6 会话回放控件~~ **已落地** | BRD BR-6 | `sessionLoadedEvent` 的 `atSeq` 是唯一截断入口，messages / todos / usage / costUsd 全部从同一前缀投影；越界抛错不钳位；半截工具调用不画 tool 行 |
+| ~~9.2~~ | ~~BR-6 会话回放控件~~ **已落地，随后按用户要求移除** | BRD BR-6 | 先后两件事，不要混：**① 能力**——`sessionLoadedEvent` 的 `atSeq` 是唯一截断入口，messages / todos / usage / costUsd 全部从同一前缀投影，越界抛错不钳位，半截工具调用不画 tool 行（这套仍在，`forkSession` 与子代理只读视图依赖它）。**② 控件**——2026-11-08 加的拖动条、位置读数与「回到最新」，**2026-11-09 用户要求移除**（"顶部事件回放功能不要"），整套 UI、渲染层状态、3 条 i18n 与 CSS 已删除。现在打开会话是全量投影，没有可停的中间位置 |
 | ~~9.3~~ | ~~设备面板形态决策~~ **已决策** | D-193 的后续 | `docs/specs/device-state-surface.md`：**不做面板、不复活 `getBoardState`**；BR-6 验收①按字面作废并改为「工具结果即设备状态的出口」；`device_status` 保留为结构化留痕，但**真实会话里 0 条该事件**——如实标注链路未被走过 |
 | ~~9.4~~ | ~~子代理 / hooks~~ **已落地**（工具 trace 仍按用户决定不做） | 框架 #13 / #17 | **子代理**：`src/subagent/`，`subagent` / `subagent_check` 两个工具，同进程嵌套 `query()`，**只读由 `read-only` 预设钉死而不是第二张白名单**，最多 4 并发、**轮数与寿命缺省不限**（2026-11-09 用户决定，原 30 轮 / 10 分钟默认值已删除），完成时宿主写 `subagent_result`；子代理开销按父会话累计并计入 `maxCostUsd`（`LoopCtx.externalCostUsd`，三处重算 + 每轮开头补增量）。**hooks**：`src/hooks/`，`hooks.json` 的外部命令，`preToolUse` 退出码 2 阻断、其它非 0 fail-closed，`postToolUse` 的 stdout 追加进正文并降级 `evidence`；接在 `executeAuthorized` 上，因此只能收紧不能放行（变异验证过）。契约：`docs/operations/subagent.md`、`docs/operations/hooks.md`。**已知边界**：桌面形态不加载项目级钩子（与 MCP / permissions 同一姿态）；子代理读不到父会话 artifacts；宿主完成泵的运行时行为无常驻测试（见 D-230） |
 
