@@ -127,143 +127,126 @@ describe("档位与索引互逆，越界钳位", () => {
   });
 });
 
-describe("<input type=\"range\"> 是无障碍底座", () => {
-  it("index.html 里有 range 的六格刻度，且带 aria-label", () => {
-    const html = read("index.html");
-    const start = html.indexOf('id="effort-range"');
-    expect(start, "#effort-range missing").toBeGreaterThan(-1);
-    const tagStart = html.lastIndexOf("<input", start);
-    const tag = html.slice(tagStart, html.indexOf("/>", start) + 2);
-    // Whitespace-normalised: the attributes are split across lines for width.
-    expect(tag.replace(/\s+/g, " ")).toContain('type="range" min="0" max="5" step="1"');
-    expect(tag).toContain('aria-label="');
-    // The stop count is the tier count; a 7th stop would silently mislabel.
-    expect(Number(tag.match(/max="(\d+)"/)[1])).toBe(EFFORT_TIERS.length - 1);
-  });
-
-  it("#effort-control 的 id 保留，旧的 #effort-menu 不再存在", () => {
+describe("面板换成脑形滑块之后，接线仍然完整", () => {
+  it("#effort-control / #effort-panel 的 id 保留，旧的 range 与下拉菜单都已移除", () => {
     const html = read("index.html");
     expect(html).toContain('id="effort-control"');
     expect(html).toContain('id="effort-panel"');
     expect(html).not.toContain('id="effort-menu"');
+    // 2026-11-09：原生 range 整个让位给组件。留着它只会是一个没人绑定、
+    // 也没人看的隐藏输入框——而它过去正是「控件到底存不存在」的判据。
+    expect(html).not.toContain('id="effort-range"');
+    expect(html).not.toContain("data-tier-index");
     const app = read("app.js");
     expect(app).not.toContain('$("effort-menu")');
     expect(app).not.toContain("renderEffortMenu");
+    expect(app).not.toContain("effortRange");
+    expect(app).not.toContain("paintEffortTrack");
   });
 
-  it("六个档位标签都在面板里，且都带 data-tier-index", () => {
+  it("面板里是组件的挂载点，Auto 与说明句在卡片之外", () => {
     const html = read("index.html");
-    for (let index = 0; index < EFFORT_TIERS.length; index += 1) {
-      expect(html, `stop ${index}`).toContain(`data-tier-index="${index}"`);
-    }
-    expect(html).toContain('data-i18n="effortTierGalaxy"');
+    // The component builds its own DOM inside this element; nothing here may
+    // duplicate the card's internals, or there would be two tracks.
+    expect(html).toContain('id="effort-galaxy-mount"');
+    expect(html).toContain('id="effort-auto"');
+    expect(html).toContain('id="effort-note"');
+    // `auto` is the absence of a tier, so it must not be a stop on the track —
+    // hence a button beside the card, not a seventh label inside it.
+    expect(html).not.toContain("effort-auto-hint\" hidden");
+    const mountAt = html.indexOf('id="effort-galaxy-mount"');
+    const autoAt = html.indexOf('id="effort-auto"');
+    expect(autoAt).toBeGreaterThan(mountAt);
   });
 
-  it("轨道可视化由 --tier 驱动，且不接指针事件", () => {
+  it("组件按挂载点创建，且只创建一次（懒加载）", () => {
     const app = read("app.js");
-    expect(app).toContain('setProperty("--tier"');
-    const css = effortCss();
-    expect(css).toContain("var(--tier");
-    // The visual layer sits under the real input; taking pointer events would
-    // make the thumb undraggable.
-    const visual = css.slice(css.indexOf(".effort-visual {"), css.indexOf(".effort-rail {"));
-    expect(visual).toContain("pointer-events: none");
+    expect(app).toContain('from "./galaxy-effort.js"');
+    const ensure = bodyOf(app, "function ensureEffortSlider() {");
+    // Guarded on the instance AND on the factory: a renderer that somehow did
+    // not get the module must degrade to "no slider", not throw on every open.
+    expect(ensure).toContain("effortSlider !== null");
+    expect(ensure).toContain('createGalaxyEffort({');
+    expect(ensure).toContain('mount: $("effort-galaxy-mount")');
+    // Created on first open, not at module load: two canvases plus a RAF loop
+    // is a real cost for a conversation that never touches the slider.
+    const setPanel = bodyOf(app, "function setEffortPanel(open) {");
+    expect(setPanel).toContain("ensureEffortSlider()");
+  });
+
+  it("样式表两处都 link 了（应用与演示页看的是同一张卡片）", () => {
+    const html = read("index.html");
+    expect(html).toContain('href="galaxy-effort.css"');
+    const demo = read("galaxy-effort-demo.html");
+    expect(demo).toContain('href="./galaxy-effort.css"');
   });
 });
 
-describe("不自绘键盘处理，方向键交给原生 range", () => {
-  it("滑块只有一个发送点；另一个发送者是 Ctrl+E 循环，不是方向键", () => {
+describe("两个发送点：组件的提交与 Ctrl+E 循环", () => {
+  it("恰好两个 setEffort 发送者，且组件的提交走 onChange", () => {
     const app = read("app.js");
-    // Two senders exist and no more: the slider's `commitEffort` and the
-    // long-standing Ctrl+E cycle. Neither is an ArrowLeft/ArrowRight branch.
+    // The slider no longer has a `change` listener of its own: the component
+    // dispatches `effort-change` on commit and this is the single adapter.
     expect(app.match(/cmd: "setEffort"/g)).toHaveLength(2);
+    const ensure = bodyOf(app, "function ensureEffortSlider() {");
+    expect(ensure).toContain("onChange:");
+    expect(ensure).toContain("commitEffort(");
     const commit = bodyOf(app, "function commitEffort(tier) {");
     expect(commit).toContain('cmd: "setEffort"');
-    // The cycle's sender lives in the `key === "e"` branch of the shortcut
-    // handler; pin it there so a future "make arrows work by hand" edit has to
-    // move an assertion rather than slip in.
+    // The cycle lives in the `key === "e"` branch of the shortcut handler.
     const cycle = bodyOf(app, '} else if (key === "e") {');
     expect(cycle).toContain('cmd: "setEffort"');
-
-    const calls = [...app.matchAll(/commitEffort\(/g)].map((match) => match.index);
-    // One definition plus one call per listener: `change` on the range and
-    // `click` on the auto button.
-    expect(calls).toHaveLength(3);
-    const rangeChange = app.indexOf('effortRange.addEventListener("change"');
-    const autoClick = app.indexOf('$("effort-auto").addEventListener("click"');
-    expect(rangeChange).toBeGreaterThan(-1);
-    expect(autoClick).toBeGreaterThan(-1);
-    const callSites = calls.slice(1);
-    for (const site of callSites) {
-      const inside =
-        (site > rangeChange && site < rangeChange + 300) || (site > autoClick && site < autoClick + 300);
-      expect(inside, `commitEffort at ${site} is outside a change/click listener`).toBe(true);
-    }
   });
 
-  it("effort 的 keydown 分支不处理 ArrowLeft / ArrowRight", () => {
+  it("画到一半的拖动不会发命令（组件只在提交时派发事件）", () => {
+    // The component's own contract, asserted in galaxy-effort.test.js: `commit`
+    // is the only dispatcher and drags call `setTarget`, not `commit`. Here we
+    // only pin the adapter: `ensureEffortSlider` wires exactly one callback,
+    // `onChange` on commit — not a per-pixel `input`/`pointermove` of its own.
     const app = read("app.js");
-    const block = bodyOf(app, 'effortControl.addEventListener("keydown"');
-    expect(block).not.toContain("ArrowLeft");
-    expect(block).not.toContain("ArrowRight");
-    // Escape is the only key it takes: a panel that traps Escape would sit on
-    // top of the composer until the user clicked elsewhere.
-    expect(block).toContain('"Escape"');
+    const ensure = bodyOf(app, "function ensureEffortSlider() {");
+    expect(ensure).not.toContain('addEventListener("input"');
+    expect(ensure).not.toContain("pointermove");
+    expect(ensure.match(/onChange:/g)).toHaveLength(1);
   });
 
-  it("range 的 input 只重绘 ramp，不发命令（拖动不会排队上百条 setEffort）", () => {
+  it("Escape 先关面板并阻止冒泡，不让组件同时把档位拉回 Low", () => {
     const app = read("app.js");
-    const input = bodyOf(app, 'effortRange.addEventListener("input"');
-    expect(input).toContain("paintEffortTrack(");
-    expect(input).not.toContain("commitEffort(");
-    expect(input).not.toContain('cmd: "setEffort"');
+    const block = bodyOf(app, "effortPanel.addEventListener(\"keydown\"");
+    // Capture phase: the component's own keydown handler sits on a node this
+    // one does not own, so a bubble-phase listener would run after it — the
+    // tier would jump to Low and the panel would close on the same key.
+    expect(block).toContain("true);");
+    expect(block).toContain("stopPropagation()");
+    expect(block).toContain("preventDefault()");
+    expect(block).toContain("setEffortPanel(false)");
   });
 });
 
-describe("降低动效时关掉粒子与脉动", () => {
-  it("有一段 prefers-reduced-motion: reduce 覆盖粒子与光晕", () => {
-    const css = effortCss();
-    const start = css.indexOf("@media (prefers-reduced-motion: reduce)");
-    expect(start, "no reduced-motion block in the slider's styles").toBeGreaterThan(-1);
-    const block = css.slice(start, css.indexOf("\n}", css.indexOf(".effort-lit", start)) + 2);
-    expect(block).toContain(".effort-particles");
-    expect(block).toContain("animation: none");
-    expect(block).toContain(".effort-glow");
-    // The particles are hidden outright, not merely stopped: a frozen dot is
-    // still decoration the setting asked not to see.
-    expect(block).toContain("display: none");
+describe("减少动态：应用内开关要能传到组件", () => {
+  it("构造时传 reducedMotion，且它读的是 data-motion", () => {
+    const app = read("app.js");
+    const ensure = bodyOf(app, "function ensureEffortSlider() {");
+    expect(ensure).toContain("reducedMotion:");
+    expect(ensure).toContain('dataset.motion === "reduced"');
   });
 
-  it("脉动与漂浮动画确实只挂在最高档上", () => {
-    const css = effortCss();
-    const pulse = css.slice(css.indexOf(".effort-panel[data-tier=\"5\"] .effort-glow"));
-    expect(pulse.slice(0, 200)).toContain("animation: effort-pulse");
-    const particles = css.slice(css.indexOf('.effort-panel[data-tier="5"] .effort-particles'));
-    expect(particles.slice(0, 200)).toContain("opacity: 1");
-    // Below the top tier the particles layer is transparent, so no drifting
-    // dot draws at Low..Max.
-    expect(css).toContain(".effort-particles {\n  position: absolute;\n  inset: 0;\n  opacity: 0;");
-    expect(css).toContain("@keyframes effort-pulse");
-    expect(css).toContain("@keyframes effort-drift");
-  });
-
-  it("CSS 只用设计令牌，没有写死颜色", () => {
-    // The stylesheet's header says literal values are allowed only in the
-    // token block. A hex colour here would also break the light themes.
-    const css = effortCss();
-    const offenders = css.match(/#[0-9a-fA-F]{3,8}\b/g) ?? [];
-    // Two exceptions, both inside the dot layer's mask gradient: a mask's
-    // middle stop has to be fully opaque, and there is no token for "opaque".
-    expect(offenders).toStrictEqual(["#000", "#000", "#000", "#000"]);
-    // Everything that paints — rail, lit segment, dots, glow, particles, thumb
-    // — goes through a token.
-    expect(css).toContain("background: var(--surface)");
-    expect(css).toContain("var(--accent)");
-    expect(css).toContain("var(--accent-text)");
-    expect(css).toContain("var(--accent-soft)");
+  it("data-motion 变化时重建实例（组件看不出非媒体查询的开关）", () => {
+    const app = read("app.js");
+    // The component only reads `prefers-reduced-motion`; the app's own switch
+    // is an attribute. Rebuilding is how the two stay one setting instead of
+    // two — see the comment at the MutationObserver.
+    const at = app.indexOf('attributeFilter: ["data-motion"]');
+    expect(at).toBeGreaterThan(-1);
+    // The observer is registered right above the filter it names, so slice
+    // backwards to the `new MutationObserver(` that owns it.
+    const start = app.lastIndexOf("new MutationObserver(", at);
+    expect(start).toBeGreaterThan(-1);
+    const block = app.slice(start, at);
+    expect(block).toContain("destroy()");
+    expect(block).toContain("ensureEffortSlider()");
   });
 });
-
 describe("思考强度始终显示；不支持时靠说明，不靠隐藏（2026-11-09 用户决定）", () => {
   it("模型未声明支持时滑块仍在（宿主始终报六档）", () => {
     const app = read("app.js");
@@ -414,12 +397,16 @@ describe("思考强度这一块两种语言都是英文（2026-11-09 用户决�
     }
   });
 
-  it("app.js 通过同一个键模式取名字，两种语言切换后标签跟着换", () => {
+  it("芯片标签直接取英文常量，不经过字典（这一块整体不翻译）", () => {
     const app = read("app.js");
-    expect(app).toContain("effortTier${fallback}");
-    // The chip's label and the panel's stops are repainted from `t` on every
-    // locale change, not left as whatever the DOM was born with. The repaint
-    // goes through `setEffort`, which also rewrites the chip text.
+    const label = bodyOf(app, "function effortTierLabel(index) {");
+    // 2026-11-09：`effortTier*` 这组字典键已随「思考强度用英文」一起退场，
+    // 名字只剩一个来源 —— `EFFORT_TIER_LABELS`。再走一次 `t[...]` 就等于把
+    // 一个逐字相同的查表留在热路径上，且给了它第二次漂移的机会。
+    expect(label).toContain("EFFORT_TIER_LABELS");
+    expect(label).not.toContain("t[");
+    // 切语言仍要重画：`Auto` 与「sends high」那句还在字典里（两套都是英文，
+    // 但换语言时重新走一遍 setEffort 才不依赖「值恰好没变」）。
     const applyLocale = bodyOf(app, "function applyLocale(locale, { announce = false } = {}) {");
     expect(applyLocale).toContain("setEffort(state.effort)");
   });

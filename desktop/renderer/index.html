@@ -13,6 +13,9 @@
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="settings.css" />
+    <!-- The brain slider's own stylesheet. It is a separate file because the
+         demo page links it too; both must render the same card. -->
+    <link rel="stylesheet" href="galaxy-effort.css" />
   </head>
   <body>
     <div class="shell">
@@ -450,46 +453,25 @@
                          conversation to set an effort for. A model that would
                          drop the parameter gets a sentence in `#effort-note`
                          rather than a missing control. `syncEffortControl()` in
-                         app.js owns that decision. The chip opens a six-tier
-                         slider: a native `<input type="range">` carries
-                         keyboard, screen-reader and touch behaviour, and every
-                         visual layer above it is driven by the `--tier` custom
-                         property. -->
+                         app.js owns that decision.
+
+                         The panel is the brain slider (`galaxy-effort.js`,
+                         2026-11-09): it replaced a six-stop native range whose
+                         popover was too narrow for the card the spec defines
+                         (440×258). The component owns the track, the folds and
+                         the Galaxy layers; this file only supplies the mount
+                         point and the `Auto` escape hatch, which is not a
+                         seventh tier and therefore not on the track. -->
                     <div class="effort-control" id="effort-control" hidden>
                       <button class="chip-button effort-picker" id="effort-picker" aria-expanded="false" aria-controls="effort-panel">
                         <span id="effort-label">Auto</span>
                         <svg class="icon" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
                       </button>
                       <div class="effort-panel" id="effort-panel" role="group" aria-label="Thinking effort" hidden>
-                        <div class="effort-panel-head">
-                          <span class="effort-panel-title" data-i18n="effortLabel">Thinking</span>
+                        <div id="effort-galaxy-mount"></div>
+                        <div class="effort-panel-foot">
                           <button type="button" class="effort-auto" id="effort-auto" aria-pressed="true" data-i18n="effortAuto">Auto</button>
                           <span class="effort-auto-hint" id="effort-auto-hint"></span>
-                        </div>
-                        <div class="effort-track">
-                          <div class="effort-visual" aria-hidden="true">
-                            <div class="effort-rail"></div>
-                            <div class="effort-lit"></div>
-                            <div class="effort-dots"></div>
-                            <div class="effort-glow"></div>
-                            <div class="effort-particles"><i></i><i></i><i></i><i></i><i></i><i></i></div>
-                          </div>
-                          <input
-                            type="range" min="0" max="5" step="1"
-                            id="effort-range"
-                            class="effort-range"
-                            value="0"
-                            aria-label="Thinking effort"
-                            aria-describedby="effort-note"
-                          />
-                        </div>
-                        <div class="effort-scale" aria-hidden="true">
-                          <span data-tier-index="0" data-i18n="effortTierLow">Low</span>
-                          <span data-tier-index="1" data-i18n="effortTierMedium">Medium</span>
-                          <span data-tier-index="2" data-i18n="effortTierHigh">High</span>
-                          <span data-tier-index="3" data-i18n="effortTierExtra">Extra</span>
-                          <span data-tier-index="4" data-i18n="effortTierMax">Max</span>
-                          <span data-tier-index="5" data-i18n="effortTierGalaxy">Galaxy</span>
                         </div>
                         <div class="effort-fixed" id="effort-note" hidden></div>
                       </div>

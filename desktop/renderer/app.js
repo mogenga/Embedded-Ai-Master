@@ -11,7 +11,8 @@ import { providerMark } from "./provider-presets.js";
 import { providerRailRows, readProviderMeta } from "./provider-meta.js";
 import { VENDOR_MARKS } from "./vendor-marks.js";
 import { nextThinkingExpanded, normalizeTranscriptView, thinkingExpandedOnEnd } from "./thinking-view.js";
-import { EFFORT_TIER_LABELS, effortTierAt, effortTierIndex } from "./effort-tiers.js";
+import { EFFORT_TIER_LABELS, effortTierIndex } from "./effort-tiers.js";
+import { createGalaxyEffort } from "./galaxy-effort.js";
 
 /** Saved preferences are restored here; the host gets them on init. */
 const savedLocale = localStorage.getItem("prometheus.locale");
@@ -2885,11 +2886,20 @@ function effortLevels() {
  * Is a `setEffort` command awaiting the host's answer?
  *
  * A host that refuses a tier answers with a `notice` and no `state`, so the
- * thumb would keep the position the drag left it at while the next request
+ * slider would keep the position the drag left it at while the next request
  * carries the old value. This flag is what tells that refusal apart from an
  * unrelated notice arriving mid-drag.
  */
 let effortPending = false;
+
+/**
+ * The brain slider instance, or `null` before the panel has opened once.
+ *
+ * Created lazily: the component builds two canvases, an SVG and a RAF loop, and
+ * a conversation that never touches the slider should not pay for them. It is
+ * also the reason `destroy` exists — see `syncEffortControl`.
+ */
+let effortSlider = null;
 
 /**
  * Show the chip for the model the host just described.
@@ -2903,100 +2913,56 @@ let effortPending = false;
  *
  * The exception is a host with no model at all (`levels` empty for real): there
  * is no conversation to set an effort for, and the chip would be a button with
- * nothing behind it. That one still hides.
+ * nothing behind it. That one still hides — and tears the slider down, because
+ * a component that is still running its RAF loop behind a hidden chip is a bug
+ * nobody would look for.
  */
 function syncEffortControl() {
   const unavailable = effortLevels().length === 0;
   effortControl.hidden = unavailable;
-  // A model switch that takes the control away must also close its panel: the
-  // panel would otherwise still be `hidden = false` the next time a reasoning
-  // model comes back, popping open with nobody having asked for it. Direct
-  // lookups rather than the `effortPanel` / `effortPicker` constants, which
-  // are declared far below this and would be in their temporal dead zone if
-  // this ever ran during module evaluation.
+  // Direct lookups rather than the `effortPanel` / `effortPicker` constants,
+  // which are declared far below this and would be in their temporal dead zone
+  // if this ever ran during module evaluation.
   if (unavailable) {
     $("effort-panel").hidden = true;
     $("effort-picker").setAttribute("aria-expanded", "false");
+    if (effortSlider !== null) {
+      effortSlider.destroy();
+      effortSlider = null;
+    }
   }
 }
 
 /**
- * The tier's name in the current language, or the English fallback.
+ * The tier's display name for the chip.
  *
- * The dictionary key is built from the constant (`effortTier` + `Low`), so the
- * two lists cannot drift apart by a typo; a locale that is missing an entry
- * shows the English name rather than an empty stop on the track.
+ * The panel's stops are painted by the component itself (it owns the SVG and
+ * the track), so this is only about the seven-character label on the closed
+ * chip. `EFFORT_TIER_LABELS` is the English vocabulary by design — the operator
+ * asked for the effort control to stay untranslated.
  */
 function effortTierLabel(index) {
-  const fallback = EFFORT_TIER_LABELS[index] ?? "";
-  const text = t[`effortTier${fallback}`];
-  return typeof text === "string" && text.trim() !== "" ? text : fallback;
+  return EFFORT_TIER_LABELS[index] ?? "";
 }
 
 /**
- * Paint the intensity ramp for an index, without touching the range itself.
- *
- * `--tier` (0-5) is what every layer in the CSS derives its width, density and
- * glow from; `data-tier` is the state the top tier's pulse keys off. An index
- * below zero — `auto`, or a protocol-only value such as `minimal` from a host
- * that predates tiers — lights nothing: no stop is highlighted, and claiming
- * "Low" for a setting that is not "Low" would be the lie this rule exists to
- * avoid.
- */
-function paintEffortTrack(index) {
-  const panel = $("effort-panel");
-  panel.style.setProperty("--tier", String(index >= 0 ? index : 0));
-  if (index >= 0) panel.dataset.tier = String(index);
-  else delete panel.dataset.tier;
-  panel.querySelectorAll("[data-tier-index]").forEach((node) => {
-    node.classList.toggle("active", Number(node.dataset.tierIndex) === index);
-  });
-}
-
-function setEffort(effort) {
-  // The host answered (applied or not): any in-flight commit is settled, and
-  // a later `notice` for something else must not yank the thumb.
-  effortPending = false;
-  state.effort = effort;
-  const index = effortTierIndex(effort);
-  $("effort-label").textContent = effort === "auto"
-    ? t.effortAuto
-    : index >= 0
-      ? effortTierLabel(index)
-      : effort;
-  syncEffortControl();
-  renderEffortPanel();
-}
-
-/**
- * Repaint the panel from the state the host last confirmed.
+ * Point the chip and the panel at the state the host last confirmed.
  *
  * Called on every `state`/`session_loaded` (through `setEffort`) and after a
  * refused `setEffort` — the host answers a refusal with a `notice` and no new
- * `state`, so without this the thumb would stay where the drag left it while
+ * `state`, so without this the brain would stay where the drag left it while
  * the request carried the old value.
  */
 function renderEffortPanel() {
   const choices = state.effortChoices ?? {};
-  const panel = $("effort-panel");
-  // Both names come from the dictionary and change with the language: the
-  // headless sweep (`[data-i18n]`) cannot reach an attribute, and the range
-  // has no visible text of its own to be named by.
-  panel.setAttribute("aria-label", t.effortLabel);
-  $("effort-range").setAttribute("aria-label", t.effortLabel);
-  panel.querySelectorAll("[data-tier-index]").forEach((node) => {
-    node.textContent = effortTierLabel(Number(node.dataset.tierIndex));
-  });
+  $("effort-panel").setAttribute("aria-label", t.effortLabel);
 
+  // `auto` is not a tier. The brain parks at the low end but stays unlit, and
+  // no stop is highlighted, so the track never claims a selection the request
+  // does not carry. A protocol-only value (`minimal` from an older run.json) is
+  // the same case.
   const index = effortTierIndex(state.effort);
-  // A range has no "unset" position: when the value is `auto` (or a protocol
-  // value that is not a tier) the thumb parks at the low end, but the ramp is
-  // unlit and no stop is highlighted, so the track never claims a selection.
-  const range = $("effort-range");
-  range.value = String(index >= 0 ? index : 0);
-  if (index >= 0) range.setAttribute("aria-valuetext", effortTierLabel(index));
-  else range.removeAttribute("aria-valuetext");
-  paintEffortTrack(index);
+  if (effortSlider !== null) effortSlider.setValue(index >= 0 ? index : 0, { silent: true });
 
   $("effort-auto").setAttribute("aria-pressed", String(state.effort === "auto"));
   // The hint slot answers one question in both states: what will actually go on
@@ -3022,6 +2988,21 @@ function renderEffortPanel() {
   const noteNode = $("effort-note");
   noteNode.textContent = note;
   noteNode.hidden = note === "";
+}
+
+function setEffort(effort) {
+  // The host answered (applied or not): any in-flight commit is settled, and
+  // a later `notice` for something else must not yank the thumb.
+  effortPending = false;
+  state.effort = effort;
+  const index = effortTierIndex(effort);
+  $("effort-label").textContent = effort === "auto"
+    ? t.effortAuto
+    : index >= 0
+      ? effortTierLabel(index)
+      : effort;
+  syncEffortControl();
+  renderEffortPanel();
 }
 
 /* ---------- model picker ---------- */
@@ -7528,12 +7509,45 @@ function addMentionPath(path) {
 
 const effortPicker = $("effort-picker");
 const effortPanel = $("effort-panel");
-const effortRange = $("effort-range");
+
+/**
+ * Build the brain slider into `#effort-galaxy-mount`, once.
+ *
+ * Lazy for two reasons: the component allocates two canvases and starts a RAF
+ * loop, and a conversation that never opens the panel should not pay for
+ * either. The `reducedMotion` flag is the app's own motion switch (Settings →
+ * appearance), not the OS one — the component already ORs in
+ * `prefers-reduced-motion` itself, so passing the in-app setting is what makes
+ * both switches work without duplicating the media query here.
+ */
+function ensureEffortSlider() {
+  if (effortSlider !== null || typeof createGalaxyEffort !== "function") return;
+  effortSlider = createGalaxyEffort({
+    mount: $("effort-galaxy-mount"),
+    value: Math.max(0, effortTierIndex(state.effort)),
+    reducedMotion: document.documentElement.dataset.motion === "reduced",
+    onChange: (detail) => commitEffort(detail.level.toLowerCase()),
+  });
+}
 
 function setEffortPanel(open) {
-  if (open) renderEffortPanel();
+  if (open) {
+    // Create before painting: `renderEffortPanel` pushes the confirmed tier
+    // into the instance, and an instance built after that push would sit at
+    // Low for one frame.
+    ensureEffortSlider();
+    renderEffortPanel();
+  }
   effortPanel.hidden = !open;
   effortPicker.setAttribute("aria-expanded", String(open));
+  if (open && effortSlider !== null) {
+    // The panel was `hidden`, so the slider could not take focus when the
+    // chip was clicked. Handing focus over is what makes the arrow keys work
+    // immediately after opening, and it is what the closed-chip → open-panel
+    // gesture implies.
+    const focusTarget = effortPanel.querySelector('[role="slider"]');
+    if (focusTarget !== null) focusTarget.focus();
+  }
 }
 
 effortPicker.addEventListener("click", (event) => {
@@ -7555,22 +7569,6 @@ function commitEffort(tier) {
   api.send({ cmd: "setEffort", effort: tier });
 }
 
-// `input` fires while the thumb is dragged. The ramp follows immediately
-// because the slider is the thing being manipulated, but no command is sent
-// until the drag ends — a range throws one `change` per gesture, while `input`
-// fires on every pixel and a command per pixel would queue hundreds of
-// `setEffort` writes.
-effortRange.addEventListener("input", () => {
-  paintEffortTrack(Number(effortRange.value));
-});
-
-// Keyboard and pointer both end here: the browser fires `change` for an arrow
-// key, a Home/End jump and a thumb release alike. ArrowLeft/Right are NOT
-// handled by us — the native range already moves by `step` and fires this.
-effortRange.addEventListener("change", () => {
-  commitEffort(effortTierAt(effortRange.value));
-});
-
 $("effort-auto").addEventListener("click", (event) => {
   event.stopPropagation();
   commitEffort("auto");
@@ -7580,15 +7578,35 @@ document.addEventListener("click", (event) => {
   if (!event.target.closest("#effort-control")) setEffortPanel(false);
 });
 
-// Escape closes the panel like every other composer popover. Escape on a
-// focused range is not otherwise meaningful, and the window-level chain runs
-// after this one, so the panel closes before "abort the turn" is considered.
-effortControl.addEventListener("keydown", (event) => {
+// Escape closes the panel like every other composer popover. The slider itself
+// binds Escape to "back to Low" (spec §3), so this handler has to run first and
+// stop there: a key that both moves the tier and closes the panel would do
+// something the operator did not ask for. Capture phase, because the component's
+// listener sits on a node this one does not own.
+effortPanel.addEventListener("keydown", (event) => {
   if (event.key !== "Escape" || effortPanel.hidden) return;
   event.stopPropagation();
+  event.preventDefault();
   setEffortPanel(false);
   effortPicker.focus();
-});
+}, true);
+
+// The in-app motion switch (`documentElement.dataset.motion`) is not a media
+// query, so the component cannot see it — it only reads
+// `prefers-reduced-motion` itself. Rebuilding the instance is the honest way to
+// apply a preference the component took at construction: the alternative is a
+// second, app-only "am I reduced" check inside the render loop, which would be
+// one more place to keep in sync. The tier is re-read from `state.effort` on
+// rebuild, so nothing the operator chose is lost.
+new MutationObserver(() => {
+  if (effortSlider === null) return;
+  effortSlider.destroy();
+  effortSlider = null;
+  if (!effortPanel.hidden) {
+    ensureEffortSlider();
+    renderEffortPanel();
+  }
+}).observe(document.documentElement, { attributes: true, attributeFilter: ["data-motion"] });
 
 modelPicker.addEventListener("click", (event) => {
   event.stopPropagation();
