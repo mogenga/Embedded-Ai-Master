@@ -19,7 +19,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -96,14 +96,25 @@ export async function checkFile(file) {
     } catch (error) {
       return `读取失败：${error instanceof Error ? error.message : String(error)}`;
     }
+    let module;
     try {
       // 只构造，不求值：构造过程就是完整的 V8 解析，`link` / `evaluate` 不参与。
-      new SourceTextModule(source, { identifier: path.resolve(file) });
-      return undefined;
+      module = new SourceTextModule(source, { identifier: path.resolve(file) });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return `${path.relative(ROOT, file)}: ${message}`;
     }
+    // 解析通过还不够：**具名 import 必须真的存在**。
+    //
+    // 这是 2026-11-09 的事故补上的一层：删掉 `link-policy.js` 的两个导出后，
+    // `main.js` 的 `import { blockedRevealText }` 仍在。语法检查全绿、tsc 看不见
+    // （`main.js` 不在 include 里）、没有任何测试加载 `main.js`，于是应用**打不开**
+    // 而 CI 一句话不说。`link()` 会在链接期解析真实导出，正好抓这一类。
+    //
+    // 只校验相对路径：裸包名可能属于另一个模块图（`electron` 之类），由 Electron
+    // 或 Node 解析，这里替它判只会制造假阳性。
+    const missing = await missingLocalExports(source, file, SourceTextModule);
+    return missing;
   }
   // 回退：与旧实现逐字等价。`.cjs` 与拿不到构造器时都走这里。
   try {
@@ -113,6 +124,121 @@ export async function checkFile(file) {
     const detail = `${error.stdout ?? ""}${error.stderr ?? ""}`.trim();
     return detail === "" ? `node --check 退出码 ${error.code}` : detail;
   }
+}
+
+/**
+ * 这个文件里有没有指向不存在的本地导出的 `import { … }`。
+ *
+ * 用 `SourceTextModule.link` 而不是自己解析 import 语句：链接器知道的事比正则多
+ * ——`export * from` 的再导出、`export { x as y }` 的改名、`default` 与
+ * `export { x as default }` 的区别，全都由它按真实模块图算出来。
+ *
+ * 链接目标只有两种情况：能解析到磁盘上的相对模块，就给它一个构造好的
+ * `SourceTextModule`；否则（裸包名、`.json`、不存在）用一个返回空导出集的桩。
+ * 桩是**故意宽松**的：那些模块由 Node / Electron 解析，本脚本没有能力也不应该
+ * 替它们判断，报一个假失败会让人不再信这个检查。
+ *
+ * @returns 通过时 `undefined`，否则是一行带文件名的说明。
+ */
+/**
+ * A copy of this source with every **non-relative** static import removed.
+ *
+ * Why this is necessary rather than clever: `SourceTextModule.link` asks for
+ * *every* dependency and demands the exact export names, so a builtin or a
+ * package (`node:fs/promises`, `electron`) can only be satisfied by a real
+ * module — which `SourceTextModule` cannot make out of a builtin at all. Given
+ * an empty stand-in, every `import { copyFile } from "node:fs/promises"` is a
+ * failure, and a check that reports those is a check people turn off.
+ *
+ * Stripping the line removes that whole class of false positive while keeping
+ * the one this check exists for. The rewrite is line-based and therefore
+ * deliberately narrow: it only matches a **single-line** `import … from "…"`
+ * whose specifier does not start with `./` or `../`. Nothing is executed, and
+ * a multi-line or unusual form simply goes unlinked (no failure either way).
+ */
+function withoutExternalImports(source) {
+  // Multiline form (`import {\n  a,\n  b,\n} from "node:fs";`) is the house
+  // style in `scripts/`, so the pattern spans lines. It is anchored on the
+  // statement's own `from "…"` clause rather than on `^import` alone, which is
+  // what keeps it from swallowing a multi-import block at once.
+  // `[\s\S]*?` spans the multiline form; the lazy quantifier stops at the
+  // first `from "…"`, which is this statement's own clause because an import
+  // declaration has exactly one. Comments between clauses are not expected
+  // in an import block in this repo, and if one appeared the statement simply
+  // would not be stripped — leaving a false positive, never a missed real one.
+  const EXTERNAL_IMPORT = /^[ \t]*import\s[\s\S]*?from\s*["'](?!\.\.?\/)[^"']*["'];?[ \t]*$/gm;
+  return source.replace(EXTERNAL_IMPORT, "");
+}
+
+async function missingLocalExports(source, file, SourceTextModule) {
+  const body = withoutExternalImports(source);
+  // Nothing local to link: the file only imports builtins and packages, which
+  // this check by design cannot judge.
+  if (!/^\s*import\s/m.test(body)) return undefined;
+
+  let subject;
+  try {
+    subject = new SourceTextModule(body, { identifier: path.resolve(file) });
+  } catch {
+    // The original source failed to parse; that is reported by the caller and
+    // is a different failure from a missing export.
+    return undefined;
+  }
+
+  const locals = new Map();
+  try {
+    await subject.link(async (specifier) => {
+      const resolved = await resolveLocalSpecifier(file, specifier);
+      if (resolved === undefined) {
+        return new SourceTextModule("", { identifier: specifier });
+      }
+      if (!locals.has(resolved)) {
+        const target = await readFile(resolved, "utf8");
+        // The dependency gets the **same** external-import stripping: what is
+        // being checked is the edge between this file and its local target,
+        // and a `node:*` clause inside the target would otherwise fail the
+        // link for a reason that has nothing to do with this file. Its own
+        // pass checks its own edges.
+        locals.set(resolved, new SourceTextModule(withoutExternalImports(target), { identifier: resolved }));
+      }
+      return locals.get(resolved);
+    });
+    return undefined;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("does not provide an export")) return undefined;
+    return `${path.relative(ROOT, file)}: ${message}（本地模块里没有这个导出，应用会在加载时报错）`;
+  }
+}
+
+/**
+ * 把一个相对 import 说明符解析成磁盘路径，解析不了时 `undefined`。
+ *
+ * 只处理 `./` 与 `../`：其余（`node:*`、裸包名）留给运行时。省略扩展名时按
+ * ESM 的规则试 `.js` / `.mjs` / `/index.js`——本仓库没有打包器，写 `./x`
+ * 的地方确实就是这么解析的。
+ */
+async function resolveLocalSpecifier(fromFile, specifier) {
+  // Only relative paths. `node:*` and bare specifiers resolve to real modules
+  // with real export sets, but linking them here means holding the whole
+  // builtin module graph in this process — and `SourceTextModule` cannot
+  // produce one for a builtin at all. Stubbing them (the old body of this
+  // check) made every `import { access } from "node:fs/promises"` a false
+  // positive, which is worse than not checking them: a check that cries wolf
+  // gets ignored. Which is also why this function's caller passes a stub for
+  // them and never reports on them.
+  if (!specifier.startsWith("./") && !specifier.startsWith("../")) return undefined;
+  const base = path.resolve(path.dirname(fromFile), specifier);
+  const candidates = path.extname(base) === "" ? [`${base}.js`, `${base}.mjs`, path.join(base, "index.js")] : [base];
+  for (const candidate of candidates) {
+    try {
+      const info = await stat(candidate);
+      if (info.isFile()) return candidate;
+    } catch {
+      /* try the next candidate */
+    }
+  }
+  return undefined;
 }
 
 async function main() {

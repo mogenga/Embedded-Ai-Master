@@ -38,10 +38,8 @@ import {
 import {
   blockedExternalText,
   blockedNavigationText,
-  blockedRevealText,
   checkExternalUrl,
   checkNavigationTarget,
-  checkRevealTarget,
 } from "./link-policy.js";
 import { createUpdater } from "./updater.js";
 
