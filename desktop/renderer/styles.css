@@ -3961,12 +3961,6 @@ mark.find-hit.current {
   text-transform: capitalize;
 }
 
-.effort-fixed {
-  padding: 7px 10px;
-  font-size: var(--text-sm);
-  color: var(--text-faint);
-}
-
 #input {
   flex: 1;
   resize: none;
@@ -5018,18 +5012,58 @@ mark.find-hit.current {
 /* The row under the card. `Auto` keeps the composer's own spacing rather than
    the card's interior geometry — it is chrome this app added, not part of the
    spec'd component. */
+/* Everything that is not the spec'd card: `Auto` and the disclosure sentence.
+   It is moved *into* `.ge-card` on the first open (`ensureEffortSlider`), and
+   drawn below the card's 258px box so the spec's own size stays untouched.
+
+   **Positioning stays in layout units** — `left/right: 22px` is the card's own
+   inset, and because the extras live inside the scaled root it comes out at
+   the card's visual edge automatically (22 × 0.68 = 15px, aligned with the
+   title). Width therefore needs no arithmetic at all.
+
+   **Type does not.** `Auto` is a real control a person clicks; letting the
+   card's 0.68 shrink a 12px label to 8px would be a control the operator has
+   to squint at. So font size and padding are divided by the scale, which is
+   the same single source `--ge-scale` the card is scaled by. At scale 1 (the
+   demo page) these divisions are no-ops.
+
+   `layoutEffortExtras()` in app.js writes the card's extra height from this
+   block's measured layout height. */
+.effort-extras {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  top: 258px;
+  padding-top: calc(10px / var(--ge-scale, 1));
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: calc(13px / var(--ge-scale, 1));
+  line-height: 1.45;
+}
+
+/* Before the component exists there is no card to move into; the extras fall
+   back to a plain block under the mount so `Auto` is never unreachable. */
+.effort-panel > .effort-extras {
+  position: static;
+  padding-top: 8px;
+  font-family: inherit;
+  font-size: var(--text-xs);
+}
+
 .effort-panel-foot {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 2px 0;
 }
 
+/* Auto reads as a composer chip, not as card interior: it is chrome this app
+   added, and the card's own vocabulary is "no controls, only the slider". Sizes
+   divided by the card's scale for the same reason the extras' font size is —
+   see the comment above `.effort-extras`. */
 .effort-auto {
-  padding: 3px 10px;
+  padding: calc(3px / var(--ge-scale, 1)) calc(10px / var(--ge-scale, 1));
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
+  font-size: calc(var(--text-xs) / var(--ge-scale, 1));
   color: var(--text-secondary);
   transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
 }
@@ -5049,42 +5083,18 @@ mark.find-hit.current {
    map onto one value). Right-aligned so the button keeps the left edge. */
 .effort-auto-hint {
   margin-left: auto;
-  font-size: var(--text-xs);
+  font-size: calc(var(--text-xs) / var(--ge-scale, 1));
   color: var(--text-faint);
   font-variant-numeric: tabular-nums;
 }
 
-/* The disclosure sentence, drawn *inside* the card (2026-11-09, by request:
-   "声明融合进卡片"). It is a property of the model, the same kind of fact as
-   the tier name and the mapped value, so it belongs on the same surface.
-
-   The card's own 258px is the spec's checked size and the note is not part of
-   it, so the note sits **below** that box and the card grows by exactly the
-   note's measured height (`--ge-note-h`, written by `layoutEffortNote()` in
-   app.js). A fixed larger height would clip a three-line note on a narrow
-   window; measuring is the only version that cannot. */
-.effort-panel #effort-note {
-  position: absolute;
-  left: 22px;
-  right: 22px;
-  top: 258px;
-  padding: 6px 0 12px;
-  font-family: Arial, Helvetica, sans-serif;
-  font-size: 13px;
+/* The disclosure sentence, inside the card with the Auto button. Dim, not a
+   warning: "this model takes no effort parameter" is a property of the model,
+   not a fault the operator caused. Font size comes from `.effort-extras`. */
+.effort-fixed {
+  padding: 8px 0 0;
   line-height: 1.45;
   color: #848484;
-}
-
-/* Before the component exists the note has no card to live in; it falls back
-   to the plain block so the sentence is never invisible. `layoutEffortNote()`
-   moves it into `.ge-card` on the first open. */
-.effort-panel > #effort-note {
-  position: static;
-  padding: 6px 2px 0;
-  font-family: inherit;
-  font-size: var(--text-xs);
-  line-height: 1.5;
-  color: var(--text-faint);
 }
 
 /* ---------- model picker ---------- */

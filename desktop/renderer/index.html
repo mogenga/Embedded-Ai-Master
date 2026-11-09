@@ -469,14 +469,24 @@
                       </button>
                       <div class="effort-panel" id="effort-panel" role="group" aria-label="Thinking effort" hidden>
                         <div id="effort-galaxy-mount"></div>
-                        <div class="effort-panel-foot">
-                          <button type="button" class="effort-auto" id="effort-auto" aria-pressed="true" data-i18n="effortAuto">Auto</button>
-                          <span class="effort-auto-hint" id="effort-auto-hint"></span>
+                        <!-- 卡片以外的所有东西都收在这一块里，打开时整块搬进
+                             `.ge-card`（`ensureEffortSlider`）。
+
+                             为什么要搬：Auto 与那句声明都是这个模型的属性，
+                             和档位名、映射结果属于同一类信息，落在卡片外面读
+                             起来像与应用其余部分无关的附着物（用户 2026-11-09
+                             两次要求「融合进卡片」）。
+
+                             为什么整块而不是逐个搬：它们要一起被反向缩放，才能
+                             在缩小后的卡片里保持正常的字号——见
+                             `layoutEffortExtras()`。 -->
+                        <div class="effort-extras" id="effort-extras">
+                          <div class="effort-panel-foot">
+                            <button type="button" class="effort-auto" id="effort-auto" aria-pressed="true" data-i18n="effortAuto">Auto</button>
+                            <span class="effort-auto-hint" id="effort-auto-hint"></span>
+                          </div>
+                          <div class="effort-fixed" id="effort-note" hidden></div>
                         </div>
-                        <!-- 声明画在卡片里，不是卡片下面：它是这个模型的性质，
-                             与档位名、映射结果属于同一类信息，放在同一张
-                             卡上才读得成一句话。空槽时整块不占位。 -->
-                        <div class="effort-fixed" id="effort-note" hidden></div>
                       </div>
                     </div>
                     <div class="composer-actions">

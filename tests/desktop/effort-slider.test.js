@@ -187,7 +187,7 @@ describe("面板换成脑形滑块之后，接线仍然完整", () => {
     // 高度不写死 —— 声明句多长它就得长多高，由 `layoutEffortNote()` 量出来写。
     const mount = css.slice(css.indexOf("#effort-galaxy-mount {"), css.indexOf("}", css.indexOf("#effort-galaxy-mount {")));
     expect(mount).toContain("width: 300px");
-    const layout = bodyOf(app, "function layoutEffortNote() {");
+    const layout = bodyOf(app, "function layoutEffortExtras() {");
     expect(layout).toContain("offsetHeight");
     expect(layout).toContain("mount.style.height");
     expect(layout).toContain("card.style.minHeight");
@@ -203,6 +203,29 @@ describe("面板换成脑形滑块之后，接线仍然完整", () => {
     // compute with it. Searching the raw text would fail on the explanation.
     const code = app.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     expect(code.match(/0\.68/g) ?? []).toHaveLength(0);
+  });
+
+  it("Auto 与声明一起搬进卡片，字号按 1/scale 抵掉卡片的缩小", () => {
+    const app = read("app.js");
+    const ensure = bodyOf(app, "function ensureEffortSlider() {");
+    // 2026-11-09 用户原话「auto 也要含进卡片里」「声明融合进卡片」。
+    // 两者同属一块（`#effort-extras`），一起搬。
+    expect(ensure).toContain('$("effort-extras")');
+    expect(ensure).toContain("card.append(");
+    const layout = bodyOf(app, "function layoutEffortExtras() {");
+    // 关着的时候量不到（display: none → 0），不能在那种状态下写高度。
+    expect(layout).toContain('$("effort-panel").hidden');
+    expect(layout).toContain("offsetHeight");
+    const css = read("styles.css");
+    expect(css).toContain("top: 258px");
+    // 卡片缩到 0.68，Auto 是人点的真控件：字号与内边距除以同一个 --ge-scale。
+    // 用 transform 反向放大也行不通——位置会跟着变，而这一块要贴着卡片下缘。
+    const extras = css.slice(css.indexOf(".effort-extras {"), css.indexOf("}", css.indexOf(".effort-extras {")));
+    expect(extras).toContain("calc(13px / var(--ge-scale, 1))");
+    expect(css).toContain("calc(var(--text-xs) / var(--ge-scale, 1))");
+    // 位置留在布局单位里：left/right 就是卡片的 22px 内缩，缩放后自动落在
+    // 卡片视觉边缘上（22 × 0.68 = 15）。
+    expect(extras).toContain("left: 22px");
   });
 
   it("样式表两处都 link 了（应用与演示页看的是同一张卡片）", () => {

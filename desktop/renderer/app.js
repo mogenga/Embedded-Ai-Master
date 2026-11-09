@@ -2988,38 +2988,44 @@ function renderEffortPanel() {
   const noteNode = $("effort-note");
   noteNode.textContent = note;
   noteNode.hidden = note === "";
-  layoutEffortNote();
+  layoutEffortExtras();
 }
 
 /**
- * Make the card as tall as the note needs.
+ * Size the card for the controls that now live inside it, and un-shrink them.
  *
- * The card's 258px comes from the spec and is not ours to change; the note is
- * *ours*, and its height depends on the text and the window width. So the
- * card's `min-height` and the panel's height are set from the note's own
- * measured height each time the text changes — a fixed extra height would clip
- * a three-line note and leave a gap under a one-line one.
+ * Two separate jobs, both forced by putting `Auto` and the note on the card:
  *
- * `#effort-note` is absolutely positioned below the card's 258px box, so
- * measuring it does not feed back into the card's height and oscillate.
+ * 1. **Height.** The card's 258px is the spec's checked value and the extras
+ *    are ours, so the card grows by exactly the extras' measured height. A
+ *    fixed extra would clip a three-line note on a narrow window.
+ *
+ * 2. **Type size.** The extras sit inside `.ge-root`, which is
+ *    `transform: scale(--ge-scale)`; at 0.68 an 11px label renders at 7.5px.
+ *    The card's own text is meant to shrink *as a picture* of the spec, but
+ *    the Auto button is a real control a person clicks, so it is scaled back
+ *    up by `1/scale`. That keeps it at its nominal size while still tracking
+ *    the card's position.
+ *
+ * The extras are absolutely positioned below the card's 258px box, so
+ * measuring them cannot feed back into the card's height and oscillate.
  */
-function layoutEffortNote() {
-  const note = $("effort-note");
-  const card = note.parentElement;
+function layoutEffortExtras() {
+  const extras = $("effort-extras");
+  const card = extras.parentElement;
   if (card === null || !card.classList.contains("ge-card")) return;
   // 弹层关着的时候整棵子树是 `display: none`，`offsetHeight` 量出来是 0。
   // `renderEffortPanel` 每个 `state` 事件都会跑（包括面板没打开的时候），
-  // 所以这里必须自己识别这个状态，否则会把卡片的 `min-height` 写回 258px ——
-  // 面板真打开时声明句就会压到 `Auto` 那一行上。打开时 `setEffortPanel`
-  // 会再调一次，那次量得到。
+  // 所以这里必须自己识别这个状态，否则会把卡片高度写回 258 —— 面板真打开时
+  // extras 就会压到轨道上。打开时 `setEffortPanel` 会再调一次，那次量得到。
   if ($("effort-panel").hidden) return;
   const mount = $("effort-galaxy-mount");
   const scale = Number.parseFloat(getComputedStyle(mount).getPropertyValue("--ge-scale")) || 1;
-  // `offsetHeight` 是**未缩放**坐标空间里的布局高度：声明句在缩放的那棵树里，
-  // 但它自己的 border-box 不受祖先 transform 影响。
-  const extra = note.hidden ? 0 : note.offsetHeight;
+  // `offsetHeight` 量的是**变换之前**的布局高度。字号与内边距已经按
+  // `1/--ge-scale` 放大过（CSS 里那几处 `calc(… / var(--ge-scale))`），所以
+  // 这里的数就是逻辑空间里的真实高度，乘回 `scale` 才等于它在屏幕上占的位置。
+  const extra = extras.hidden ? 0 : extras.offsetHeight;
   card.style.minHeight = `${258 + extra}px`;
-  // 占位盒要跟着长，否则 `Auto` 那一行会压在声明句上。乘同一个 `--ge-scale`。
   mount.style.height = `${(258 + extra) * scale}px`;
 }
 
@@ -7561,12 +7567,13 @@ function ensureEffortSlider() {
     reducedMotion: document.documentElement.dataset.motion === "reduced",
     onChange: (detail) => commitEffort(detail.level.toLowerCase()),
   });
-  // 声明句画进卡片里（2026-11-09 用户要求）。它说的是这个模型的性质，与档位
-  // 名、映射结果是一类信息；留在卡片外面时读起来像一条与应用其余部分无关的
-  // 附着物。卡片是组件建的，所以只能在这里接管一个节点——`#effort-note` 在
-  // 标记里仍然写在 `#effort-panel` 内，作为「组件没建起来」时的位置。
+  // 卡片以外的所有东西（Auto 与声明句）搬进卡片（2026-11-09 用户要求
+  // 「auto 也要含进卡片里」「声明融合进卡片」）。它们是这个控件的设置与模型
+  // 属性，不是卡片旁边的一条附着物。卡片是组件建的，所以只能在这里接管一个
+  // 节点——`#effort-extras` 在标记里仍然写在 `#effort-panel` 内，作为「组件
+  // 没建起来」时的落点。
   const card = $("effort-galaxy-mount").querySelector(".ge-card");
-  if (card !== null) card.append($("effort-note"));
+  if (card !== null) card.append($("effort-extras"));
 }
 
 function setEffortPanel(open) {
