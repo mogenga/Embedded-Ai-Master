@@ -1095,15 +1095,16 @@ describe("CSS 落实规格 §1 的数值", () => {
     expect(tall).toContain("rgba(255, 255, 255, .27)");
   });
 
-  it("单档：拖动手柄不显示、cursor: default、不画焦点框", () => {
+  it("单档：pointer-events 收回、cursor: default，焦点框保留", () => {
     // `data-single` 由 JS 写在根节点上（见上面对应的用例）。样式表只负责
     // 视觉与指针：`pointer-events: none` 收回整条命中区，`cursor: default`
-    // 去掉"可以拖"的手型，焦点框也去掉（没有可做的动作）。
+    // 去掉"可以拖"的手型。
     const single = CSS.slice(CSS.indexOf('.ge-root[data-single="true"] .ge-slider {'));
     expect(single).toContain("pointer-events: none");
     expect(single).toContain("cursor: default");
-    const focus = CSS.slice(CSS.indexOf('.ge-root[data-single="true"] .ge-slider:focus-visible'));
-    expect(focus).toContain("outline: none");
+    // 焦点框**不**去掉：控件仍在 Tab 序列里，一个看得见却按不动的控件
+    // 仍然需要看得见的焦点。谁把这条去掉，键盘用户就找不到自己了。
+    expect(CSS).not.toMatch(/\[data-single="true"\][^{]*:focus-visible[^{]*\{[^}]*outline:\s*none/);
   });
 
   it("CSS 里没有写死「六档」的刻度位置或点数", () => {

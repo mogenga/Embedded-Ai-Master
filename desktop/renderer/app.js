@@ -7543,9 +7543,9 @@ function ensureEffortSlider() {
 
 function setEffortPanel(open) {
   if (open) {
-    // Create before painting: `renderEffortPanel` pushes the confirmed tier
+    // Create before painting: `renderEffortPanel` pushes the confirmed stop
     // into the instance, and an instance built after that push would sit at
-    // Low for one frame.
+    // the wrong stop for one frame.
     ensureEffortSlider();
   }
   // Unhide **before** painting: `renderEffortPanel` pushes the confirmed stop
@@ -7555,14 +7555,13 @@ function setEffortPanel(open) {
   effortPicker.setAttribute("aria-expanded", String(open));
   if (open) {
     renderEffortPanel();
-    if (effortSlider !== null) {
-      // The panel was `hidden`, so the slider could not take focus when the
-      // chip was clicked. Handing focus over is what makes the arrow keys work
-      // immediately after opening, and it is what the closed-chip → open-panel
-      // gesture implies.
-      const focusTarget = effortPanel.querySelector('[role="slider"]');
-      if (focusTarget !== null) focusTarget.focus();
-    }
+    // **Not** focusing the slider here (2026-11-09). Opening a panel with the
+    // mouse is not a keyboard gesture, and the slider's focus ring
+    // (`outline-offset: 4px`, spec §3) is drawn past its own 72px hit area —
+    // which ends exactly where "Recommended" begins. Auto-focusing made that
+    // ring appear on every open, drawn over the label. The slider keeps
+    // `tabindex="0"`, so Tab still reaches it and the ring still appears when
+    // the operator actually uses the keyboard, which is what the spec asks for.
   }
 }
 

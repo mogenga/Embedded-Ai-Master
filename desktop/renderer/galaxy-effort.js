@@ -2,11 +2,14 @@
  * 脑形思考强度滑块（Galaxy Effort Slider）—— 组件本体。
  *
  * 事实源是 `docs/specs/galaxy-effort-slider.md`：§1 的结构与尺寸、§2 的脑形
- * 与褶皱、§3 的输入与无障碍、§4 的运动、§6 的清理。所有数学（弹簧、褶皱
- * 揭示、色板插值、Galaxy 派生量）都在 `./galaxy-effort-core.js` 里，两个
- * Canvas 图层在 `./galaxy-effort-layers.js` 里——本文件不重写公式、不复制常量。
- * 复制一份的后果不是多写几行：同一次拖拽里脑形、轨道填充与粒子会各按不同公式
- * 走，那种偏差肉眼可见，却没有哪条测试抓得住。
+ * 与褶皱、§3 的输入与无障碍、§4 的运动、§6 的清理。弹簧、色板插值、Galaxy
+ * 派生量与 Canvas 图层仍来自 `./galaxy-effort-core.js` 与
+ * `./galaxy-effort-layers.js`——本文件不重写它们。
+ *
+ * **例外是两处把档位数写进定义域的纯函数**：core 的 `trackX` 与 `foldReveal`
+ * 把位置钳在 0..5 再除以 5 / 把 level 当位置用，那是六档验收的产物；档位改成
+ * 由宿主决定之后，这里的 `trackXAt` 与 `foldRevealAt` 按当前跨度重算了同样的
+ * 公式（两处都有注释说明推导）。core 一个字符都没改——它被 51 条测试钉着。
  *
  * 顶层只有 import、常量与函数声明，不碰 `document` / `window` /
  * `requestAnimationFrame`。这不只是洁癖：`tests/desktop/*` 会在 Node 里静态
@@ -134,6 +137,10 @@ const CHAR_STAGGER_MS = 15;
  *
  * 单档或三档时 `levelPos` 不再是整数 1..5（见 `foldRevealAt`），但窗口本身的形状
  * 是规格给的，不随档位数改。
+ *
+ * **已知后果（2026-11-09，未修，留给产品决定）**：五层按 `span` 均分，档位越少，
+ * 最低档的褶皱越多。三档时 p=0 处第 1 层的 reveal 是 0.7085（六档时是 0）——最低档
+ * 不再是「只有主沟」。要让它仍是主沟，得改成按比例只启用前 N 层，那是改规格。
  */
 const FOLD_WINDOW_LEAD = 0.85;
 const FOLD_WINDOW_WIDTH = 0.7;
@@ -723,17 +730,20 @@ export function createGalaxyEffort(options = {}) {
     labelRun += 1;
     const run = labelRun;
     tierLabel.textContent = "";
-    const spans = [];
+    const letters = [];
     for (const char of text) {
-      const span = element("span", "ge-char");
-      span.textContent = char;
-      spans.push(span);
-      tierLabel.append(span);
+      // 不叫 `span`：外层闭包里 `span` 是档位跨度（`stops.length - 1`）。同名
+      // 局部变量会把那个数字遮住，将来在这里多读一次"第几档"就会拿到一个
+      // DOM 节点，而这种错不会报错，只会让动画按一个对象去算。
+      const letter = element("span", "ge-char");
+      letter.textContent = char;
+      letters.push(letter);
+      tierLabel.append(letter);
     }
-    spans.forEach((span, index) => {
+    letters.forEach((letter, index) => {
       const timer = setTimeout(() => {
         if (run !== labelRun || !ready) return;
-        span.classList.add("ge-char-in");
+        letter.classList.add("ge-char-in");
       }, index * CHAR_STAGGER_MS);
       charTimers.push(timer);
     });
@@ -878,7 +888,7 @@ export function createGalaxyEffort(options = {}) {
   /* ---------- 指针 ---------- */
 
   /**
-   * 指针在轨道内的横坐标换算成 0..5（规格 §3 的公式，逐字）。
+   * 指针在轨道内的横坐标换算成 0..span（规格 §3 的公式，上界换成当前跨度）。
    *
    * **除以实测宽度而不是写死 392**。宿主把这个控件整体 `transform: scale()`
    * 缩小时（2026-11-09：composer 里按 0.68 显示），`getBoundingClientRect()`
@@ -913,8 +923,8 @@ export function createGalaxyEffort(options = {}) {
     slider.setPointerCapture(event.pointerId);
     // 按下就跟随指针，取的是**连续值**而不是最近档：这一下既可能是点击（松手
     // 时才吸附并提交），也可能是拖拽的起点——按下先取整会让拖拽从一格半格
-    // 之外弹一下再开始。
-    setTarget(clampPosition(valueAtPointer(event), span));
+    // 之外弹一下再开始。`setTarget` 自己会钳进 0..span，这里不重复钳。
+    setTarget(valueAtPointer(event));
   }
 
   function onPointerMove(event) {

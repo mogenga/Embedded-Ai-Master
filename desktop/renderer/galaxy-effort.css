@@ -250,26 +250,17 @@
 
 /* 单档（`stops.length === 1`）：滑块冻结。
  *
- * `data-single` 由 JS 写在根节点上。这里做的是视觉与指针那一半：
- * - `pointer-events: none` 让整条命中区不接受点击、拖动与 hover 光标，且
- *   **不冒泡到卡片**（轨道本来就没有可点的东西）；
- * - `cursor: default` 是给 `pointer-events` 之外的情形留的兜底（例如键盘聚焦
- *   后脚本派发的合成指针事件）；
- * - 焦点轮廓也去掉：没有可做的动作，画一圈"可以按"的紫框是在骗人。
+ * `data-single` 由 JS 写在根节点上。这里只做视觉与指针那一半：
+ * - `pointer-events: none` 收回整条命中区，于是没有可拖的落点、也没有 hover；
+ * - `cursor: default` 去掉任何"这里可以拖"的光标暗示（拖动手柄不存在）。
  *
- * JS 侧还有一道真正的锁（`single` 挡掉 setTarget / 键盘 / commit）：样式表
- * 加载失败或 `pointer-events` 被宿主覆盖时，控件仍然拖不动。 */
+ * 焦点框**不**在这里去掉：滑块仍在 Tab 序列里，读屏还能念出"0 / 0，Off"，
+ * 一个看得见却按不动的控件仍然需要看得见的焦点。
+ *
+ * JS 侧还有一道真正的锁（`single` 挡掉 setTarget / 指针 / 键盘 / commit）：
+ * 样式表加载失败或 `pointer-events` 被宿主覆盖时，控件仍然拖不动。 */
 .ge-root[data-single="true"] .ge-slider {
   pointer-events: none;
-  cursor: default;
-}
-
-.ge-root[data-single="true"] .ge-slider:focus-visible {
-  outline: none;
-}
-
-/* 单档没有"拖动中"这回事：脑形停在唯一的档位上，不要给拖拽手柄的光标暗示。 */
-.ge-root[data-single="true"] {
   cursor: default;
 }
 

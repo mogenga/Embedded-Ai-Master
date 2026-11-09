@@ -181,11 +181,16 @@ describe("面板换成脑形滑块之后，接线仍然完整", () => {
     // 验收值，所以缩小只能发生在宿主这一层：给组件根节点一个 --ge-scale，
     // 整块 transform，内部尺寸一律不动。谁把 galaxy-effort.css 里的 440 改小，
     // 验收表就和实现对不上了。
-    expect(css).toContain("--ge-scale: 0.68");
+    expect(css).toContain("--ge-scale: 0.55");
     expect(css).toContain("#effort-galaxy-mount");
     // transform 不改变父级布局盒：不给占位尺寸的话，弹层会按 440×258 留白。
+    // 占位盒 = 卡片逻辑尺寸 × 缩放系数，两个数字必须一起改——所以这里从
+    // `--ge-scale` 推回期望值，而不是再抄一份字面量。
+    const scale = Number(css.match(/--ge-scale:\s*([0-9.]+)/)[1]);
     const mount = css.slice(css.indexOf("#effort-galaxy-mount {"), css.indexOf("}", css.indexOf("#effort-galaxy-mount {")));
-    expect(mount).toContain("width: 300px");
+    expect(mount).toContain(`width: ${Math.round(440 * scale)}px`);
+    // 高度容许取整误差（258 × .55 = 141.9，写的是 142）。
+    expect(mount).toMatch(/height:\s*14[12]px/);
     // 卡片高度不再需要为 extras 生长：那块只剩一行说明，字号已经抵掉缩放，
     // 不会溢出。`layoutEffortExtras` 连同它的副作用一起删除了。
     expect(app).not.toContain("layoutEffortExtras");
