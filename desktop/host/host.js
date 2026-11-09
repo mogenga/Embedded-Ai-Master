@@ -4268,11 +4268,31 @@ const handlers = {
     send(sessionsEvent());
   },
 
+  /**
+   * Delete a saved conversation. The open one may be deleted too.
+   *
+   * It used to be refused ("不能删除当前打开的会话") with the advice to start a new
+   * conversation first — which asked the operator to do the cleanup by hand for
+   * a delete they had already asked for (2026-11-09). Deleting the open one now
+   * closes it exactly the way a new conversation does: the transcript empties,
+   * the composer comes back, and the session row leaves the sidebar. That is
+   * `handleNewSession`, reused rather than reimplemented — a second "return to
+   * the start" path would drift from the first.
+   *
+   * Order matters: the files go first, and the screen only resets once they are
+   * really gone. A delete that fails must leave the operator reading the
+   * conversation they still have, not staring at an empty window while the
+   * transcript is still on disk.
+   */
   async deleteSession(payload) {
     const id = String(payload.id ?? "");
     if (id === "") return;
-    if (id === sessionId) {
-      send({ type: "notice", level: "warn", text: "不能删除当前打开的会话，请先新建会话" });
+    const deletingOpen = id === sessionId;
+    if (deletingOpen && ctx.running) {
+      // The same guard every other session-level command has: a live turn owns
+      // the log, and pulling the directory out from under it would fail the
+      // run with an I/O error instead of the sentence the operator needs.
+      send({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
       return;
     }
     const admin = kernel.createSessionAdmin({ harnessHome });
@@ -4287,6 +4307,10 @@ const handlers = {
     // inherited this one's title.
     for (const key of [...titleCache.keys()]) {
       if (key.startsWith(`${id}@`)) titleCache.delete(key);
+    }
+    if (deletingOpen) {
+      handleNewSession();
+      return;
     }
     send(sessionsEvent());
   },

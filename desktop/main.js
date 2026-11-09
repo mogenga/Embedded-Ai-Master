@@ -49,8 +49,21 @@ const HOST = join(here, "host", "host.js");
 const RENDERER = join(here, "renderer", "index.html");
 const pkg = JSON.parse(readFileSync(join(here, "package.json"), "utf8"));
 
-/** Workspace the host is started in; the renderer can narrow it, not widen it. */
-const startCwd = process.cwd();
+/**
+ * Workspace the host is started in; the renderer can narrow it, not widen it.
+ *
+ * **装好的应用不能用 `process.cwd()`。** 安装形态下进程的工作目录是**安装
+ * 目录**（`%LOCALAPPDATA%\Programs\embedded-ai-master-desktop`），于是宿主把
+ * 它当成一个"项目"，侧栏里真的出现一行叫 `embedded-ai-master-desktop` 的
+ * 工作区——那不是用户的项目，是程序自己躺的地方（2026-11-09 用户报的）。
+ * 更糟的是它只在启动那一刻存在：切到别的会话后 `adoptSessionWorkdir` 改了 cwd，
+ * 这一行就消失，看起来像"文件夹掉了"。
+ *
+ * 开发形态保留 `process.cwd()`：从仓库根跑 `npm run desktop` 时，那正是操作者
+ * 想要的默认工作区。装好的应用则从「文档」开始 —— 它是一个可由用户自己换掉的
+ * 普通目录（顶栏点一下就能改），而不是只有装了才能写的一个内部路径。
+ */
+const startCwd = app.isPackaged ? app.getPath("documents") : process.cwd();
 
 /**
  * Update state goes to every open window over the same `host-event` channel
@@ -324,9 +337,19 @@ function startWindow(options = {}) {
     show: false,
     backgroundColor: "#0e0e10",
     title: "Embedded AI Master",
-    // Windows 任务栏/标题栏图标。打包后的 exe 用自身的资源图标，但开发
-    // 模式（electron .）不传这个就是 Electron 默认图标。
-    icon: join(here, "build", process.platform === "win32" ? "icon.ico" : "icon.png"),
+    // Windows 任务栏/标题栏图标。
+    //
+    // **必须是 asar 里存在的路径**。这里曾经是 `join(here, "build", "icon.ico")`
+    // ——`build/` 是打包器的输入目录（`win.icon` 从那里读，写进 exe 的资源段），
+    // 但它**不在 `build.files` 里**，所以装好之后 asar 内根本没有这个文件。传一个
+    // 不存在的路径不会报错，Electron 只是回退到默认图标，于是任务栏显示的是
+    // Electron 的标志而不是本应用的（2026-11-09 用户报的就是这个）。
+    //
+    // 现在指向 `renderer/assets/app.ico`：那个目录在 `build.files` 里（`renderer/**/*`），
+    // 开发形态与打包形态是**同一份文件、同一个路径**，不会再出现「开发时正常、
+    // 装完就变默认图标」。`build/icon.ico` 保留原样，它是 electron-builder 的输入，
+    // 两份逐字节相同（`sha256 c99b84fa…`）。
+    icon: join(here, "renderer", "assets", process.platform === "win32" ? "app.ico" : "mark.png"),
     // The renderer draws its own caption buttons on Windows so they match the
     // top bar and follow the theme; macOS keeps its traffic lights.
     titleBarStyle: "hidden",
