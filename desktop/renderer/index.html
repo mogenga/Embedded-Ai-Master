@@ -444,14 +444,17 @@
                       </button>
                       <div class="model-menu" id="model-menu" role="listbox" hidden></div>
                     </div>
-                    <!-- Visible only when the current model declares reasoning
-                         support. `syncEffortControl()` in app.js removes
-                         `hidden` from the host's reported levels, and leaves it
-                         on for a model that would drop the parameter. The chip
-                         opens a six-tier slider: a native
-                         `<input type="range">` carries keyboard, screen-reader
-                         and touch behaviour, and every visual layer above it is
-                         driven by the `--tier` custom property. -->
+                    <!-- Always visible once the host has named a model
+                         (2026-11-09, by request); it stays hidden only for a
+                         host with no model at all, where there is no
+                         conversation to set an effort for. A model that would
+                         drop the parameter gets a sentence in `#effort-note`
+                         rather than a missing control. `syncEffortControl()` in
+                         app.js owns that decision. The chip opens a six-tier
+                         slider: a native `<input type="range">` carries
+                         keyboard, screen-reader and touch behaviour, and every
+                         visual layer above it is driven by the `--tier` custom
+                         property. -->
                     <div class="effort-control" id="effort-control" hidden>
                       <button class="chip-button effort-picker" id="effort-picker" aria-expanded="false" aria-controls="effort-panel">
                         <span id="effort-label">Auto</span>

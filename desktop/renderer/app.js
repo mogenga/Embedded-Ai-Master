@@ -2868,12 +2868,14 @@ function setMode(mode) {
 }
 
 /**
- * The reasoning levels the active model accepts.
+ * The tiers the host reported for the active model.
  *
- * The host derives this from `providers.json` (`supportsReasoning`), so an
- * empty list is a fact: the model does not take the parameter. It is not a
- * prompt to guess a default set — offering `low`/`medium`/`high` to a model
- * whose request drops the field is the lie this list exists to avoid.
+ * Since 2026-11-09 the host reports all six tiers whenever it has a model at
+ * all, so an empty list here means one thing only: **no model**, and therefore
+ * no conversation to set an effort for. "This model would drop the parameter"
+ * is no longer expressed by an empty list — it travels as `effortChoices.note`
+ * and is shown inside the panel. Do not reintroduce a guess list here: the
+ * vocabulary is the host's (and the kernel's), not the renderer's.
  */
 function effortLevels() {
   return state.effortChoices?.levels ?? [];
