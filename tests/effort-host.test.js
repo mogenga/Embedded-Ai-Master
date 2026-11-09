@@ -74,6 +74,48 @@ async function completionGateway() {
   return { baseUrl: `http://127.0.0.1:${port}/v1`, bodies };
 }
 
+/**
+ * A gateway that answers both `/v1/models` (with capability fields) and the
+ * chat endpoint.
+ *
+ * 2026-11-10: the operator's gateway reports `reasoning_efforts` per model, and
+ * the host now reads it. This fixture is the smallest shape that proves the
+ * handshake picks it up — a capability table the model's own `providers.json`
+ * entry deliberately contradicts, so a green assertion cannot come from the
+ * config path instead.
+ */
+async function catalogGateway(entries) {
+  const bodies = [];
+  const server = createServer((req, res) => {
+    if (req.url?.endsWith("/models")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ object: "list", data: entries }));
+      return;
+    }
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      const text = Buffer.concat(chunks).toString("utf8");
+      if (text !== "") {
+        try {
+          bodies.push(JSON.parse(text));
+        } catch {
+          bodies.push({ unparsed: text });
+        }
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      }));
+    });
+  });
+  servers.push(server);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address();
+  return { baseUrl: `http://127.0.0.1:${port}/v1`, bodies };
+}
+
 async function tempHome(models, baseUrl) {
   const dir = await mkdtemp(path.join(tmpdir(), "eam-effort-host-"));
   tempDirs.push(dir);
@@ -380,6 +422,113 @@ describe("desktop host 的推理强度", () => {
     expect(state.effortChoices.default).toBe("low");
     expect(state.effortChoices.levels).toStrictEqual(["low", "medium", "high", "extra", "max", "galaxy"]);
     expect(state.models[0].supportsReasoning).toBe(true);
+  }, HOST_TIMEOUT_MS);
+});
+
+/**
+ * 三级回退的第 1 级：网关目录（2026-11-10）。
+ *
+ * 这组测的是**宿主真的读了 `/v1/models`**，而不是只把内核的解析函数测了一遍。
+ * 判据是配置与目录故意冲突：`providers.json` 里这个模型只声明了
+ * `supportsReasoning: true`（没有任何档位信息），而网关说它接受
+ * `low/medium/high/xhigh/max`。停靠站里出现 `extra` 只可能来自目录。
+ */
+describe("网关目录优先于缺省映射", () => {
+  it("目录报五档时，停靠站跟着变成五档而不是三档", async () => {
+    const gateway = await catalogGateway([
+      {
+        id: "flash",
+        supports_reasoning: true,
+        reasoning_efforts: ["low", "medium", "high", "xhigh", "max"],
+        reasoning_default_effort: "max",
+      },
+    ]);
+    const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
+
+    // The catalog is fetched after `ready`, so the stop list arrives in a
+    // **second** `state`. Waiting for "more stops" would deadlock on a gateway
+    // whose catalog does not change the list; wait for the second state and
+    // assert on what it says.
+    const events = await runHost(home, [{ cmd: "init", cwd: home }], {
+      // The catalog fetch is fire-and-forget after `ready`, so the second
+      // `state` is the one that carries it. Waiting for the *content* rather
+      // than for a count keeps this honest: if the follow-up event stopped
+      // arriving, the test would time out instead of passing on a count.
+      until: (all) => states(all).some(
+        (event) => (event.effortChoices?.stops ?? []).some((stop) => stop.value === "extra"),
+      ),
+      timeoutMs: 25_000,
+    });
+
+    const stops = states(events).at(-1).effortChoices.stops;
+    // `xhigh` 只有目录知道，缺省映射永远算不出它 → `extra` 这一档存在就是证据。
+    expect(stops.map((stop) => stop.value)).toStrictEqual([
+      "auto", "low", "medium", "high", "extra", "max",
+    ]);
+    expect(stops.find((stop) => stop.value === "extra").sends).toBe("xhigh");
+    expect(stops.find((stop) => stop.value === "max").sends).toBe("max");
+    // galaxy 落在 max 上，与 max 重复，不该单独占一格。
+    expect(stops.some((stop) => stop.value === "galaxy")).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
+  it("目录说只有 high/xhigh 时，低档不出现（拖不到就发不出去）", async () => {
+    const gateway = await catalogGateway([
+      { id: "flash", supports_reasoning: true, reasoning_efforts: ["high", "xhigh"] },
+    ]);
+    const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
+
+    const events = await runHost(home, [{ cmd: "init", cwd: home }], {
+      // 目录到达后 `low`/`medium` 会消失 —— 那才是这次要等的形状变化。
+      // 按 "有 high" 等会在第一个 `state` 上就命中，等于没等。
+      until: (all) => {
+        const last = states(all).at(-1);
+        if (last === undefined) return false;
+        const values = (last.effortChoices?.stops ?? []).map((stop) => stop.value);
+        return values.includes("auto") && !values.includes("low");
+      },
+      timeoutMs: 25_000,
+    });
+
+    const stops = states(events).at(-1).effortChoices.stops;
+    // 秩 ≤ low / medium 的值一个都没有，所以那两档不可用 —— 停靠站从 high 起。
+    expect(stops.map((stop) => stop.value)).toStrictEqual(["auto", "high", "extra"]);
+  }, HOST_TIMEOUT_MS);
+
+  it("目录报的 xhigh 真的上线（适配层不再按旧白名单拒绝）", async () => {
+    const gateway = await catalogGateway([
+      { id: "flash", supports_reasoning: true, reasoning_efforts: ["low", "high", "xhigh"] },
+    ]);
+    const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
+
+    // `setEffort` 与 `prompt` 必须在目录到达**之后**发。命令是排队执行的，
+    // 而目录抓取是 `ready` 之后才发的异步请求 —— 一次性灌进去就等于在目录
+    // 还空着的时候选了 `extra`，它会按第 3 级折算成 `high`。
+    // 这里先等到目录那个 `state`（stops 里出现 `extra`），再发后续命令。
+    await runHost(
+      home,
+      [{ cmd: "init", cwd: home }],
+      {
+        until: (all) => states(all).some(
+          (event) => (event.effortChoices?.stops ?? []).some((stop) => stop.value === "extra"),
+        ),
+        timeoutMs: 25_000,
+      },
+    );
+    // 上一步已经退出进程；重开一次，此时目录已落盘缓存，`ready` 之前就能用。
+    await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "setEffort", effort: "extra" },
+        { cmd: "prompt", text: "hi" },
+      ],
+      { until: (all) => all.some((event) => event.type === "run_end"), timeoutMs: 30_000 },
+    );
+
+    // `extra` 在目录能力下解析成 `xhigh`；它超出内核原来的五个安全值，
+    // 能出现在请求体里就说明适配层已经不再用它那份白名单二次拦截。
+    expect(gateway.bodies).toHaveLength(1);
+    expect(gateway.bodies[0].reasoning_effort).toBe("xhigh");
   }, HOST_TIMEOUT_MS);
 });
 

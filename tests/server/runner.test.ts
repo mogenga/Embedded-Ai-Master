@@ -259,13 +259,20 @@ describe("createSessionRunner", () => {
     await runner.start({ text: "tier", reasoningEffort: "galaxy" });
     expect(fake.calls[2]?.reasoningEffort).toBe("galaxy");
 
-    // 例子里原本是 `"max"`：Task 1 之后它是合法档位，不再是拒绝的样本。
-    // 断言本身没变——仍必须有一个非协议值、非档位的字符串在启动前被拒。
-    const error = await startError(runner, { text: "x", reasoningEffort: "xhigh" as never });
+    // 2026-11-10：网关目录报出的扩展值是一等公民。`xhigh` 曾经是这一条的
+    // 拒绝样本，现在必须穿过——目录说这个模型接受它，宿主已经把档位折算成
+    // 它再交过来，这里再拒就等于让整条目录链路断在最后一步。
+    await runner.start({ text: "ext", reasoningEffort: "xhigh" as never });
+    expect(fake.calls[3]?.reasoningEffort).toBe("xhigh");
+
+    // 仍然要拒的东西：**形状**非法。校验退到这一层是因为白名单已经不归
+    // runner 管（值的合法性由解析层负责），但一段空白或一个换行塞进请求体
+    // 永远是错的。
+    const error = await startError(runner, { text: "x", reasoningEffort: " high" as never });
     expect(error.code).toBe("invalid_run_limits");
     expect(error.message).toContain("reasoningEffort");
     // 被拒绝的调用从未到达 runSession。
-    expect(fake.calls).toHaveLength(3);
+    expect(fake.calls).toHaveLength(4);
   });
 
   it("等待 onSession 后才 resolve", async () => {

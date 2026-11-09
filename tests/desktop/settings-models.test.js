@@ -251,6 +251,22 @@ describe("上下文窗口往返", () => {
   });
 });
 
+describe("reasoningLevels 在设置页保存后仍在（2026-11-10 新增字段）", () => {
+  it("carriedFromModel 会带上它，保存一次不会把它删掉", () => {
+    // 与 `effortMap` 同一类事故：表单不编辑这个字段，但整份模型对象是
+    // `carriedFromModel` 重建的。漏掉它就等于一次「保存」静默删掉用户手写的
+    // 网关能力表，三级回退的第 2 级从此失效。
+    const withLevels = {
+      id: "gw/flash",
+      contextWindow: 8192,
+      reasoningLevels: ["low", "high", "xhigh"],
+    };
+    expect(carriedFromModel(withLevels).reasoningLevels).toStrictEqual(["low", "high", "xhigh"]);
+    // 缺省时不出现在结果里（不写一个空数组冒充「用户写了空」）。
+    expect(Object.hasOwn(carriedFromModel({ id: "gw/x" }), "reasoningLevels")).toBe(false);
+  });
+});
+
 describe("effortMap 在设置页保存后仍在（Task 1 新增字段带来的缺口）", () => {
   // `carriedFromModel` is an explicit whitelist and the page rebuilds each
   // model from it on save. A field missing from the list is not "left alone" —

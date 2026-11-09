@@ -563,7 +563,11 @@ describe("desktop host", () => {
       const chunks = [];
       req.on("data", (chunk) => chunks.push(chunk));
       req.on("end", () => {
-        bodies.push(Buffer.concat(chunks).toString("utf8"));
+        const text = Buffer.concat(chunks).toString("utf8");
+        // 2026-11-10：宿主启动后会抓一次 `GET /v1/models`（网关目录）。那是
+        // 一个**没有 body** 的请求，记进来会让下面的 `JSON.parse` 炸在一个与
+        // 本用例无关的地方。只收真的有 body 的请求。
+        if (text !== "") bodies.push(text);
         res.writeHead(400, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: { message: "bad request (test)" } }));
       });

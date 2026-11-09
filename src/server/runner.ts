@@ -86,6 +86,17 @@ export interface ActionInput {
   model?: string;
 }
 
+/**
+ * 一个能原样放进请求体的标量：非空，且不含空白或控制字符。
+ *
+ * 与 `src/model/openai.ts` 的 `isPlainToken` 同一判据：这里判**形状**，
+ * 不判白名单。目录报出的扩展值（`xhigh` 之类）必须能穿过这一层，否则宿主
+ * 已经把档位折算对了也会在起跑线上被拒。
+ */
+function isPlainEffortToken(value: string): boolean {
+  return value !== "" && !/[\s\x00-\x1f\x7f]/.test(value);
+}
+
 /** The subset of `ActionInput` that has to survive validation. */
 interface RunLimits {
   maxTurns?: number;
@@ -140,11 +151,23 @@ function readRunLimits(input: ActionInput): RunLimits {
     // 两个词汇都收：协议值直接上线，界面档位由 `runSession` 按模型的
     // `effortMap` 折算。这里看不到模型配置，所以不做折算——但也不能把
     // `galaxy` 当成非法值拒绝，那会让界面上一档合法的选择变成报错。
-    if (!isReasoningEffort(input.reasoningEffort) && !isEffortTier(input.reasoningEffort)) {
+    // **第三个词汇**：网关目录报出的扩展值（`xhigh` / `max` / `ultra` …）。
+    // 2026-11-10 起它们是一等公民——目录说这个模型接受 `xhigh`，宿主会把档位
+    // 折算成它再交过来。这里再按旧的五值白名单拒绝，等于让整条目录链路断在
+    // 最后一步：`resolveTierAgainst` 算得再对，请求也发不出去。
+    //
+    // 校验退到**形状**一级（非空、无空白/控制字符），与适配层
+    // `createOpenAIProvider` 同一判据——值的合法性由解析层负责，不是这里。
+    if (
+      !isReasoningEffort(input.reasoningEffort)
+      && !isEffortTier(input.reasoningEffort)
+      && !isPlainEffortToken(input.reasoningEffort)
+    ) {
       throw new RunnerError(
         "invalid_run_limits",
         `reasoningEffort 非法: ${JSON.stringify(input.reasoningEffort)}；合法值: auto, `
-          + `${REASONING_EFFORTS.join(", ")}, 档位 ${EFFORT_TIERS.join(", ")}`,
+          + `${REASONING_EFFORTS.join(", ")}, 档位 ${EFFORT_TIERS.join(", ")}，`
+          + "或网关目录报告的值",
       );
     }
     limits.reasoningEffort = input.reasoningEffort;

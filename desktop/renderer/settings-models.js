@@ -105,6 +105,10 @@ export function carriedFromModel(model) {
     // round-tripping (and keys the kernel's schema would then receive); the
     // whitelist is the contract, so a new field is added here on purpose.
     ...(model?.effortMap !== undefined ? { effortMap: model.effortMap } : {}),
+    // 2026-11-10：三级回退的第 2 级。这个表单不编辑它（`providers.json`
+    // 手写），但整份模型对象是**从这里重建的**，漏掉一个键就是一次「保存」
+    // 把用户手写的档位表静默删掉——与上面 `effortMap` 完全同一类事故。
+    ...(model?.reasoningLevels !== undefined ? { reasoningLevels: model.reasoningLevels } : {}),
   };
 }
 

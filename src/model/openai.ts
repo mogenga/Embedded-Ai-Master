@@ -1,5 +1,3 @@
-import { isReasoningEffort } from "../config/providers.js";
-import type { ReasoningEffort } from "../config/providers.js";
 import { heuristicCountTokens } from "./count.js";
 import type { CompletionResult, ModelChatMessage, ModelProtocol, ModelToolSchema } from "./protocol.js";
 import { retry, type RetryConfig } from "./retry.js";
@@ -24,8 +22,16 @@ export interface OpenAIProviderCfg {
    * 网关上含义不同，凭一个内核默认值替用户做选择，会悄悄改变既有用户的每一次
    * 请求。调用方（`runSession`）已经用 `resolveReasoningEffort` 合并了单次覆盖
    * 与模型配置；这一层只负责把拿到的值原样放上线。
+   *
+   * 类型是 `string` 而不是 `ReasoningEffort`：目录报出的扩展值（`xhigh` /
+   * `max` 之类）也要能过这一层。**值的合法性由解析层确认**
+   * （`acceptedEfforts` / `resolveTierAgainst`），适配层只负责把拿到的值原样
+   * 放上线，不该是白名单的第二个 owner。
+   *
+   * 构造期只拦**格式**（非空、无空白/控制字符），不拦白名单——白名单判断放在
+   * 这里，就会和解析层各持一份、迟早给出两个答案。
    */
-  reasoningEffort?: ReasoningEffort;
+  reasoningEffort?: string;
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
@@ -547,17 +553,33 @@ function isStreamUnsupportedStatus(status: number): boolean {
   return status === 400 || status === 404 || status === 405 || status === 415 || status === 422;
 }
 
+/**
+ * 一个能原样放进请求体的标量：非空，且不含空白或控制字符。
+ *
+ * 这是**形状**判断，不是白名单判断。它的作用是挡住「把一段 JSON、一个换行或
+ * 一个空串当作等级」这种明显的调用错误，而不是判断某个网关认不认这一档——
+ * 后者由 `acceptedEfforts` / `resolveTierAgainst` 决定。
+ */
+function isPlainToken(value: string): boolean {
+  return value !== "" && !/[\s\u0000-\u001f\u007f]/.test(value);
+}
+
 export function createOpenAIProvider(cfg: OpenAIProviderCfg): ModelProtocol {
   const fetchImpl = cfg.fetchImpl ?? fetch;
   const chatCompletionsUrl = resolveChatCompletionsUrl(cfg.baseUrl);
   const requestTimeoutMs = cfg.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const maxResponseBytes = cfg.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-  // 在构造期校验，而不是发请求时才带上：一个内核不认识的等级发出去，只会在
-  // 某个网关上换回 400（甚至被静默忽略而界面显示「已生效」）。这里就拒绝，
-  // 错误立刻落在调用栈上，且不会产生任何出站请求。
-  if (cfg.reasoningEffort !== undefined && !isReasoningEffort(cfg.reasoningEffort)) {
+  // 构造期只校验**格式**，不校验白名单：`reasoningEffort` 的值可能来自网关
+  // 目录（`xhigh` / `max` 之类），白名单判断属于解析层（`acceptedEfforts` /
+  // `resolveTierAgainst`），适配层再持一份白名单就是第二个 owner。
+  //
+  // 这里仍然拒绝空串与控制字符：那是把一段 JSON 或换行塞进请求体/日志的
+  // 形状问题，与「这个网关认不认这一档」无关。拒绝发生在构造期，所以不会
+  // 产生任何出站请求。
+  if (cfg.reasoningEffort !== undefined && !isPlainToken(cfg.reasoningEffort)) {
     throw new TypeError(
-      `reasoningEffort 非法: ${JSON.stringify(cfg.reasoningEffort)}`,
+      `reasoningEffort 格式非法: ${JSON.stringify(cfg.reasoningEffort)}`
+        + "（必须是非空、且不含空白或控制字符的字符串）",
     );
   }
   // 降级是 provider 实例的状态而不是全局的：provider 每轮会话都会重建，

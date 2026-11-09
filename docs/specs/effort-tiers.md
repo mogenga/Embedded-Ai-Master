@@ -30,7 +30,7 @@ Galaxy 六个停止点；每个模型有一张映射表，把它折成 `none` / 
 
 ## 六档
 
-| 档位 | 键 | 界面名 | 缺省协议值 |
+| 档位 | 键 | 界面名 | 缺省协议值（第 3 级） |
 |---|---|---|---|
 | 1 | `low` | `Low` | `low` |
 | 2 | `medium` | `Medium` | `medium` |
@@ -38,6 +38,9 @@ Galaxy 六个停止点；每个模型有一张映射表，把它折成 `none` / 
 | 4 | `extra` | `Extra` | `high` |
 | 5 | `max` | `Max` | `high` |
 | 6 | `galaxy` | `Galaxy` | `high` |
+
+末列**只在网关目录与 `reasoningLevels` 都没有时才生效**——见下一节的三级回退。
+有目录时 `space-bunny` 的 `extra` 会发 `xhigh`，按这张表永远算不出来。
 
 顺序即轨道顺序，是契约：`desktop/renderer/index.html` 的六个 `data-tier-index` 与滑块的
 `max="5"` 都按它排。
@@ -52,6 +55,37 @@ Galaxy 六个停止点；每个模型有一张映射表，把它折成 `none` / 
 **`auto` 不是第七档。** 它是「不提要求」的哨兵：`run.json` 里删掉该模型的条目，请求体里
 完全不出现 `reasoning_effort`。缺席（不提要求，用服务商默认）与 `none`（明确关闭推理）
 是两件事，两种都要能表达。
+
+## 三级回退：解析先看能力，再看映射（2026-11-10）
+
+六档是**界面词汇**，解析某档实际发什么值有三级来源，从高到低：
+
+| 级 | 来源 | 说明 |
+|---|---|---|
+| 1 | **网关目录** `GET /v1/models` | `reasoning_efforts` / `reasoning_default_effort` / `reasoning_fixed_effort`。不是标准 OpenAI 协议的一部分，但有的网关报（用户的网关就是，21 个模型全带）。字段名有别名，见 `src/model/catalog.ts` |
+| 2 | `providers.json` 的 `reasoningLevels` | 目录没说时的用户声明。可选字符串数组，元素必须是已知协议值 |
+| 3 | `effortMap` / `DEFAULT_EFFORT_MAP` | 前两级都没有时的旧行为 |
+
+**解析规则**：给定这个模型接受的协议值集合 `accepted`（按强度序
+`none < minimal < low < medium < high < xhigh < max < ultra` 排好），
+
+```
+resolve(tier) = accepted 中秩 ≤ 该档秩的最高者        没有 → null（这一档不可用）
+```
+
+档位的秩：`low`=2 `medium`=3 `high`=4 `extra`=5 `max`=6 `galaxy`=7。
+
+例：网关报 `{high, xhigh}`（glm-5.2）时，`low` / `medium` 解析为 `null`（不画到滑块上），
+`high`→`high`，`extra`/`max`/`galaxy`→`xhigh`。界面因此只有 `High` / `Extra` 两档。
+
+这条规则与 Claude Code 文档一致：
+`"falls back to the highest supported level at or below the one you set."`
+
+**`supportsReasoning: false` 仍然最优先**：用户显式否定的模型不看目录。**目录与配置冲突时
+目录优先**——网关是执行方，它的表决定请求会不会被接受；配置是用户的猜测。
+
+**滑块的档位数就是解析结果去重后的个数。** 同一协议值不占两格：`space-bunny` 的
+`{low, medium, high, xhigh, max}` 给出五档（`galaxy` 与 `max` 同值，不单独出现）。
 
 ## 缺省映射表与逐模型覆盖
 

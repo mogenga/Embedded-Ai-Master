@@ -67,19 +67,37 @@ describe("reasoning_effort 上线", () => {
     expect(bodies[0]?.reasoning_effort).toBe(level);
   });
 
-  it("非法等级在创建适配器时就被拒绝，不会发出去", () => {
+  it("格式非法的等级在创建适配器时就被拒绝，不会发出去", () => {
+    // 白名单判断不在适配层：`xhigh` / `max` 这类目录来的扩展值必须能过
+    // （见下面那条用例）。这里拦的是**格式**问题——空串、空白、控制字符，
+    // 那些是把一段 JSON 或换行塞进请求体的形状错误。
     const { impl, bodies } = capturingFetch();
 
-    expect(() =>
-      createOpenAIProvider({
-        baseUrl: "http://gw/v1",
-        model: "m",
-        fetchImpl: impl,
-        reasoningEffort: "max" as never,
-      }),
-    ).toThrowError(/reasoningEffort/);
+    for (const value of ["", " high", "a\nb"]) {
+      expect(() =>
+        createOpenAIProvider({
+          baseUrl: "http://gw/v1",
+          model: "m",
+          fetchImpl: impl,
+          reasoningEffort: value,
+        }),
+      ).toThrowError(/reasoningEffort/);
+    }
     // 拒绝发生在构造成员时，所以没有任何请求被发出。
     expect(bodies).toHaveLength(0);
+  });
+
+  it("目录来的扩展值能过构造期（白名单由 acceptedEfforts 判断）", async () => {
+    // 回归点：目录说 space-bunny 接受 `xhigh`，宿主选到 Extra 时算出的就是这个
+    // 值。适配层再持一份白名单，请求在这里就发不出去。
+    for (const level of ["xhigh", "max", "ultra"]) {
+      const { impl, bodies } = capturingFetch();
+
+      await complete(impl, level);
+
+      expect(bodies).toHaveLength(1);
+      expect(bodies[0]?.reasoning_effort).toBe(level);
+    }
   });
 
   it("降级为非流式重试时仍然带着同一个等级", async () => {

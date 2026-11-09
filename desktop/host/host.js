@@ -19,11 +19,13 @@ import {
   existsSync,
   lstatSync,
   openSync,
+  readFileSync,
   readdirSync,
   readSync,
   realpathSync,
   statSync,
 } from "node:fs";
+import { writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -137,6 +139,8 @@ try {
       isEffortTier,
       DEFAULT_EFFORT_MAP,
       resolveEffortTier,
+      acceptedEfforts,
+      resolveTierAgainst,
     },
     { isValidSessionId },
     // `resumeSession` is here rather than in the `/compact` batch below because
@@ -227,6 +231,19 @@ try {
     isEffortTier,
     DEFAULT_EFFORT_MAP,
     resolveEffortTier,
+    // 三级回退的能力层（2026-11-10）。`dist/` 可能是一个早于这些导出的构建，
+    // 缺一个名字不该让宿主在启动时炸掉——调用处都带 `typeof === "function"`
+    // 守卫，缺了就等于「网关没报能力」，回落到第 3 级。
+    acceptedEfforts,
+    resolveTierAgainst,
+    // 目录解析在另一个模块，且可能在 import 期缺失（见 `catalogModule`）。
+    // 这里用 getter：`kernel` 在本文件靠前处组装，那时 catalogModule 还没 await。
+    get extractCatalog() {
+      return catalogModule?.extractCatalog;
+    },
+    get parseCatalogEntry() {
+      return catalogModule?.parseCatalogEntry;
+    },
     writeMcpServers,
     writePermissionConfig,
     writeProviders,
@@ -271,6 +288,16 @@ send({ type: "hello" });
  * only visible on the namespace.
  */
 const probeModule = await import(dist("model/probe.js")).catch(() => undefined);
+
+/**
+ * The kernel's model-catalog parser (`dist/model/catalog.js`).
+ *
+ * Same namespace rule as `probeModule`: this file is newer than most `dist/`
+ * trees, and a host that cannot parse a catalog must still boot — the
+ * three-level fallback simply stops at level 2. Read through a getter because
+ * `kernel` is assembled before this import resolves.
+ */
+const catalogModule = await import(dist("model/catalog.js")).catch(() => undefined);
 
 /**
  * The kernel's knowledge-base locator, loaded lazily by `getKb`.
@@ -1016,8 +1043,17 @@ function effortChoices() {
     return choices;
   }
   choices.levels = [...kernel.EFFORT_TIERS];
+  // 三级回退的第 1、2 级在核心里：`resolveTierAgainst` 先看网关目录、再看
+  // `providers.json` 的 `reasoningLevels`，两级都没有才回落到 `effortMap`
+  // （第 3 级）。宿主只负责把目录递进去，不自己判断优先级。
+  const capability = catalogFor(modelRef);
+  const hasCapability = typeof kernel.resolveTierAgainst === "function";
   for (const tier of kernel.EFFORT_TIERS) {
-    choices.resolved[tier] = kernel.resolveEffortTier(cfg, tier);
+    // `null` = 这一档在这个模型上没有对应的请求值，不是"发 null"。
+    // 旧内核没有 `resolveTierAgainst`，那时退回 `resolveEffortTier`。
+    choices.resolved[tier] = hasCapability
+      ? kernel.resolveTierAgainst(cfg, tier, capability)
+      : kernel.resolveEffortTier(cfg, tier);
   }
   if (typeof cfg.reasoningEffort === "string") choices.default = cfg.reasoningEffort;
 
@@ -1035,6 +1071,10 @@ function effortChoices() {
   const seen = new Set();
   for (const tier of kernel.EFFORT_TIERS) {
     const sends = choices.resolved[tier];
+    // `null` means this tier has no request value on this model (the gateway
+    // offers nothing at or below it). Skipping — rather than drawing a stop
+    // that would send nothing — is the point of the capability catalog.
+    if (sends === null || sends === undefined) continue;
     if (seen.has(sends)) continue;
     seen.add(sends);
     // `value` is the tier key `setEffort` accepts, and the first tier that
@@ -1045,6 +1085,185 @@ function effortChoices() {
   return choices;
 }
 
+
+// ---------------------------------------------------------------------------
+// Model capability catalog (三级回退的第 1 级)
+// ---------------------------------------------------------------------------
+
+/**
+ * Capabilities the gateway reported for its models, keyed by model id.
+ *
+ * `GET /v1/models` is not required by the OpenAI-compatible protocol to say
+ * anything about reasoning effort — but some gateways do, and this one does:
+ * `reasoning_efforts` / `reasoning_default_effort` / `reasoning_fixed_effort`
+ * per model (2026-11-09, measured against the operator's own gateway). Reading
+ * it is the difference between offering the five levels a model actually
+ * accepts and offering three names that all send `high`.
+ *
+ * **Absent is not empty.** `undefined` means "the gateway did not say" (fall
+ * back to config, then to the default map); an empty entry means it said
+ * "no effort levels".
+ */
+let modelCatalog;
+
+/**
+ * Where the fetched catalog is cached, and how long it is trusted.
+ *
+ * The catalog changes when the operator edits the gateway's model list, which
+ * is rare; fetching it on every launch would put a network round-trip in front
+ * of the first prompt. A day is short enough that a new model shows up without
+ * the operator doing anything, long enough that launches are offline.
+ */
+const CATALOG_CACHE_FILE = "model-catalog.json";
+const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
+/** Nothing the UI waits on: the catalog is an enhancement to `stops`. */
+const CATALOG_TIMEOUT_MS = 2000;
+
+function catalogCachePath() {
+  return path.join(harnessHome, CATALOG_CACHE_FILE);
+}
+
+/** The cached entries, or `undefined` when the file is missing/stale/unreadable. */
+function readCachedCatalog() {
+  try {
+    const text = readFileSync(catalogCachePath(), "utf8");
+    const parsed = JSON.parse(text);
+    if (typeof parsed !== "object" || parsed === null) return undefined;
+    const fetchedAt = Number(parsed.fetchedAt);
+    if (!Number.isFinite(fetchedAt) || Date.now() - fetchedAt > CATALOG_TTL_MS) return undefined;
+    const models = parsed.models;
+    if (typeof models !== "object" || models === null) return undefined;
+    return models;
+  } catch {
+    // Missing, unreadable or malformed: all three mean "no cache", and none of
+    // them is worth a notice — the catalog is an enhancement, not a setting.
+    return undefined;
+  }
+}
+
+async function writeCachedCatalog(models) {
+  try {
+    await writeFile(catalogCachePath(), JSON.stringify({ fetchedAt: Date.now(), models }), "utf8");
+  } catch {
+    // A cache that cannot be written costs one network call next launch.
+  }
+}
+
+/**
+ * Fetch the gateway's model catalog and keep only the capability fields.
+ *
+ * Quiet on every failure: an unreachable gateway, a 401, a gateway that lists
+ * models without capability fields — all of them mean "no catalog", and the
+ * three-level fallback already handles that. A notice here would fire on every
+ * launch for every operator whose gateway does not implement the extension.
+ */
+async function fetchCatalog(provider) {
+  const parseCatalog = kernel.extractCatalog;
+  if (typeof parseCatalog !== "function") return undefined;
+  const apiKey = typeof kernel.resolveProviderApiKey === "function"
+    ? kernel.resolveProviderApiKey(provider)
+    : undefined;
+  const base = String(provider.baseUrl ?? "").replace(/\/+$/, "");
+  if (base === "") return undefined;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CATALOG_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${base}/models`, {
+      headers: apiKey === undefined ? {} : { Authorization: `Bearer ${apiKey}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) return undefined;
+    const payload = await response.json();
+    const extracted = parseCatalog(payload);
+    if (extracted === undefined) return undefined;
+    // A Map is not JSON; the cache stores a plain object.
+    return Object.fromEntries(extracted);
+  } catch {
+    return undefined;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Make sure `modelCatalog` reflects the operator's gateway.
+ *
+ * Order: memory → disk cache → network. The first two are synchronous from the
+ * caller's point of view; the network path is awaited by `init` only after
+ * `ready`, so a slow gateway delays nothing the window waits on. When the
+ * network answer differs from what the handshake used, a fresh `state` is sent
+ * so the panel's stop list catches up without the operator reopening it.
+ */
+async function refreshCatalog({ force = false } = {}) {
+  if (modelCatalog !== undefined) return modelCatalog;
+  const cached = force ? undefined : readCachedCatalog();
+  if (cached !== undefined) {
+    modelCatalog = cached;
+    return modelCatalog;
+  }
+  let provider;
+  try {
+    provider = kernel.resolveModelRef(providers, modelRef).provider;
+  } catch {
+    // No resolved model means no provider to ask. An empty catalog is the
+    // honest answer; the fallback levels still work.
+    modelCatalog = {};
+    return modelCatalog;
+  }
+  const fetched = await fetchCatalog(provider);
+  modelCatalog = fetched ?? {};
+  if (fetched !== undefined) await writeCachedCatalog(fetched);
+  return modelCatalog;
+}
+
+/**
+ * The gateway's capability record for a `provider/model` reference, if any.
+ *
+ * **The catalog is keyed by the gateway's own id, not by our `provider/model`
+ * reference.** `GET /v1/models` knows nothing about our provider prefix; it
+ * calls the model `flash` while the composer calls it `gw/flash`. Looking up
+ * the full reference would silently find nothing — every model would fall back
+ * to level 3 and the catalog would look like it was never fetched.
+ *
+ * Both forms are tried, bare id first: a gateway whose ids happen to contain a
+ * slash would otherwise never be found by the reference lookup.
+ */
+function catalogFor(ref) {
+  if (modelCatalog === undefined) return undefined;
+  const slash = ref.indexOf("/");
+  const bare = slash >= 0 ? ref.slice(slash + 1) : ref;
+  const entry = modelCatalog[bare] ?? modelCatalog[ref];
+  if (entry === undefined) return undefined;
+  // The cache round-trip turns the capability object into plain JSON; the
+  // kernel's parser is what normalizes strings/objects and field aliases, so
+  // feeding the raw entry back through it keeps one definition of the shape.
+  return typeof kernel.parseCatalogEntry === "function" ? kernel.parseCatalogEntry(entry) : undefined;
+}
+
+/**
+ * The effort override to hand this run, already folded to a protocol value.
+ *
+ * Empty for `auto` (send nothing). A protocol value goes as itself. A **tier**
+ * goes through `resolveTierAgainst` with this model's capability, so the
+ * catalog actually reaches the request — `runSession` cannot do it, it never
+ * sees the catalog. Falling back to `resolveEffortTier` when the kernel is too
+ * old keeps a stale `dist/` working at level 3.
+ */
+function reasoningEffortOption() {
+  const stored = currentEffort();
+  if (stored === "auto") return {};
+  if (!kernel.isEffortTier(stored)) return { reasoningEffort: stored };
+  const cfg = currentModelCfg();
+  if (cfg === undefined) return {};
+  const capability = catalogFor(modelRef);
+  const folded = typeof kernel.resolveTierAgainst === "function"
+    ? kernel.resolveTierAgainst(cfg, stored, capability)
+    : kernel.resolveEffortTier(cfg, stored);
+  // `null` = this tier has no request value on this model. Sending nothing is
+  // the honest outcome; the panel does not offer that tier in the first place,
+  // so this only happens for a `run.json` written under another model.
+  return folded === null || folded === undefined ? {} : { reasoningEffort: folded };
+}
 
 /**
  * The limits to hand this run.
@@ -1071,7 +1290,14 @@ function runLimitOptions() {
     ...(runLimits.systemPrompt === "" ? {} : { systemPrompt: runLimits.systemPrompt }),
     // Omitted for "auto": the runner would turn it into "no override" anyway,
     // and a field that never travels is one less thing to misread downstream.
-    ...(currentEffort() === "auto" ? {} : { reasoningEffort: currentEffort() }),
+    //
+    // **A tier is folded here, not downstream** (2026-11-10). `runSession`
+    // resolves a tier through the model's `effortMap` — level 3 of the
+    // three-level fallback — because it has no way to know the gateway's
+    // capability table. Only the host has that. Sending the tier name would
+    // silently ignore the catalog and send `high` for `extra` on a model the
+    // gateway says accepts `xhigh`.
+    ...reasoningEffortOption(),
   };
 }
 
@@ -2304,10 +2530,15 @@ async function handleCompact() {
     // model's `effortMap`, a protocol value goes as itself. Passing `galaxy`
     // straight to the adapter would throw here, and `/compact` is not the place
     // to discover that the composer's top tier is unrepresentable.
+    // 三级回退同样适用于 /compact 的摘要调用：目录说这个模型接受什么，
+    // 就用什么。`resolveTierAgainst` 不在旧内核里，那时退回 `resolveEffortTier`。
+    const compactCapability = catalogFor(model);
     const summaryEffort = storedEffort === undefined
       ? undefined
       : modules.isEffortTier(storedEffort)
-        ? modules.resolveEffortTier(modelCfg, storedEffort)
+        ? (typeof kernel.resolveTierAgainst === "function"
+          ? (kernel.resolveTierAgainst(modelCfg, storedEffort, compactCapability) ?? undefined)
+          : modules.resolveEffortTier(modelCfg, storedEffort))
         : storedEffort;
     const modelProtocol = modules.createOpenAIProvider({
       baseUrl: provider.baseUrl,
@@ -3596,6 +3827,27 @@ const handlers = {
     send({ type: "commands", commands: commandCatalogue(skills) });
     send({ type: "setup_checklist", checks: [] });
     send({ type: "locale", locale });
+    // The catalog is an enhancement, so it is fetched **after** `ready` and
+    // never awaited by the handshake: a gateway that is slow, down, or does
+    // not implement the extension must not delay the window. When the answer
+    // arrives and it actually changes the stop list, a fresh `state` is sent
+    // so an open panel catches up instead of waiting for the next launch.
+    if (modelCatalog === undefined) {
+      // **One** follow-up `state`, unconditionally.
+      //
+      // Trying to send it only when the stop list changed looked cheaper and
+      // was wrong twice over: the comparison ran before the catalog had been
+      // assigned (so it always matched), and a gateway whose catalog does not
+      // change this model's stops is a perfectly ordinary case — the client
+      // still benefits from knowing the question has been answered. One extra
+      // event on boot costs nothing the renderer can perceive.
+      //
+      // `refreshCatalog` memoizes, so a second `init` (reload, model change)
+      // does not fire a second network call or a second event.
+      refreshCatalog()
+        .then(() => send(stateEvent()))
+        .catch(() => undefined);
+    }
     if (missing) {
       send({
         type: "notice",
@@ -3876,6 +4128,12 @@ const handlers = {
       return;
     }
     providers = next;
+    // A new provider set may point somewhere else entirely, so the capability
+    // table describes a gateway nobody is talking to any more. Drop it: the
+    // next `effortChoices()` re-reads the cache, and a stale table would put
+    // stops on the panel for a model this gateway does not have.
+    modelCatalog = undefined;
+    refreshCatalog().catch(() => undefined);
     modelList = buildModelList(providers);
     const stillValid = modelList.some((model) => model.id === modelRef);
     if (!stillValid) modelRef = modelList[0]?.id ?? "";
@@ -4199,6 +4457,10 @@ const handlers = {
       const loaded = kernel.loadProviders(harnessHome);
       providers = loaded;
       providersError = "";
+      // Same reason as `saveProviders`: the table belongs to the gateway that
+      // was configured when it was fetched.
+      modelCatalog = undefined;
+      refreshCatalog().catch(() => undefined);
     } catch (error) {
       providers = {};
       providersError = messageOf(error);
@@ -4467,12 +4729,25 @@ const handlers = {
       });
       return;
     }
-    if (wanted !== "auto" && !kernel.isEffortTier(wanted) && !kernel.isReasoningEffort(wanted)) {
+    // Accepted: `auto`, any tier key, any protocol value the catalog says this
+    // model takes, and the historical safe values (an old `run.json` may hold
+    // one). The catalog's set is what makes `xhigh` / `max` acceptable at all —
+    // the kernel's own whitelist deliberately stops at `high`, because it has
+    // no way to know a gateway that accepts more.
+    const capability = catalogFor(modelRef);
+    const accepted = typeof kernel.acceptedEfforts === "function"
+      ? kernel.acceptedEfforts(cfg, capability)
+      : undefined;
+    const inAccepted = Array.isArray(accepted) && accepted.includes(wanted);
+    if (wanted !== "auto" && !kernel.isEffortTier(wanted) && !kernel.isReasoningEffort(wanted) && !inAccepted) {
       send({
         type: "notice",
         level: "warn",
         text: `不支持的推理强度：${JSON.stringify(wanted)}；该模型支持 auto, `
-          + `档位 ${[...kernel.EFFORT_TIERS].join(", ")}, 协议值 ${EFFORT_LEVELS.join(", ")}`,
+          + `档位 ${[...kernel.EFFORT_TIERS].join(", ")}, 协议值 ${EFFORT_LEVELS.join(", ")}`
+          + (Array.isArray(accepted) && accepted.length > 0
+            ? `；网关报告该模型接受 ${accepted.join(", ")}`
+            : ""),
       });
       return;
     }
