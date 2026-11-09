@@ -94,3 +94,45 @@ describe("旧 dist 的 @ 搜索在弹窗里可见（D-184 ② / BACKLOG 5.4）",
     expect(body).toContain('${isDir ? "/" : ""}');
   });
 });
+
+describe("空 `@` 列出全部，而不是什么都不显示（2026-11-09）", () => {
+  it("内核的空查询返回全部条目，不再短路成空数组", () => {
+    // The short-circuit `if (query === "") return { files: [] }` was what made
+    // an empty `@` show nothing at all, which reads as "this project has no
+    // files". The assertion lives here rather than only in the kernel suite so
+    // that a future "optimisation" that reinstates the early return breaks a
+    // test named after the behaviour the user asked for.
+    const source = readFileSync(
+      path.join(import.meta.dirname, "..", "..", "src", "server", "files-api.ts"),
+      "utf8",
+    );
+    const body = source.slice(source.indexOf("export async function searchFilesByName("));
+    expect(body).not.toContain('if (query === "")');
+    expect(body).toContain("const needle = query.toLowerCase();");
+  });
+
+  it("真的空工作区时弹窗说明原因，而不是把自己藏起来", () => {
+    const app = read("app.js");
+    const body = functionBody(app, "function renderMention(");
+    expect(body).toContain("t.mentionNothingHere");
+    expect(body).toContain("mention-hint");
+    // The empty branch must render a hint and stay visible. Hiding it leaves
+    // the reader with a keystroke that did nothing and no reason.
+    const empty = body.slice(body.indexOf("if (files.length === 0)"));
+    expect(empty).toContain("fileMention.hidden = false");
+    const branch = empty.slice(0, empty.indexOf("files.forEach("));
+    expect(branch).not.toContain("fileMention.hidden = true");
+  });
+
+  it("两种语言都有「这里没有可引用的文件」", () => {
+    for (const locale of ["en", "zh"]) {
+      const text = dictionaries[locale].mentionNothingHere;
+      expect(typeof text).toBe("string");
+      expect(text.trim()).not.toBe("");
+    }
+    expect(dictionaries.zh.mentionNothingHere).toContain("没有可引用");
+    // It must not be the "unavailable" sentence again: that one names a broken
+    // build, which is a different fact with a different fix.
+    expect(dictionaries.zh.mentionNothingHere).not.toBe(dictionaries.zh.mentionSearchUnavailable);
+  });
+});

@@ -505,8 +505,10 @@ function parseSearchQuery(rawQuery: unknown): string {
  * 边界与 `listDirectory` 完全相同（同一个 `resolveReadableDirectory`），因为
  * 这是一条会返回绝对路径的读接口：能搜到就必须能打开，反之亦然。
  *
- * 空查询**不遍历**：弹窗每次击键都会带着当时已输入的片段来问，空串意味着
- * 「还没输入」，此时扫一遍整棵树只是白花预算。
+ * **空查询列出全部**（2026-11-09 用户决定，原先是直接回空数组）。`@` 一敲出来、
+ * 还没输入片段时，弹窗要能看见这个工作区里有什么可引用；回一个空数组会让它
+ * 什么都不显示，读起来像「这里没有文件」。代价是空查询会真的遍历一次（在
+ * `MAX_SEARCH_SCAN` 预算内），但那是弹窗打开那一刻的一次扫描，不是每个击键一次。
  *
  * **目录与文件都是结果**（D-184 ①，2026-11-07）。弹窗插入的是路径，目录
  * 路径与文件路径一样可用；只返回文件会让 `@src` 完不成，而目录往往比文件
@@ -524,9 +526,9 @@ export async function searchFilesByName(
 ): Promise<FileSearchResult> {
   const root = await resolveReadableDirectory(harnessHome, rawRoot);
   const query = parseSearchQuery(rawQuery);
-  if (query === "") {
-    return { root, query, files: [], scanned: 0, truncated: false, scanTruncated: false };
-  }
+  // 空查询 = 不筛：每个条目都算命中（见函数头注释）。用空串做 needle 是可行的
+  // ——`includes("")` 恒为 true——但把它写出来，是因为「空串恰好匹配一切」这
+  // 件事不写清楚时，下一个人会以为这里漏了一处判断。
   const needle = query.toLowerCase();
   const limit = options?.limit ?? MAX_SEARCH_RESULTS;
   const maxScanned = options?.maxScanned ?? MAX_SEARCH_SCAN;

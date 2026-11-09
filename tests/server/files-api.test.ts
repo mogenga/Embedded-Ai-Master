@@ -307,17 +307,39 @@ describe("searchFilesByName", () => {
     expect(result.files[0]?.relative).toBe("README.md");
   });
 
-  it("空查询不遍历：scanned 为 0", async () => {
+  it("空查询列出全部：`@` 刚敲出来时看得见工作区里有什么", async () => {
     const { home, root } = makeProject();
+    mkdirSync(path.join(root, "src"));
     writeFileSync(path.join(root, "readme.md"), "x");
+    writeFileSync(path.join(root, "src", "a.ts"), "x");
+    writeFileSync(path.join(root, "b.ts"), "x");
 
     for (const query of ["", "   ", undefined, null, 42]) {
       const result = await searchFilesByName(home, root, query);
-      expect(result.files).toEqual([]);
-      expect(result.scanned).toBe(0);
+      // Every entry matches. With an empty needle the rank collapses to the
+      // path-contains tier for all of them, so the sort is "shorter relative
+      // first, then localeCompare" — which is why `src` (3 chars) lands ahead
+      // of `b.ts` (4). The exact order is asserted rather than left loose: it
+      // is what decides which entries survive the 20-result cap.
+      expect(result.files.map((file) => file.relative)).toEqual(["src", "b.ts", "src/a.ts", "readme.md"]);
+      expect(result.scanned).toBeGreaterThan(0);
       expect(result.truncated).toBe(false);
       expect(result.scanTruncated).toBe(false);
     }
+  });
+
+  it("空查询也守着同一份忽略清单与结果上限", async () => {
+    // "List everything" must not become "list node_modules too" — the walk is
+    // the same walk, so the same rules apply. This is the assertion that keeps
+    // the change from quietly turning the popup into a tree dump.
+    const { home, root } = makeProject();
+    mkdirSync(path.join(root, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(path.join(root, "node_modules", "pkg", "readme.md"), "x");
+    writeFileSync(path.join(root, "readme.md"), "x");
+
+    const result = await searchFilesByName(home, root, "");
+    expect(result.files.map((file) => file.relative)).toEqual(["readme.md"]);
+    expect(result.scanned).toBe(1);
   });
 
   it("忽略目录（node_modules）不贡献结果", async () => {

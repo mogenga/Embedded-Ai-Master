@@ -308,6 +308,11 @@ export const dictionaries = {
      *  same distinction for a missing kernel entry). */
     mentionSearchUnavailable:
       "File search is unavailable: this build is missing the search module. A source checkout needs npm run build and a restart; an installed copy needs reinstalling.",
+    /** The workspace really has nothing to reference. Different from the
+     *  unavailable case above and from "no match" for a typed fragment: an
+     *  empty `@` lists everything, so an empty answer here means the folder
+     *  is empty (or every entry was ignored). */
+    mentionNothingHere: "This workspace has no files to reference.",
     attachmentUnsupported: "That file cannot be attached from the browser; drop it from your file manager instead.",
     attachmentTooLarge: "That image is larger than 4 MB.",
     attachmentRemove: "Remove image",
@@ -766,6 +771,9 @@ export const dictionaries = {
     /** D-184 ②：内核缺搜索模块，空列表不是「没有匹配的文件」。两种形态的修法不同。 */
     mentionSearchUnavailable:
       "文件搜索不可用：当前构建缺少搜索模块。源码形态请执行 npm run build 后重启；安装形态请重新安装。",
+    /** 工作区真的没有可引用的东西。与上面「不可用」、以及「输入的片段没匹配」都不同：
+     *  空的 `@` 会列出全部，所以这里空就说明这个目录是空的（或条目全被忽略）。 */
+    mentionNothingHere: "这个工作区里没有可引用的文件。",
     attachmentUnsupported: "这个文件无法从浏览器里附加，请从文件管理器拖进来。",
     attachmentTooLarge: "图片超过 4 MB。",
     attachmentRemove: "移除图片",

@@ -2504,8 +2504,18 @@ function renderMention(files, unavailable = false) {
     fileMention.hidden = false;
     return;
   }
+  // An empty answer for an empty `@` means the workspace has nothing to
+  // reference — the kernel lists everything for a blank query (2026-11-09),
+  // so "nothing here" is now a fact about the folder rather than about the
+  // typed fragment. Hiding the popup would take the reason with it, and the
+  // reader would be left with a keystroke that did nothing.
   if (files.length === 0) {
-    fileMention.hidden = true;
+    mention.files = [];
+    const note = document.createElement("div");
+    note.className = "mention-hint";
+    note.textContent = t.mentionNothingHere;
+    fileMention.appendChild(note);
+    fileMention.hidden = false;
     return;
   }
   files.forEach((entry, index) => {
