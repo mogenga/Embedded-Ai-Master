@@ -15,12 +15,30 @@
  * 会让每个数字都差一点，而这些都是逐条核对的验收项。
  */
 
+/* ---------- 宿主要求缩小时 ----------
+ *
+ * 规格里的数字是逻辑尺寸，逐条核对的验收依据。宿主不能改它们，否则验收表与
+ * 实现就对不上了；但 composer 的弹层只有几百像素宽，440×258 的卡在那里放不
+ * 下（2026-11-09 用户原话「太大了，等比缩小」）。
+ *
+ * 做法是给**根节点**一个 `--ge-scale`：整块按它 `transform: scale()`，所有
+ * 内部尺寸一个都不动。默认 1，演示页因此逐像素等于规格；composer 里设 0.68。
+ *
+ * `transform-origin` 取左上角而不是中心：宿主要给这块留多大的位置是它自己算
+ * 的，锚在中心会让一块 300×176 的占位框里浮着一块偏移过的卡片，反过来还要
+ * 在宿主里补一次负 margin。
+ *
+ * 缩放不改坐标：`valueAtPointer` 会按 `getBoundingClientRect()` 与逻辑宽度
+ * 的比值把指针折回逻辑坐标，所以拖动在任何缩放下都落在同一个档位。
+ */
 .ge-root {
   position: relative;
   font-family: Arial, Helvetica, sans-serif;
   font-weight: 400;
   /* 卡片允许粒子溢出（规格 §1），溢出由舞台裁切，控件自己不裁。 */
   -webkit-font-smoothing: antialiased;
+  transform: scale(var(--ge-scale, 1));
+  transform-origin: top left;
 }
 
 /* 卡片。尺寸含边框（规格 §1「尺寸含边框」），所以 width/height 用

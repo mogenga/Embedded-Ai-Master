@@ -727,11 +727,21 @@ export function createGalaxyEffort(options = {}) {
 
   /* ---------- 指针 ---------- */
 
-  /** 指针在轨道内的横坐标换算成 0..5（规格 §3 的公式，逐字）。 */
+  /**
+   * 指针在轨道内的横坐标换算成 0..5（规格 §3 的公式，逐字）。
+   *
+   * **除以实测宽度而不是写死 392**。宿主把这个控件整体 `transform: scale()`
+   * 缩小时（2026-11-09：composer 里按 0.68 显示），`getBoundingClientRect()`
+   * 给的是**缩放后**的尺寸，而公式里的 16 / 358 是组件自身的逻辑坐标。直接拿
+   * 缩放后的 x 减 16，等于把像素和逻辑单位混着算——缩小越多，拖到同样的视觉
+   * 位置得到的档位越靠右，而且只有真拖才看得出来。先按 `rect.width / 392`
+   * 的比值把 x 折回逻辑坐标，缩放就与拖动无关了。
+   */
   function valueAtPointer(event) {
     const rect = track.getBoundingClientRect();
-    const x = event.clientX - rect.left;
-    return clamp((x - 16) / 358 * LAST_TIER, 0, LAST_TIER);
+    const scale = rect.width > 0 ? rect.width / TRACK_WIDTH : 1;
+    const x = (event.clientX - rect.left) / scale;
+    return clamp((x - TRACK_START_X) / (TRACK_END_X - TRACK_START_X) * LAST_TIER, 0, LAST_TIER);
   }
 
   function onPointerDown(event) {

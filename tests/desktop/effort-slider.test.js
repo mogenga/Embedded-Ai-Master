@@ -174,6 +174,28 @@ describe("面板换成脑形滑块之后，接线仍然完整", () => {
     expect(setPanel).toContain("ensureEffortSlider()");
   });
 
+  it("宿主按等比缩小放进弹层，规格里的数字一个都不改", () => {
+    const app = read("app.js");
+    const css = read("styles.css");
+    // 2026-11-09 用户原话「太大了，等比缩小」。规格的 440×258 是逐条核对的
+    // 验收值，所以缩小只能发生在宿主这一层：给组件根节点一个 --ge-scale，
+    // 整块 transform，内部尺寸一律不动。谁把 galaxy-effort.css 里的 440 改小，
+    // 验收表就和实现对不上了。
+    expect(css).toContain("--ge-scale: 0.68");
+    expect(css).toContain("#effort-galaxy-mount");
+    // transform 不改变父级布局盒：不给占位尺寸的话，弹层会按 440×258 留白。
+    const mount = css.slice(css.indexOf("#effort-galaxy-mount {"), css.indexOf("}", css.indexOf("#effort-galaxy-mount {")));
+    expect(mount).toContain("width: 300px");
+    expect(mount).toContain("height: 176px");
+    // 组件那一侧只认变量、有自己的默认值，演示页因此仍是 1:1。
+    const galaxy = read("galaxy-effort.css");
+    expect(galaxy).toContain("scale(var(--ge-scale, 1))");
+    expect(galaxy).toContain("width: 440px");
+    expect(galaxy).toContain("height: 258px");
+    // app.js 不该有自己的缩放数学：缩放是样式的事。
+    expect(app).not.toContain("ge-scale");
+  });
+
   it("样式表两处都 link 了（应用与演示页看的是同一张卡片）", () => {
     const html = read("index.html");
     expect(html).toContain('href="galaxy-effort.css"');

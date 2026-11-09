@@ -4991,12 +4991,28 @@ mark.find-hit.current {
   /* Anchored right: the chip sits at the composer's right edge, and a panel
      growing rightwards from `left: 0` would leave the window. */
   right: 0;
-  width: 444px;
   z-index: 20;
 }
 
 .effort-panel[hidden] {
   display: none;
+}
+
+/* The brain card is drawn at the spec's 440×258 and scaled down here, rather
+   than re-specified at a smaller size: the numbers in `galaxy-effort.css` are
+   the checked acceptance values, and a second set for the composer would be a
+   second thing to keep in sync. 0.68 puts the card at ~300×176 — wide enough
+   that the six stop labels still read, narrow enough for the composer popover.
+   Scaling lives on the component's root, so the demo page keeps 1. */
+#effort-galaxy-mount {
+  --ge-scale: 0.68;
+  /* A `transform` does not change the box the parent lays out, so the scaled
+     card would leave 440×258 of empty space behind it. These are that box
+     multiplied by the same 0.68 — the one number here that has to track the
+     scale above. */
+  width: 300px;
+  height: 176px;
+  overflow: visible;
 }
 
 /* The row under the card. `Auto` keeps the composer's own spacing rather than

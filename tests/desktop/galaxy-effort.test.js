@@ -295,10 +295,16 @@ describe("指针交互（规格 §3）", () => {
     expect(CSS).toMatch(/\.ge-slider\s*\{[^}]*touch-action:\s*none/);
   });
 
-  it("拖动换算是 (x - 16) / 358 × 5", () => {
+  it("拖动换算把缩放折回逻辑坐标，再套 (x - 16) / 358 × 5", () => {
     const body = bodyOf(SOURCE, "  function valueAtPointer(event) {");
-    expect(body).toContain("(x - 16) / 358");
+    expect(body).toContain("TRACK_START_X");
+    expect(body).toContain("TRACK_END_X");
     expect(body).toContain("LAST_TIER");
+    // 2026-11-09：composer 里控件整体 `transform: scale()` 到约 0.68。
+    // `getBoundingClientRect()` 给的是缩放后的尺寸，公式里的 16 / 358 是逻辑
+    // 坐标；不折回去就等于像素与逻辑单位混算，缩得越小档位越偏右。
+    expect(body).toContain("rect.width / TRACK_WIDTH");
+    expect(body).toContain("/ scale");
   });
 
   it("拖动中间值不提交；松手才提交", () => {
