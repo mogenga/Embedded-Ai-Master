@@ -450,18 +450,24 @@
                     <!-- Always visible once the host has named a model
                          (2026-11-09, by request); it stays hidden only for a
                          host with no model at all, where there is no
-                         conversation to set an effort for. A model that would
-                         drop the parameter gets a sentence in `#effort-note`
-                         rather than a missing control. `syncEffortControl()` in
-                         app.js owns that decision.
+                         conversation to set an effort for.
+                         `syncEffortControl()` in app.js owns that decision.
 
                          The panel is the brain slider (`galaxy-effort.js`,
                          2026-11-09): it replaced a six-stop native range whose
                          popover was too narrow for the card the spec defines
                          (440×258). The component owns the track, the folds and
                          the Galaxy layers; this file only supplies the mount
-                         point and the `Auto` escape hatch, which is not a
-                         seventh tier and therefore not on the track. -->
+                         point.
+
+                         **The track is as long as the model allows** (自适应
+                         映射, 2026-11-09): the host computes the stop list, so
+                         a model whose map sends `high` for its top three tiers
+                         gets three stops, and a model that takes no effort
+                         parameter at all gets one that cannot be dragged. The
+                         length of the track *is* the capability statement, which
+                         is why the disclosure sentence that used to live here
+                         is gone. -->
                     <div class="effort-control" id="effort-control" hidden>
                       <button class="chip-button effort-picker" id="effort-picker" aria-expanded="false" aria-controls="effort-panel">
                         <span id="effort-label">Auto</span>
@@ -469,23 +475,14 @@
                       </button>
                       <div class="effort-panel" id="effort-panel" role="group" aria-label="Thinking effort" hidden>
                         <div id="effort-galaxy-mount"></div>
-                        <!-- 卡片以外的所有东西都收在这一块里，打开时整块搬进
-                             `.ge-card`（`ensureEffortSlider`）。
-
-                             为什么要搬：Auto 与那句声明都是这个模型的属性，
-                             和档位名、映射结果属于同一类信息，落在卡片外面读
-                             起来像与应用其余部分无关的附着物（用户 2026-11-09
-                             两次要求「融合进卡片」）。
-
-                             为什么整块而不是逐个搬：它们要一起被反向缩放，才能
-                             在缩小后的卡片里保持正常的字号——见
-                             `layoutEffortExtras()`。 -->
+                        <!-- 自适应映射之后（2026-11-09），`Auto` 成了滑块最左
+                             一档、能力声明由轨道的长度表达，所以这块只剩一句
+                             「实际会发什么」的补充说明。它画在卡片下缘之外，
+                             字号按 `1/--ge-scale` 抵掉卡片的缩放。 -->
                         <div class="effort-extras" id="effort-extras">
                           <div class="effort-panel-foot">
-                            <button type="button" class="effort-auto" id="effort-auto" aria-pressed="true" data-i18n="effortAuto">Auto</button>
                             <span class="effort-auto-hint" id="effort-auto-hint"></span>
                           </div>
-                          <div class="effort-fixed" id="effort-note" hidden></div>
                         </div>
                       </div>
                     </div>

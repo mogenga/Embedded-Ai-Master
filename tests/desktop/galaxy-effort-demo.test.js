@@ -105,13 +105,15 @@ describe("同页两个实例", () => {
     expect((BODY.match(/createGalaxyEffort\(/g) ?? []).length).toBe(2);
   });
 
-  it("第一个 value: 0（Low），第二个 value: 5（Galaxy）并显式全动态", () => {
-    expect(BODY).toContain(
-      'createGalaxyEffort({ mount: slots[0].node, value: 0 })',
-    );
-    expect(BODY).toContain(
-      'createGalaxyEffort({ mount: slots[1].node, value: 5, reducedMotion: false })',
-    );
+  it("两个实例都拿到完整的六档 stops，分别停在 Low 与 Galaxy", () => {
+    // 2026-11-09 自适应映射之后，档位列表由调用方给（演示页扮演宿主）。
+    // 这一页故意给满六档：六档下的褶皱与 Galaxy 才是这个组件最完整的形态。
+    expect(BODY).toContain("stops: FULL_STOPS");
+    expect(BODY).toContain('{ value: "galaxy", label: "Galaxy" }');
+    // 两个极端：第一个在 Low（下标 1，因为 0 是 Auto），第二个在最后一档。
+    expect(BODY).toContain("mount: slots[0].node, stops: FULL_STOPS, value: 1");
+    expect(BODY).toContain("value: FULL_STOPS.length - 1");
+    expect(BODY).toContain("reducedMotion: false");
   });
 
   it("每个实例各挂一个 effort-change 监听器（不是共用一个）", () => {
@@ -122,10 +124,12 @@ describe("同页两个实例", () => {
     expect((BODY.match(/"effort-change"/g) ?? []).length).toBe(1);
   });
 
-  it("页面上显示最近一次 detail 的 value 与 level", () => {
+  it("页面上显示最近一次 detail 的三样：index / label / value", () => {
     expect(BODY).toContain('id="demo-last"');
+    // 自适应之后没有全局的档位名可反查，所以事件把三样都给出来，页面全用上。
+    expect(BODY).toMatch(/event\.detail\.index/);
+    expect(BODY).toMatch(/event\.detail\.label/);
     expect(BODY).toMatch(/event\.detail\.value/);
-    expect(BODY).toMatch(/event\.detail\.level/);
     expect(BODY).toContain("最近一次 effort-change");
   });
 });

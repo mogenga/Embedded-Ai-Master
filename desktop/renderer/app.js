@@ -11,7 +11,6 @@ import { providerMark } from "./provider-presets.js";
 import { providerRailRows, readProviderMeta } from "./provider-meta.js";
 import { VENDOR_MARKS } from "./vendor-marks.js";
 import { nextThinkingExpanded, normalizeTranscriptView, thinkingExpandedOnEnd } from "./thinking-view.js";
-import { EFFORT_TIER_LABELS, effortTierIndex } from "./effort-tiers.js";
 import { createGalaxyEffort } from "./galaxy-effort.js";
 
 /** Saved preferences are restored here; the host gets them on init. */
@@ -70,7 +69,7 @@ const state = {
   busy: false,
   mode: "ask",
   effort: "auto",
-  effortChoices: { levels: [], default: "", fixed: "" },
+  effortChoices: { levels: [], stops: [], resolved: {}, default: "", fixed: "" },
   model: "",
   models: [],
   modelsSource: "",
@@ -2869,17 +2868,17 @@ function setMode(mode) {
 }
 
 /**
- * The tiers the host reported for the active model.
+ * The stops the host says this model can use.
  *
- * Since 2026-11-09 the host reports all six tiers whenever it has a model at
- * all, so an empty list here means one thing only: **no model**, and therefore
- * no conversation to set an effort for. "This model would drop the parameter"
- * is no longer expressed by an empty list — it travels as `effortChoices.note`
- * and is shown inside the panel. Do not reintroduce a guess list here: the
- * vocabulary is the host's (and the kernel's), not the renderer's.
+ * 2026-11-09 起宿主按模型能力算出这条列表（自适应映射）：`Auto` 打头，后面是
+ * 这个模型的 `effortMap` 真正能产生的不同值，一档一个。空列表只有一个含义
+ * ——**没有可用模型**，那时整块控件隐藏。
+ *
+ * 不再有「六档固定、不支持就补一句声明」那套：滑块的**长度**就是能力声明，
+ * 拖到最后一档意味着唯一一件事。
  */
-function effortLevels() {
-  return state.effortChoices?.levels ?? [];
+function effortStops() {
+  return state.effortChoices?.stops ?? [];
 }
 
 /**
@@ -2897,28 +2896,25 @@ let effortPending = false;
  *
  * Created lazily: the component builds two canvases, an SVG and a RAF loop, and
  * a conversation that never touches the slider should not pay for them. It is
- * also the reason `destroy` exists — see `syncEffortControl`.
+ * also the reason `destroy` exists — see `syncEffortControl`. Rebuilt whenever
+ * the stop list changes, because the stop list is a constructor argument.
  */
 let effortSlider = null;
+/** The stop-list signature the current instance was built from. */
+let effortSliderStops = "";
 
 /**
  * Show the chip for the model the host just described.
  *
- * **Always shown** (2026-11-09, by request). The control used to disappear for
- * a model that did not declare `supportsReasoning`, because a stop whose
- * parameter the request drops is a promise the request does not keep. The
- * operator's answer stands: the tier list is a setting the user owns, and the
- * honest way to say "this model will not receive it" is a sentence beside it,
- * not an empty corner of the composer.
- *
- * The exception is a host with no model at all (`levels` empty for real): there
- * is no conversation to set an effort for, and the chip would be a button with
- * nothing behind it. That one still hides — and tears the slider down, because
- * a component that is still running its RAF loop behind a hidden chip is a bug
- * nobody would look for.
+ * **Always shown whenever there is a model** (2026-11-09, by request). The
+ * exception is a host with no model at all (`stops` empty for real): there is
+ * no conversation to set an effort for, and the chip would be a button with
+ * nothing behind it. That one hides — and tears the slider down, because a
+ * component still running its RAF loop behind a hidden chip is a bug nobody
+ * would look for.
  */
 function syncEffortControl() {
-  const unavailable = effortLevels().length === 0;
+  const unavailable = effortStops().length === 0;
   effortControl.hidden = unavailable;
   // Direct lookups rather than the `effortPanel` / `effortPicker` constants,
   // which are declared far below this and would be in their temporal dead zone
@@ -2929,20 +2925,38 @@ function syncEffortControl() {
     if (effortSlider !== null) {
       effortSlider.destroy();
       effortSlider = null;
+      effortSliderStops = "";
     }
   }
 }
 
 /**
- * The tier's display name for the chip.
+ * Where a `setEffort` value sits in the host's stop list.
  *
- * The panel's stops are painted by the component itself (it owns the SVG and
- * the track), so this is only about the seven-character label on the closed
- * chip. `EFFORT_TIER_LABELS` is the English vocabulary by design — the operator
- * asked for the effort control to stay untranslated.
+ * Returns -1 when the value is not one of the stops — `auto` on a model that
+ * takes no effort parameter is the common case, and so is a protocol value
+ * (`minimal`) left in an old `run.json`. The caller parks the slider at 0 in
+ * that case, which is the honest position: there is no stop for it.
  */
-function effortTierLabel(index) {
-  return EFFORT_TIER_LABELS[index] ?? "";
+function effortStopIndex(value) {
+  return effortStops().findIndex((stop) => stop.value === value);
+}
+
+/**
+ * How many distinct things the track can send, for the chip's own label.
+ *
+ * A one-stop list is the "this model takes no effort parameter" case: the host
+ * labels its single stop `Off`, and the chip says the same thing.
+ */
+function effortChipLabel() {
+  const stops = effortStops();
+  if (stops.length === 0) return "";
+  const index = effortStopIndex(state.effort);
+  // A value with no stop of its own (an old `minimal`, or `auto` where the
+  // single stop is `Off`) still has to print something truthful. `Auto` is the
+  // host's word for "send nothing", which is what those requests do.
+  if (index >= 0) return stops[index].label;
+  return stops[0].label;
 }
 
 /**
@@ -2957,76 +2971,19 @@ function renderEffortPanel() {
   const choices = state.effortChoices ?? {};
   $("effort-panel").setAttribute("aria-label", t.effortLabel);
 
-  // `auto` is not a tier. The brain parks at the low end but stays unlit, and
-  // no stop is highlighted, so the track never claims a selection the request
-  // does not carry. A protocol-only value (`minimal` from an older run.json) is
-  // the same case.
-  const index = effortTierIndex(state.effort);
+  const index = effortStopIndex(state.effort);
   if (effortSlider !== null) effortSlider.setValue(index >= 0 ? index : 0, { silent: true });
 
-  $("effort-auto").setAttribute("aria-pressed", String(state.effort === "auto"));
-  // The hint slot answers one question in both states: what will actually go on
-  // the wire. Under `auto` that is the model's default level; under a picked
-  // tier it is the mapped protocol value — shown only when it differs from the
-  // tier's own name. Three tiers collapse onto `high` by default, and a slider
-  // showing only names would claim three strengths where there is one request.
-  // `choices.resolved` is what the host computed with the model's `effortMap`;
-  // deriving it here would be a second answer to the same question.
-  const resolved = index >= 0 ? choices.resolved?.[state.effort] : undefined;
-  $("effort-auto-hint").textContent = state.effort === "auto"
-    ? choices.default ?? ""
-    : typeof resolved === "string" && resolved !== state.effort
-      ? t.effortSends(resolved)
-      : "";
-
-  // Why there is nothing to choose, when the host gave a reason — dim, not a
-  // warning: "this model takes no effort parameter" is a property of the
-  // model, not a fault the operator caused. `fixed` is the same sentence for
-  // a model locked to one level.
-  const note = choices.note
-    || (choices.fixed ? t.effortFixed.replace("{level}", choices.fixed) : "");
-  const noteNode = $("effort-note");
-  noteNode.textContent = note;
-  noteNode.hidden = note === "";
-  layoutEffortExtras();
-}
-
-/**
- * Size the card for the controls that now live inside it, and un-shrink them.
- *
- * Two separate jobs, both forced by putting `Auto` and the note on the card:
- *
- * 1. **Height.** The card's 258px is the spec's checked value and the extras
- *    are ours, so the card grows by exactly the extras' measured height. A
- *    fixed extra would clip a three-line note on a narrow window.
- *
- * 2. **Type size.** The extras sit inside `.ge-root`, which is
- *    `transform: scale(--ge-scale)`; at 0.68 an 11px label renders at 7.5px.
- *    The card's own text is meant to shrink *as a picture* of the spec, but
- *    the Auto button is a real control a person clicks, so it is scaled back
- *    up by `1/scale`. That keeps it at its nominal size while still tracking
- *    the card's position.
- *
- * The extras are absolutely positioned below the card's 258px box, so
- * measuring them cannot feed back into the card's height and oscillate.
- */
-function layoutEffortExtras() {
-  const extras = $("effort-extras");
-  const card = extras.parentElement;
-  if (card === null || !card.classList.contains("ge-card")) return;
-  // 弹层关着的时候整棵子树是 `display: none`，`offsetHeight` 量出来是 0。
-  // `renderEffortPanel` 每个 `state` 事件都会跑（包括面板没打开的时候），
-  // 所以这里必须自己识别这个状态，否则会把卡片高度写回 258 —— 面板真打开时
-  // extras 就会压到轨道上。打开时 `setEffortPanel` 会再调一次，那次量得到。
-  if ($("effort-panel").hidden) return;
-  const mount = $("effort-galaxy-mount");
-  const scale = Number.parseFloat(getComputedStyle(mount).getPropertyValue("--ge-scale")) || 1;
-  // `offsetHeight` 量的是**变换之前**的布局高度。字号与内边距已经按
-  // `1/--ge-scale` 放大过（CSS 里那几处 `calc(… / var(--ge-scale))`），所以
-  // 这里的数就是逻辑空间里的真实高度，乘回 `scale` 才等于它在屏幕上占的位置。
-  const extra = extras.hidden ? 0 : extras.offsetHeight;
-  card.style.minHeight = `${258 + extra}px`;
-  mount.style.height = `${(258 + extra) * scale}px`;
+  // The hint answers one question: what will actually go on the wire. It is
+  // empty for every stop whose own `sends` matches its name — after the
+  // adaptive change that is every stop the panel offers, so this only shows up
+  // for a value with no stop of its own (an old `run.json` holding `minimal`).
+  // `choices.resolved` is the host's answer; deriving it here would be a second
+  // source of truth for one question.
+  const resolved = choices.resolved?.[state.effort];
+  $("effort-auto-hint").textContent = typeof resolved === "string" && resolved !== state.effort
+    ? t.effortSends(resolved)
+    : "";
 }
 
 function setEffort(effort) {
@@ -3034,12 +2991,7 @@ function setEffort(effort) {
   // a later `notice` for something else must not yank the thumb.
   effortPending = false;
   state.effort = effort;
-  const index = effortTierIndex(effort);
-  $("effort-label").textContent = effort === "auto"
-    ? t.effortAuto
-    : index >= 0
-      ? effortTierLabel(index)
-      : effort;
+  $("effort-label").textContent = effortChipLabel();
   syncEffortControl();
   renderEffortPanel();
 }
@@ -6880,16 +6832,18 @@ document.addEventListener("keydown", (event) => {
     // mean had no pane behind it, and an accepted shortcut that does the
     // effort cycle beats one that does nothing while the sheet lists neither.
     event.preventDefault();
-    // Silent when the model has no levels: the control is hidden, and sending
-    // anyway would earn one warning per keypress for a setting the user cannot
-    // see (D-169's complaint about this exact shortcut).
-    if (effortLevels().length === 0) return;
-    // Cycle through what this model actually accepts, not a fixed four. The
-    // index advances from the chip's current value, and the host's answering
-    // `state` is what moves it — same rule as the menu click above.
-    const order = ["auto", ...effortLevels()];
-    const next = order[(order.indexOf(state.effort) + 1) % order.length];
-    api.send({ cmd: "setEffort", effort: next });
+    // Silent when there is no model: the control is hidden, and sending anyway
+    // would earn one warning per keypress for a setting the user cannot see
+    // (D-169's complaint about this exact shortcut).
+    const stops = effortStops();
+    if (stops.length === 0) return;
+    // Cycle through the stops the host actually offers, in track order. A
+    // one-stop list cannot cycle: the key does nothing rather than sending a
+    // value that is already selected.
+    if (stops.length === 1) return;
+    const at = effortStopIndex(state.effort);
+    const next = stops[(at + 1) % stops.length];
+    api.send({ cmd: "setEffort", effort: next.value });
   } else if (key === "\\") {
     event.preventDefault();
     closeWorkbench();
@@ -7560,20 +7514,31 @@ const effortPanel = $("effort-panel");
  * both switches work without duplicating the media query here.
  */
 function ensureEffortSlider() {
-  if (effortSlider !== null || typeof createGalaxyEffort !== "function") return;
+  if (typeof createGalaxyEffort !== "function") return;
+  const stops = effortStops();
+  if (stops.length === 0) return;
+  // The stop list is a constructor argument, so a model switch that changes it
+  // has to rebuild. Compare by signature rather than by identity: the host
+  // sends a fresh array on every `state`, and rebuilding on every keystroke
+  // would restart the RAF loop and the fold animation for nothing.
+  const signature = stops.map((stop) => `${stop.value}:${stop.label}`).join("|");
+  if (effortSlider !== null && signature === effortSliderStops) return;
+  if (effortSlider !== null) {
+    effortSlider.destroy();
+    effortSlider = null;
+  }
+  effortSliderStops = signature;
+  const index = effortStopIndex(state.effort);
   effortSlider = createGalaxyEffort({
     mount: $("effort-galaxy-mount"),
-    value: Math.max(0, effortTierIndex(state.effort)),
+    stops,
+    value: index >= 0 ? index : 0,
     reducedMotion: document.documentElement.dataset.motion === "reduced",
-    onChange: (detail) => commitEffort(detail.level.toLowerCase()),
+    // The component reports `{ index, value, label }`; `value` is what the
+    // host accepts, so it goes on the wire unchanged. `label` is a display
+    // string and must never be parsed back into a level.
+    onChange: (detail) => commitEffort(detail.value),
   });
-  // 卡片以外的所有东西（Auto 与声明句）搬进卡片（2026-11-09 用户要求
-  // 「auto 也要含进卡片里」「声明融合进卡片」）。它们是这个控件的设置与模型
-  // 属性，不是卡片旁边的一条附着物。卡片是组件建的，所以只能在这里接管一个
-  // 节点——`#effort-extras` 在标记里仍然写在 `#effort-panel` 内，作为「组件
-  // 没建起来」时的落点。
-  const card = $("effort-galaxy-mount").querySelector(".ge-card");
-  if (card !== null) card.append($("effort-extras"));
 }
 
 function setEffortPanel(open) {
@@ -7583,9 +7548,9 @@ function setEffortPanel(open) {
     // Low for one frame.
     ensureEffortSlider();
   }
-  // Unhide **before** painting: `layoutEffortNote` measures the note, and a
-  // subtree under `display: none` measures zero — it would write the card back
-  // to its bare 258px and let the note overlap the Auto row.
+  // Unhide **before** painting: `renderEffortPanel` pushes the confirmed stop
+  // into the instance, and a slider measured under `display: none` lays out at
+  // zero — the fold animation would start from the wrong position.
   effortPanel.hidden = !open;
   effortPicker.setAttribute("aria-expanded", String(open));
   if (open) {
@@ -7620,10 +7585,6 @@ function commitEffort(tier) {
   api.send({ cmd: "setEffort", effort: tier });
 }
 
-$("effort-auto").addEventListener("click", (event) => {
-  event.stopPropagation();
-  commitEffort("auto");
-});
 
 document.addEventListener("click", (event) => {
   if (!event.target.closest("#effort-control")) setEffortPanel(false);

@@ -183,19 +183,37 @@
           { label: "实例 B", node: document.getElementById("demo-slot-b") },
         ];
 
-        /* 同页两个实例（规格 §6 的验收项）：第一个停在 Low，第二个停在 Galaxy，
-           一屏之内就能比对两个极端。第二个显式给 reducedMotion: false——缺省值
-           将来若改了，这一页仍然按「全动态」演示。 */
+        /* 自适应映射之后（2026-11-09），档位列表由宿主给，组件不再自带六档。
+           演示页扮演宿主的角色：这里给满六档，好让六档下的褶皱与 Galaxy 都能
+           看到。第一个停在 Low，第二个停在 Galaxy，一屏之内比对两个极端。
+           第二个显式给 reducedMotion: false——缺省值将来若改了，这一页仍然按
+           「全动态」演示。 */
+        const FULL_STOPS = [
+          { value: "auto", label: "Auto" },
+          { value: "low", label: "Low" },
+          { value: "medium", label: "Medium" },
+          { value: "high", label: "High" },
+          { value: "extra", label: "Extra" },
+          { value: "max", label: "Max" },
+          { value: "galaxy", label: "Galaxy" },
+        ];
         const instances = [
-          createGalaxyEffort({ mount: slots[0].node, value: 0 }),
-          createGalaxyEffort({ mount: slots[1].node, value: 5, reducedMotion: false }),
+          createGalaxyEffort({ mount: slots[0].node, stops: FULL_STOPS, value: 1 }),
+          createGalaxyEffort({
+            mount: slots[1].node,
+            stops: FULL_STOPS,
+            value: FULL_STOPS.length - 1,
+            reducedMotion: false,
+          }),
         ];
 
         /* 每个实例一个监听器、挂在各自的挂载槽上。共用一个监听器就只能靠
-           `event.target` 反推是哪个实例，而事件是冒泡的，反推错了也没人发现。 */
+           `event.target` 反推是哪个实例，而事件是冒泡的，反推错了也没人发现。
+           `detail` 的字段是 `{ index, value, label }`（自适应之后没有固定的档位
+           名可反查，所以事件把三样都给出来）。 */
         slots.forEach((slot) => {
           slot.node.addEventListener("effort-change", (event) => {
-            lastLine.textContent = `${slot.label} · value ${event.detail.value} · level ${event.detail.level}`;
+            lastLine.textContent = `${slot.label} · index ${event.detail.index} · ${event.detail.label} (${event.detail.value})`;
           });
         });
 

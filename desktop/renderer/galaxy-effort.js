@@ -16,15 +16,11 @@
 
 import {
   FOLD_LEVELS,
-  TIER_NAMES,
   clamp,
-  foldReveal,
   galaxyState,
   stepSpring,
-  tierIndex,
   trackFillOpacity,
   trackFillStops,
-  trackX,
 } from "./galaxy-effort-core.js";
 import { createPixelLayer, createRadialLayer } from "./galaxy-effort-layers.js";
 
@@ -49,12 +45,29 @@ const BRAIN_HALF = BRAIN_SIZE / 2;
 const MIRROR_TRANSFORM = "translate(64 0) scale(-1 1)";
 
 /**
- * tooltip 默认文案，逐字来自规格 §3。
+ * tooltip 的默认文案。
  *
- * 它是**默认值**而不是硬编码：宿主可以传 `tooltip` 覆盖成已本地化的句子。默认
- * 值必须是规格原文，因为这段文字本身就是验收项。
+ * 六档时逐字等于规格 §3 的原文（`Low, Medium, High, Extra, Max or Galaxy`）；
+ * 档位由宿主决定之后，默认句只能从 `stops` 的标签拼出来——写死六个名字会在
+ * 三档或一档的模型上说出根本不存在的档（R3）。宿主仍可以传 `tooltip` 覆盖成
+ * 已本地化的句子。
  */
-const DEFAULT_TOOLTIP = "Drag the brain or use arrow keys to choose Low, Medium, High, Extra, Max or Galaxy. Higher effort adds brain folds; Galaxy adds particles. This control uses local demo state.";
+function listLabels(labels) {
+  if (labels.length <= 1) return labels.join("");
+  if (labels.length === 2) return labels[0] + " or " + labels[1];
+  return labels.slice(0, -1).join(", ") + " or " + labels[labels.length - 1];
+}
+
+/**
+ * 默认 tooltip：把档位名逐个列出来。
+ *
+ * 导出是为了让测试能在 Node 里直接断言六档时它逐字等于规格 §3 的原文——
+ * 那段文字本身是验收项，而档位名改成动态拼接之后，它只能靠一条断言钉住。
+ */
+export function defaultTooltip(stops) {
+  return "Drag the brain or use arrow keys to choose " + listLabels(stops.map((stop) => stop.label))
+    + ". Higher effort adds brain folds; Galaxy adds particles. This control uses local demo state.";
+}
 
 /** 普通档位弹簧（规格 §4）：k=420、damping=32。 */
 const POSITION_K = 420;
@@ -80,10 +93,11 @@ const TRACK_HEIGHT = 40;
 /** 轨道在命中区内的上偏移（规格 §1：上 15、下 17、高 40，命中区高 72）。 */
 const TRACK_TOP = 15;
 /**
- * 六个刻度圆点的左右端（规格 §1：`16 + i×358/5`）。
+ * 刻度圆点的左右端（规格 §1：`16 + i×358/5`，六档时）。
  *
- * 与 `trackX` 共用同一对端点：刻度与脑形中心必须落在同一条映射上，两处各写
- * 一套数字的后果是脑形停在两粒刻度之间，而看起来"差不多对"。
+ * 与 `trackXAt` 共用同一对端点：刻度与脑形中心必须落在同一条映射上，两处各写
+ * 一套数字的后果是脑形停在两粒刻度之间，而看起来"差不多对"。端点**不随档位数
+ * 变**（轨道还是那条轨道），变的只是中间分几格。
  */
 const TRACK_START_X = 16;
 const TRACK_END_X = TRACK_START_X + 358;
@@ -99,8 +113,9 @@ const RADIAL_HEIGHT = 390;
 /**
  * 粒子中心在**放射画布**里的坐标（规格 §5：`(100+22+16 + position/5×358, 60+141+28)`）。
  *
- * 只留下不随位置变化的那部分：横坐标把 `16 + position/5×358` 让给
- * `trackX(position)`（那是轨道与脑形共用的唯一一份映射），常量只剩 `100 + 22`；
+ * 只留下不随位置变化的那部分：横坐标把 `16 + position/span×358` 让给
+ * `trackXAt(position, span)`（那是轨道、刻度与脑形共用的唯一一份映射），常量只剩
+ * `100 + 22`；
  * 纵坐标是规格原文的三个数之和 `60 + 141 + 28 = 229`，原样抄写、不在这里
  * 重新拆成"命中区 + 轨道偏移"。粒子必须跟着脑形走——脑形一到 Galaxy 就停在
  * 最右侧，中心写死会让粒子从空处喷出来。
@@ -114,8 +129,14 @@ const RADIAL_CENTER_BASE_Y = 60 + 141 + 28;
  */
 const CHAR_STAGGER_MS = 15;
 
-/** 轨道最右一格的下标。写成 `TIER_NAMES.length - 1`，增删档位时不用再找一遍。 */
-const LAST_TIER = TIER_NAMES.length - 1;
+/**
+ * 一档褶皱展开窗口的半宽与宽度（规格 §4）：`u = (p - levelPos + .85) / .7`。
+ *
+ * 单档或三档时 `levelPos` 不再是整数 1..5（见 `foldRevealAt`），但窗口本身的形状
+ * 是规格给的，不随档位数改。
+ */
+const FOLD_WINDOW_LEAD = 0.85;
+const FOLD_WINDOW_WIDTH = 0.7;
 
 /**
  * 建一个 SVG 节点并写属性。
@@ -155,23 +176,108 @@ function resolveMount(mount) {
   throw new Error("createGalaxyEffort: mount must be an element or a selector string");
 }
 
-/** 把任意输入折成 0..5 的整数档位（提交与外部回写用）。 */
-function normaliseValue(raw) {
+/**
+ * 校验并拷贝宿主给的档位表。
+ *
+ * `stops` 是**必填**的：档位由模型能力决定，正是这次改动的全部意义。缺省时
+ * 兜底成三档会让"宿主漏传"看起来像"控件能用、只是档位不对"——那种错要等到
+ * 用户发现标签和请求不符才会被查出来（R3）。所以缺省、空表、形状不对一律抛错。
+ *
+ * 拷贝一份：宿主每次回答都可能重建自己那份数组，组件内部的刻度、标签与判定
+ * 必须来自同一份快照；否则宿主刷新一次，刻度和标签就会各说一套。
+ *
+ * 导出是为了让 `tests/desktop/*` 在没有 DOM 的 Node 里直接断言校验规则
+ * （规格 §7：可脱离 DOM 的部分导出成纯函数）。
+ */
+export function normaliseStops(stops) {
+  if (!Array.isArray(stops) || stops.length === 0) {
+    throw new Error("createGalaxyEffort: stops must be a non-empty array of { value, label }");
+  }
+  return stops.map((stop, index) => {
+    if (stop === null || typeof stop !== "object"
+      || typeof stop.value !== "string" || typeof stop.label !== "string" || stop.label === "") {
+      throw new Error(`createGalaxyEffort: stops[${index}] must be { value: string, label: string }`);
+    }
+    return { value: stop.value, label: stop.label };
+  });
+}
+
+/** 把任意输入折成 0..span 的整数档位（提交与外部回写用）。 */
+function normaliseValue(raw, span) {
   const number = Number(raw);
   if (!Number.isFinite(number)) return 0;
-  return clamp(Math.round(number), 0, LAST_TIER);
+  return clamp(Math.round(number), 0, span);
 }
 
 /**
- * 拖拽途中的目标：钳进 0..5，但**保留小数**。
+ * 拖拽途中的目标：钳进 0..span，但**保留小数**。
  *
- * 拖动是连续量。在这里取整会让轨道填充与褶皱一格一格地跳，弹簧也跟着变成
- * 六段阶梯——规格 §4 的"禁止用两张静帧淡入冒充移动"说的正是这件事。
+ * 拖动是连续量。在这里取整会让轨道填充与褶皱一格一格地跳，弹簧也会跟着变成
+ * 阶梯——规格 §4 的"禁止用两张静帧淡入冒充移动"说的正是这件事。
  */
-function clampPosition(raw) {
+function clampPosition(raw, span) {
   const number = Number(raw);
   if (!Number.isFinite(number)) return 0;
-  return clamp(number, 0, LAST_TIER);
+  return clamp(number, 0, span);
+}
+
+/**
+ * 连续位置 → 最近的整数档位。
+ *
+ * 用 `round` 而不是 `floor`：位置 4.6 在视觉上已经属于最高档（脑形停在两格之间
+ * 靠右的地方），向下取整会让标签停在上一个档位、和用户看到的位置对不上。
+ * 与 core 的 `tierIndex` 同一套取整，只是上界由写死的 5 换成当前的 `span`。
+ */
+function indexAt(position, span) {
+  const number = Number(position);
+  if (!Number.isFinite(number)) return 0;
+  return clamp(Math.round(number), 0, span);
+}
+
+/**
+ * 轨道内的横坐标：`TRACK_START_X + position / span × (TRACK_END_X - TRACK_START_X)`。
+ *
+ * 不调 core 的 `trackX`：那个把位置钳在 0..5 再除以 5，是六档验收的产物。宿主给
+ * 三档时 `position = 2` 就是满档，用 core 的会把它画在轨道的 40% 处——脑形与刻度
+ * 就此分家。端点常量与 core 相同（`16` 与 `16 + 358`），只有分母换成当前跨度。
+ */
+export function trackXAt(position, span) {
+  if (span <= 0) return TRACK_START_X;
+  return TRACK_START_X + clamp(position, 0, span) / span * (TRACK_END_X - TRACK_START_X);
+}
+
+/**
+ * 某一层褶皱在当前位置的揭示程度，`0` 到 `1`。
+ *
+ * 公式是规格 §4 的 `u = clamp((p - level + .85) / .7, 0, 1)` 加 smoothstep，
+ * **内联在这里而不是调 core 的 `foldReveal`**：core 把位置钳在 0..5、把 level 当
+ * 位置用，那是六档验收的产物，定义域与档位数绑死；档位一旦由宿主决定，第 f 层
+ * 的展开中心要落在 `f × span / 5`（三档时是 .4/.8/1.2/1.6/2），超出 0..5 的
+ * 语义。core 那个纯函数有 51 条测试钉着，不能为了这里去改它。
+ *
+ * 窗口宽度不变：第 5 层在 `span` 处 `u = (span - span + .85) / .7 > 1`，所以满档
+ * 时五层全开——这正是"最高档要看到全部褶皱"。
+ */
+export function foldRevealAt(position, levelPos, span) {
+  const p = clamp(position, 0, span);
+  const u = clamp((p - levelPos + FOLD_WINDOW_LEAD) / FOLD_WINDOW_WIDTH, 0, 1);
+  return u * u * (3 - 2 * u);
+}
+
+/**
+ * Galaxy 在哪一档生效：只有它是**最高一档**时返回它的下标，否则返回 -1。
+ *
+ * 理由是没有比 Galaxy 更强的请求可发的那种模型不该出现 Galaxy 效果——默认映射
+ * 下最高档是 `high`，列表里可能仍有 `galaxy`（旧 `run.json` 里存的档位），此时
+ * 整套像素层、放射层与放大都不跑。宿主不会故意造"galaxy 在中间"的表，但组件
+ * 不能因此崩：按"不在最高位就不启用"处理。
+ *
+ * 单档且那一档就是 `galaxy` 时返回 0（它同时是最高档）；这是规则的直接结果，
+ * 不是特例。
+ */
+export function galaxyIndexOf(stops) {
+  const index = stops.findIndex((stop) => stop.value === "galaxy");
+  return index !== -1 && index === stops.length - 1 ? index : -1;
 }
 
 /** 帮助按钮里的 24×24 圆圈问号（规格 §1 的路径逐字）。描边颜色由 CSS 给。 */
@@ -288,15 +394,20 @@ function buildBrain() {
  * 所有状态都收在这个闭包里：模块顶层没有可变状态，否则同页两个实例会共享一个
  * `clock` 或一条弹簧，拖一个另一个跟着动，而这类串扰在单实例验收里完全看不出来。
  *
+ * `stops` 是**必填**的档位表（见 `normaliseStops`）。`value` 是**下标**而不是
+ * 档位名：同一个名字（例如 `auto`）在不同模型上落在不同位置，下标才是轨道上的
+ * 位置本身。
+ *
  * @param {{
  *   mount: Element | string,
+ *   stops: Array<{ value: string, label: string }>,
  *   value?: number,
  *   reducedMotion?: boolean,
  *   tooltip?: string,
- *   onChange?: (detail: { value: number, level: string }) => void,
+ *   onChange?: (detail: { index: number, value: string, label: string }) => void,
  * }} options
  * @returns {{
- *   setValue: (value: number, settings?: { silent?: boolean }) => void,
+ *   setValue: (index: number, settings?: { silent?: boolean }) => void,
  *   getValue: () => number,
  *   destroy: () => void,
  * }}
@@ -304,11 +415,20 @@ function buildBrain() {
 export function createGalaxyEffort(options = {}) {
   const {
     mount,
+    stops: rawStops,
     value = 0,
     reducedMotion = false,
-    tooltip = DEFAULT_TOOLTIP,
+    tooltip,
     onChange,
   } = options;
+
+  const stops = normaliseStops(rawStops);
+  /** 位置的最大值：档位表的长度减一。所有"上界"从它来，不再写死 5。 */
+  const span = stops.length - 1;
+  /** 只有一个档位时整条轨道不可拖（规格：`aria-valuemax = 0`，冻结）。 */
+  const single = span === 0;
+  /** Galaxy 生效的档位下标；-1 表示不启用（不在最高位或根本没有）。 */
+  const galaxyIndex = galaxyIndexOf(stops);
 
   const mountNode = resolveMount(mount);
 
@@ -363,13 +483,17 @@ export function createGalaxyEffort(options = {}) {
   /* ---------- DOM ---------- */
 
   const root = element("div", "ge-root");
+  // 单档时整条轨道不可拖。视觉上的"没有手柄、光标是默认箭头"全在 CSS 里，这个
+  // 属性是给 CSS 的钩子；JS 侧另外还有一层（`single` 挡掉 setTarget / 指针 /
+  // 键盘 / commit），因为 `pointer-events: none` 挡不住键盘，也不该是唯一那道锁。
+  if (single) root.dataset.single = "true";
   const card = element("div", "ge-card");
 
   const title = element("div", "ge-title");
   const titleName = element("span", "ge-title-name");
   titleName.textContent = "Effort";
   const tierLabel = element("span", "ge-tier");
-  tierLabel.textContent = TIER_NAMES[0];
+  tierLabel.textContent = stops[0].label;
   title.append(titleName, tierLabel);
 
   const help = element("button", "ge-help");
@@ -381,7 +505,7 @@ export function createGalaxyEffort(options = {}) {
   bubble.id = "ge-tooltip-" + Math.random().toString(36).slice(2, 9);
   bubble.setAttribute("role", "tooltip");
   bubble.hidden = true;
-  bubble.textContent = tooltip;
+  bubble.textContent = tooltip ?? defaultTooltip(stops);
   help.setAttribute("aria-controls", bubble.id);
 
   const scale = element("div", "ge-scale");
@@ -401,9 +525,10 @@ export function createGalaxyEffort(options = {}) {
   slider.setAttribute("role", "slider");
   slider.setAttribute("tabindex", "0");
   slider.setAttribute("aria-valuemin", "0");
-  slider.setAttribute("aria-valuemax", String(LAST_TIER));
+  // 单档时 upper bound 是 0：读屏会说"0 到 0"，与"拖不动"一致。
+  slider.setAttribute("aria-valuemax", String(span));
   slider.setAttribute("aria-valuenow", "0");
-  slider.setAttribute("aria-valuetext", TIER_NAMES[0]);
+  slider.setAttribute("aria-valuetext", stops[0].label);
   slider.setAttribute("aria-orientation", "horizontal");
   slider.setAttribute("aria-label", "Effort");
 
@@ -413,9 +538,13 @@ export function createGalaxyEffort(options = {}) {
   track.style.top = `${TRACK_TOP}px`;
   const trackFill = element("div", "ge-track-fill");
   const dots = element("div", "ge-track-dots");
-  for (let index = 0; index <= LAST_TIER; index += 1) {
+  // 刻度点数量就是档位数，位置由同一个跨度均分。单档时只有一个点、落在左端
+  // （除数 `span` 为 0，不能套那条公式）；也不给长刻度——长刻度是"第二档这个
+  // 推荐位置"的记号，一档的表里没有第二个位置可指。
+  for (let index = 0; index < stops.length; index += 1) {
     const dot = element("i", index === 1 ? "ge-dot ge-dot-tall" : "ge-dot");
-    dot.style.left = `${TRACK_START_X + index * (TRACK_END_X - TRACK_START_X) / LAST_TIER - 3}px`;
+    const dotX = single ? TRACK_START_X : TRACK_START_X + index * (TRACK_END_X - TRACK_START_X) / span;
+    dot.style.left = `${dotX - 3}px`;
     dots.append(dot);
   }
 
@@ -473,19 +602,26 @@ export function createGalaxyEffort(options = {}) {
    */
   function paint(animateLabel) {
     const state = galaxyState(galaxy, clock, enteredAt);
-    const x = trackX(position);
-    const index = tierIndex(target);
+    const x = trackXAt(position, span);
+    const index = indexAt(target, span);
 
     // 轨道填充：宽度跟着连续位置走，颜色是五个色标的横向渐变。
     // 两件事都不能"只在换档时刷"——规格 §4 要的是随实际位置连续变化，
     // 中途反向时前缘颜色要顺着当时的颜色回去，不能先跳档再回来。
-    const stops = trackFillStops(position);
+    //
+    // 色标**按归一化位置取**：core 的 `trackFillStops` 把 p-1 当色板下标，
+    // 定义域是六档的 0..5。三档时满档是 2，直接传会让整条轨道只用第一组色板、
+    // 右端永远不偏冷紫——"强度越高前缘越冷"是规格 §4 的验收项。先把当前位置
+    // 折成等价的六档位置（`position × 5 / span`）再取；单档（span = 0）没有
+    // "更高"可言，取 0。六档下 `5 / span === 1`，与原实现逐位相同。
+    const fillPosition = span === 0 ? 0 : position * (5 / span);
+    const fillStops = trackFillStops(fillPosition);
     trackFill.style.width = `${x}px`;
     trackFill.style.opacity = String(trackFillOpacity(state.g));
-    trackFill.style.background = `linear-gradient(90deg, ${stops[0]} 0%, ${stops[1]} 30%, ${stops[2]} 60%, ${stops[3]} 90%, ${stops[4]} 100%)`;
+    trackFill.style.background = `linear-gradient(90deg, ${fillStops[0]} 0%, ${fillStops[1]} 30%, ${fillStops[2]} 60%, ${fillStops[3]} 90%, ${fillStops[4]} 100%)`;
 
     // 脑形：始终是同一个 SVG，只改派生属性（规格 §4「进出保留同一 SVG」）。
-    // 坐标相对**命中区**（脑形的父节点），`trackX` 给的正是命中区内的横坐标；
+    // 坐标相对**命中区**（脑形的父节点），`trackXAt` 给的正是命中区内的横坐标；
     // 减去半径让 48px 的盒子以中心对齐。
     brain.wrap.style.left = `${x - BRAIN_HALF}px`;
     brain.wrap.style.top = `${BRAIN_CENTER_Y - BRAIN_HALF}px`;
@@ -496,10 +632,13 @@ export function createGalaxyEffort(options = {}) {
     brain.wrap.style.setProperty("--ge-glow-b", `${state.glow[1]}px`);
     brain.wrap.style.setProperty("--ge-glow-strength", String(state.g));
 
-    // 褶皱：同一批节点，只改 opacity 与 --ge-fold-hidden。第 N 层的 level 就是
-    // 它的展开窗口中心，所以每层都拿同一个 position 各自算一次 reveal。
+    // 褶皱：同一批节点，只改 opacity 与 --ge-fold-hidden。每层在档位表上的
+    // 展开中心是 `level × span / 5`——五层均匀铺满整条轨道，档位越少层与层
+    // 之间越近（三档时第 2 层与第 1 层只差 0.4 格）。位置换算交给
+    // `foldRevealAt`，那里说明了为什么不能直接调 core 的 `foldReveal`。
     for (const group of brain.folds) {
-      const reveal = foldReveal(position, Number(group.dataset.tier));
+      const levelPos = Number(group.dataset.tier) * span / 5;
+      const reveal = foldRevealAt(position, levelPos, span);
       group.setAttribute("opacity", String(reveal));
       group.style.setProperty("--ge-fold-hidden", String(1 - reveal));
     }
@@ -513,11 +652,13 @@ export function createGalaxyEffort(options = {}) {
 
     if (index !== labelIndex) {
       labelIndex = index;
-      if (animateLabel) animateLabelTo(TIER_NAMES[index]);
-      else setLabel(TIER_NAMES[index]);
+      if (animateLabel) animateLabelTo(stops[index].label);
+      else setLabel(stops[index].label);
     }
-    const label = TIER_NAMES[index];
-    tierLabel.classList.toggle("ge-tier-galaxy", index === LAST_TIER);
+    const label = stops[index].label;
+    // 淡蓝只给**真正启用的** Galaxy：宿主把 `galaxy` 放在中间档时那档没有
+    // Galaxy 效果，标签再染成蓝色就是在指一个不存在的东西。
+    tierLabel.classList.toggle("ge-tier-galaxy", galaxyIndex !== -1 && index === galaxyIndex);
     slider.setAttribute("aria-valuenow", String(index));
     slider.setAttribute("aria-valuetext", label);
 
@@ -680,10 +821,14 @@ export function createGalaxyEffort(options = {}) {
    *
    * "提交"专指用户真的选定了一档（松手、点击、键盘、`setValue` 且未 `silent`）。
    * 拖动途中的连续值只改视觉，不经过这里——否则一次拖拽会排出上百条命令。
+   *
+   * 单档时直接不派发：位置不可能变，发一条"用户选了那唯一一档"的命令只会让
+   * 宿主以为发生过一次选择（对话框、日志、`run.json` 都会留下一条假记录）。
    */
   function commit(next) {
-    const index = normaliseValue(next);
-    const detail = { value: index, level: TIER_NAMES[index] };
+    if (single) return;
+    const index = normaliseValue(next, span);
+    const detail = { index, value: stops[index].value, label: stops[index].label };
     root.dispatchEvent(new CustomEvent("effort-change", {
       detail,
       bubbles: true,
@@ -698,14 +843,19 @@ export function createGalaxyEffort(options = {}) {
    * `enteredAt` 只在**进入**那一帧写一次：它定义 `age = clock - enteredAt`，
    * 每帧重写会让爆发永远停在最强的一帧，而规格 §4 要的是"进入时强而短、
    * 随后微弱"。
+   *
+   * 单档时是一个纯粹的赋值：目标恒为 0、`galaxyTarget` 恒为 0，指针与键盘都
+   * 改不动它（入口处挡住了，这里再挡一次是因为 `setValue` 也走这条路）。
    */
   function setTarget(index, { animate = true } = {}) {
-    const next = clampPosition(index);
+    const next = single ? 0 : clampPosition(index, span);
     const wasGalaxy = galaxyTarget === 1;
-    // 判据是**最近档位**而不是"位置正好等于 5"：规格 §4 写的是「当最近档位进入
-    // Galaxy 时」，而拖动中的位置是连续值，4.6 已经在视觉上属于 Galaxy（标签也
-    // 已经换了），等它精确到 5 才变形会让标签先到、脑形后到。
-    const isGalaxy = tierIndex(next) === LAST_TIER;
+    // 判据是**最近档位**而不是"位置正好等于最高"：规格 §4 写的是「当最近档位
+    // 进入 Galaxy 时」，而拖动中的位置是连续值，5.6 在六档下已经在视觉上属于
+    // Galaxy（标签也已经换了），等它精确到端点才变形会让标签先到、脑形后到。
+    // `galaxyIndex === -1`（没有 Galaxy 档、或它不在最高位）时整条 Galaxy 路径
+    // 不跑，`galaxyTarget` 恒为 0。
+    const isGalaxy = galaxyIndex !== -1 && indexAt(next, span) === galaxyIndex;
     target = next;
     if (isGalaxy && !wasGalaxy) {
       enteredAt = clock;
@@ -741,23 +891,30 @@ export function createGalaxyEffort(options = {}) {
     const rect = track.getBoundingClientRect();
     const scale = rect.width > 0 ? rect.width / TRACK_WIDTH : 1;
     const x = (event.clientX - rect.left) / scale;
-    return clamp((x - TRACK_START_X) / (TRACK_END_X - TRACK_START_X) * LAST_TIER, 0, LAST_TIER);
+    // 分子用 0..span 而不是写死 0..5：换算的是"在多少档之间取哪一档"，跨度
+    // 必须与刻度、脑形用的是同一个。
+    const at = span === 0 ? 0 : (x - TRACK_START_X) / (TRACK_END_X - TRACK_START_X) * span;
+    return clamp(at, 0, span);
   }
 
   function onPointerDown(event) {
+    // 单档时整条轨道不接受指针：拖不动、点不动，也不抢焦点与 pointer capture。
+    // CSS 的 `pointer-events: none` 只挡真指针，键盘与脚本仍能进来，所以这里
+    // 还有一道 JS 的锁。
+    if (single) return;
     // 已有一个指针在拖时不抢占（规格 §3「重复触摸不抢占」）：第二根手指按下来
     // 只会让第一根还在走的那次拖拽跳一下。
     if (activePointer !== null) return;
     if (event.pointerType === "mouse" && event.button !== 0) return;
     event.preventDefault();
     activePointer = event.pointerId;
-    startTier = tierIndex(target);
+    startTier = indexAt(target, span);
     slider.focus();
     slider.setPointerCapture(event.pointerId);
     // 按下就跟随指针，取的是**连续值**而不是最近档：这一下既可能是点击（松手
     // 时才吸附并提交），也可能是拖拽的起点——按下先取整会让拖拽从一格半格
     // 之外弹一下再开始。
-    setTarget(clampPosition(valueAtPointer(event)));
+    setTarget(clampPosition(valueAtPointer(event), span));
   }
 
   function onPointerMove(event) {
@@ -794,19 +951,23 @@ export function createGalaxyEffort(options = {}) {
    * "按住方向键拖到一半"的中间态，所以这里直接走 `commit`。
    */
   function keyboardTo(index) {
-    const next = clamp(index, 0, LAST_TIER);
+    if (single) return;
+    const next = clamp(index, 0, span);
     setTarget(next);
     commit(next);
   }
 
   function onKeyDown(event) {
+    // 单档时键盘全部无效，也不阻止默认：Tab / 空格 / 方向键在这个控件上
+    // 本来就该交给页面（阻止了反而是"吞键"）。
+    if (single) return;
     // 拖动中按键盘接管：先把捕获还回去，否则松手事件还会落在这个滑块上，
     // 用户已经用键盘选完了，松手却把它再改一次。
     if (activePointer !== null) {
       if (slider.hasPointerCapture(activePointer)) slider.releasePointerCapture(activePointer);
       activePointer = null;
     }
-    const current = tierIndex(target);
+    const current = indexAt(target, span);
     let next = null;
     switch (event.key) {
       case "ArrowLeft":
@@ -822,7 +983,7 @@ export function createGalaxyEffort(options = {}) {
         next = 0;
         break;
       case "End":
-        next = LAST_TIER;
+        next = span;
         break;
       case "PageUp":
         next = current + 2;
@@ -918,7 +1079,7 @@ export function createGalaxyEffort(options = {}) {
       galaxyVelocity = 0;
       // 文字动画直接切到终态：一个已经在放拆字动画的标签在减少动态下继续
       // 一帧一帧地进，等于把设置关掉了一半。
-      setLabel(TIER_NAMES[tierIndex(target)]);
+      setLabel(stops[indexAt(target, span)].label);
       paint(false);
       return;
     }
@@ -951,20 +1112,20 @@ export function createGalaxyEffort(options = {}) {
   /* ---------- 对外接口 ---------- */
 
   /**
-   * 外部设置档位（宿主回写用）。
+   * 外部设置档位（宿主回写用），参数是**下标**。
    *
-   * 设置的是**整数档**：这个控件的对外值域就是 0..5，接受一个 2.6 会让界面停在
-   * 半格上而 `getValue()` 说出另一个数。`position` 与 `target` 一起设，这样
+   * 设置的是**整数档**：这个控件的对外值域是 0..`span`，接受一个 2.6 会让界面
+   * 停在半格上而 `getValue()` 说出另一个数。`position` 与 `target` 一起设，这样
    * 宿主回写不会先播一段别人没要求的动画——回写是"确认"，不是"用户操作"。
    *
    * Galaxy 的两条弹簧照常分工：普通模式下交给弹簧（脑形会从当前位置长过去），
-   * 减少动态模式下直接吸附。
+   * 减少动态模式下直接吸附。单档时下标恒为 0，也不派发事件。
    */
   function setValue(next, settings = {}) {
     if (!ready) return;
-    const index = normaliseValue(next);
+    const index = single ? 0 : normaliseValue(next, span);
     const wasGalaxy = galaxyTarget === 1;
-    const isGalaxy = index === LAST_TIER;
+    const isGalaxy = galaxyIndex !== -1 && index === galaxyIndex;
     target = index;
     position = index;
     velocity = 0;
@@ -981,7 +1142,7 @@ export function createGalaxyEffort(options = {}) {
   }
 
   function getValue() {
-    return tierIndex(target);
+    return indexAt(target, span);
   }
 
   /**

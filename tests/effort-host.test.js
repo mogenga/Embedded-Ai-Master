@@ -163,7 +163,7 @@ const REASONING_MODELS = {
 };
 
 describe("desktop host 的推理强度", () => {
-  it("模型未声明支持时只提供 auto，并说明原因", async () => {
+  it("模型未声明支持时只剩一档 Off，且能拖的档位数为零", async () => {
     const gateway = await completionGateway();
     const home = await tempHome(PLAIN_MODELS, gateway.baseUrl);
 
@@ -172,17 +172,17 @@ describe("desktop host 的推理强度", () => {
     });
     const state = states(events)[0];
 
-    // **六档始终上报**（2026-11-09，用户要求「思考强度应该始终显示」）。
-    // 曾经这里是空列表：模型没声明就整块隐藏。改为显示滑块 + 一句说明，
-    // 因为档位是用户拥有的设置，「这个模型收不到它」应当被说出来，
-    // 而不是让控件直接消失。
-    expect(state.effortChoices.levels).toStrictEqual(["low", "medium", "high", "extra", "max", "galaxy"]);
+    // 2026-11-09 用户决定（自适应映射 +「只剩一档，拖不动」）：
+    // 控件的长度就是能力声明，所以这个模型只给一个停在原地的档位。
+    // 以前这里是六档 + 一句 note，那句 note 现在删了 —— 既然拖不到任何
+    // 别的地方，就没有需要道歉的东西。
+    expect(state.effortChoices.stops).toStrictEqual([
+      { value: "auto", label: "Off", sends: null },
+    ]);
     expect(state.effort).toBe("auto");
-    expect(state.effortChoices.note).toContain("supportsReasoning");
-    // The disclosure is a flag too, so a renderer does not have to match on
-    // the note's wording to know the difference.
+    expect(state.effortChoices.note).toBe("");
+    // The flag stays: it is a fact about the model, not about the slider.
     expect(state.effortChoices.unsupported).toBe(true);
-    // `supportsReasoning` 也只是转述配置，不再是写死的 false。
     expect(state.models[0].supportsReasoning).toBe(false);
   }, HOST_TIMEOUT_MS);
 
@@ -442,7 +442,60 @@ describe("宿主报告每一档实际会发的协议值", () => {
     expect(resolved.galaxy).toBe("high");
   }, HOST_TIMEOUT_MS);
 
-  it("不支持推理的模型也给六档与折算表，另带 unsupported 说明", async () => {
+  it("默认映射下只给三档：Extra / Max / Galaxy 都发 high，不该各占一格", async () => {
+    const gateway = await completionGateway();
+    const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
+
+    const events = await runHost(home, [{ cmd: "init", cwd: home }], {
+      until: (all) => all.some((event) => event.type === "ready"),
+    });
+    const stops = states(events)[0].effortChoices.stops;
+
+    // 2026-11-09 自适应映射：滑块的每一档必须发一个**不同**的值。
+    // 默认映射把 extra / max / galaxy 全折成 high，所以它们不能各占一格
+    // —— 那会是三个名字对一个请求，正是以前要补一句声明的原因。
+    expect(stops).toStrictEqual([
+      { value: "auto", label: "Auto", sends: null },
+      { value: "low", label: "Low", sends: "low" },
+      { value: "medium", label: "Medium", sends: "medium" },
+      { value: "high", label: "High", sends: "high" },
+    ]);
+    // `sends` 是给人看的，但它的**去重**性质是可断言的核心：没有两个档位
+    // 指向同一个值。
+    const sends = stops.filter((stop) => stop.sends !== null).map((stop) => stop.sends);
+    expect(new Set(sends).size).toBe(sends.length);
+  }, HOST_TIMEOUT_MS);
+
+  it("模型把 galaxy 映到独立值时，Galaxy 才作为最高档出现", async () => {
+    const gateway = await completionGateway();
+    const home = await tempHome(
+      {
+        flash: {
+          contextWindow: 8192,
+          maxOutput: 512,
+          supportsReasoning: true,
+          // 一个真的能区分六档的模型：每档发不同的值。
+          effortMap: { extra: "minimal", max: "none", galaxy: "high" },
+        },
+      },
+      gateway.baseUrl,
+    );
+
+    const events = await runHost(home, [{ cmd: "init", cwd: home }], {
+      until: (all) => all.some((event) => event.type === "ready"),
+    });
+    const stops = states(events)[0].effortChoices.stops;
+
+    // 六档里有五档发不同的值（high 只出现一次），所以轨道是 Auto + 5 档。
+    // `galaxy` 映射到 high，而 high 已经被 `high` 那一档占了 —— 按「第一个
+    // 产生该值的档位」规则，Galaxy 不该出现。
+    expect(stops.map((stop) => stop.value)).toStrictEqual([
+      "auto", "low", "medium", "high", "extra", "max",
+    ]);
+    expect(stops.at(-1).sends).toBe("none");
+  }, HOST_TIMEOUT_MS);
+
+  it("不支持推理的模型也给折算表，另带 unsupported 说明", async () => {
     const gateway = await completionGateway();
     const home = await tempHome(PLAIN_MODELS, gateway.baseUrl);
 

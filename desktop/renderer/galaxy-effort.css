@@ -248,6 +248,31 @@
   outline-offset: 4px;
 }
 
+/* 单档（`stops.length === 1`）：滑块冻结。
+ *
+ * `data-single` 由 JS 写在根节点上。这里做的是视觉与指针那一半：
+ * - `pointer-events: none` 让整条命中区不接受点击、拖动与 hover 光标，且
+ *   **不冒泡到卡片**（轨道本来就没有可点的东西）；
+ * - `cursor: default` 是给 `pointer-events` 之外的情形留的兜底（例如键盘聚焦
+ *   后脚本派发的合成指针事件）；
+ * - 焦点轮廓也去掉：没有可做的动作，画一圈"可以按"的紫框是在骗人。
+ *
+ * JS 侧还有一道真正的锁（`single` 挡掉 setTarget / 键盘 / commit）：样式表
+ * 加载失败或 `pointer-events` 被宿主覆盖时，控件仍然拖不动。 */
+.ge-root[data-single="true"] .ge-slider {
+  pointer-events: none;
+  cursor: default;
+}
+
+.ge-root[data-single="true"] .ge-slider:focus-visible {
+  outline: none;
+}
+
+/* 单档没有"拖动中"这回事：脑形停在唯一的档位上，不要给拖拽手柄的光标暗示。 */
+.ge-root[data-single="true"] {
+  cursor: default;
+}
+
 /* 轨道：位于命中区上 15、下 17，392×40，#272727、圆角 10、裁切内部像素
    （规格 §1）。`overflow: hidden` 同时负责裁掉像素画布与填充的左半。
    `top` 由 `galaxy-effort.js` 按 `TRACK_TOP` 写，这里给的 15px 是同一数值的
@@ -286,7 +311,9 @@
 }
 
 /* 刻度圆点：直径 6、纵坐标 18、rgba(255,255,255,.20)。横坐标由 JS 写 left
-   （六个位置是 `16 + i×358/5`，与 `trackX` 同一个映射，不在这里再算一遍）。 */
+   （位置把 `trackXAt` 的 16..374 按当前档位数均分，不在这里再算一遍）。
+   档位由宿主决定，所以点数与间距都不在样式表里——写死六个点会在三档的模型上
+   多出三个不存在的档位。 */
 .ge-dot {
   position: absolute;
   top: 18px;
@@ -296,8 +323,10 @@
   background: rgba(255, 255, 255, .20);
 }
 
-/* 第二项是 6×20 的长刻度（规格 §1）。上边距 10 让它的中点也落在 20，
-   与圆点的纵坐标 18（中心 21）保持视觉上同一条线。 */
+/* 第二档（`i === 1`）是 6×20 的长刻度（规格 §1）。上边距 10 让它的中点也落在
+   20，与圆点的纵坐标 18（中心 21）保持视觉上同一条线。
+   只在档位表有第二项时由 JS 加这个类：单档时那个"推荐位置"不存在，长刻度
+   没有可指的东西。 */
 .ge-dot-tall {
   top: 10px;
   height: 20px;

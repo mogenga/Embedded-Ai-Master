@@ -144,19 +144,19 @@ describe("面板换成脑形滑块之后，接线仍然完整", () => {
     expect(app).not.toContain("paintEffortTrack");
   });
 
-  it("面板里是组件的挂载点，Auto 与说明句在卡片之外", () => {
+  it("面板里只剩挂载点与一句补充说明，Auto 按钮与声明句都已退场", () => {
     const html = read("index.html");
     // The component builds its own DOM inside this element; nothing here may
     // duplicate the card's internals, or there would be two tracks.
     expect(html).toContain('id="effort-galaxy-mount"');
-    expect(html).toContain('id="effort-auto"');
-    expect(html).toContain('id="effort-note"');
-    // `auto` is the absence of a tier, so it must not be a stop on the track —
-    // hence a button beside the card, not a seventh label inside it.
-    expect(html).not.toContain("effort-auto-hint\" hidden");
-    const mountAt = html.indexOf('id="effort-galaxy-mount"');
-    const autoAt = html.indexOf('id="effort-auto"');
-    expect(autoAt).toBeGreaterThan(mountAt);
+    // 2026-11-09 自适应映射之后：
+    // - `auto` 成了滑块最左一档，所以那个独立按钮没有了；
+    // - 轨道的长度就是能力声明，所以那句“这个模型收不到”的说明也没有了。
+    expect(html).not.toContain('id="effort-auto"');
+    expect(html).not.toContain('id="effort-note"');
+    // 留下的只有“实际会发什么”的补充说明，它挂在挂载点之后。
+    expect(html).toContain('id="effort-auto-hint"');
+    expect(html.indexOf('id="effort-auto-hint"')).toBeGreaterThan(html.indexOf('id="effort-galaxy-mount"'));
   });
 
   it("组件按挂载点创建，且只创建一次（懒加载）", () => {
@@ -184,48 +184,33 @@ describe("面板换成脑形滑块之后，接线仍然完整", () => {
     expect(css).toContain("--ge-scale: 0.68");
     expect(css).toContain("#effort-galaxy-mount");
     // transform 不改变父级布局盒：不给占位尺寸的话，弹层会按 440×258 留白。
-    // 高度不写死 —— 声明句多长它就得长多高，由 `layoutEffortNote()` 量出来写。
     const mount = css.slice(css.indexOf("#effort-galaxy-mount {"), css.indexOf("}", css.indexOf("#effort-galaxy-mount {")));
     expect(mount).toContain("width: 300px");
-    const layout = bodyOf(app, "function layoutEffortExtras() {");
-    expect(layout).toContain("offsetHeight");
-    expect(layout).toContain("mount.style.height");
-    expect(layout).toContain("card.style.minHeight");
+    // 卡片高度不再需要为 extras 生长：那块只剩一行说明，字号已经抵掉缩放，
+    // 不会溢出。`layoutEffortExtras` 连同它的副作用一起删除了。
+    expect(app).not.toContain("layoutEffortExtras");
     // 组件那一侧只认变量、有自己的默认值，演示页因此仍是 1:1。
     const galaxy = read("galaxy-effort.css");
     expect(galaxy).toContain("scale(var(--ge-scale, 1))");
     expect(galaxy).toContain("width: 440px");
     expect(galaxy).toContain("height: 258px");
-    // 缩放系数只能有一处定义。app.js 读数（占位高度要乘它），但那必须是
-    // 从样式里读，不能自己再写一个 0.68 —— 两份数字迟早会分家。
-    expect(app).toContain('getPropertyValue("--ge-scale")');
-    // Strip comments first: the code may *talk* about 0.68, but it must not
-    // compute with it. Searching the raw text would fail on the explanation.
-    const code = app.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
-    expect(code.match(/0\.68/g) ?? []).toHaveLength(0);
+    // 缩放系数只有一个定义处（样式表）。app.js 不再参与——它以前要读这个值
+    // 去算卡片高度，现在 extras 只剩一行说明，不需要量。
+    expect(app).not.toContain("--ge-scale");
   });
 
-  it("Auto 与声明一起搬进卡片，字号按 1/scale 抵掉卡片的缩小", () => {
+  it("滑块按宿主给的 stops 创建，宿主换档位就重建", () => {
     const app = read("app.js");
     const ensure = bodyOf(app, "function ensureEffortSlider() {");
-    // 2026-11-09 用户原话「auto 也要含进卡片里」「声明融合进卡片」。
-    // 两者同属一块（`#effort-extras`），一起搬。
-    expect(ensure).toContain('$("effort-extras")');
-    expect(ensure).toContain("card.append(");
-    const layout = bodyOf(app, "function layoutEffortExtras() {");
-    // 关着的时候量不到（display: none → 0），不能在那种状态下写高度。
-    expect(layout).toContain('$("effort-panel").hidden');
-    expect(layout).toContain("offsetHeight");
-    const css = read("styles.css");
-    expect(css).toContain("top: 258px");
-    // 卡片缩到 0.68，Auto 是人点的真控件：字号与内边距除以同一个 --ge-scale。
-    // 用 transform 反向放大也行不通——位置会跟着变，而这一块要贴着卡片下缘。
-    const extras = css.slice(css.indexOf(".effort-extras {"), css.indexOf("}", css.indexOf(".effort-extras {")));
-    expect(extras).toContain("calc(13px / var(--ge-scale, 1))");
-    expect(css).toContain("calc(var(--text-xs) / var(--ge-scale, 1))");
-    // 位置留在布局单位里：left/right 就是卡片的 22px 内缩，缩放后自动落在
-    // 卡片视觉边缘上（22 × 0.68 = 15）。
-    expect(extras).toContain("left: 22px");
+    // 2026-11-09 自适应映射：档位列表是宿主的答案，组件不再自己决定有六档。
+    expect(ensure).toContain("stops,");
+    expect(ensure).toContain("effortStops()");
+    // 换模型可能改变列表长度，而列表是构造参数，所以要比对签名后重建。
+    expect(ensure).toContain("signature");
+    expect(ensure).toContain("effortSliderStops");
+    expect(ensure).toContain("destroy()");
+    // 组件的提交通知是 `{ index, value, label }`；上线的是 `value`。
+    expect(ensure).toContain("commitEffort(detail.value)");
   });
 
   it("样式表两处都 link 了（应用与演示页看的是同一张卡片）", () => {
@@ -302,34 +287,25 @@ describe("减少动态：应用内开关要能传到组件", () => {
   });
 });
 describe("思考强度始终显示；不支持时靠说明，不靠隐藏（2026-11-09 用户决定）", () => {
-  it("模型未声明支持时滑块仍在（宿主始终报六档）", () => {
+  it("模型未声明支持时只剩一档，芯片仍在，标签是宿主给的 Off", () => {
     const app = read("app.js");
+    // 2026-11-09 用户决定：自适应映射 +「只剩一档，拖不动」。
+    // 控件不消失（「思考强度应该始终显示」仍然成立），拖不动就说明一切。
     const body = bodyOf(app, "function syncEffortControl() {");
-    // The chip hides only when there is no model at all — `levels` empty for
-    // real means the host said "no model", not "this model takes no effort".
-    expect(body).toContain("effortLevels().length === 0");
+    expect(body).toContain("effortStops().length === 0");
     expect(body).toContain("effortControl.hidden");
-    // `effortLevels()` is `state.effortChoices.levels` — the host's answer,
-    // not a local list.
-    const levels = bodyOf(app, "function effortLevels() {");
-    expect(levels).toContain("state.effortChoices");
-    expect(levels).toContain("levels");
+    const stops = bodyOf(app, "function effortStops() {");
+    expect(stops).toContain("state.effortChoices");
+    expect(stops).toContain("stops");
+    // 芯片的字来自宿主那一条档位的 label，不再由渲染层拼。
+    const chip = bodyOf(app, "function effortChipLabel() {");
+    expect(chip).toContain("stops[index].label");
+    expect(chip).toContain("stops[0].label");
     // Markup starts hidden: before the host has spoken there is nothing to
     // paint, and a slider shown at that moment would be a guess.
     const html = read("index.html");
     const tag = html.slice(html.indexOf('id="effort-control"') - 40, html.indexOf('id="effort-control"') + 40);
     expect(tag).toContain("hidden");
-  });
-
-  it("不支持时那条说明画在面板里，滑块不被收起", () => {
-    const app = read("app.js");
-    const body = bodyOf(app, "function renderEffortPanel() {");
-    // The note is the disclosure channel; it is painted from the host's answer
-    // and reaches `#effort-note` whether or not the model declared support.
-    expect(body).toContain("choices.note");
-    expect(body).toContain("effort-note");
-    // Nothing in this function hides the control on `unsupported`.
-    expect(body).not.toContain("effortControl.hidden");
   });
 
   it("隐藏时 setEffort 仍然跑到，所以状态不会只画一半", () => {
@@ -365,17 +341,6 @@ describe("思考强度始终显示；不支持时靠说明，不靠隐藏（2026
     expect(setEffortBody).toContain("effortPending = false");
   });
 
-  it("原因沿用宿主的 note 措辞，画在面板里", () => {
-    const app = read("app.js");
-    const body = bodyOf(app, "function renderEffortPanel() {");
-    expect(body).toContain("choices.note");
-    expect(body).toContain("effort-note");
-    // `fixed` (a model locked to one level) reuses the existing sentence
-    // rather than inventing a second one.
-    expect(body).toContain("t.effortFixed");
-    const html = read("index.html");
-    expect(html).toContain('id="effort-note"');
-  });
 });
 
 describe("思考强度这一块两种语言都是英文（2026-11-09 用户决定）", () => {
@@ -451,16 +416,15 @@ describe("思考强度这一块两种语言都是英文（2026-11-09 用户决�
     }
   });
 
-  it("芯片标签直接取英文常量，不经过字典（这一块整体不翻译）", () => {
+  it("芯片标签取宿主给的那一条 stop，不自己拼", () => {
     const app = read("app.js");
-    const label = bodyOf(app, "function effortTierLabel(index) {");
-    // 2026-11-09：`effortTier*` 这组字典键已随「思考强度用英文」一起退场，
-    // 名字只剩一个来源 —— `EFFORT_TIER_LABELS`。再走一次 `t[...]` 就等于把
-    // 一个逐字相同的查表留在热路径上，且给了它第二次漂移的机会。
-    expect(label).toContain("EFFORT_TIER_LABELS");
-    expect(label).not.toContain("t[");
-    // 切语言仍要重画：`Auto` 与「sends high」那句还在字典里（两套都是英文，
-    // 但换语言时重新走一遍 setEffort 才不依赖「值恰好没变」）。
+    const chip = bodyOf(app, "function effortChipLabel() {");
+    // 2026-11-09：档位名来自宿主的 `stops[i].label`。渲染层不再有自己的
+    // 词汇表，也就没有「两张表漂移」这件事可说。
+    expect(chip).toContain("effortStops()");
+    expect(chip).toContain(".label");
+    expect(app).not.toContain("EFFORT_TIER_LABELS");
+    // 切语言仍要重画：`sends high` 那句还在字典里，换语言时重新走一遍。
     const applyLocale = bodyOf(app, "function applyLocale(locale, { announce = false } = {}) {");
     expect(applyLocale).toContain("setEffort(state.effort)");
   });

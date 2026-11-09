@@ -1279,7 +1279,7 @@ export function initialState(options = {}) {
     locale: options.locale === "en" ? "en" : "zh",
     mode: textOf(options.mode) || "diagnose",
     effort: "auto",
-    effortChoices: { levels: [], default: "", fixed: "" },
+    effortChoices: { levels: [], stops: [], resolved: {}, default: "", fixed: "" },
     sandbox: "enforce",
     networkPolicy: "off",
     model: textOf(options.model),

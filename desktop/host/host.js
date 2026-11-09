@@ -954,41 +954,64 @@ function effortTable() {
 }
 
 /**
+ * The tier's display name, in the one vocabulary this control uses.
+ *
+ * 2026-11-09 用户决定：「思考强度用英文，不用自动翻译」. The renderer keeps an
+ * identical list for its own fallback; these are the strings the host puts on
+ * the wire so a client that never loaded the dictionary still gets names.
+ */
+const TIER_LABELS = {
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  extra: "Extra",
+  max: "Max",
+  galaxy: "Galaxy",
+};
+
+/**
  * What the effort popover may offer for the selected model.
  *
- * `levels` is the **six tiers**, not protocol values: the slider's six stops
- * are the tiers, and the tiers are the only thing `setEffort` is meant to
- * receive from a click. The protocol values are still accepted (see
- * `setEffort`) so a `run.json` written by an older build keeps working, but
- * they are not what this menu is made of.
+ * `stops` is the slider, **as long as the model can actually use** (2026-11-09,
+ * 用户决定：自适应映射). It is the answer to a problem the fixed six tiers had:
+ * the default map sends `high` for `extra`, `max` *and* `galaxy`, so a
+ * six-stop track offered three names for one request and the panel had to
+ * apologise for it in a sentence. With `stops`, the length of the track *is*
+ * the disclosure — dragging to the last stop means exactly one thing.
  *
- * `resolved` is the load-bearing half: for each tier, the `reasoning_effort`
- * value this particular model would actually send. Without it the UI can only
- * say "Galaxy", which for a model with no `effortMap` sends exactly what
- * "High" sends — the operator is left guessing whether the top of the track
- * does anything. `effortTier` in the kernel owns the mapping, including the
- * per-model `effortMap` override; this function only reports its answers.
+ * The rules, in order:
  *
- * **The six tiers are always reported** (2026-11-09, by request). They used to
- * be withheld for a model that had not declared `supportsReasoning`, on the
- * ground that a control whose parameter the request drops is a false promise.
- * The operator's answer was that the control is a *setting*, not a claim about
- * the gateway: it should be there, and it should say what it will do.
+ * 1. **The model takes no effort parameter at all** → one stop, labelled
+ *    `Off`. The control stays on screen (2026-11-09 用户要求：思考强度应该始终
+ *    显示) but cannot be dragged, because there is nothing to choose.
+ * 2. Otherwise → `Auto` first (it means "send no field", which is a real state
+ *    and not the absence of one), then one stop per **distinct** value the
+ *    model's `effortMap` can produce, in tier order. A tier is only offered if
+ *    it is the first tier that produces its value — a later tier that maps to
+ *    the same value would be a second name for the same request.
  *
- * What replaces hiding is disclosure — `unsupported: true` plus a note naming
- * the field to edit. The renderer keeps the slider visible and shows that
- * sentence, so the choice is visible *and* the fact that this model will not
- * receive it is visible with it. `resolved` is still reported (it is what the
- * tier *would* send), because the mapping is a property of the tier list, not
- * of this model's declaration.
+ * `resolved` (tier → protocol value) and `levels` (all six tier keys) stay: the
+ * first is what the host itself uses to build `stops`, the second is what
+ * `setEffort` accepts, and an old `run.json` may hold any of them.
  *
- * `default` is the level `auto` will actually send, so the menu can say what
+ * `default` is the level `auto` will actually send, so the panel can say what
  * the model will do without the operator having to read providers.json.
  */
 function effortChoices() {
-  const choices = { levels: [], resolved: {}, default: "", fixed: "", note: "", unsupported: false };
+  const choices = {
+    levels: [],
+    stops: [],
+    resolved: {},
+    default: "",
+    fixed: "",
+    note: "",
+    unsupported: false,
+  };
   const cfg = currentModelCfg();
   if (cfg === undefined) {
+    // No model is different from "this model takes nothing": there is no
+    // conversation to set an effort for, and the renderer hides the chip.
+    choices.stops = [];
     choices.note = "没有可用模型，无法调整推理强度";
     return choices;
   }
@@ -997,14 +1020,31 @@ function effortChoices() {
     choices.resolved[tier] = kernel.resolveEffortTier(cfg, tier);
   }
   if (typeof cfg.reasoningEffort === "string") choices.default = cfg.reasoningEffort;
+
   if (!kernel.supportsReasoning(cfg)) {
-    // Name the field, because the fix is a providers.json edit. This is a
-    // disclosure, not a reason to hide the control.
+    // One stop, and its label says what happens rather than what could happen.
+    // `unsupported` stays for any renderer-side decision that is not about the
+    // slider's length (the note is gone as of 2026-11-09; the flag is kept
+    // because it is a fact about the model, not about this control).
     choices.unsupported = true;
-    choices.note = `${modelRef} 未声明支持推理强度（providers.json 里该模型的 supportsReasoning 不是 true），请求不会携带该参数`;
+    choices.stops = [{ value: "auto", label: "Off", sends: null }];
+    return choices;
+  }
+
+  choices.stops = [{ value: "auto", label: "Auto", sends: null }];
+  const seen = new Set();
+  for (const tier of kernel.EFFORT_TIERS) {
+    const sends = choices.resolved[tier];
+    if (seen.has(sends)) continue;
+    seen.add(sends);
+    // `value` is the tier key `setEffort` accepts, and the first tier that
+    // produces this value — never a later one, or two stops would send the
+    // same thing while claiming to be different.
+    choices.stops.push({ value: tier, label: TIER_LABELS[tier] ?? tier, sends });
   }
   return choices;
 }
+
 
 /**
  * The limits to hand this run.

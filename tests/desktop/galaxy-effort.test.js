@@ -1,7 +1,14 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { createGalaxyEffort } from "../../desktop/renderer/galaxy-effort.js";
+import {
+  createGalaxyEffort,
+  defaultTooltip,
+  foldRevealAt,
+  galaxyIndexOf,
+  normaliseStops,
+  trackXAt,
+} from "../../desktop/renderer/galaxy-effort.js";
 
 /**
  * 脑形滑块的组件本体（`docs/specs/galaxy-effort-slider.md` §1–§4、§6）。
@@ -29,6 +36,29 @@ const read = (name) => readFileSync(path.join(RENDERER, name), "utf8");
 
 const SOURCE = read("galaxy-effort.js");
 const CSS = read("galaxy-effort.css");
+
+/**
+ * 三组档位表，覆盖三种宿主的真实回答（`docs/archive/adaptive-effort-plan.md`
+ * 「契约」一节）：
+ *
+ * - `SIX_STOPS`：改动前写死的六档。它必须与旧行为逐位一致（回归）；
+ * - `THREE_STOPS`：默认映射去重后的三档（`auto` 在最左）；
+ * - `ONE_STOP`：模型没有声明 `supportsReasoning` 时的一档。
+ */
+const SIX_STOPS = [
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "extra", label: "Extra" },
+  { value: "max", label: "Max" },
+  { value: "galaxy", label: "Galaxy" },
+];
+const THREE_STOPS = [
+  { value: "auto", label: "Auto" },
+  { value: "low", label: "Low" },
+  { value: "high", label: "High" },
+];
+const ONE_STOP = [{ value: "auto", label: "Off" }];
 
 /**
  * 去掉注释后的源码。
@@ -166,7 +196,7 @@ describe("导出与顶层纯度", () => {
       .map((match) => match[2]));
     // 上游模块里的常量由它们自己声明；`NaN` 之类是语言内建的。
     const externals = new Set([
-      "FOLD_LEVELS", "TIER_NAMES", "PIXEL_PALETTE", "TRACK_PALETTES", "NaN", "Infinity",
+      "FOLD_LEVELS", "PIXEL_PALETTE", "TRACK_PALETTES", "NaN", "Infinity",
     ]);
     const missing = [...used].filter((name) => !declared.has(name) && !externals.has(name));
     expect(missing, `引用了未声明的常量：${missing.join(", ")}`).toStrictEqual([]);
@@ -193,13 +223,13 @@ describe("导出与顶层纯度", () => {
 
 describe("数学与图层都来自上游模块，不在这里重写", () => {
   it("import 了 core 与 layers 的既有导出", () => {
-    // 接线的证据：这几个名字必须从上游来。若本文件自己再实现一份 `foldReveal`，
-    // 拖拽时脑形与轨道填充就会各按一套公式走——肉眼可见，却抓不住。
+    // 接线的证据：这几个名字必须从上游来。若本文件自己再实现一份弹簧或色板
+    // 插值，拖拽时脑形与轨道填充就会各按一套公式走——肉眼可见，却抓不住。
     expect(SOURCE).toContain('from "./galaxy-effort-core.js"');
     expect(SOURCE).toContain('from "./galaxy-effort-layers.js"');
     for (const name of [
-      "FOLD_LEVELS", "TIER_NAMES", "foldReveal", "galaxyState", "stepSpring",
-      "tierIndex", "trackFillOpacity", "trackFillStops", "trackX", "clamp",
+      "FOLD_LEVELS", "galaxyState", "stepSpring",
+      "trackFillOpacity", "trackFillStops", "clamp",
     ]) {
       expect(SOURCE, name).toMatch(new RegExp(`\\b${name}\\b`));
     }
@@ -208,13 +238,28 @@ describe("数学与图层都来自上游模块，不在这里重写", () => {
     }
   });
 
+  it("不再从 core 取档位表：标签一律来自 stops", () => {
+    // `TIER_NAMES` 是六档写死时代的档位表。档位由宿主决定之后它没有用途：
+    // 标签来自 `stops[i].label`，Galaxy 靠 `value === "galaxy"` 判定而不是名字。
+    // 留着 import 只会让"标签从哪来"有两个来源。
+    expect(SOURCE).not.toMatch(/\bTIER_NAMES\b/);
+    expect(SOURCE).not.toMatch(/\bEFFORT_TIER_LABELS\b/);
+  });
+
   it("真的调用了上游函数，而不只是 import 了名字", () => {
     for (const call of [
       "trackFillStops(", "trackFillOpacity(", "stepSpring(", "galaxyState(",
-      "createPixelLayer(", "createRadialLayer(", "foldReveal(", "trackX(",
+      "createPixelLayer(", "createRadialLayer(", "trackXAt(",
     ]) {
       expect(CODE, call).toContain(call);
     }
+  });
+
+  it("core 的六档版 trackX / foldReveal 不再被调用（它们是写死 0..5 的）", () => {
+    // 这两个纯函数定义域绑在六档上，由 `galaxy-effort-core.test.js` 的 51 条
+    // 测试钉着，**不改它们**；组件改用自己那份按 `span` 计算的版本。
+    expect(CODE).not.toMatch(/(^|[^\w.])trackX\(/);
+    expect(CODE).not.toMatch(/(^|[^\w.])foldReveal\(/);
   });
 
   it("褶皱层逐层取自 FOLD_LEVELS，没有另抄一张路径表", () => {
@@ -295,11 +340,14 @@ describe("指针交互（规格 §3）", () => {
     expect(CSS).toMatch(/\.ge-slider\s*\{[^}]*touch-action:\s*none/);
   });
 
-  it("拖动换算把缩放折回逻辑坐标，再套 (x - 16) / 358 × 5", () => {
+  it("拖动换算把缩放折回逻辑坐标，再套 (x - 16) / 358 × span", () => {
     const body = bodyOf(SOURCE, "  function valueAtPointer(event) {");
     expect(body).toContain("TRACK_START_X");
     expect(body).toContain("TRACK_END_X");
-    expect(body).toContain("LAST_TIER");
+    // 上界是当前跨度（`span`），不再写死 5：三档时轨道右端就是第 2 档。
+    expect(body).toContain("* span");
+    expect(body).toContain("span === 0 ? 0");
+    expect(body).not.toMatch(/(^|[^\w.])LAST_TIER(?![\w$])/);
     // 2026-11-09：composer 里控件整体 `transform: scale()` 到约 0.68。
     // `getBoundingClientRect()` 给的是缩放后的尺寸，公式里的 16 / 358 是逻辑
     // 坐标；不折回去就等于像素与逻辑单位混算，缩得越小档位越偏右。
@@ -335,13 +383,15 @@ describe("键盘（规格 §3）", () => {
     }
   });
 
-  it("方向键 ±1、PageUp/PageDown ±2、Home/Escape 到 0、End 到 5", () => {
+  it("方向键 ±1、PageUp/PageDown ±2、Home/Escape 到 0、End 到 span", () => {
     expect(body).toContain("next = current - 1");
     expect(body).toContain("next = current + 1");
     expect(body).toContain("next = current + 2");
     expect(body).toContain("next = current - 2");
     expect(body).toContain("next = 0");
-    expect(body).toContain("next = LAST_TIER");
+    // 上界是档位表长度减一，不再写死 5。三档时 End 到 2。
+    expect(body).toContain("next = span");
+    expect(body).not.toMatch(/(^|[^\w.])LAST_TIER(?![\w$])/);
   });
 
   it("全部 preventDefault（方向键会滚动页面）", () => {
@@ -364,7 +414,8 @@ describe("无障碍（规格 §3）", () => {
     expect(CODE).toContain('slider.setAttribute("role", "slider")');
     expect(CODE).toContain('slider.setAttribute("tabindex", "0")');
     expect(CODE).toContain('"aria-valuemin", "0"');
-    expect(CODE).toContain('"aria-valuemax", String(LAST_TIER)');
+    // 上界是档位表长度减一：一档时是 0（`aria-valuemax="0"`）、三档时是 2。
+    expect(CODE).toContain('"aria-valuemax", String(span)');
     expect(CODE).toContain('slider.setAttribute("aria-valuenow"');
     expect(CODE).toContain('slider.setAttribute("aria-valuetext"');
     expect(CODE).toContain('"aria-orientation", "horizontal"');
@@ -388,14 +439,24 @@ describe("无障碍（规格 §3）", () => {
 });
 
 describe("提交与外部接口", () => {
-  it("effort-change 冒泡且 composed，detail 是 { value, level }", () => {
+  it("effort-change 冒泡且 composed，detail 是 { index, value, label }", () => {
     const body = bodyOf(SOURCE, "  function commit(next) {");
     expect(body).toContain('new CustomEvent("effort-change"');
     expect(body).toContain("bubbles: true");
     expect(body).toContain("composed: true");
-    expect(body).toContain("const detail = { value: index, level: TIER_NAMES[index] }");
+    // 三个字段各回答一个问题：`index` 是轨道上的位置，`value` 是宿主拿去
+    // `setEffort` 的键，`label` 是界面上显示的字。名字全是 `stops` 里的，不再是
+    // 组件自己的六档表。
+    expect(body).toContain("const detail = { index, value: stops[index].value, label: stops[index].label }");
     // 事件从根节点派发：宿主把卡片挂在哪就在哪捕获，不需要知道内部结构。
     expect(body).toContain("root.dispatchEvent");
+  });
+
+  it("单档时 commit 直接返回，不派发也不调 onChange", () => {
+    // 位置不可能变过，一条"用户选了那唯一一档"的命令只会让宿主以为发生过选择。
+    const body = bodyOf(SOURCE, "  function commit(next) {");
+    expect(body).toContain("if (single) return;");
+    expect(body.indexOf("if (single) return;")).toBeLessThan(body.indexOf("new CustomEvent"));
   });
 
   it("onChange 与事件同参数", () => {
@@ -405,11 +466,18 @@ describe("提交与外部接口", () => {
 
   it("setValue 吸附整数档、清速度，并按 silent 决定是否提交", () => {
     const body = bodyOf(SOURCE, "  function setValue(next, settings = {}) {");
-    expect(body).toContain("normaliseValue(next)");
+    expect(body).toContain("normaliseValue(next, span)");
     expect(body).toContain("position = index");
     expect(body).toContain("velocity = 0");
     expect(body).toContain('settings.silent !== true');
     expect(body).toContain("commit(index)");
+    // 单档时下标恒为 0：外部回写也不能把脑形推到轨道外。
+    expect(body).toContain("single ? 0");
+  });
+
+  it("getValue 返回下标（0..span）", () => {
+    const body = bodyOf(SOURCE, "  function getValue() {");
+    expect(body).toContain("indexAt(target, span)");
   });
 
   it("创建时的初始值走 silent，不假装用户选了一档", () => {
@@ -427,6 +495,216 @@ describe("提交与外部接口", () => {
     expect(body).toContain("throw new Error");
   });
 });
+
+/**
+ * 档位表契约（`docs/archive/adaptive-effort-plan.md`「契约」一节）。
+ *
+ * 这一组是**纯函数**：`normaliseStops` / `galaxyIndexOf` / `trackXAt` /
+ * `foldRevealAt` 都不碰 DOM，所以能在没有 jsdom 的 Node 里直接断言数值。
+ */
+describe("stops 是必填的档位表", () => {
+  it("缺省、空表、形状不对一律抛错，不静默兜底", () => {
+    // 兜底成三档会让宿主漏传时看起来"能用，只是档位不对"——这正是这次改动要
+    // 消灭的那种不一致。抛错在创建期就暴露，而不是等用户发现标签与请求不符。
+    expect(() => normaliseStops(undefined)).toThrow(/stops/);
+    expect(() => normaliseStops(null)).toThrow(/stops/);
+    expect(() => normaliseStops([])).toThrow(/stops/);
+    expect(() => normaliseStops("auto,low,high")).toThrow(/stops/);
+    expect(() => normaliseStops([{ value: "auto" }])).toThrow(/stops\[0\]/);
+    expect(() => normaliseStops([{ label: "Auto" }])).toThrow(/stops\[0\]/);
+    expect(() => normaliseStops([{ value: 3, label: "Three" }])).toThrow(/stops\[0\]/);
+    expect(() => normaliseStops([{ value: "auto", label: "" }])).toThrow(/stops\[0\]/);
+  });
+
+  it("createGalaxyEffort 缺 stops 时在创建期就抛，而不是画出一个无档位的卡片", () => {
+    const body = bodyOf(SOURCE, "export function createGalaxyEffort(options = {}) {");
+    // 校验在解析 mount 之前：参数错就是参数错，不该先做一遍 DOM 查询。
+    expect(body).toContain("normaliseStops(rawStops)");
+    expect(body.indexOf("normaliseStops(rawStops)")).toBeLessThan(body.indexOf("resolveMount(mount)"));
+  });
+
+  it("拷贝一份：宿主之后改自己那份数组，不影响已建实例", () => {
+    const input = [{ value: "auto", label: "Auto" }, { value: "high", label: "High" }];
+    const copy = normaliseStops(input);
+    expect(copy).toStrictEqual(input);
+    expect(copy).not.toBe(input);
+    expect(copy[0]).not.toBe(input[0]);
+  });
+
+  it("单档也是合法输入（模型没声明 supportsReasoning）", () => {
+    expect(normaliseStops(ONE_STOP)).toStrictEqual(ONE_STOP);
+  });
+});
+
+describe("默认 tooltip 从档位名拼出来", () => {
+  const SPEC = "Drag the brain or use arrow keys to choose Low, Medium, High, Extra, Max or Galaxy."
+    + " Higher effort adds brain folds; Galaxy adds particles. This control uses local demo state.";
+
+  it("六档时逐字等于规格 §3 的原文（这段文字本身是验收项）", () => {
+    expect(defaultTooltip(SIX_STOPS)).toBe(SPEC);
+  });
+
+  it("三档时不提不存在的档位", () => {
+    const text = defaultTooltip(THREE_STOPS);
+    expect(text).toContain("Auto, Low or High");
+    for (const absent of ["Medium", "Extra", "Max", "Galaxy,"]) {
+      expect(text, absent).not.toContain(absent);
+    }
+  });
+
+  it("单档只列一个名字", () => {
+    expect(defaultTooltip(ONE_STOP)).toContain("to choose Off.");
+  });
+
+  it("宿主传 tooltip 时以宿主的为准", () => {
+    // 组件里是 `tooltip ?? defaultTooltip(stops)`；空串是宿主的有意选择，
+    // 不是"没传"（`??` 而不是 `||`）。
+    expect(CODE).toContain("tooltip ?? defaultTooltip(stops)");
+  });
+});
+
+describe("每档一个下标：上界是 stops.length - 1", () => {
+  it("单档：只有位置 0，aria-valuemax 是 0", () => {
+    expect(ONE_STOP.length - 1).toBe(0);
+    expect(trackXAt(0, 0)).toBe(16);
+    // 任何位置都折回左端：没有第二格可去。
+    expect(trackXAt(3, 0)).toBe(16);
+  });
+
+  it("三档：位置 0..2，轨道右端是第 2 档", () => {
+    expect(trackXAt(0, 2)).toBe(16);
+    expect(trackXAt(1, 2)).toBeCloseTo(16 + 358 / 2, 12);
+    expect(trackXAt(2, 2)).toBeCloseTo(16 + 358, 12);
+    // 越界钳位：拖到轨道外不会把脑形推出去。
+    expect(trackXAt(-4, 2)).toBe(16);
+    expect(trackXAt(9, 2)).toBeCloseTo(16 + 358, 12);
+  });
+
+  it("六档：与改动前逐位相同（16 + i × 358/5）", () => {
+    // 回归：这是规格 §1 的公式，六档宿主必须看到一模一样的六个点。
+    // `toBeCloseTo` 而不是 `toBe`：`i × 358 / 5` 与 `i / 5 × 358` 在浮点上
+    // 差 1e-14（旧实现里刻度点用前者、脑形用后者，两处本来就有这点差）。
+    for (let i = 0; i < 6; i += 1) {
+      expect(trackXAt(i, 5), `i=${i}`).toBeCloseTo(16 + i * 358 / 5, 9);
+    }
+  });
+});
+
+describe("Galaxy 只在它是最高一档时启用", () => {
+  it("六档：galaxy 在最后 → 下标 5", () => {
+    expect(galaxyIndexOf(SIX_STOPS)).toBe(5);
+  });
+
+  it("三档：没有 galaxy 档 → -1（整条 Galaxy 路径不跑）", () => {
+    expect(galaxyIndexOf(THREE_STOPS)).toBe(-1);
+  });
+
+  it("最高档是 high，但列表里有 galaxy → -1（不在最高位就不启用）", () => {
+    const stopsWithGalaxyInMiddle = [
+      { value: "auto", label: "Auto" },
+      { value: "galaxy", label: "Galaxy" },
+      { value: "high", label: "High" },
+    ];
+    expect(galaxyIndexOf(stopsWithGalaxyInMiddle)).toBe(-1);
+  });
+
+  it("galaxy 在最前 → -1；唯一的档是 galaxy → 0", () => {
+    expect(galaxyIndexOf([
+      { value: "galaxy", label: "Galaxy" },
+      { value: "high", label: "High" },
+    ])).toBe(-1);
+    expect(galaxyIndexOf([{ value: "galaxy", label: "Galaxy" }])).toBe(0);
+  });
+
+  it("组件用 galaxyIndex 判定，而不是「最后一档」或字符串比较", () => {
+    expect(CODE).toContain("galaxyIndexOf(stops)");
+    // `setValue` 与 `setTarget` 走同一个判据。
+    const setValueBody = bodyOf(SOURCE, "  function setValue(next, settings = {}) {");
+    expect(setValueBody).toContain("index === galaxyIndex");
+    // 标签的淡蓝色也只给真正启用的那一档。
+    const paintBody = bodyOf(SOURCE, "  function paint(animateLabel) {");
+    expect(paintBody).toContain("galaxyIndex !== -1 && index === galaxyIndex");
+  });
+});
+
+describe("五层褶皱按档位数铺开（foldRevealAt）", () => {
+  /** 第 f 层在 `span` 档的轨道上的展开中心，与组件里的换算一致。 */
+  const levelPos = (level, span) => level * span / 5;
+
+  it("六档：第 f 层的展开中心就是 f（与 core 的 foldReveal 逐位相同）", () => {
+    // 回归的核心：span = 5 时 levelPos = level，公式退化成规格原式。
+    for (const level of [1, 2, 3, 4, 5]) {
+      expect(levelPos(level, 5), `level ${level}`).toBe(level);
+      for (const p of [0, 0.5, 1, 1.5, 2.5, 4.6, 5]) {
+        expect(foldRevealAt(p, levelPos(level, 5), 5), `level ${level} at ${p}`)
+          .toBeCloseTo(coreFoldReveal(p, level), 12);
+      }
+    }
+  });
+
+  it("三档：第 f 层落在 f × 2/5 上（0.4 / 0.8 / 1.2 / 1.6 / 2）", () => {
+    expect(levelPos(1, 2)).toBeCloseTo(0.4, 12);
+    expect(levelPos(2, 2)).toBeCloseTo(0.8, 12);
+    expect(levelPos(3, 2)).toBeCloseTo(1.2, 12);
+    expect(levelPos(4, 2)).toBeCloseTo(1.6, 12);
+    expect(levelPos(5, 2)).toBeCloseTo(2, 12);
+  });
+
+  it("三档满档（position = 2）时第 5 层完全可见，第 4 层也已长满", () => {
+    // 这是"最高档要看到全部褶皱"的可执行判据。第 5 层在 levelPos = 2 处
+    // u = (2 - 2 + .85) / .7 > 1，所以 reveal 恰好是 1。
+    expect(foldRevealAt(2, levelPos(5, 2), 2)).toBe(1);
+    // 第 4 层中心在 1.6，窗口止于 1.6 + .15 = 1.75 < 2，所以满档时也是 1。
+    expect(foldRevealAt(2, levelPos(4, 2), 2)).toBe(1);
+    // 但第 5 层在档位 0 时还没起笔（窗口从 2 - .85 = 1.15 开始）。
+    expect(foldRevealAt(0, levelPos(5, 2), 2)).toBe(0);
+  });
+
+  it("三档：低档时只有前几层长出来（褶皱确实随档位递增）", () => {
+    const visibleAt = (p) => [1, 2, 3, 4, 5]
+      .filter((level) => foldRevealAt(p, levelPos(level, 2), 2) > 0.5);
+    // 位置 0 只有第 1 层（窗口 0.4 - .85 = -0.45 起，到 0.4 + .15 = 0.55）。
+    expect(visibleAt(0)).toStrictEqual([1]);
+    // 位置 1 时第 1、2、3 层已过中点（第 3 层窗口 0.35→1.35）。
+    expect(visibleAt(1)).toStrictEqual([1, 2, 3]);
+    // 满档五层全开。
+    expect(visibleAt(2)).toStrictEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("单档：唯一的档位就在位置 0，五层都算「已经长出来」", () => {
+    // span = 0 时所有 levelPos 都是 0，第 1 层在位置 0 处的 reveal 是
+    // (0 - 0 + .85) / .7 > 1 —— 单档看到的是完整的脑形。这是有意的：一档的
+    // 控件没有"再低一档"可以退，画一个光秃秃的脑子会让人以为它坏了。
+    for (const level of [1, 2, 3, 4, 5]) {
+      expect(foldRevealAt(0, levelPos(level, 0), 0), `level ${level}`).toBe(1);
+    }
+  });
+
+  it("窗口仍是规格的 .7 宽：从 levelPos-.85 起笔，到 levelPos+.15 收笔", () => {
+    // 窗口宽度不随 span 变宽变窄（只随 levelPos 平移）：规格 §4 的
+    // 「0.15→0.85 展开」换成以中心表述就是 [levelPos-.85, levelPos+.15]，
+    // u=0 / .5 / 1 落在 levelPos-.85 / -.5 / +.15 三处。
+    // 这里取第 3 层，避开被 span 钳掉的那一侧（三档时第 1 层起笔在 0 以下）。
+    for (const span of [2, 5]) {
+      const center = levelPos(3, span);
+      expect(foldRevealAt(center - 0.85, center, span), `span ${span} 起笔`).toBe(0);
+      expect(foldRevealAt(center - 0.5, center, span), `span ${span} 中点`).toBeCloseTo(0.5, 12);
+      expect(foldRevealAt(center + 0.15, center, span), `span ${span} 收笔`).toBe(1);
+    }
+  });
+});
+
+/**
+ * core 的 `foldReveal`，只为上面那条"六档逐位相同"的回归而导入。
+ *
+ * 它是六档验收的事实源（`galaxy-effort-core.test.js` 钉着 51 条），组件不再
+ * 直接调用它，但六档宿主看到的结果必须与它一字不差。
+ */
+function coreFoldReveal(position, level) {
+  const p = Math.min(5, Math.max(0, position));
+  const u = Math.min(1, Math.max(0, (p - level + 0.85) / 0.7));
+  return u * u * (3 - 2 * u);
+}
 
 describe("一个 RAF 循环与它的启停（规格 §4 / §6）", () => {
   it("dt 钳到 min(.032, 实际秒数)", () => {
@@ -500,12 +778,20 @@ describe("褶皱、填充与标题动画（规格 §2 / §4）", () => {
 
   it("每层都保留全部节点，绘制时只改 opacity 与变量", () => {
     const body = bodyOf(SOURCE, "  function paint(animateLabel) {");
-    expect(body).toContain("foldReveal(position");
+    expect(body).toContain("foldRevealAt(position");
     expect(body).toContain('setAttribute("opacity"');
     expect(body).toContain('setProperty("--ge-fold-hidden"');
     // 没有任何一处按档位重建褶皱节点——重建会让画到一半的线凭空消失。
     expect(body).not.toContain("remove()");
     expect(body).not.toContain("createElementNS");
+  });
+
+  it("五层褶皱按档位数铺开：levelPos = level × span / 5", () => {
+    // 规格的 `foldReveal` 把 level 当位置用（六档时 level 恰好就是位置）。档位
+    // 数一变，第 f 层的展开中心必须跟着缩放到 `f × span / 5`，五层才仍然均匀
+    // 铺满整条轨道。
+    const body = bodyOf(SOURCE, "  function paint(animateLabel) {");
+    expect(body).toContain("Number(group.dataset.tier) * span / 5");
   });
 
   it("右半球是镜像复用，不是第二份路径数据", () => {
@@ -518,9 +804,11 @@ describe("褶皱、填充与标题动画（规格 §2 / §4）", () => {
     expect((CODE.match(/MIRROR_TRANSFORM/g) ?? []).length).toBeGreaterThanOrEqual(3);
   });
 
-  it("轨道填充：五个色标 + width = trackX(position)", () => {
+  it("轨道填充：五个色标 + width = trackXAt(position, span)", () => {
     const body = bodyOf(SOURCE, "  function paint(animateLabel) {");
-    expect(body).toContain("trackFillStops(position)");
+    // 色标按归一化位置取：三档时满档是 2，core 的色板轴是六档的 0..5。
+    expect(body).toContain("trackFillStops(fillPosition)");
+    expect(body).toContain("position * (5 / span)");
     expect(body).toContain("linear-gradient(90deg");
     for (const stop of ["0%", "30%", "60%", "90%", "100%"]) {
       expect(body, stop).toContain(stop);
@@ -547,6 +835,92 @@ describe("褶皱、填充与标题动画（规格 §2 / §4）", () => {
   });
 });
 
+describe("单档：整条轨道冻结（stops.length === 1）", () => {
+  it("根节点带 data-single，供 CSS 摘掉指针与光标", () => {
+    expect(CODE).toContain("root.dataset.single");
+    expect(CODE).toContain('if (single) root.dataset.single = "true"');
+    expect(CSS).toContain('.ge-root[data-single="true"]');
+  });
+
+  it("指针按下直接返回：不取焦点、不取捕获、不改目标", () => {
+    const body = bodyOf(SOURCE, "  function onPointerDown(event) {");
+    expect(body).toContain("if (single) return;");
+    // 锁在取捕获与 focus 之前：拖不动的控件不该抢焦点。
+    expect(body.indexOf("if (single) return;")).toBeLessThan(body.indexOf("setPointerCapture"));
+    expect(body.indexOf("if (single) return;")).toBeLessThan(body.indexOf("slider.focus()"));
+  });
+
+  it("键盘直接返回，既不提交也不 preventDefault", () => {
+    const body = bodyOf(SOURCE, "  function onKeyDown(event) {");
+    expect(body).toContain("if (single) return;");
+    // 位置在 `event.preventDefault()` 之前：单档控件不该吞掉页面的按键。
+    expect(body.indexOf("if (single) return;")).toBeLessThan(body.indexOf("event.preventDefault()"));
+  });
+
+  it("keyboardTo 与 setTarget 里也有锁（脚本派发的事件走不到 onKeyDown）", () => {
+    expect(bodyOf(SOURCE, "  function keyboardTo(index) {")).toContain("if (single) return;");
+    expect(bodyOf(SOURCE, "  function setTarget(index, { animate = true } = {}) {"))
+      .toContain("single ? 0");
+  });
+
+  it("commit 不派发（上面那条已断言）；setValue 把下标钳成 0", () => {
+    const body = bodyOf(SOURCE, "  function setValue(next, settings = {}) {");
+    expect(body).toContain("single ? 0");
+    // 仍然渲染完整卡片：标题、档位名、刻度、Recommended 都由 `stops[0]` 驱动。
+    expect(CODE).toContain("tierLabel.textContent = stops[0].label");
+    expect(CODE).toContain("recommended.textContent = \"Recommended\"");
+    expect(CODE).toContain("for (let index = 0; index < stops.length; index += 1)");
+  });
+
+  it("一个刻度点，落在左端（不许除以 span = 0）", () => {
+    const body = bodyOf(SOURCE, "  const dots = element(\"div\", \"ge-track-dots\");");
+    expect(body).toContain("single ? TRACK_START_X");
+  });
+});
+
+describe("三档：上界 2、刻度 3 个、End 到 2", () => {
+  it("aria-valuemax 由跨度给出，不再写死 5", () => {
+    expect(THREE_STOPS.length - 1).toBe(2);
+    const body = bodyOf(SOURCE, "export function createGalaxyEffort(options = {}) {");
+    expect(body).toContain("const span = stops.length - 1");
+    expect(CODE).toContain('"aria-valuemax", String(span)');
+  });
+
+  it("刻度点数量 = stops.length", () => {
+    const body = bodyOf(SOURCE, "  const dots = element(\"div\", \"ge-track-dots\");");
+    expect(body).toContain("index < stops.length");
+    // 第二个点才给长刻度：三档时它落在位置 1（Low），单档时没有第二个点。
+    expect(body).toContain('index === 1 ? "ge-dot ge-dot-tall" : "ge-dot"');
+  });
+
+  it("End 到 span、Home 到 0（与六档同一个表达式，只是 span 变小）", () => {
+    const body = bodyOf(SOURCE, "  function onKeyDown(event) {");
+    expect(body).toContain("next = span");
+    expect(body).toContain("next = 0");
+  });
+});
+
+describe("六档：与改动前的行为一致（回归）", () => {
+  it("六个刻度点、上界 5、End 到 5", () => {
+    expect(SIX_STOPS.length - 1).toBe(5);
+    expect(trackXAt(0, 5)).toBe(16);
+    expect(trackXAt(5, 5)).toBeCloseTo(374, 12);
+  });
+
+  it("六档的标签逐字来自 stops，不再经过 TIER_NAMES", () => {
+    const labels = SIX_STOPS.map((stop) => stop.label);
+    expect(labels).toStrictEqual(["Low", "Medium", "High", "Extra", "Max", "Galaxy"]);
+    const paintBody = bodyOf(SOURCE, "  function paint(animateLabel) {");
+    expect(paintBody).toContain("stops[index].label");
+  });
+
+  it("六档时轨道填充的位置不做缩放（5 / span === 1）", () => {
+    // 浮点：5 / 5 恰好是 1，所以 `position * (5 / span)` 与原来的
+    // `trackFillStops(position)` 逐位相同。
+    expect(5 / (SIX_STOPS.length - 1)).toBe(1);
+  });
+});
+
 describe("Galaxy 与减少动态（规格 §4 / §6）", () => {
   it("galaxyState 驱动 scale / fill / stroke / glow / shake", () => {
     const body = bodyOf(SOURCE, "  function paint(animateLabel) {");
@@ -565,11 +939,13 @@ describe("Galaxy 与减少动态（规格 §4 / §6）", () => {
     expect(body).toContain("galaxyTarget = 0");
   });
 
-  it("判据是最近档位，不是位置精确等于 5", () => {
-    // 规格 §4「当最近档位进入 Galaxy 时」。拖到 4.6 时标签已经换成 Galaxy，
-    // 若要求位置精确到 5，脑形会在标签换掉之后还差半格才开始变形。
+  it("判据是最近档位，不是位置精确等于最高档", () => {
+    // 规格 §4「当最近档位进入 Galaxy 时」。拖到 5.6 时标签已经换成 Galaxy，
+    // 若要求位置精确到端点，脑形会在标签换掉之后还差半格才开始变形。
     const body = bodyOf(SOURCE, "  function setTarget(index, { animate = true } = {}) {");
-    expect(body).toContain("tierIndex(next) === LAST_TIER");
+    expect(body).toContain("indexAt(next, span) === galaxyIndex");
+    // 没有 Galaxy 档、或它不在最高位时整条路径不跑。
+    expect(body).toContain("galaxyIndex !== -1");
   });
 
   it("两个 Canvas 图层都接上了", () => {
@@ -717,6 +1093,26 @@ describe("CSS 落实规格 §1 的数值", () => {
     expect(tall).toContain("height: 20px");
     expect(tall).toContain("border-radius: 3px");
     expect(tall).toContain("rgba(255, 255, 255, .27)");
+  });
+
+  it("单档：拖动手柄不显示、cursor: default、不画焦点框", () => {
+    // `data-single` 由 JS 写在根节点上（见上面对应的用例）。样式表只负责
+    // 视觉与指针：`pointer-events: none` 收回整条命中区，`cursor: default`
+    // 去掉"可以拖"的手型，焦点框也去掉（没有可做的动作）。
+    const single = CSS.slice(CSS.indexOf('.ge-root[data-single="true"] .ge-slider {'));
+    expect(single).toContain("pointer-events: none");
+    expect(single).toContain("cursor: default");
+    const focus = CSS.slice(CSS.indexOf('.ge-root[data-single="true"] .ge-slider:focus-visible'));
+    expect(focus).toContain("outline: none");
+  });
+
+  it("CSS 里没有写死「六档」的刻度位置或点数", () => {
+    // 刻度数量与间距全部从 JS 写 left；样式表只给单个点的大小。
+    // 一条 `nth-child(6)` 或六个 `.ge-dot` 规则都会在单档/三档下多画或漏画。
+    expect(CSS).not.toMatch(/nth-child\(\s*[3-9]\s*\)/);
+    expect(CSS).not.toMatch(/nth-last-child/);
+    // 长刻度只由 JS 的 `index === 1` 加类决定，CSS 不按位置猜。
+    expect(CSS).not.toMatch(/\.ge-dot\s*\+\s*\.ge-dot/);
   });
 
   it("tooltip 的全部数值", () => {
