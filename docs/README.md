@@ -37,6 +37,7 @@ docs/
 | [`harness-comparison.md`](specs/harness-comparison.md) | 七工具横向调研 |
 | [`ontology-scope-note.md`](specs/ontology-scope-note.md) | Ontology 暂缓纳入检索比对的**范围决策** |
 | [`effort-tiers.md`](specs/effort-tiers.md) | 思考强度六档界面语言与逐模型映射（唯一契约源） |
+| [`galaxy-effort-slider.md`](specs/galaxy-effort-slider.md) | 脑形思考强度滑块（Galaxy 动效）的完整规格：尺寸、颜色、褶皱分层、运动算法 |
 
 ### `operations/` — 操作手册与契约
 
