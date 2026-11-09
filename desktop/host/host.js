@@ -969,22 +969,27 @@ function effortTable() {
  * does anything. `effortTier` in the kernel owns the mapping, including the
  * per-model `effortMap` override; this function only reports its answers.
  *
- * `levels: []` means "auto only" — the renderer prepends `auto` itself. A model
- * that does not declare reasoning support gets that, plus a note saying why:
- * the alternative is a menu of levels whose parameter the request would drop.
+ * **The six tiers are always reported** (2026-11-09, by request). They used to
+ * be withheld for a model that had not declared `supportsReasoning`, on the
+ * ground that a control whose parameter the request drops is a false promise.
+ * The operator's answer was that the control is a *setting*, not a claim about
+ * the gateway: it should be there, and it should say what it will do.
+ *
+ * What replaces hiding is disclosure — `unsupported: true` plus a note naming
+ * the field to edit. The renderer keeps the slider visible and shows that
+ * sentence, so the choice is visible *and* the fact that this model will not
+ * receive it is visible with it. `resolved` is still reported (it is what the
+ * tier *would* send), because the mapping is a property of the tier list, not
+ * of this model's declaration.
+ *
  * `default` is the level `auto` will actually send, so the menu can say what
  * the model will do without the operator having to read providers.json.
  */
 function effortChoices() {
-  const choices = { levels: [], resolved: {}, default: "", fixed: "", note: "" };
+  const choices = { levels: [], resolved: {}, default: "", fixed: "", note: "", unsupported: false };
   const cfg = currentModelCfg();
   if (cfg === undefined) {
     choices.note = "没有可用模型，无法调整推理强度";
-    return choices;
-  }
-  if (!kernel.supportsReasoning(cfg)) {
-    // Name the field, because the fix is a providers.json edit.
-    choices.note = `${modelRef} 未声明支持推理强度（providers.json 里该模型的 supportsReasoning 不是 true），请求不会携带该参数`;
     return choices;
   }
   choices.levels = [...kernel.EFFORT_TIERS];
@@ -992,6 +997,12 @@ function effortChoices() {
     choices.resolved[tier] = kernel.resolveEffortTier(cfg, tier);
   }
   if (typeof cfg.reasoningEffort === "string") choices.default = cfg.reasoningEffort;
+  if (!kernel.supportsReasoning(cfg)) {
+    // Name the field, because the fix is a providers.json edit. This is a
+    // disclosure, not a reason to hide the control.
+    choices.unsupported = true;
+    choices.note = `${modelRef} 未声明支持推理强度（providers.json 里该模型的 supportsReasoning 不是 true），请求不会携带该参数`;
+  }
   return choices;
 }
 

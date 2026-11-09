@@ -172,10 +172,16 @@ describe("desktop host 的推理强度", () => {
     });
     const state = states(events)[0];
 
-    // 渲染器在 levels 前面自己补 "auto"，所以空 levels 就是「只有 auto」。
-    expect(state.effortChoices.levels).toStrictEqual([]);
+    // **六档始终上报**（2026-11-09，用户要求「思考强度应该始终显示」）。
+    // 曾经这里是空列表：模型没声明就整块隐藏。改为显示滑块 + 一句说明，
+    // 因为档位是用户拥有的设置，「这个模型收不到它」应当被说出来，
+    // 而不是让控件直接消失。
+    expect(state.effortChoices.levels).toStrictEqual(["low", "medium", "high", "extra", "max", "galaxy"]);
     expect(state.effort).toBe("auto");
     expect(state.effortChoices.note).toContain("supportsReasoning");
+    // The disclosure is a flag too, so a renderer does not have to match on
+    // the note's wording to know the difference.
+    expect(state.effortChoices.unsupported).toBe(true);
     // `supportsReasoning` 也只是转述配置，不再是写死的 false。
     expect(state.models[0].supportsReasoning).toBe(false);
   }, HOST_TIMEOUT_MS);
@@ -195,6 +201,9 @@ describe("desktop host 的推理强度", () => {
     expect(state.effortChoices.levels).toStrictEqual(["low", "medium", "high", "extra", "max", "galaxy"]);
     expect(state.effort).toBe("auto");
     expect(state.models[0].supportsReasoning).toBe(true);
+    // A declared model carries no caveat.
+    expect(state.effortChoices.unsupported).toBe(false);
+    expect(state.effortChoices.note).toBe("");
   }, HOST_TIMEOUT_MS);
 
   it("setEffort 拒绝不支持的等级，且不改 state", async () => {
@@ -433,7 +442,7 @@ describe("宿主报告每一档实际会发的协议值", () => {
     expect(resolved.galaxy).toBe("high");
   }, HOST_TIMEOUT_MS);
 
-  it("不支持推理的模型没有档位，也没有折算表", async () => {
+  it("不支持推理的模型也给六档与折算表，另带 unsupported 说明", async () => {
     const gateway = await completionGateway();
     const home = await tempHome(PLAIN_MODELS, gateway.baseUrl);
 
@@ -442,10 +451,15 @@ describe("宿主报告每一档实际会发的协议值", () => {
     });
     const state = states(events)[0];
 
-    // Reporting a mapping here would claim the model sends these values; its
-    // requests carry no `reasoning_effort` at all.
-    expect(state.effortChoices.levels).toStrictEqual([]);
-    expect(state.effortChoices.resolved).toStrictEqual({});
+    // 2026-11-09：档位与折算表**照报**。它们是档位列表的性质，不是这个模型
+    // 声明的性质——「这个模型收不到」由 `unsupported` 与 `note` 说出来，
+    // 而不是靠把控件藏掉（用户原话：「思考强度应该始终显示」）。
+    expect(state.effortChoices.levels).toStrictEqual(["low", "medium", "high", "extra", "max", "galaxy"]);
+    expect(state.effortChoices.resolved).toStrictEqual({
+      low: "low", medium: "medium", high: "high",
+      extra: "high", max: "high", galaxy: "high",
+    });
+    expect(state.effortChoices.unsupported).toBe(true);
   }, HOST_TIMEOUT_MS);
 });
 

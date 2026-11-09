@@ -264,10 +264,12 @@ describe("降低动效时关掉粒子与脉动", () => {
   });
 });
 
-describe("模型不支持推理时整块隐藏并说明原因（R3）", () => {
-  it("levels 为空时 #effort-control 不可见", () => {
+describe("思考强度始终显示；不支持时靠说明，不靠隐藏（2026-11-09 用户决定）", () => {
+  it("模型未声明支持时滑块仍在（宿主始终报六档）", () => {
     const app = read("app.js");
     const body = bodyOf(app, "function syncEffortControl() {");
+    // The chip hides only when there is no model at all — `levels` empty for
+    // real means the host said "no model", not "this model takes no effort".
     expect(body).toContain("effortLevels().length === 0");
     expect(body).toContain("effortControl.hidden");
     // `effortLevels()` is `state.effortChoices.levels` — the host's answer,
@@ -280,6 +282,17 @@ describe("模型不支持推理时整块隐藏并说明原因（R3）", () => {
     const html = read("index.html");
     const tag = html.slice(html.indexOf('id="effort-control"') - 40, html.indexOf('id="effort-control"') + 40);
     expect(tag).toContain("hidden");
+  });
+
+  it("不支持时那条说明画在面板里，滑块不被收起", () => {
+    const app = read("app.js");
+    const body = bodyOf(app, "function renderEffortPanel() {");
+    // The note is the disclosure channel; it is painted from the host's answer
+    // and reaches `#effort-note` whether or not the model declared support.
+    expect(body).toContain("choices.note");
+    expect(body).toContain("effort-note");
+    // Nothing in this function hides the control on `unsupported`.
+    expect(body).not.toContain("effortControl.hidden");
   });
 
   it("隐藏时 setEffort 仍然跑到，所以状态不会只画一半", () => {

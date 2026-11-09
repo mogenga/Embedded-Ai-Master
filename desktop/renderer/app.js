@@ -2890,13 +2890,18 @@ function effortLevels() {
 let effortPending = false;
 
 /**
- * Show or hide the chip for the model the host just described.
+ * Show the chip for the model the host just described.
  *
- * A model with no levels has nothing to choose: `auto` is the only value and
- * the request sends nothing, so a slider would be a control whose stops cannot
- * take effect on this model — the exact thing R3 forbids. It stays hidden; the
- * reason (the host's `note`) is drawn in the panel, so it is there whole for
- * any surface that opens it rather than being re-worded here.
+ * **Always shown** (2026-11-09, by request). The control used to disappear for
+ * a model that did not declare `supportsReasoning`, because a stop whose
+ * parameter the request drops is a promise the request does not keep. The
+ * operator's answer stands: the tier list is a setting the user owns, and the
+ * honest way to say "this model will not receive it" is a sentence beside it,
+ * not an empty corner of the composer.
+ *
+ * The exception is a host with no model at all (`levels` empty for real): there
+ * is no conversation to set an effort for, and the chip would be a button with
+ * nothing behind it. That one still hides.
  */
 function syncEffortControl() {
   const unavailable = effortLevels().length === 0;
