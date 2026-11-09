@@ -773,6 +773,13 @@ export async function* runSession(opts: RunOptions): AsyncGenerator<LoopEvent> {
       // 现在没有第二个消费者。它仍是 deps 的必填项——那是「谁来对花费负责」的
       // 接线点，将来界面要显示「本会话子代理花销」时接在这里，而不是再算一遍。
       onSpend: () => undefined,
+      // 开跑事件写在**父会话**日志里：子代理的存在必须能从这条时间线上看见，
+      // 否则渲染器只在它结束时才知道有过这一件事，无法回答「现在有哪些在跑」。
+      // 写失败由 runner 降级为一行 stderr 且不取消子代理（`appendMcpStatus`
+      // 的姿态）：那是观测性记录，不是子代理能跑起来的前提。
+      onStarted: async (payload) => {
+        await session.append({ type: "subagent_started", payload: { ...payload } });
+      },
       ...(compactor === undefined ? {} : { compactor }),
       ...(opts.timeoutMs === undefined ? {} : { timeoutMs: opts.timeoutMs }),
       ...(provider.pricePerMillion === undefined

@@ -11,6 +11,7 @@ import type {
   McpStatusPayload,
   SessionEvent,
   SubagentResultPayload,
+  SubagentStartedPayload,
   TodosPayload,
   ToolStartedPayload,
 } from "../src/session/types.js";
@@ -48,6 +49,15 @@ const todos: TodosPayload = {
     { content: "读 datasheet", status: "completed" },
     { content: "量波形", status: "in_progress" },
   ],
+};
+
+const subagentStarted: SubagentStartedPayload = {
+  id: "sa_0123456789ab",
+  sessionDir: "/sessions/parent/subagents/sa_0123456789ab",
+  promptPreview: "确认主频",
+  startedAt: "2026-11-08T00:00:00.000Z",
+  maxTurns: 30,
+  timeoutMs: 600_000,
 };
 
 const subagentResult: SubagentResultPayload = {
@@ -164,6 +174,71 @@ describe("新事件类型", () => {
 
     expect(result.events.map((event) => event.type)).toEqual(["user", "subagent_result"]);
     expect(result.events[1]?.payload).toStrictEqual({ ...subagentResult });
+  });
+
+  it("buildMessages 忽略 subagent_started，且它可出现在工具批次中间", () => {
+    // `subagent` 工具在自己的 execute 里写这条事件，此刻 assistant 与它的
+    // tool_result 都还没闭合。与 `subagent_result` 同一分支：它是事实记录，
+    // 不是模型说过的话，也绝不能被并进会在未闭合批次上抛错的那三类。
+    const events: SessionEvent[] = [
+      {
+        seq: 0,
+        ts: "t",
+        type: "assistant",
+        payload: { content: "", toolCalls: [{ id: "c1", name: "subagent", arguments: {} }] },
+      },
+      { seq: 1, ts: "t", type: "subagent_started", payload: { ...subagentStarted } },
+      { seq: 2, ts: "t", type: "tool_result", payload: { id: "c1", text: "ok" }, parent: 0 },
+    ];
+
+    expect(() => buildMessages(events)).not.toThrow();
+    expect(buildMessages(events).map((message) => message.role)).toEqual(["assistant", "tool"]);
+  });
+
+  it("桌面协议层认识 subagent_started，不会画成「未识别的事件类型」", () => {
+    // 漏登记的表现不是「少画一行」，而是每次派发子代理都在工具行上方多一句警告。
+    const ctx = createContext({ sessionId: "s" });
+    const out = sessionEventToHostEvents(
+      { seq: 0, ts: "t", type: "subagent_started", payload: { ...subagentStarted } },
+      ctx,
+    );
+
+    expect(
+      out.filter(
+        (message) =>
+          message.type === "notice" && String(message.text).includes("未识别的事件类型"),
+      ),
+    ).toStrictEqual([]);
+    // **登记 ≠ 绘制在转录里**：这条事件产出的是输入框上方那条「运行中」的界面
+    // 状态，不是对话气泡。Task 1 曾在这里钉 `toStrictEqual([])`；Task 2 给它加了
+    // 绘制之后，那条断言被换成下面这两条——**不是删掉**：一条要求确实产出了一条
+    // 消息（否则「登记了但哪也不去」会静默通过），一条要求它没有变成 notice
+    // （转录里多一行「子代理开始」与工具行重复，且会在每次派发时出现）。
+    expect(out).toStrictEqual([
+      {
+        type: "subagent_started",
+        id: subagentStarted.id,
+        promptPreview: subagentStarted.promptPreview,
+        startedAt: subagentStarted.startedAt,
+        sessionDir: subagentStarted.sessionDir,
+        maxTurns: subagentStarted.maxTurns,
+        timeoutMs: subagentStarted.timeoutMs,
+      },
+    ]);
+    expect(out.filter((message) => message.type === "notice")).toStrictEqual([]);
+  });
+
+  it("subagent_started 事件往返持久化：白名单缺一项就会整份日志不可读", async () => {
+    const dir = makeTempDir();
+    const session = await createSession(dir);
+    await session.append({ type: "user", payload: { content: "u" } });
+    await session.append({ type: "subagent_started", payload: { ...subagentStarted } });
+    await session.close();
+
+    const result = readSessionDir(dir);
+
+    expect(result.events.map((event) => event.type)).toEqual(["user", "subagent_started"]);
+    expect(result.events[1]?.payload).toStrictEqual({ ...subagentStarted });
   });
 
   it("todos 事件往返持久化：白名单缺一项就会整份日志不可读", async () => {

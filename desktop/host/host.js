@@ -34,6 +34,8 @@ import {
   resolveRoots,
 } from "./roots.js";
 import { SerialBridge, listSerialPorts } from "./serial-bridge.js";
+import { subagentSessionDir } from "./subagent-session.js";
+import { hooksDefaultPaths, hooksView } from "./hooks-view.js";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 // `distParent` is the directory that holds `dist/` — the checkout root in
@@ -153,6 +155,7 @@ try {
     skillsModule,
     backgroundModule,
     subagentModule,
+    hooksModule,
     protocol,
   ] = await Promise.all([
     import(dist("server/runner.js")),
@@ -187,6 +190,12 @@ try {
     // subagent landed still boots; the pump then simply has no queue to drain
     // and says nothing, which is the truth — that kernel never started one.
     import(dist("subagent/runner.js")).catch(() => undefined),
+    // Same namespace rule, plus a `catch`: `dist/hooks/config.js` is newer than
+    // most `dist/` trees in the wild. The hooks feature itself belongs to the
+    // kernel (`runSession` reads the file on every run); this import exists only
+    // so `/hook` can show what that reader would see. An un-rebuilt kernel boots
+    // and answers "run npm run build" rather than losing the window.
+    import(dist("hooks/config.js")).catch(() => undefined),
     import("../renderer/protocol.js"),
   ]);
   kernel = {
@@ -217,6 +226,7 @@ try {
     skills: skillsModule,
     background: backgroundModule,
     subagent: subagentModule,
+    hooks: hooksModule,
     protocol,
   };
 } catch (error) {
@@ -509,6 +519,19 @@ let locale = "zh";
 let mode = "diagnose";
 let sessionId = "";
 let running = false;
+/**
+ * Set while the transcript on screen is a subagent's log, `null` otherwise.
+ *
+ * Kept as its own field rather than reusing `sessionId`: the host's `sessionId`
+ * stays on the **parent** the whole time. A subagent session has no runner —
+ * its job finished before anybody could open it — so pointing `sessionId` at
+ * the child would make the next `prompt` write into a directory nothing is
+ * driving. `prompt` refuses while this is non-null instead.
+ *
+ * Cleared by every path that opens a different transcript (`loadSession`,
+ * `newSession`, `forkSession`), because the banner is drawn from it.
+ */
+let readonlySession = null;
 /** The protocol context for the open session; replaced on every new run. */
 let ctx = kernel.protocol.createContext();
 /** Stream handle for the live run. */
@@ -746,7 +769,17 @@ const sessions = (() => {
      * browser and refused to open here.
      */
     async detailTolerant(id) {
-      const dir = path.join(sessionsRoot, id);
+      return sessions.detailTolerantDir(path.join(sessionsRoot, id));
+    },
+    /**
+     * The same tolerant read against a directory already resolved.
+     *
+     * A subagent session is two segments deep and cannot go through the `id`
+     * form above; the path is built by `subagentSessionDir` (validated piece by
+     * piece) and handed here. Nothing else differs — same checked header, same
+     * tolerance for a log that ends mid-line, same error codes.
+     */
+    async detailTolerantDir(dir) {
       const header = kernel.readSessionHeader(dir);
       const snapshot = await kernel.readSessionSnapshot(dir, { allowTrailingPartial: true });
       return { header, events: snapshot.events };
@@ -1567,12 +1600,21 @@ async function pumpCompletions() {
       // same handle: one writer, one seq sequence.
       if (canDrainBackground) {
         for (const payload of background.takeBackgroundCompletions(id)) {
-          await handle.append({ type: "background_result", payload });
+          // Draw it too, not just write it. A completion by definition lands
+          // after the turn that started it, and by then neither delivery path
+          // is running: `follow` returned when the header went `closed`
+          // (`log-tail.ts`), and the accelerator only accepts events while
+          // `ctx.running` and only a contiguous seq. Appending without
+          // delivering left the transcript showing "running" forever, and the
+          // next prompt's `since = headSeq` skipped the line entirely.
+          const written = await handle.append({ type: "background_result", payload });
+          deliverPumpedEvent(written);
         }
       }
       if (canDrainSubagent) {
         for (const payload of subagent.takeSubagentCompletions(id)) {
-          await handle.append({ type: "subagent_result", payload });
+          const written = await handle.append({ type: "subagent_result", payload });
+          deliverPumpedEvent(written);
         }
       }
     } catch (error) {
@@ -1586,6 +1628,52 @@ async function pumpCompletions() {
     }
   } finally {
     completionPumpInFlight = false;
+  }
+}
+
+/**
+ * Draw one event that the pump just appended itself.
+ *
+ * The two normal delivery paths are both unavailable here, so this is
+ * deliberately a *third* one, and it is only safe because of where it sits:
+ *
+ * - `follow` is gone. The kernel's follower returns as soon as the header says
+ *   `closed`, and every `handle.close()` writes that (`session/handle.ts`). A
+ *   completion is by definition written after its turn ended, so by then there
+ *   is no follower to see it.
+ * - The in-process accelerator is gone too: `handleLiveEvent` drops anything
+ *   that arrives while `!ctx.running`, and it only translates a *contiguous*
+ *   `lastSeq + 1`. A pump-opened handle is a different object anyway — it is
+ *   not wired to `onSessionEvent` at all.
+ *
+ * So the pump is the only place that knows this event exists. It has just
+ * written it, it has the whole event (seq included), and it is the only writer
+ * that can produce it — which is what keeps this from double-drawing: nothing
+ * else is watching this log at this moment.
+ *
+ * The cursor is advanced so the *next* prompt does not replay it. It is set
+ * past the event rather than incremented, because the pump's seq is the log's
+ * real seq and the host may have missed earlier ones: jumping to what was just
+ * written makes "everything up to here is on screen" true, which is exactly
+ * what `ctx.lastSeq` means everywhere else in this file.
+ */
+function deliverPumpedEvent(event) {
+  try {
+    // `sessionEventToHostEvents` skips anything `<= ctx.lastSeq`; move past it
+    // first so this event is translated.
+    if (Number.isSafeInteger(event.seq) && event.seq > ctx.lastSeq) {
+      ctx.lastSeq = event.seq - 1;
+    }
+    deliverKernelEvent(event);
+  } catch (error) {
+    // Same trade as the accelerator: a duplicated frame is recoverable by the
+    // reader, a silently dropped one is not. Rewind so a later replay shows it.
+    ctx.lastSeq = Math.min(ctx.lastSeq, Number.isSafeInteger(event.seq) ? event.seq - 1 : ctx.lastSeq);
+    send({
+      type: "notice",
+      level: "warn",
+      text: `事件已写入日志但未能显示：${messageOf(error)}`,
+    });
   }
 }
 
@@ -1737,22 +1825,31 @@ function handleLiveEvent(session, event) {
 /**
  * The built-in slash commands this form can actually run.
  *
- * All three have a real handler here: `/clear` maps to `newSession`,
+ * All four have a real handler here: `/clear` maps to `newSession`,
  * `/context` is answered by the renderer from the kernel's own measurement,
- * and `/compact` runs the kernel's compaction. A verb with no route behind it
- * would be a menu row that fails on click (R3), so the list is short on
- * purpose.
+ * `/compact` runs the kernel's compaction, and `/hook` reads the same config
+ * the next run will load. A verb with no route behind it would be a menu row
+ * that fails on click (R3), so the list is short on purpose.
  *
  * One function, called by both `init` and `listCommands`: the boot push and
  * the answer to the renderer's own request have to be the same list, and two
  * literals for one catalogue is exactly how they drift apart.
  */
 function builtinCommands() {
-  return [{ name: "clear" }, { name: "context" }, { name: "compact" }];
+  return [{ name: "clear" }, { name: "context" }, { name: "compact" }, { name: "hook" }];
 }
 
 /** What the settings page and the transcript show when the store is absent. */
 const SKILLS_MISSING = "内核未导出技能存储，请重新执行 npm run build";
+
+/**
+ * What `/hook` says when this `dist/` has no hooks config reader.
+ *
+ * The kernel itself may well have the hooks feature and simply be compiled
+ * before the reader was split into its own module; either way the honest
+ * answer is "this build cannot show them", not an empty list (R3).
+ */
+const HOOKS_MISSING = "钩子配置读取不可用：内核未编译到这一版，请先 npm run build";
 
 /**
  * A settings-page refusal, tagged so the renderer can route it to that page.
@@ -1991,6 +2088,20 @@ function systemPromptMismatchHint(error) {
 async function handlePrompt(text) {
   if (typeof text !== "string" || text.trim() === "") {
     send({ type: "error", message: "消息不能为空" });
+    return;
+  }
+  // The transcript on screen is a subagent's finished log. Its job is over and
+  // its directory is owned by nobody: a prompt accepted here would either be
+  // written into a session with no runner or silently start a turn in the
+  // parent while the screen shows the child — two timelines in one window.
+  // The renderer disables its composer for the same reason; this is the second
+  // entrance, for a window that has not been rebuilt.
+  if (readonlySession !== null) {
+    send({
+      type: "notice",
+      level: "warn",
+      text: `正在查看子代理 ${readonlySession.childId} 的会话记录（只读），不能在这里发消息；先返回父会话`,
+    });
     return;
   }
   if (ctx.running) {
@@ -2374,6 +2485,8 @@ function handleNewSession() {
   sessionId = "";
   lastSessionId = "";
   lastSessionMeasure = {};
+  // A new conversation is not the child's log any more (see `handleLoadSession`).
+  readonlySession = null;
   ctx = kernel.protocol.createContext({ cwd });
   // `cwd` here is the folder the topbar currently names — including one adopted
   // from a conversation that was just opened. A new session starting where the
@@ -2540,6 +2653,12 @@ async function handleLoadSession(id, atSeq) {
   // needing those tools.
   if (id !== sessionId) releaseSessionMcp(sessionId);
   sessionId = id;
+  // Any parent session — the one the child belongs to or another — ends the
+  // read-only view: the transcript is no longer the child's log, so a banner
+  // over it would be describing a different screen. Cleared here because this
+  // is the one place the sidebar, the banner's own "back" link and
+  // `newSession` all converge on.
+  readonlySession = null;
   running = false;
   // Follow the conversation's own project before the context and the `state`
   // are built: both carry a cwd, and they must describe the same folder as
@@ -2582,6 +2701,120 @@ async function handleLoadSession(id, atSeq) {
   send(stateEvent());
   // No follow: the session is closed, so following would end immediately.
   // The next prompt resumes it and starts a fresh pump.
+}
+
+/**
+ * Open a finished subagent's own log, read-only.
+ *
+ * Deliberately the same shape as `handleLoadSession` — the same running guard,
+ * the same two failure notices (gone vs. corrupt), the same projection entry
+ * point, the same refusal to switch the transcript when the read or the
+ * projection failed. The differences are exactly three, and all of them come
+ * from the session being two directories deep and owned by nobody:
+ *
+ *   1. the directory comes from `subagentSessionDir`, which validates the two
+ *      ids separately instead of concatenating a caller's string into a path;
+ *   2. `sessionId` stays on the **parent**. The child has no runner, so an
+ *      adopted id would make the next prompt write where nothing consumes it;
+ *   3. `readonlySession` is set, which is what makes `prompt` refuse and what
+ *      the renderer draws its permanent banner from.
+ *
+ * The workdir is not adopted: a child session records the parent's workdir, so
+ * adopting it is a no-op in the common case and a workspace switch the
+ * operator did not ask for in the rest.
+ */
+async function handleLoadSubagent(parentId, childId, atSeq) {
+  if (ctx.running) {
+    send({ type: "notice", level: "warn", text: "当前回合尚未结束，请先停止或等待" });
+    return;
+  }
+  const dir = subagentSessionDir({
+    sessionsRoot,
+    parentId,
+    childId,
+    isValidSessionId: kernel.isValidSessionId,
+  });
+  if (dir === undefined) {
+    send({ type: "error", message: `非法的子代理会话 id: ${String(parentId)} / ${String(childId)}` });
+    return;
+  }
+  stopFollow();
+  let detail;
+  try {
+    detail = await sessions.detailTolerantDir(dir);
+  } catch (error) {
+    // Same two-way split as `handleLoadSession`, and the same reason for it:
+    // "gone" is not "corrupt", and a reader sent to inspect a header file that
+    // no longer exists has been given the wrong next step (D-214 / D-215).
+    const code = error instanceof Error && "code" in error ? error.code : "";
+    if (code === "session_not_found") {
+      send({
+        type: "notice",
+        level: "warn",
+        text: `子代理会话不存在：${childId}（目录或 header.json 已被删除）`,
+      });
+      return;
+    }
+    if (code === "invalid_header" || code === "invalid_event_line" || code === "invalid_seq" || code === "unknown_event_type") {
+      send({
+        type: "notice",
+        level: "warn",
+        text: `子代理会话文件损坏（${code}）：${messageOf(error)}。文件在磁盘上，但内容无法解析。`,
+      });
+      return;
+    }
+    send({ type: "notice", level: "error", text: `子代理会话读取失败：${messageOf(error)}` });
+    return;
+  }
+  let projection;
+  try {
+    projection = kernel.protocol.sessionLoadedEvent(detail.events, {
+      // The child's own record of the workdir, exactly as a parent session
+      // would report it — the transcript is a record of where it ran, and this
+      // does not move the host's `cwd`.
+      cwd: detail.header.workdir ?? cwd,
+      mode,
+      ...(atSeq === undefined ? {} : { atSeq }),
+    });
+  } catch (error) {
+    send({ type: "notice", level: "warn", text: `子代理会话未打开：${messageOf(error)}` });
+    return;
+  }
+  // The scrubbing position is deliberately **not** published. `sessionId`
+  // stays on the parent, and the renderer's scrubber commits by sending
+  // `loadSession{id: state.sessionId, atSeq}` — an `atSeq` measured against
+  // the child's log would be handed to the parent's log, where the same number
+  // means a different event. A hidden bar is the honest answer for a record
+  // nobody can scrub; a bar that jumps the parent to the wrong place is not.
+  //
+  // Built by omission rather than by deleting two keys off the projection: the
+  // two fields are the pair a truncated projection carries, and a reader of
+  // this file should see that this answer has neither.
+  const { lastSeq: _lastSeq, atSeq: _atSeq, ...loaded } = projection;
+  // The transcript is about to be replaced, so the parent's live run has no
+  // follower either way; `sessionId` itself does not move. Nothing here
+  // touches `running`, because the guard above already established it is
+  // false and the child has no turn to start or finish.
+  sessionId = parentId;
+  lastSessionId = parentId;
+  // A fresh context with **no cursor**. `ctx.lastSeq` is the position in the
+  // parent's log, and this read was the child's: copying the child's head here
+  // would make the parent's next live events look already-delivered. Nothing
+  // reads this cursor before `handlePrompt` replaces the whole context and
+  // seeds `lastSeq` from the parent's own log — so the honest value is the
+  // context's default.
+  ctx = kernel.protocol.createContext({ sessionId: parentId, cwd });
+  lastSessionMeasure = lastMeasure(
+    atSeq === undefined ? detail.events : detail.events.filter((event) => event.seq <= atSeq),
+  );
+  loaded.effort = currentEffort();
+  // The banner's data. The child id travels with the parent's so the renderer
+  // can name it and so "back to the parent" is a `loadSession` it can already
+  // send.
+  loaded.readonly = { parentId, childId };
+  readonlySession = { parentId, childId };
+  send(loaded);
+  send(stateEvent());
 }
 
 function handlePermission(id, answer) {
@@ -3393,6 +3626,28 @@ const handlers = {
       return;
     }
     return handleLoadSession(payload.id, atSeq);
+  },
+
+  /**
+   * Open a finished subagent's log, read-only.
+   *
+   * Two ids rather than a path: the host never takes a caller's string as a
+   * path segment, and `subagentSessionDir` is the one place that decides what
+   * a legal pair is. `atSeq` follows the same rule as `loadSession` and is
+   * refused here for the same reason — before any file is read.
+   */
+  loadSubagent(payload = {}) {
+    if (runner === undefined) return;
+    const atSeq = requestedAtSeq(payload);
+    if (atSeq === null) {
+      send({
+        type: "notice",
+        level: "warn",
+        text: `子代理会话未打开：atSeq 必须是非负整数（收到 ${JSON.stringify(payload.atSeq)}）`,
+      });
+      return;
+    }
+    return handleLoadSubagent(payload.parentId, payload.childId, atSeq);
   },
 
   /**
@@ -4328,6 +4583,39 @@ const handlers = {
       return;
     }
     send({ type: "skills", ...snapshot });
+  },
+
+  /**
+   * What the hooks configuration says, for `/hook`.
+   *
+   * A read-only answer to a read-only question: it reports what the *next* run
+   * would load, and never changes what the current process does. The payload's
+   * `reload` only chooses the wording of the answer — whether the list was
+   * re-read is a fact the answer has to be able to state, and the renderer must
+   * not infer it. The read itself happens on every call either way: the file is
+   * hand-editable, so a remembered list describes a file nobody re-read.
+   *
+   * `hooksView` owns the two outcomes (configured vs unreadable) and the
+   * `includeProject: false` decision; this handler only chooses which event to
+   * send. A kernel with no reader is answered, not ignored: the warn names the
+   * fix and an `error`-shaped `hooks` event releases the renderer's pending
+   * request — an empty list would claim "nothing is configured" about a build
+   * that cannot look (R3).
+   */
+  getHooks(payload = {}) {
+    const reload = payload.reload === true;
+    const snapshot = hooksView({ module: kernel.hooks, home: harnessHome, workdir: cwd });
+    if (snapshot === undefined) {
+      send({ type: "notice", level: "warn", text: HOOKS_MISSING });
+      send({
+        type: "hooks",
+        reload,
+        error: { code: "module_missing", message: HOOKS_MISSING },
+        ...hooksDefaultPaths(harnessHome, cwd),
+      });
+      return;
+    }
+    send({ type: "hooks", reload, ...snapshot });
   },
 
   /**

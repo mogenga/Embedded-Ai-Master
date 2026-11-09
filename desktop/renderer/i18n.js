@@ -123,6 +123,31 @@ export const dictionaries = {
     planCollapse: "Collapse the plan",
     planComplete: "all steps done",
     planNext: "starting",
+    /* The subagent strip above the composer. It is only on screen while at
+       least one subagent is running, so every string here is about "now" — a
+       finished one is reported by its own result notice. `subagentElapsed` is
+       fed a clock reading; `subagentElapsedUnknown` is what a start time the
+       kernel did not record reads as, rather than a fabricated 0:00. */
+    subagentStripLabel: "Subagents",
+    subagentRunning: (n) => (n === 1 ? "1 subagent running" : `${n} subagents running`),
+    subagentMore: (n) => `+${n}`,
+    subagentElapsed: (clock) => `running ${clock}`,
+    subagentElapsedUnknown: "running ?",
+    /* `minutes` is an already-formatted duration; an empty one means the kernel
+       reported no timeout, and the clause then names the turn cap alone rather
+       than printing a limit nobody set. */
+    subagentLimits: (turns, minutes) =>
+      minutes === "" ? `up to ${turns} turns` : `up to ${turns} turns, ${minutes}`,
+    minutesShort: (n) => `${n} min`,
+    subagentOpen: "Open this subagent's session record (read-only)",
+    subagentToggle: "Show every running subagent",
+    subagentStripCollapse:"Collapse the subagent list",
+    /* The banner over a subagent's log. It is permanent for as long as that
+       log is on screen — there is no dismiss — and `readonlyBack` is the way
+       out, which is why it is a button and not a sentence. */
+    readonlySubagent: (id) => `Viewing subagent ${id}'s session record (read-only)`,
+    readonlyBack: "Back to parent session",
+    readonlyComposerReason: "This is a subagent's finished session record. Messages are disabled; return to the parent session to continue.",
     tools: "Tools",
     tabFiles: "Files",
     tabChanges: "Changes",
@@ -303,6 +328,35 @@ export const dictionaries = {
     commandUnknownHeading: (name) => `Unknown command: /${name}`,
     commandAvailable: "Available commands:",
     commandTakesNoArguments: (name) => `/${name} takes no arguments; nothing ran.`,
+    /* `/hook` accepts exactly one argument. Naming the one it takes is the
+       whole point: "unknown argument" alone leaves the user guessing whether a
+       typo or a missing feature is in the way. */
+    commandHookUnknownArgument: (args) =>
+      `/hook does not take “${args}”; the only argument is \`reload\`. Nothing ran.`,
+    /* The `/hook` report. It is a block in the transcript (not a notice)
+       because it is a list: one row per configured hook, plus the two file
+       paths and the project-file disclosure. */
+    hooksTitle: "Configured hooks",
+    hooksReRead: "re-read just now",
+    hooksEmpty: "No hooks are configured; nothing runs before or after a tool call.",
+    hooksUserFile: "User file",
+    hooksProjectFile: "Project file",
+    hooksProjectSkipped: (file) =>
+      `Project file exists but is NOT loaded (this window never trusts a workspace): ${file}`,
+    hooksProjectAbsent: "No project file in this workspace.",
+    hooksErrorTitle: "The hooks file could not be read; the next run will start with no hooks.",
+    hooksErrorEntry: (code, message) => `${code}: ${message}`,
+    hooksReloadNote:
+      "A reload only re-reads the file for this display. What the running session uses was fixed when it started; a new run picks up the file as it is now.",
+    hooksNoWriteNote: "This command never changes the file. Edit it by hand.",
+    /* Where a row came from, in the reader's language: `user` / `project` are
+       wire values, and printing them raw beside a localized command name reads
+       like a leak. */
+    hooksSourceUser: (index) => `user #${index}`,
+    hooksSourceProject: (index) => `project #${index}`,
+    /* A hook with no `matcher` runs on every tool. That is not "unset", it is
+       "everything" — printing a blank there reads like a broken entry. */
+    hooksAllTools: "all tools",
     /* A skill command that cannot run, said precisely: no body has arrived for
        that name, or the body arrived empty. Sending an empty prompt instead
        would spend a turn on nothing and look like the skill ran (R3). */
@@ -557,6 +611,20 @@ export const dictionaries = {
     planCollapse: "收起计划",
     planComplete: "全部步骤已完成",
     planNext: "即将开始",
+    subagentStripLabel: "子代理",
+    subagentRunning: (n) => `${n} 个子代理运行中`,
+    subagentMore: (n) => `+${n}`,
+    subagentElapsed: (clock) => `已跑 ${clock}`,
+    subagentElapsedUnknown: "已跑 ?",
+    subagentLimits: (turns, minutes) =>
+      minutes === "" ? `上限 ${turns} 轮` : `上限 ${turns} 轮、${minutes}`,
+    minutesShort: (n) => `${n} 分钟`,
+    subagentOpen: "打开这个子代理的会话记录（只读）",
+    subagentToggle: "展开全部运行中的子代理",
+    subagentStripCollapse:"收起子代理列表",
+    readonlySubagent: (id) => `正在查看子代理 ${id} 的会话记录（只读）`,
+    readonlyBack: "返回父会话",
+    readonlyComposerReason: "这是子代理的会话记录，已完成且只读。不能在这里发消息；返回父会话即可继续。",
     tools: "工具",
     tabFiles: "文件",
     tabChanges: "改动",
@@ -720,6 +788,32 @@ export const dictionaries = {
     commandUnknownHeading: (name) => `未知命令：/${name}`,
     commandAvailable: "可用命令：",
     commandTakesNoArguments: (name) => `/${name} 不接受参数，没有执行。`,
+    /* `/hook` 只认一个参数。点名它认的那个才是重点：只说「不认识的参数」，
+       用户分不清是自己拼错还是这个功能不存在。 */
+    commandHookUnknownArgument: (args) =>
+      `/hook 不接受“${args}”；唯一的参数是 \`reload\`，没有执行。`,
+    /* `/hook` 的报告。它是转录里的一段（不是 notice）：这是一份清单，每条
+       钩子一行，外加两份文件路径与项目级文件的处理说明。 */
+    hooksTitle: "已配置的钩子",
+    hooksReRead: "刚刚重读过",
+    hooksEmpty: "没有配置任何钩子；工具调用前后都不会跑东西。",
+    hooksUserFile: "用户级文件",
+    hooksProjectFile: "项目级文件",
+    hooksProjectSkipped: (file) =>
+      `项目级文件存在但未被加载（这个窗口从不信任工作区配置）：${file}`,
+    hooksProjectAbsent: "这个工作区没有项目级文件。",
+    hooksErrorTitle: "钩子配置读取失败；下一轮将以「没有钩子」启动。",
+    hooksErrorEntry: (code, message) => `${code}：${message}`,
+    hooksReloadNote:
+      "reload 只是把这个文件重读给界面看。正在跑的会话用的是它启动时读到的那份；新一轮才会读到文件现在的样子。",
+    hooksNoWriteNote: "这条命令不会改文件。要改钩子请手动编辑。",
+    /* 行尾「哪份文件的第几条」：两个词都随语言走，别把 `user` / `project`
+       原样印给中文读者。 */
+    hooksSourceUser: (index) => `用户级 #${index}`,
+    hooksSourceProject: (index) => `项目级 #${index}`,
+    /* 没写 `matcher` 的钩子对每个工具都跑。这不是「没配」，是「全匹配」——说
+       成缺省值会让读者以为它坏了。 */
+    hooksAllTools: "全部工具",
     /* 技能命令跑不了时说清楚是哪一种：这个名字的提示词还没到，或者到了但是空的。
        偷偷发一条空消息既浪费一轮，又像是技能真的跑了（R3）。 */
     skillUnavailable: (name) => `/${name} 的提示词还没加载，没有发送。`,

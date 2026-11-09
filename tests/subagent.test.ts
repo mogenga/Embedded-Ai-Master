@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { buildMessages } from "../src/context/build.js";
 import { runSession } from "../src/index.js";
@@ -19,7 +19,7 @@ import { createPermissionGate } from "../src/permissions/gate.js";
 import { readSessionDir } from "../src/session/persistence.js";
 import { createSession } from "../src/session/session.js";
 import type { SessionHandle } from "../src/session/session.js";
-import type { SessionEvent } from "../src/session/types.js";
+import type { SessionEvent, SubagentStartedPayload } from "../src/session/types.js";
 import {
   DEFAULT_MAX_TURNS,
   DEFAULT_TIMEOUT_MS,
@@ -151,6 +151,8 @@ function toolReply(
 interface Harness {
   parentSessionId: string;
   parentDir: string;
+  /** 父会话的 handle：`onStarted` 要往里写事件，宿主也是这么接的。 */
+  parent: SessionHandle;
   workdir: string;
   deps: SubagentDeps;
   spend: number[];
@@ -191,6 +193,7 @@ async function harness(opts: {
   return {
     parentSessionId: parent.id,
     parentDir,
+    parent,
     workdir,
     deps,
     spend,
@@ -723,6 +726,299 @@ describe("subagent 运行语义", () => {
     // 明确错误码而不是「空文件」：读不到与读到空是两件事（R3）。
     expect(results[0]?.code).toBe("artifact_dir_missing");
     expect(String(results[0]?.text)).not.toContain("PARENT-ONLY");
+  });
+});
+
+describe("subagent_started 生命周期事件", () => {
+  /**
+   * 把父会话的 handle 接成 `onStarted`。
+   *
+   * 与 `src/index.ts` 的接线同形：`session.append({ type: "subagent_started",
+   * payload })`。这里不直接改 `deps.onStarted` 是为了让「写失败」那条用例能
+   * 单独换一个会抛的实现，而其余用例走的就是宿主的那条路径。
+   */
+  function appendStarted(h: Harness): void {
+    h.deps.onStarted = async (payload) => {
+      await h.parent.append({ type: "subagent_started", payload: { ...payload } });
+    };
+  }
+
+  function startedPayloadsOf(dir: string): SubagentStartedPayload[] {
+    return eventsOf(dir)
+      .filter((event) => event.type === "subagent_started")
+      .map((event) => event.payload as unknown as SubagentStartedPayload);
+  }
+
+  it("开始事件先于完成事件：onStarted 落盘之前 runJob 根本没发车", async () => {
+    // 「先写开始事件，再 `void runJob(...)`」是一条硬顺序，不是装饰：反过来的
+    // 话，一次跑得极快的子代理会在开始事件落盘之前就结算、进完成队列，宿主泵
+    // 随后写出的 `subagent_result` 的 seq 就会**小于** `subagent_started` ——
+    // 渲染器先看到它结束、再看到它开始。
+    //
+    // 判据选在「onStarted 还没 resolve 的那段时间里，完成队列必须一直是空的」：
+    // 正确实现下 `runJob` 此刻还没被调用，所以这是一个不可能被打破的保证；
+    // 把 `void runJob(...)` 挪到 `await onStarted` 之前，这个窗口里它就会跑完。
+    const h = await harness({ steps: [reply("结论：查完了。")] });
+    let completionsSeenWhilePending = 0;
+    h.deps.onStarted = async (payload) => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      // 采样点放在**窗口末尾**：此刻若 runJob 早已发车，它多半已经跑完了。
+      completionsSeenWhilePending += takeSubagentCompletions(h.parentSessionId).length;
+      await h.parent.append({ type: "subagent_started", payload: { ...payload } });
+    };
+
+    const outcome = await startSubagent(h.parentSessionId, h.parentDir, "查一下", {
+      deps: h.deps,
+    });
+    if (!("id" in outcome)) throw new Error(outcome.error);
+
+    expect(completionsSeenWhilePending).toBe(0);
+    // 返回的时候开始事件已经在盘上了。
+    const atReturn = eventsOf(h.parentDir).filter((event) => event.type === "subagent_started");
+    expect(atReturn).toHaveLength(1);
+    expect(atReturn[0]?.payload).toMatchObject({ id: outcome.id });
+
+    await waitFor(() => getSubagent(h.parentSessionId, outcome.id)?.status === "finished");
+    // 完成队列由宿主取走写成 `subagent_result`；这里照同一条路径写一遍，
+    // 否则父日志里根本没有可比的第二条。
+    for (const completion of takeSubagentCompletions(h.parentSessionId)) {
+      await h.parent.append({ type: "subagent_result", payload: { ...completion } });
+    }
+
+    const events = eventsOf(h.parentDir);
+    const startedAt = events.findIndex((event) => event.type === "subagent_started");
+    const resultAt = events.findIndex((event) => event.type === "subagent_result");
+    expect(startedAt).toBeGreaterThan(-1);
+    expect(resultAt).toBeGreaterThan(-1);
+    // 断言直接用 seq 才是用例要说的事（下标同序只是实现的副作用）。
+    expect(events[startedAt]?.seq).toBeLessThan(events[resultAt]?.seq);
+  });
+
+  it("开始事件带真正生效的上限：传 0 写的是夹过的 30 / 600000", async () => {
+    const h = await harness({ steps: [reply("结论：查完了。")] });
+    appendStarted(h);
+
+    const outcome = await startSubagent(h.parentSessionId, h.parentDir, "查一下", {
+      deps: h.deps,
+      maxTurns: 0,
+      timeoutMs: 0,
+    });
+    if (!("id" in outcome)) throw new Error(outcome.error);
+    await waitFor(() => getSubagent(h.parentSessionId, outcome.id)?.status !== "running");
+
+    const [started] = startedPayloadsOf(h.parentDir);
+    expect(started?.id).toBe(outcome.id);
+    // 填 0 的人看到的是边界值，不是 0——回显原值就是说谎。
+    expect(started?.maxTurns).toBe(DEFAULT_MAX_TURNS);
+    expect(started?.timeoutMs).toBe(DEFAULT_TIMEOUT_MS);
+    expect(started?.promptPreview).toBe("查一下");
+    expect(started?.sessionDir).toBe(path.join(h.parentDir, "subagents", outcome.id));
+    expect(typeof started?.startedAt).toBe("string");
+    expect(Number.isNaN(Date.parse(String(started?.startedAt)))).toBe(false);
+  });
+
+  it("开始事件可以没有：不接 onStarted 时 startSubagent 照常返回并跑完", async () => {
+    const h = await harness({ steps: [reply("结论：查完了。")] });
+    // 刻意不同 `appendStarted`：`deps.onStarted` 保持缺席。
+    expect(h.deps.onStarted).toBeUndefined();
+
+    const outcome = await startSubagent(h.parentSessionId, h.parentDir, "查一下", {
+      deps: h.deps,
+    });
+
+    expect("id" in outcome).toBe(true);
+    if (!("id" in outcome)) return;
+    await waitFor(() => getSubagent(h.parentSessionId, outcome.id)?.status === "finished");
+    expect(getSubagent(h.parentSessionId, outcome.id)?.text).toContain("查完了");
+    // 没有开始事件，也没有因此冒出任何别的行。
+    expect(startedPayloadsOf(h.parentDir)).toEqual([]);
+  });
+
+  it("写失败不阻止启动：onStarted 抛错时仍返回 id，子代理照常跑完并入队", async () => {
+    const h = await harness({ steps: [reply("结论：查完了。")] });
+    h.deps.onStarted = async () => {
+      throw new Error("disk is full");
+    };
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const outcome = await startSubagent(h.parentSessionId, h.parentDir, "查一下", {
+        deps: h.deps,
+      });
+
+      // 作业已经登记、马上要跑：一条日志写失败不是取消它的理由。
+      expect("id" in outcome).toBe(true);
+      if (!("id" in outcome)) return;
+      await waitFor(() => getSubagent(h.parentSessionId, outcome.id)?.status === "finished");
+
+      expect(getSubagent(h.parentSessionId, outcome.id)?.text).toContain("查完了");
+      const completions = takeSubagentCompletions(h.parentSessionId);
+      expect(completions).toHaveLength(1);
+      expect(completions[0]).toMatchObject({ id: outcome.id, status: "finished" });
+      // 也不能静默：写失败要有一行 stderr。
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[subagent] started event append failed: disk is full"),
+      );
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("写失败发生在返回 id 之前：抛错的 onStarted 不会让 id 变成一个没跑的作业", async () => {
+    // 「先写开始事件再返回 id」是顺序要求，不是装饰：把它挪到 `void runJob(...)`
+    // 之后，一条跑得极快的子代理会先推完成、后写开始。这里用「调用发生在
+    // startSubagent 的 await 链里」钉住它——onStarted 没 resolve 之前不返回。
+    const h = await harness({ steps: [reply("结论：查完了。")] });
+    let resolved = false;
+    h.deps.onStarted = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      resolved = true;
+    };
+
+    const outcome = await startSubagent(h.parentSessionId, h.parentDir, "查一下", {
+      deps: h.deps,
+    });
+
+    expect("id" in outcome).toBe(true);
+    expect(resolved).toBe(true);
+    if (!("id" in outcome)) return;
+    await waitFor(() => getSubagent(h.parentSessionId, outcome.id)?.status !== "running");
+  });
+
+  it("投影跳过：buildMessages 对 subagent_started 不抛错，且它可落在工具批次中间", () => {
+    // 开始事件由 `subagent` 工具调用**内部**写，那一刻 assistant 与它的
+    // tool_result 都还没闭合——与 `subagent_result` 同一条理由。
+    const events: SessionEvent[] = [
+      {
+        seq: 0,
+        ts: "t",
+        type: "assistant",
+        payload: { content: "", toolCalls: [{ id: "c1", name: "subagent", arguments: {} }] },
+      },
+      {
+        seq: 1,
+        ts: "t",
+        type: "subagent_started",
+        payload: {
+          id: "sa_0123456789ab",
+          sessionDir: "/sessions/parent/subagents/sa_0123456789ab",
+          promptPreview: "确认主频",
+          startedAt: "2026-11-09T00:00:00.000Z",
+          maxTurns: DEFAULT_MAX_TURNS,
+          timeoutMs: DEFAULT_TIMEOUT_MS,
+        },
+      },
+      { seq: 2, ts: "t", type: "tool_result", payload: { id: "c1", text: "ok" }, parent: 0 },
+    ];
+
+    expect(() => buildMessages(events)).not.toThrow();
+    expect(buildMessages(events).map((message) => message.role)).toEqual(["assistant", "tool"]);
+  });
+
+  it("往返持久化：白名单漏一项就会整份父日志不可读", async () => {
+    // `EVENT_TYPES` 是**读取时**白名单。漏登记不会让写入失败，而会让下一次
+    // 读盘抛 unknown_event_type——整份父日志一起不可用。
+    const h = await harness({ steps: [reply("结论：查完了。")] });
+    appendStarted(h);
+    const outcome = await startSubagent(h.parentSessionId, h.parentDir, "查一下", {
+      deps: h.deps,
+    });
+    if (!("id" in outcome)) throw new Error(outcome.error);
+    await waitFor(() => getSubagent(h.parentSessionId, outcome.id)?.status !== "running");
+    await h.parent.close();
+
+    const { events } = readSessionDir(h.parentDir);
+    const started = events.find((event) => event.type === "subagent_started");
+    expect(started?.payload).toMatchObject({
+      id: outcome.id,
+      maxTurns: DEFAULT_MAX_TURNS,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+    });
+  });
+
+  it("runSession 接上了 onStarted：父轮次派发子代理后父日志里真有开始事件", async () => {
+    // 上面几条测的是 runner 的契约；这一条测的是**接线**。`onStarted` 是可选
+    // 字段，漏接时 `npm run typecheck` 一声不响——与「成本闭包永远不传」那条
+    // 用例同一个教训。子代理自己的模型调用由 `deps.model` 桩接管不到，所以这里
+    // 只断言父会话侧：`subagent` 调用之后、轮次结束之前，日志里有一条开始事件。
+    const home = await tempDir();
+    const providersText = JSON.stringify({
+      gw: {
+        protocol: "openai-chat-completions",
+        baseUrl: "http://127.0.0.1:9",
+        models: { flash: { contextWindow: 8192, maxOutput: 512 } },
+      },
+    });
+    // 网关的**线上形状**，不是 `CompletionResult`：这条走的是真适配层
+    // （`src/model/openai.ts`），`reply()` 那张形状它读不出来。
+    const responses = [
+      {
+        choices: [
+          {
+            message: {
+              content: "",
+              tool_calls: [
+                {
+                  id: "s1",
+                  type: "function",
+                  function: { name: "subagent", arguments: '{"prompt":"查一下时钟树"}' },
+                },
+              ],
+            },
+            finish_reason: "tool_calls",
+          },
+        ],
+        usage: { prompt_tokens: 10, completion_tokens: 5 },
+      },
+      {
+        choices: [{ message: { content: "子代理已经派出去查时钟树了。" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 20, completion_tokens: 6 },
+      },
+    ];
+    let index = 0;
+    const fetchImpl = (async () => {
+      const payload = responses[Math.min(index, responses.length - 1)];
+      index += 1;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => payload,
+        text: async () => JSON.stringify(payload),
+      };
+    }) as unknown as typeof fetch;
+    const sessionDir = path.join(home, "parent-wiring");
+
+    for await (const _event of runSession({
+      input: "查时钟树",
+      model: "gw/flash",
+      providersText,
+      sessionDir,
+      sessionId: "parent-wiring",
+      fetchImpl,
+      home,
+      // 子代理工具是写操作，diagnose 下要审批；这里直接放行，测的是接线不是审批。
+      permissions: { preset: "danger-full-access" },
+    })) {
+      // 事件流不是这条用例的判据，日志才是。
+    }
+
+    const { events } = readSessionDir(sessionDir);
+    const started = events.find((event) => event.type === "subagent_started");
+    expect(started).toBeDefined();
+    const startedPayload = started?.payload as unknown as SubagentStartedPayload;
+    // payload 来自 runner 算好的那一份，不是这里另算的。
+    expect(startedPayload).toMatchObject({
+      promptPreview: "查一下时钟树",
+      maxTurns: DEFAULT_MAX_TURNS,
+      timeoutMs: DEFAULT_TIMEOUT_MS,
+    });
+    expect(startedPayload.id).toMatch(/^sa_[0-9a-f]{12}$/);
+    expect(startedPayload.sessionDir).toBe(
+      path.join(sessionDir, "subagents", String(startedPayload.id)),
+    );
+    // 开始事件落在 `subagent` 那次工具调用上：它之前有一条 assistant，
+    // 之后有一条同 id 的 tool_result。
+    const startedIndex = events.findIndex((event) => event.type === "subagent_started");
+    expect(events.slice(startedIndex + 1).some((event) => event.type === "tool_result")).toBe(true);
   });
 });
 

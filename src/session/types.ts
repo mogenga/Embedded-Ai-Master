@@ -42,7 +42,16 @@ export type EventType =
    * 通过 `subagent_check` 或随后一条 user 消息看到结论，投影层再放一遍只是让它
    * 复述自己没说过的话——所以 `build.ts` 原位跳过它。
    */
-  | "subagent_result";
+  | "subagent_result"
+  /**
+   * 一个子代理开跑。由 runner 在返回 id **之前**写（`src/subagent/runner.ts`）。
+   *
+   * 与 `subagent_result` 同一类东西：**事实记录**，不是对话内容，投影层同样
+   * 原位跳过。它存在的理由是终局事件要等作业结束才写，而「现在有哪些子代理在
+   * 跑、已经跑了多久」必须有一个更早的凭据——没有它，运行中的那一侧根本不知道
+   * 有过这个子代理。
+   */
+  | "subagent_started";
 
 export interface SessionHeader {
   id: string;
@@ -217,6 +226,26 @@ export interface BackgroundResultPayload {
  * 两处各算一次，迟早会对不上。
  */
 export type SubagentResultPayload = SubagentSummary;
+
+/**
+ * 一条 `subagent_started` 事件的 payload。
+ *
+ * `maxTurns` / `timeoutMs` 是**真正生效**的两个上限，不是调用方填的原值：填 0
+ * 或超范围的值会被 `resolveSubagentMaxTurns` / `resolveSubagentTimeoutMs` 夹到
+ * 边界上，事件里回显原值就是说谎——而且与 `subagent` 工具正文会给出两个不同
+ * 的数字。这两个数由 runner 算一次、两处共用。
+ */
+export interface SubagentStartedPayload {
+  id: string;
+  sessionDir: string;
+  promptPreview: string;
+  label?: string;
+  startedAt: string;
+  /** 真正生效的轮数上限，不是用户填的原值（填 0 会被夹到边界）。 */
+  maxTurns: number;
+  /** 真正生效的寿命上限（毫秒），同上。 */
+  timeoutMs: number;
+}
 
 export interface AssistantPayload {
   content: string;

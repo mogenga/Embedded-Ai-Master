@@ -327,7 +327,12 @@ export function buildMessages(
       case "background_result":
       // 子代理的终局同理:它由宿主在子代理结束时写,完全可能落在父轮次的
       // assistant 与 tool_result 之间。它是事实记录,不是模型说过的话。
-      case "subagent_result": {
+      case "subagent_result":
+      // 子代理的开始事件与终局同一类东西:它由 `startSubagent` 在 `subagent`
+      // 工具调用返回**之前**写,而那次调用此刻正处在 assistant 与它的
+      // tool_result 之间——所以它同样不能并进会触发批次守卫的那三类。它是
+      // 事实记录,不是模型说过的话,模型也不需要知道「它什么时候开跑的」。
+      case "subagent_started": {
         break;
       }
       default: {

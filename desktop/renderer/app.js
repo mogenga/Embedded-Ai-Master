@@ -6,6 +6,7 @@ import { escapeHtml, renderMarkdown, IncrementalRenderer } from "./markdown.js";
 import { createSettings } from "./settings.js";
 import { icon, setIcon } from "./icons.js";
 import { planSummary } from "./plan-summary.js";
+import { elapsedClock, subagentName, subagentOverflow } from "./subagent-strip.js";
 import { providerMark } from "./provider-presets.js";
 import { providerRailRows, readProviderMeta } from "./provider-meta.js";
 import { VENDOR_MARKS } from "./vendor-marks.js";
@@ -45,6 +46,14 @@ const planStripToggle = $("plan-strip-toggle");
 const planStripCount = $("plan-strip-count");
 const planStripCurrent = $("plan-strip-current");
 const planStripList = $("plan-strip-items");
+const subagentStrip = $("subagent-strip");
+const subagentStripToggle = $("subagent-strip-toggle");
+const subagentStripCount = $("subagent-strip-count");
+const subagentStripCurrent = $("subagent-strip-current");
+const subagentStripList = $("subagent-strip-items");
+const readonlyBanner = $("readonly-banner");
+const readonlyText = $("readonly-text");
+const readonlyBack = $("readonly-back");
 
 const workbench = $("workbench");
 const workbenchTabs = $("workbench-tabs");
@@ -150,6 +159,26 @@ const state = {
    * re-project from and a drag cannot trigger a re-read.
    */
   replay: null,
+  /**
+   * The subagents running right now: `id → { label, startedAt }`.
+   *
+   * Named for the strip, not after the feature: the old goals / subagents /
+   * checkpoints UI (D-185) owned a handful of renderer symbols that a test
+   * forbids by name, precisely so a revert cannot quietly resurrect those
+   * cards. This map feeds the strip above the composer and nothing else, and
+   * it is emptied by `newSession` and by `session_loaded` — a run belongs to
+   * the session that started it.
+   */
+  liveSubagents: new Map(),
+  /**
+   * The subagent whose log is on screen, or null. `{ parentId, childId }`.
+   *
+   * Mirrors the host's `readonlySession`, which is also what refuses a prompt:
+   * this copy exists so the composer can be disabled and the banner drawn
+   * before the round trip. Never inferred — only `session_loaded` sets it,
+   * from the field the host attaches to a `loadSubagent` answer.
+   */
+  readonly: null,
   /**
    * The last update state the main process reported, or null before the first
    * answer. Kept here so the About page can draw immediately when it is built,
@@ -341,6 +370,11 @@ function applyLocale(locale, { announce = false } = {}) {
   // step line are derived text with no attribute to sweep, so repaint the
   // whole strip from the list it already holds.
   if (planItems.length > 0) renderPlanStrip(planItems);
+  // Same rule for the subagent strip: its count, clock and every row's tooltip
+  // are derived text, and the language just changed under them. The list it
+  // repaints from is the state map, so nothing has to be remembered here.
+  renderSubagentStrip();
+  renderReadonlyBanner();
   // The transcript card's title was written into its HTML once, when the card
   // was created, and carries no `data-i18n` — so a language switch left the
   // one heading in the middle of the transcript in the old language while
@@ -920,6 +954,10 @@ function renderReplayPosition() {
   replayLatest.textContent = t.replayBackToLatest;
   replayLatest.hidden = !isReplaying();
   renderComposerLock();
+  // The strip goes away when the screen stops being "now" and comes back when
+  // it is again, so its visibility has to be re-decided wherever the replay
+  // position is.
+  renderSubagentStrip();
 }
 
 /**
@@ -936,6 +974,19 @@ function renderComposerLock() {
   if (composerLock) composerLock.hidden = !replaying;
   if (composerLockText) composerLockText.textContent = replaying ? t.replayLockedReason : "";
   if (sendButton) sendButton.disabled = replaying;
+  // A second, independent reason to close the same box: the transcript is a
+  // finished subagent's record, so there is nothing behind it to answer a
+  // message. Layered on top rather than folded into the block above, because
+  // the note must say *which* of the two it is — a replay is a position the
+  // reader chose and can leave by dragging, a record has no live session at
+  // all — and because the two can never both apply (a child's log publishes no
+  // replay position).
+  if (state.readonly !== null) {
+    input.disabled = true;
+    if (composerLock) composerLock.hidden = false;
+    if (composerLockText) composerLockText.textContent = t.readonlyComposerReason;
+    if (sendButton) sendButton.disabled = true;
+  }
 }
 
 /**
@@ -1557,6 +1608,299 @@ planStripToggle?.addEventListener("click", () => {
   setPlanStripOpen(!planStrip.classList.contains("open"));
 });
 
+/* ---------- subagent strip (above the composer) ----------
+ *
+ * Same shape as the plan strip and for the same reason: a run that is worth
+ * watching is a run whose rows have scrolled away. What it answers is the
+ * operator's own question — which subagents are running, for how long, and one
+ * click to go and read what one of them did.
+ *
+ * Two rules that are not obvious:
+ *
+ * 1. **The clock is the renderer's, the start time is the kernel's.** The
+ *    protocol layer carries `startedAt` and refuses to compute an elapsed
+ *    figure; a pure function's answer would be stale one second later. The
+ *    ticker below reads `Date.now()` against that timestamp.
+ * 2. **Nothing is redrawn on a tick.** The ticker rewrites the header's two
+ *    numbers and each row's clock text; it never rebuilds rows. A rebuild once
+ *    a second would steal focus from a row button under the cursor, which is
+ *    the same mistake `renderPlan` was rewritten to avoid.
+ */
+
+/** The last `renderSubagentStrip` list, so a tick or a locale switch can repaint. */
+let subagentRuns = [];
+/** The one-second ticker, or null when nothing is running. */
+let subagentTicker = null;
+/** The ticker's period. One second: that is the resolution of the readout. */
+const SUBAGENT_TICK_MS = 1_000;
+
+/**
+ * The runs the strip should show right now, oldest first.
+ *
+ * Oldest first so the folded header names the run that has been going longest —
+ * the one whose elapsed figure is the one worth glancing at. `startedAt` is
+ * sorted as a timestamp, and a run whose clock did not parse sorts last rather
+ * than vanishing.
+ */
+function runningSubagents() {
+  const runs = [...state.liveSubagents.values()];
+  runs.sort((left, right) => {
+    const a = Date.parse(left.startedAt);
+    const b = Date.parse(right.startedAt);
+    if (!Number.isFinite(a) && !Number.isFinite(b)) return 0;
+    if (!Number.isFinite(a)) return 1;
+    if (!Number.isFinite(b)) return -1;
+    return a - b;
+  });
+  return runs;
+}
+
+/**
+ * Stop the ticker and drop the rows. Called whenever the set becomes empty, so
+ * the timer cannot outlive the thing it was counting.
+ */
+function haltSubagentTicker() {
+  if (subagentTicker !== null) {
+    clearInterval(subagentTicker);
+    subagentTicker = null;
+  }
+}
+
+function startSubagentTicker() {
+  // One timer, started only with something to count. A tick with an empty map
+  // would be a `setInterval` running for the life of the window.
+  if (subagentTicker !== null || state.liveSubagents.size === 0) return;
+  subagentTicker = setInterval(() => {
+    if (state.liveSubagents.size === 0) {
+      haltSubagentTicker();
+      renderSubagentStrip();
+      return;
+    }
+    // Numbers only — see rule 2 in the block comment.
+    paintSubagentClocks();
+  }, SUBAGENT_TICK_MS);
+}
+
+/**
+ * Add a run to the strip, or refresh one already there.
+ *
+ * A second `subagent_started` for the same id is a duplicate (a re-delivered
+ * event, or a resumed log): it keeps the **first** clock, because the run
+ * started then and a later timestamp would make it look younger than it is.
+ */
+function noteSubagentStarted(message) {
+  if (typeof message.id !== "string" || message.id === "") return;
+  const existing = state.liveSubagents.get(message.id);
+  state.liveSubagents.set(message.id, {
+    id: message.id,
+    label: message.label ?? existing?.label,
+    startedAt: existing?.startedAt ?? message.startedAt,
+    maxTurns: message.maxTurns ?? existing?.maxTurns,
+    timeoutMs: message.timeoutMs ?? existing?.timeoutMs,
+  });
+  startSubagentTicker();
+  renderSubagentStrip();
+}
+
+/**
+ * Take a run out. Returns whether it was there, so the caller can tell "the
+ * strip changed" from "a result for a run this window never saw".
+ */
+function noteSubagentSettled(id) {
+  if (typeof id !== "string" || id === "") return false;
+  const removed = state.liveSubagents.delete(id);
+  if (state.liveSubagents.size === 0) haltSubagentTicker();
+  if (removed) renderSubagentStrip();
+  return removed;
+}
+
+function clearSubagents() {
+  state.liveSubagents.clear();
+  haltSubagentTicker();
+  renderSubagentStrip();
+}
+
+/** A row's limit clause: turns when the kernel reported them, nothing when not. */
+function subagentLimitText(run) {
+  if (typeof run.maxTurns !== "number" || !Number.isFinite(run.maxTurns)) return "";
+  const minutes =
+    typeof run.timeoutMs === "number" && Number.isFinite(run.timeoutMs) && run.timeoutMs > 0
+      ? t.minutesShort(Math.round(run.timeoutMs / 60000))
+      : "";
+  return t.subagentLimits(run.maxTurns, minutes);
+}
+
+/**
+ * One row per running subagent. Reused by index like `paintPlanRows`: a status
+ * change must not rebuild the list under the reader's cursor.
+ *
+ * The row is a `<button>`: it opens that run's own log. It is the only control
+ * here, so the whole row being clickable is the honest target rather than a
+ * chevron that means "open" and a label that does not.
+ */
+function paintSubagentRows(runs) {
+  if (!subagentStripList) return;
+  const existing = [...subagentStripList.children];
+  runs.forEach((run, index) => {
+    let row = existing[index];
+    if (!row) {
+      row = document.createElement("button");
+      row.type = "button";
+      row.className = "subagent-strip-row";
+      row.dataset.subagentId = run.id;
+      const name = document.createElement("span");
+      name.className = "subagent-strip-name";
+      row.appendChild(name);
+      const clock = document.createElement("span");
+      clock.className = "subagent-strip-clock";
+      row.appendChild(clock);
+      const limits = document.createElement("span");
+      limits.className = "subagent-strip-limits";
+      row.appendChild(limits);
+      row.addEventListener("click", () => loadSubagent(row.dataset.subagentId));
+      subagentStripList.appendChild(row);
+    }
+    if (row.dataset.subagentId !== run.id) row.dataset.subagentId = run.id;
+    row.title = t.subagentOpen;
+    row.querySelector(".subagent-strip-name").textContent = subagentName(run);
+    row.querySelector(".subagent-strip-limits").textContent = subagentLimitText(run);
+    paintSubagentClock(row, run);
+  });
+  for (const stale of existing.slice(runs.length)) stale.remove();
+}
+
+/** One row's elapsed figure, from the kernel's start time and this clock. */
+function paintSubagentClock(row, run) {
+  const clock = row.querySelector(".subagent-strip-clock");
+  if (!clock) return;
+  const elapsed = elapsedClock(run.startedAt, Date.now());
+  clock.textContent = elapsed === null ? t.subagentElapsedUnknown : t.subagentElapsed(elapsed);
+}
+
+/**
+ * Rewrite every clock in place — the ticker's whole job.
+ *
+ * It also refreshes the folded header, whose one named run is the oldest and
+ * therefore the one whose figure just changed.
+ */
+function paintSubagentClocks() {
+  const runs = subagentRuns;
+  if (!subagentStripList) return;
+  const rows = [...subagentStripList.children];
+  runs.forEach((run, index) => {
+    const row = rows[index];
+    if (row) paintSubagentClock(row, run);
+  });
+  if (subagentStripCount) subagentStripCount.textContent = t.subagentRunning(runs.length);
+  if (subagentStripCurrent) subagentStripCurrent.textContent = foldedSubagentText(runs);
+}
+
+/**
+ * What the folded header says after the count: the oldest run's name and clock,
+ * then how many others are behind it. `+N` is the count of the rest, not of all
+ * of them — the header already names one.
+ */
+function foldedSubagentText(runs) {
+  if (runs.length === 0) return "";
+  const first = runs[0];
+  const elapsed = elapsedClock(first.startedAt, Date.now());
+  const clock = elapsed === null ? t.subagentElapsedUnknown : t.subagentElapsed(elapsed);
+  const parts = [`${subagentName(first)} ${clock}`];
+  const overflow = subagentOverflow(runs.length);
+  if (overflow > 0) parts.push(t.subagentMore(overflow));
+  return parts.join(" · ");
+}
+
+/**
+ * Draw the strip from the runs that exist now.
+ *
+ * Hidden when there is nothing to show, and **hidden while the transcript is a
+ * replay**: the replay shows a past position, so a line saying "2 subagents
+ * running" over it would be a claim about now drawn on a picture of then. The
+ * same objection applies to a subagent's own read-only log, which is a finished
+ * record — nothing in it is running.
+ */
+function renderSubagentStrip() {
+  if (!subagentStrip) return;
+  const runs = runningSubagents();
+  subagentRuns = runs;
+  if (runs.length === 0 || isReplaying() || state.readonly !== null) {
+    subagentStrip.hidden = true;
+    setSubagentStripOpen(false);
+    subagentStripList?.replaceChildren();
+    return;
+  }
+  subagentStrip.hidden = false;
+  if (subagentStripCount) subagentStripCount.textContent = t.subagentRunning(runs.length);
+  if (subagentStripCurrent) subagentStripCurrent.textContent = foldedSubagentText(runs);
+  paintSubagentRows(runs);
+  setSubagentStripTitle();
+}
+
+function setSubagentStripTitle() {
+  if (!subagentStrip || !subagentStripToggle) return;
+  const open = subagentStrip.classList.contains("open");
+  subagentStripToggle.title = open ? t.subagentStripCollapse : t.subagentToggle;
+}
+
+function setSubagentStripOpen(open) {
+  if (!subagentStrip || !subagentStripToggle) return;
+  subagentStrip.classList.toggle("open", open);
+  subagentStripToggle.setAttribute("aria-expanded", open ? "true" : "false");
+  // Same mechanics as the plan strip: the list stays in the DOM clipped to zero
+  // height, so opening it rebuilds nothing.
+  subagentStripList?.setAttribute("aria-hidden", open ? "false" : "true");
+  setSubagentStripTitle();
+}
+
+subagentStripToggle?.addEventListener("click", () => {
+  setSubagentStripOpen(!subagentStrip.classList.contains("open"));
+});
+
+/* ---------- read-only subagent session ---------- */
+
+/**
+ * Ask the host for a finished subagent's log.
+ *
+ * The host is the one that decides whether the pair of ids is legal
+ * (`subagentSessionDir`) and where the record is; this only names the two.
+ */
+function loadSubagent(childId) {
+  const parentId = state.readonly?.parentId ?? state.sessionId;
+  if (typeof parentId !== "string" || parentId === "" || typeof childId !== "string" || childId === "") return;
+  api.send({ cmd: "loadSubagent", parentId, childId });
+}
+
+/** Leave the child's log and reopen the parent's. */
+function exitReadonly() {
+  const parentId = state.readonly?.parentId ?? "";
+  if (parentId === "") return;
+  api.send({ cmd: "loadSession", id: parentId });
+}
+
+/**
+ * The permanent banner over a subagent's log.
+ *
+ * It is not a notice: a notice scrolls away with the transcript it was written
+ * into, and this one has to outlast every redraw of a screen that looks exactly
+ * like a writable conversation. `loadSession` clears the state — there is no
+ * dismiss button, because "dismiss" would mean "read this as an ordinary
+ * conversation", which is the one thing it is not.
+ */
+function renderReadonlyBanner() {
+  if (!readonlyBanner) return;
+  const readonly = state.readonly;
+  if (readonly === null) {
+    readonlyBanner.hidden = true;
+    return;
+  }
+  readonlyBanner.hidden = false;
+  if (readonlyText) readonlyText.textContent = t.readonlySubagent(readonly.childId);
+  if (readonlyBack) readonlyBack.textContent = t.readonlyBack;
+}
+
+readonlyBack?.addEventListener("click", exitReadonly);
+
 /* ---------- state ---------- */
 
 function setBusy(busy) {
@@ -1912,7 +2256,7 @@ function reportUnknownCommand(name, available) {
  * a stale host catalogue, not a command, so it must not echo into the
  * transcript on its way to the "unknown" notice.
  */
-const RUNNABLE_COMMANDS = new Set(["clear", "context", "compact"]);
+const RUNNABLE_COMMANDS = new Set(["clear", "context", "compact", "hook"]);
 
 /**
  * Run one built-in command locally.
@@ -1957,6 +2301,15 @@ function runSlashCommand({ name, args }, rawText = `/${name}`) {
     scrollToBottom();
     return "kept";
   }
+  // A subagent's record refuses these for the same reason a replay does, and
+  // more sharply: `/compact` and `/context` would act on the **parent's** log
+  // while the screen shows the child's, and `/clear` would start a new
+  // conversation from a record the reader is still reading.
+  if (state.readonly !== null) {
+    addNotice("warn", t.readonlyComposerReason);
+    scrollToBottom();
+    return "kept";
+  }
   // Only the palette reaches this while a turn runs (`submit()` refuses
   // earlier for a typed command). The kernel refuses these verbs mid-turn too,
   // so the window answers with the same sentence — and "kept" restores the
@@ -1978,9 +2331,20 @@ function runSlashCommand({ name, args }, rawText = `/${name}`) {
     reportUnknownCommand(name, available);
     return "kept";
   }
-  if (String(args ?? "").trim() !== "") {
-    // None of these verbs takes an argument, and the kernel's compaction has
-    // no focus/keep option. Silently dropping the text would be the same
+  const argsText = String(args ?? "").trim();
+  if (name === "hook") {
+    // `/hook` takes exactly one argument and it is `reload`. Anything else is
+    // refused by name rather than passed on: a host that silently ignored
+    // `foo` would answer with a list that looks like the answer to `/hook
+    // foo`, which is not a question this window can answer.
+    if (argsText !== "" && argsText !== "reload") {
+      addNotice("warn", t.commandHookUnknownArgument(argsText));
+      scrollToBottom();
+      return "kept";
+    }
+  } else if (argsText !== "") {
+    // None of the other verbs takes an argument, and the kernel's compaction
+    // has no focus/keep option. Silently dropping the text would be the same
     // broken promise `--keep N` made before it was removed.
     addNotice("warn", t.commandTakesNoArguments(name));
     scrollToBottom();
@@ -2003,6 +2367,13 @@ function runSlashCommand({ name, args }, rawText = `/${name}`) {
       // The host answers with the kernel's own result: a compaction marker, a
       // "nothing to compact" note, or a warning.
       api.send({ cmd: "compact" });
+      return "ran";
+    case "hook":
+      // The answer is drawn from the host's `hooks` event, not from here: the
+      // list is the kernel's reading of the file, and this window has never
+      // seen it. `reload` asks for the same read again — it changes what the
+      // next `/hook` shows, not what the running session does.
+      api.send(argsText === "reload" ? { cmd: "getHooks", reload: true } : { cmd: "getHooks" });
       return "ran";
     default:
       // Unreachable: `RUNNABLE_COMMANDS` is the same set these cases cover.
@@ -2117,6 +2488,91 @@ function reportContextLines() {
   if (report.headroom !== null && report.headroom > 0) {
     addNotice("dim", `· ${t.contextCompactionBuffer} ${formatTokens(report.headroom)}`);
   }
+}
+
+/**
+ * One `/hook` answer, drawn as a block in the transcript.
+ *
+ * A block rather than a notice because it is a list: one row per hook, plus
+ * the two file paths and the project-file disclosure. A line-per-notice version
+ * lost the alignment that makes "which file, which entry" readable, and a
+ * notice is the shell talking — this is an answer to a question the operator
+ * asked (the echoed `/hook` message sits directly above it).
+ *
+ * The host owns every fact here: the rows are `loadHookConfig`'s own output
+ * (`source` / `index` included), and the renderer only joins `command` and
+ * `args` for display. Nothing is inferred from a missing field — an absent
+ * `matcher` is drawn as "all tools" because that is what the kernel does with
+ * it, not because a default was filled in on the way here.
+ *
+ * `error` and `hooks` are mutually exclusive in practice (the host never sends
+ * both), and the error branch draws no rows at all: a broken file must never
+ * render as an empty list, which would say "nothing is configured" about a
+ * file that says the opposite (R3).
+ */
+function renderHooksReport(message) {
+  const rows = [];
+  const headingSuffix = message.reload === true ? ` (${t.hooksReRead})` : "";
+  rows.push(`<div class="hooks-title">${escapeHtml(t.hooksTitle + headingSuffix)}</div>`);
+  if (message.error !== undefined && message.error !== null) {
+    const code = typeof message.error.code === "string" ? message.error.code : "";
+    const text = typeof message.error.message === "string" ? message.error.message : "";
+    rows.push(
+      `<div class="hooks-error">${escapeHtml(t.hooksErrorTitle)}</div>` +
+        `<div class="hooks-error-detail">${escapeHtml(t.hooksErrorEntry(code, text))}</div>`,
+    );
+  } else {
+    const hooks = Array.isArray(message.hooks) ? message.hooks : [];
+    if (hooks.length === 0) {
+      rows.push(`<div class="hooks-empty">${escapeHtml(t.hooksEmpty)}</div>`);
+    } else {
+      const list = hooks.map((hook) => {
+        const command = [hook?.command ?? "", ...(Array.isArray(hook?.args) ? hook.args : [])]
+          .filter((part) => String(part) !== "")
+          .join(" ");
+        const source = hook?.source === "project" ? t.hooksSourceProject : t.hooksSourceUser;
+        const index = Number.isSafeInteger(hook?.index) ? hook.index : 0;
+        return (
+          `<div class="hooks-row">` +
+          `<span class="hooks-event">${escapeHtml(String(hook?.event ?? ""))}</span>` +
+          `<span class="hooks-matcher">${escapeHtml(
+            typeof hook?.matcher === "string" && hook.matcher !== "" ? hook.matcher : t.hooksAllTools,
+          )}</span>` +
+          `<span class="hooks-command">${escapeHtml(command)}</span>` +
+          `<span class="hooks-source">${escapeHtml(source(index))}</span>` +
+          `</div>`
+        );
+      });
+      rows.push(`<div class="hooks-rows">${list.join("")}</div>`);
+    }
+  }
+  if (typeof message.userConfigPath === "string" && message.userConfigPath !== "") {
+    rows.push(
+      `<div class="hooks-path">${escapeHtml(t.hooksUserFile)}: ${escapeHtml(message.userConfigPath)}</div>`,
+    );
+  }
+  if (typeof message.projectConfigPath === "string" && message.projectConfigPath !== "") {
+    const skipped =
+      typeof message.projectSkipped === "string" && message.projectSkipped !== ""
+        ? message.projectSkipped
+        : null;
+    rows.push(`<div class="hooks-path">${escapeHtml(`${t.hooksProjectFile}: ${message.projectConfigPath}`)}</div>`);
+    // Always one of the two sentences. The path alone leaves the reader unable
+    // to tell "there is no project file" from "there is one and it is loaded" —
+    // and in this window it is never loaded. A missing sentence would read as
+    // the second, which is the one thing that is not true.
+    rows.push(
+      skipped === null
+        ? `<div class="hooks-path">${escapeHtml(t.hooksProjectAbsent)}</div>`
+        : `<div class="hooks-skipped">${escapeHtml(t.hooksProjectSkipped(skipped))}</div>`,
+    );
+  }
+  // The two facts that keep this from reading like "something was applied":
+  // `reload` is a display refresh, and this command never writes.
+  rows.push(`<div class="hooks-note">${escapeHtml(t.hooksReloadNote)}</div>`);
+  rows.push(`<div class="hooks-note">${escapeHtml(t.hooksNoWriteNote)}</div>`);
+  addNode(`<div class="hooks-report">${rows.join("")}</div>`);
+  scrollToBottom();
 }
 
 function moveCommand(delta) {
@@ -4004,6 +4460,14 @@ function handleEvent(message) {
       break;
     }
 
+    case "subagent_started":
+      // Interface state: the strip above the composer counts it. Nothing is
+      // written into the transcript — the tool row that dispatched it is
+      // already there, and a start line plus a result line would be two rows
+      // for one act.
+      noteSubagentStarted(message);
+      break;
+
     case "ask_user": {
       // A question from the model, drawn with the same bar the permission
       // prompt uses. Preview text is monospace and scrolls: it is code or a
@@ -4103,6 +4567,11 @@ function handleEvent(message) {
       break;
 
     case "notice":
+      // A `subagent_result` notice carries the id of the run it concludes, so
+      // the strip above the composer can stop counting it. Read before the
+      // routing below: the strip's count is about this window, not about where
+      // the sentence ends up being drawn.
+      if (message.subagentId !== undefined) noteSubagentSettled(message.subagentId);
       // A `domain` tag routes the message to the surface that asked for it.
       // Skill failures and refused settings saves are answered while the
       // settings dialog is open, and a `showModal()` sits on top of the
@@ -4236,7 +4705,7 @@ function handleEvent(message) {
       // rows, and appending them onto the ones already drawn would show the
       // future the reader just scrubbed away from.
       target
-        .querySelectorAll(".turn, .tool-row, .tool-group, .tool-item, .tool-output, .notice, .plan, .thinking, .compact-marker")
+        .querySelectorAll(".turn, .tool-row, .tool-group, .tool-item, .tool-output, .notice, .plan, .thinking, .compact-marker, .hooks-report")
         .forEach((node) => node.remove());
       state.currentAssistant = null;
       state.currentThinking = null;
@@ -4264,6 +4733,31 @@ function handleEvent(message) {
       // rebuilds this transcript, so `/clear` and the sidebar's "new chat"
       // need no path of their own.
       setReplay(message);
+      // The read-only view is a property of this transcript, so it is decided
+      // here rather than by a command the renderer sent: the host attaches
+      // `readonly` to exactly the answers that are a subagent's log, and an
+      // answer without it means the screen is a conversation again. Taking the
+      // event's field is what keeps the banner and the host's `prompt` refusal
+      // from disagreeing.
+      state.readonly =
+        message.readonly && typeof message.readonly.childId === "string"
+          ? { parentId: String(message.readonly.parentId ?? ""), childId: message.readonly.childId }
+          : null;
+      // Runs belong to the session that started them. A transcript being
+      // rebuilt means either a different session or the same one reopened, and
+      // in both cases a run this window remembers is not evidence about what
+      // is running now — the log is. Anything still running will be announced
+      // again by a `subagent_started` this window has not yet seen.
+      state.liveSubagents.clear();
+      haltSubagentTicker();
+      renderReadonlyBanner();
+      renderSubagentStrip();
+      // The box is opened or closed by the state decided above, and nothing
+      // else on this path calls it: `setReplay` only reaches it when the event
+      // carries a position, and a child's record deliberately carries none.
+      // Without this line, opening a subagent's log from a live conversation
+      // would leave a enabled composer over a transcript nothing can answer.
+      renderComposerLock();
       for (const item of message.messages || []) {
         if (item.role === "user") {
           addUserTurn(item.text, item.images ?? 0);
@@ -4367,6 +4861,10 @@ function handleEvent(message) {
       scrollToBottom();
       break;
     }
+
+    case "hooks":
+      renderHooksReport(message);
+      break;
 
     case "session_status":
       // The sidebar row for this conversation reflects what the task is doing.
@@ -6335,6 +6833,14 @@ function submit() {
   // note gives, and the draft stays where it is.
   if (isReplaying()) {
     addNotice("warn", t.replayLockedReason);
+    scrollToBottom();
+    return;
+  }
+  // A subagent's record has no live session behind it either, and the input is
+  // disabled there for the same reason. The draft stays: the reader may want
+  // to paste it into the parent conversation once they go back.
+  if (state.readonly !== null) {
+    addNotice("warn", t.readonlyComposerReason);
     scrollToBottom();
     return;
   }

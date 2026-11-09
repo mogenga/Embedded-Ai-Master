@@ -23,6 +23,16 @@ export const COMMANDS = [
     description: { zh: "立即压缩上下文", en: "Compact the context now" },
     argumentHint: "",
   },
+  {
+    // A hint rather than `""`: `/hook` on its own lists the hooks, and
+    // `/hook reload` re-reads the file for the display. The palette inserting
+    // `/hook ` is the right affordance for the second form, and Enter on
+    // `/hook` with nothing after it is the same as clicking the row for the
+    // first.
+    name: "hook",
+    description: { zh: "查看已配置的钩子", en: "List configured hooks" },
+    argumentHint: "[reload]",
+  },
 ];
 
 const FALLBACK_LOCALE = "en";
