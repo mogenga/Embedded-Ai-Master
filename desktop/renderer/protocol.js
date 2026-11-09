@@ -392,6 +392,51 @@ export function summarizeSubagentResult(payload) {
   return { type: "notice", level: "warn", text: `${who} 已终止：${reason}` };
 }
 
+/**
+ * A running subagent's opening line, or `null` when the payload cannot be keyed.
+ *
+ * This is interface state, not a transcript row: the strip above the composer
+ * keeps one entry per run and drops it when the run's `subagent_result` arrives.
+ * `id` is the only field that must be there — without it there is nothing to
+ * key the entry on, and an entry nobody can drop would count as "running"
+ * forever.
+ *
+ * No elapsed figure is computed here. That number changes every second, and a
+ * pure function precomputing it hands the renderer a value that is already
+ * stale by the time it is drawn; the renderer's ticker measures it from
+ * `startedAt` against its own clock instead.
+ *
+ * `status` is deliberately ignored. The event is named `subagent_started`, and
+ * a payload that happens to carry a status is still a start — a completion
+ * travels as `subagent_result`, and drawing this one as anything else would be
+ * two producers for one fact.
+ *
+ * Empty optional fields are omitted rather than written as `""`: the renderer
+ * reads absence as "the kernel did not say", and an empty string there would
+ * paint a blank label where an id is the honest fallback.
+ */
+export function subagentStartedEvent(payload) {
+  if (!isRecord(payload)) return null;
+  const id = textOf(payload.id);
+  if (id === "") return null;
+  const message = { type: "subagent_started", id };
+  const label = textOf(payload.label);
+  if (label !== "") message.label = label;
+  const promptPreview = textOf(payload.promptPreview);
+  if (promptPreview !== "") message.promptPreview = promptPreview;
+  const startedAt = textOf(payload.startedAt);
+  if (startedAt !== "") message.startedAt = startedAt;
+  const sessionDir = textOf(payload.sessionDir);
+  if (sessionDir !== "") message.sessionDir = sessionDir;
+  if (typeof payload.maxTurns === "number" && Number.isFinite(payload.maxTurns)) {
+    message.maxTurns = payload.maxTurns;
+  }
+  if (typeof payload.timeoutMs === "number" && Number.isFinite(payload.timeoutMs)) {
+    message.timeoutMs = payload.timeoutMs;
+  }
+  return message;
+}
+
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: false });
 
@@ -997,7 +1042,29 @@ export function sessionEventToHostEvents(event, ctx) {
       // view, and the full conclusion is in the child session (`subagent_check`
       // reads it back).
       const summary = summarizeSubagentResult(payload);
-      if (summary !== null) out.push(summary);
+      if (summary !== null) {
+        // The strip above the composer counts running runs, so the same event
+        // has to say which one stopped. The id rides on the notice rather than
+        // becoming a second event: one kernel event stays one renderer
+        // message ("only one notice, no card" — the rule that kept this from
+        // being a panel), and the strip reads the field. Only written when the
+        // payload has an id, so a log from before this field existed produces
+        // exactly the message it always did.
+        const id = textOf(payload.id);
+        if (id !== "") summary.subagentId = id;
+        out.push(summary);
+      }
+      break;
+    }
+
+    case "subagent_started": {
+      // A subagent began. This produces interface state, not a transcript row:
+      // the renderer's strip above the composer counts it and stops counting
+      // when the matching `subagent_result` arrives. Nothing is drawn in the
+      // transcript here — a start line plus an end line would be two rows for
+      // one dispatch, and the tool row that launched it is already there.
+      const started = subagentStartedEvent(payload);
+      if (started !== null) out.push(started);
       break;
     }
 

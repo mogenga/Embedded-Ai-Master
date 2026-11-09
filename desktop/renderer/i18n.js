@@ -123,6 +123,31 @@ export const dictionaries = {
     planCollapse: "Collapse the plan",
     planComplete: "all steps done",
     planNext: "starting",
+    /* The subagent strip above the composer. It is only on screen while at
+       least one subagent is running, so every string here is about "now" — a
+       finished one is reported by its own result notice. `subagentElapsed` is
+       fed a clock reading; `subagentElapsedUnknown` is what a start time the
+       kernel did not record reads as, rather than a fabricated 0:00. */
+    subagentStripLabel: "Subagents",
+    subagentRunning: (n) => (n === 1 ? "1 subagent running" : `${n} subagents running`),
+    subagentMore: (n) => `+${n}`,
+    subagentElapsed: (clock) => `running ${clock}`,
+    subagentElapsedUnknown: "running ?",
+    /* `minutes` is an already-formatted duration; an empty one means the kernel
+       reported no timeout, and the clause then names the turn cap alone rather
+       than printing a limit nobody set. */
+    subagentLimits: (turns, minutes) =>
+      minutes === "" ? `up to ${turns} turns` : `up to ${turns} turns, ${minutes}`,
+    minutesShort: (n) => `${n} min`,
+    subagentOpen: "Open this subagent's session record (read-only)",
+    subagentToggle: "Show every running subagent",
+    subagentStripCollapse:"Collapse the subagent list",
+    /* The banner over a subagent's log. It is permanent for as long as that
+       log is on screen — there is no dismiss — and `readonlyBack` is the way
+       out, which is why it is a button and not a sentence. */
+    readonlySubagent: (id) => `Viewing subagent ${id}'s session record (read-only)`,
+    readonlyBack: "Back to parent session",
+    readonlyComposerReason: "This is a subagent's finished session record. Messages are disabled; return to the parent session to continue.",
     tools: "Tools",
     tabFiles: "Files",
     tabChanges: "Changes",
@@ -557,6 +582,20 @@ export const dictionaries = {
     planCollapse: "收起计划",
     planComplete: "全部步骤已完成",
     planNext: "即将开始",
+    subagentStripLabel: "子代理",
+    subagentRunning: (n) => `${n} 个子代理运行中`,
+    subagentMore: (n) => `+${n}`,
+    subagentElapsed: (clock) => `已跑 ${clock}`,
+    subagentElapsedUnknown: "已跑 ?",
+    subagentLimits: (turns, minutes) =>
+      minutes === "" ? `上限 ${turns} 轮` : `上限 ${turns} 轮、${minutes}`,
+    minutesShort: (n) => `${n} 分钟`,
+    subagentOpen: "打开这个子代理的会话记录（只读）",
+    subagentToggle: "展开全部运行中的子代理",
+    subagentStripCollapse:"收起子代理列表",
+    readonlySubagent: (id) => `正在查看子代理 ${id} 的会话记录（只读）`,
+    readonlyBack: "返回父会话",
+    readonlyComposerReason: "这是子代理的会话记录，已完成且只读。不能在这里发消息；返回父会话即可继续。",
     tools: "工具",
     tabFiles: "文件",
     tabChanges: "改动",

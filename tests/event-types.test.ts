@@ -196,8 +196,7 @@ describe("新事件类型", () => {
   });
 
   it("桌面协议层认识 subagent_started，不会画成「未识别的事件类型」", () => {
-    // Task 2 才画「运行中」那一条；这里只钉住**登记**——漏登记的表现不是
-    // 「少画一行」，而是每次派发子代理都在工具行上方多一句警告。
+    // 漏登记的表现不是「少画一行」，而是每次派发子代理都在工具行上方多一句警告。
     const ctx = createContext({ sessionId: "s" });
     const out = sessionEventToHostEvents(
       { seq: 0, ts: "t", type: "subagent_started", payload: { ...subagentStarted } },
@@ -210,8 +209,23 @@ describe("新事件类型", () => {
           message.type === "notice" && String(message.text).includes("未识别的事件类型"),
       ),
     ).toStrictEqual([]);
-    // 登记 ≠ 绘制：本轮它不产生任何消息（绘制在渲染层那一任务）。
-    expect(out).toStrictEqual([]);
+    // **登记 ≠ 绘制在转录里**：这条事件产出的是输入框上方那条「运行中」的界面
+    // 状态，不是对话气泡。Task 1 曾在这里钉 `toStrictEqual([])`；Task 2 给它加了
+    // 绘制之后，那条断言被换成下面这两条——**不是删掉**：一条要求确实产出了一条
+    // 消息（否则「登记了但哪也不去」会静默通过），一条要求它没有变成 notice
+    // （转录里多一行「子代理开始」与工具行重复，且会在每次派发时出现）。
+    expect(out).toStrictEqual([
+      {
+        type: "subagent_started",
+        id: subagentStarted.id,
+        promptPreview: subagentStarted.promptPreview,
+        startedAt: subagentStarted.startedAt,
+        sessionDir: subagentStarted.sessionDir,
+        maxTurns: subagentStarted.maxTurns,
+        timeoutMs: subagentStarted.timeoutMs,
+      },
+    ]);
+    expect(out.filter((message) => message.type === "notice")).toStrictEqual([]);
   });
 
   it("subagent_started 事件往返持久化：白名单缺一项就会整份日志不可读", async () => {

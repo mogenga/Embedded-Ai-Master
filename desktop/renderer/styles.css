@@ -3461,6 +3461,87 @@ mark.find-hit.current {
   padding: 2px 0;
 }
 
+/* ---------- subagent strip (above the composer, above the plan strip) ----------
+   Same box as the plan strip — it reuses that class — and only the rows are its
+   own. It is listed before the plan strip in the document so the plan, which is
+   the longer-lived of the two, stays closest to the input. */
+
+.subagent-strip-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 3px 4px;
+  border-radius: var(--radius-sm, 4px);
+  font-size: var(--text-sm);
+  text-align: left;
+  color: var(--text);
+}
+
+.subagent-strip-row:hover,
+.subagent-strip-row:focus-visible {
+  background: var(--surface-hover);
+}
+
+/* The name is the elastic part: a label the model chose can be long, and it
+   ellipsises rather than pushing the clock off the row. */
+.subagent-strip-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Tabular figures so a clock that ticks from 1:09 to 1:10 does not shift the
+   name beside it once a second. */
+.subagent-strip-clock {
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-faint);
+}
+
+.subagent-strip-limits {
+  flex: 0 0 auto;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+
+/* ---------- read-only banner (a subagent's log) ----------
+   A permanent strip above the transcript. Not a notice: notices live inside the
+   transcript and are cleared with it, while this describes the whole screen and
+   has to survive every redraw of it. */
+
+.readonly-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 16px 8px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.readonly-banner .icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: var(--text-faint);
+}
+
+.readonly-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pending-choices {
   display: flex;
   gap: 6px;

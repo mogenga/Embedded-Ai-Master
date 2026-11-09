@@ -191,6 +191,19 @@
               <span class="replay-count" id="replay-count"></span>
               <button type="button" class="btn btn-quiet small" id="replay-latest" hidden></button>
             </div>
+            <!-- The read-only banner (BR-6 / subagent replay). A subagent's log
+                 is opened for reading only, and that fact has to stay on screen
+                 the whole time it is being read: the transcript looks exactly
+                 like a conversation gated the same way, and the one thing a
+                 reader must not do here is type into it. It is not dismissible
+                 — it goes away when the screen does, i.e. when the parent
+                 session is reopened. Its label is a button: it names the child
+                 being read and returns to the parent in one click. -->
+            <div class="readonly-banner" id="readonly-banner" hidden role="status">
+              <svg class="icon" aria-hidden="true"><use href="#i-shield"></use></svg>
+              <span class="readonly-text" id="readonly-text"></span>
+              <button type="button" class="link-button" id="readonly-back"></button>
+            </div>
             <main class="transcript" id="transcript" aria-live="polite" aria-busy="false">
               <div class="find-bar" id="find-bar" hidden>
                 <input id="find-input" type="search" spellcheck="false" autocomplete="off" />
@@ -248,6 +261,30 @@
               <div class="composer-lock" id="composer-lock" hidden role="status">
                 <svg class="icon" aria-hidden="true"><use href="#i-pause"></use></svg>
                 <span id="composer-lock-text"></span>
+              </div>
+
+              <!-- Subagents running right now, one line above the composer.
+                   Same mechanics as the plan strip below it: folded it is a
+                   count plus the oldest run's id and elapsed time, opened it
+                   lists every run. It only exists while something is running —
+                   an empty strip would be a row that says nothing. A run that
+                   has finished is drawn by its `subagent_result` notice; this
+                   strip is only about "now". -->
+              <div class="plan-strip subagent-strip" id="subagent-strip" hidden>
+                <button
+                  type="button"
+                  class="plan-strip-head"
+                  id="subagent-strip-toggle"
+                  aria-expanded="false"
+                  aria-controls="subagent-strip-items"
+                >
+                  <svg class="icon plan-strip-glyph" aria-hidden="true"><use href="#i-robot"></use></svg>
+                  <span class="plan-strip-label" data-i18n="subagentStripLabel">Subagents</span>
+                  <span class="plan-strip-count" id="subagent-strip-count"></span>
+                  <span class="plan-strip-current" id="subagent-strip-current"></span>
+                  <svg class="icon plan-strip-chevron" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
+                </button>
+                <div class="plan-strip-items" id="subagent-strip-items" aria-hidden="true"></div>
               </div>
 
               <!-- The same plan the transcript card draws, kept in view while
