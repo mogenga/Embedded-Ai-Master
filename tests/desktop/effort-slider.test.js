@@ -341,7 +341,19 @@ describe("思考强度始终显示；不支持时靠说明，不靠隐藏（2026
   });
 });
 
-describe("中英文两种语言都有六个档位名", () => {
+describe("思考强度这一块两种语言都是英文（2026-11-09 用户决定）", () => {
+  /**
+   * 用户原话：「思考强度用英文，不用自动翻译」。
+   *
+   * 曾经 zh 字典里有一套中文名（低 / 中 / 高 / 加强 / 极强 / 星系），是上一轮
+   * 子代理自己定的。问题不在翻译质量，在**同一档在三个地方有三个名字**：
+   * 规格表写 Low…Galaxy，`run.json` 存 `low`…`galaxy`，`providers.json` 的
+   * `effortMap` 键也是英文，只有界面显示中文。改成一个名字之后，界面、日志与
+   * 配置说的是同一句话。
+   *
+   * 所以这组断言与「别的文案都要翻译」相反：这里要求 zh 与 en **逐字相同**。
+   * 谁把它们翻成中文，这两条会红。
+   */
   const TIER_BY_LABEL = {
     Low: "effortTierLow",
     Medium: "effortTierMedium",
@@ -351,7 +363,20 @@ describe("中英文两种语言都有六个档位名", () => {
     Galaxy: "effortTierGalaxy",
   };
 
-  it("每套字典都有六个，且都不为空", () => {
+  /** 控件里会渲染出来的每一项（不含 `effortSends`，那是一个函数）。 */
+  const EFFORT_KEYS = [
+    ...Object.values(TIER_BY_LABEL),
+    "effortAuto",
+    "effortLow",
+    "effortMedium",
+    "effortHigh",
+    "effortLabel",
+    "effortFixed",
+  ];
+
+  const CJK = /[㐀-鿿＀-￯]/;
+
+  it("每套字典都有六个档位，且都不为空", () => {
     for (const locale of ["en", "zh"]) {
       for (const label of EFFORT_TIER_LABELS) {
         const key = TIER_BY_LABEL[label];
@@ -362,11 +387,27 @@ describe("中英文两种语言都有六个档位名", () => {
     }
   });
 
-  it("中文名与英文名不是同一份，且六档互不相同", () => {
-    for (const label of EFFORT_TIER_LABELS) {
-      const key = TIER_BY_LABEL[label];
-      expect(dictionaries.en[key]).not.toBe(dictionaries.zh[key]);
+  it("zh 的每一个思考强度键都与 en 逐字相同", () => {
+    for (const key of EFFORT_KEYS) {
+      expect(dictionaries.zh[key], `zh.${key} 应当与 en 相同`).toBe(dictionaries.en[key]);
     }
+    expect(dictionaries.zh.effortSends("high")).toBe(dictionaries.en.effortSends("high"));
+  });
+
+  it("这些键的值里没有中日韩字符（「不用自动翻译」的可执行形式）", () => {
+    // 逐字相同只能抓「翻了但翻得一样」以外的情形；这一条抓的是「有人只改了
+    // zh 那一份」。字符串里出现中文就是被翻译过了。
+    for (const locale of ["en", "zh"]) {
+      for (const key of EFFORT_KEYS) {
+        expect(
+          CJK.test(dictionaries[locale][key]),
+          `${locale}.${key} 里出现了中文：${dictionaries[locale][key]}`,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it("六个档位名互不相同（两种语言都一样）", () => {
     for (const locale of ["en", "zh"]) {
       const names = EFFORT_TIER_LABELS.map((label) => dictionaries[locale][TIER_BY_LABEL[label]]);
       expect(new Set(names).size, `${locale} has duplicate tier names`).toBe(6);
@@ -401,15 +442,15 @@ describe("映射结果显示：三档默认落同一值时必须说出来", () =
     expect(body).toContain("resolved !== state.effort");
   });
 
-  it("两种语言都有那句话，且带上真正要发的值", () => {
+  it("那句话带上真正要发的值，且两种语言说的是同一句", () => {
     for (const locale of ["en", "zh"]) {
       const text = dictionaries[locale].effortSends("high");
       expect(typeof text, locale).toBe("string");
       expect(text).toContain("high");
       expect(text.trim()).not.toBe("high");
     }
-    // The three top tiers collapse onto one value by default; this sentence is
-    // what keeps the slider from implying three different strengths.
-    expect(dictionaries.zh.effortSends).not.toBe(dictionaries.en.effortSends);
+    // 三档默认落到同一个 high；这句话是滑块不假装有三种强度的那一半。
+    // 它与档位名同属「思考强度用英文」的范围，所以两种语言逐字相同。
+    expect(dictionaries.zh.effortSends("high")).toBe(dictionaries.en.effortSends("high"));
   });
 });

@@ -30,18 +30,24 @@ Galaxy 六个停止点；每个模型有一张映射表，把它折成 `none` / 
 
 ## 六档
 
-| 档位 | 键 | 英文 | 中文 | 缺省协议值 |
-|---|---|---|---|---|
-| 1 | `low` | Low | 低 | `low` |
-| 2 | `medium` | Medium | 中 | `medium` |
-| 3 | `high` | High | 高 | `high` |
-| 4 | `extra` | Extra | 加强 | `high` |
-| 5 | `max` | Max | 极强 | `high` |
-| 6 | `galaxy` | Galaxy | 星系 | `high` |
+| 档位 | 键 | 界面名 | 缺省协议值 |
+|---|---|---|---|
+| 1 | `low` | `Low` | `low` |
+| 2 | `medium` | `Medium` | `medium` |
+| 3 | `high` | `High` | `high` |
+| 4 | `extra` | `Extra` | `high` |
+| 5 | `max` | `Max` | `high` |
+| 6 | `galaxy` | `Galaxy` | `high` |
 
 顺序即轨道顺序，是契约：`desktop/renderer/index.html` 的六个 `data-tier-index` 与滑块的
-`max="5"` 都按它排。中英文名在 [`desktop/renderer/i18n.js`](../../desktop/renderer/i18n.js)
-的 `effortTierLow` … `effortTierGalaxy`，缺键时回落英文。
+`max="5"` 都按它排。
+
+**界面名只有英文，不翻译**（2026-11-09，用户原话「思考强度用英文，不用自动翻译」）。
+六个名字在 `desktop/renderer/i18n.js` 的 `effortTierLow` … `effortTierGalaxy`，**中英两套
+字典逐字相同**——`tests/desktop/effort-slider.test.js` 钉着这一点，并且断言这些值里不出现
+中日韩字符。理由不是省事：同一个档位在规格表、`run.json` 的存档值、`providers.json` 的
+`effortMap` 键和界面标签里必须只有一个名字；以前 zh 字典里有一套中文名（低 / 中 / 高 /
+加强 / 极强 / 星系），于是同一档在四个地方有四个说法。`auto` 与面板标题 `Thinking` 同理。
 
 **`auto` 不是第七档。** 它是「不提要求」的哨兵：`run.json` 里删掉该模型的条目，请求体里
 完全不出现 `reasoning_effort`。缺席（不提要求，用服务商默认）与 `none`（明确关闭推理）

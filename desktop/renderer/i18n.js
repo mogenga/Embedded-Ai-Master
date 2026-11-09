@@ -547,21 +547,28 @@ export const dictionaries = {
     modeWorkspaceWriteDesc: "允许改工作区文件；设备写入仍需审批",
     modeDangerFullAccessDesc: "不询问也不限制，只用于可丢弃的目标",
     modeRecommended: "推荐",
-    effortAuto: "自动",
-    effortLow: "低",
-    effortMedium: "中",
-    effortHigh: "高",
-    effortLabel: "思考",
-    effortFixed: "该模型固定以 {level} 强度推理。",
-    effortTierLow: "低",
-    effortTierMedium: "中",
-    effortTierHigh: "高",
-    effortTierExtra: "加强",
+    /* 思考强度这一整块**刻意不翻译**（2026-11-09，用户原话「思考强度用英文，
+       不用自动翻译」）。理由不是懒惰：六档名是这套设计自己的词汇
+       （Low/Medium/High/Extra/Max/Galaxy），规格、`run.json` 的存档值、
+       `providers.json` 的 `effortMap` 键、界面标签全用同一组英文词；翻成中文
+       之后，同一个档位在界面、日志和配置里会有三个名字。所以 zh 字典这几项与
+       en 字典逐字相同，`tests/desktop/effort-slider.test.js` 钉着这一点。
+       这不是「漏翻」——别顺手把它们填回中文。 */
+    effortAuto: "Auto",
+    effortLow: "Low",
+    effortMedium: "Med",
+    effortHigh: "High",
+    effortLabel: "Thinking",
+    effortFixed: "This model always reasons at {level}.",
+    effortTierLow: "Low",
+    effortTierMedium: "Medium",
+    effortTierHigh: "High",
+    effortTierExtra: "Extra",
     /* 选中的档位实际会发出的协议值。三档默认落到同一个 high；只显示档位名
        会让人以为那是三种不同的强度。 */
-    effortSends: (value) => `发出 ${value}`,
-    effortTierMax: "极强",
-    effortTierGalaxy: "星系",
+    effortSends: (value) => `sends ${value}`,
+    effortTierMax: "Max",
+    effortTierGalaxy: "Galaxy",
     plusMenuTitle: "添加到这条消息",
     plusAddFiles: "添加文件或图片",
     plusAddFolder: "添加文件夹",
@@ -845,7 +852,10 @@ export const dictionaries = {
     settingsDefaultModel: "默认模型",
     settingsDefaults: "默认行为",
     settingsMode: "权限模式",
-    settingsEffort: "思考强度",
+    /* 见下面 effortTier* 那段的说明：思考强度这一块整体不翻译。这一项目前
+       没有渲染者（设置页里没有独立的思考强度控件），一并保持一致，免得将来
+       接上去时又变成中文。 */
+    settingsEffort: "Thinking effort",
     settingsMaxTokens: "单次回复 token 上限",
     settingsAutoApprove: "自动批准的工具",
     settingsContext: "上下文窗口",
