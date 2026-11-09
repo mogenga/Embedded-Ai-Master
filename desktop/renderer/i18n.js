@@ -314,13 +314,6 @@ export const dictionaries = {
      *  one is not sent at all and the strip keeps the image (D-188, R3). */
     attachmentNotSent: "This kernel cannot send images yet. Remove the attached image to send the message.",
     imageCount: (n) => `${n} image${n === 1 ? "" : "s"} attached`,
-    /* Replay (BR-6). The bar states a position, says why the composer is
-       closed while a replay is on screen, and names the way out. The two
-       buttons must say what they do, not which state they are in: "Back to
-       latest" is the action, and its absence is what says "already there". */
-    replayPosition: (at, last) => `Event ${at + 1} / ${last + 1}`,
-    replayLockedReason: "You are replaying an earlier point in this conversation. Messages are disabled until you return to the latest event.",
-    replayBackToLatest: "Back to latest",
     paletteEmpty: "No matching commands.",
     /* Slash-command notices. The commands' own descriptions live in
        ./commands.js next to the catalogue; only what the renderer says about
@@ -777,11 +770,6 @@ export const dictionaries = {
     /** 当前内核不能发送图片：带图的这条消息不会被发出，附件条保留（D-188，R3）。 */
     attachmentNotSent: "当前内核还不支持发送图片，请先移除附件再发送。",
     imageCount: (n) => `附带 ${n} 张图片`,
-    /* 回放（BR-6）。回放条给位置、说明输入框为什么锁着、给出退出的动作；
-       在最后一条时按钮消失，本身就是「已是最新」的说明。 */
-    replayPosition: (at, last) => `第 ${at + 1} / ${last + 1} 条事件`,
-    replayLockedReason: "正在回放这段对话的较早位置，回放期间不能发消息；回到最新一条即可继续。",
-    replayBackToLatest: "回到最新",
     paletteEmpty: "没有匹配的命令。",
     /* 斜杠命令的提示文案。命令自身的描述在 ./commands.js 里与目录放在一起；
        这里只放渲染器要说的话（拒绝、测量结果）。 */

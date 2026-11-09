@@ -217,32 +217,20 @@ describe("1 s 计时器随「有东西在跑」生灭", () => {
 // 验收行 4：回放态隐藏
 // ---------------------------------------------------------------------------
 
-describe("回放态隐藏子代理条", () => {
-  it("renderSubagentStrip 里 isReplaying() 为真时 hidden", () => {
-    const app = readRenderer("app.js");
-    const body = functionBody(app, "function renderSubagentStrip(");
-    const guard = body.indexOf("isReplaying()");
-    expect(guard).toBeGreaterThan(-1);
-    expect(body).toContain("subagentStrip.hidden = true");
-    // The predicate decides, and the hidden assignment comes after it: a
-    // "running now" line over a picture of the past is a false statement.
-    expect(guard).toBeLessThan(body.indexOf("subagentStrip.hidden = true"));
-  });
-
-  it("没有子代理时整条 hidden（不占位）", () => {
+describe("子代理条的去留只看有没有东西在跑", () => {
+  it("有子代理就显示，没有就 hidden（不占位）", () => {
     const app = readRenderer("app.js");
     const body = functionBody(app, "function renderSubagentStrip(");
     expect(body).toContain("runs.length === 0");
+    // The strip used to be hidden while the BR-6 scrubber showed an earlier
+    // position — "running now" over a picture of the past is a false
+    // statement. That scrubber is gone (2026-11-09), so the read-only record
+    // is the only state left that also hides it.
+    expect(body).toContain("state.readonly !== null");
+    expect(body).not.toContain("isReplaying");
     // And the markup ships hidden, so a window that never had a subagent has
     // no empty band above the composer.
     expect(readRenderer("index.html")).toContain('id="subagent-strip" hidden');
-  });
-
-  it("回放位置变化时重新判一次可见性", () => {
-    // Otherwise the strip would stay hidden after "back to latest".
-    const app = readRenderer("app.js");
-    const body = functionBody(app, "function renderReplayPosition(");
-    expect(body).toContain("renderSubagentStrip()");
   });
 });
 
@@ -373,28 +361,28 @@ describe("只读：宿主拒绝 prompt，渲染层禁用输入框", () => {
     expect(functionBody(app, "function exitReadonly(")).toContain('api.send({ cmd: "loadSession", id: parentId })');
   });
 
-  it("只读子会话里输入框也被禁用，并说明原因（不是回放那句）", () => {
+  it("只读子会话里输入框被禁用，并说明原因", () => {
     const app = readRenderer("app.js");
     const body = functionBody(app, "function renderComposerLock(");
     // A live conditional, not a mention: `&& false` left every other assertion
     // in this file green while nothing was actually disabled.
-    const guard = body.indexOf("if (state.readonly !== null) {");
+    const guard = body.indexOf("state.readonly !== null");
     expect(guard, "the read-only lock must be a real conditional").toBeGreaterThan(-1);
-    const block = body.slice(guard);
-    expect(block).toContain("input.disabled = true");
-    expect(block).toContain("t.readonlyComposerReason");
-    // Two different reasons, two different sentences.
-    expect(body).toContain("t.replayLockedReason");
+    expect(body).toContain("input.disabled = locked");
+    expect(body).toContain("t.readonlyComposerReason");
+    // The replay half of this function went with the scrubber (2026-11-09);
+    // its sentence must not linger as a key nobody can reach.
+    expect(body).not.toContain("replayLockedReason");
     const dict = readRenderer("i18n.js");
     expect(dict).toContain("readonlyComposerReason");
+    expect(dict).not.toContain("replayLockedReason");
   });
 
   it("进入只读态时重新上锁：session_loaded 是唯一写 state.readonly 的地方", () => {
     // The lock is a function of `state.readonly`, and nothing else on the
-    // `session_loaded` path calls it — `setReplay` only reaches it when the
-    // event carries a position, which a child's answer deliberately does not.
-    // Without the call, opening a record from a live conversation leaves an
-    // enabled composer over a transcript nothing can answer.
+    // `session_loaded` path calls it. Without the call, opening a record from
+    // a live conversation leaves an enabled composer over a transcript
+    // nothing can answer.
     const app = readRenderer("app.js");
     const loaded = caseBody(app, 'case "session_loaded":');
     expect(loaded).toContain("state.readonly =");

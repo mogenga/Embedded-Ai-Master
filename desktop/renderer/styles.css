@@ -2624,50 +2624,11 @@ mark.find-hit.current {
   opacity: 0.7;
 }
 
-/* ---------- replay bar (BR-6) ----------
-   A strip between the top bar and the transcript. It is in the flow, not
-   floating: the rows it scrubs are directly below it, and a panel over them
-   would hide the thing being replayed. It costs height only while a stored
-   conversation is open, so a new session's first screen is unchanged. */
-
-.replay-bar {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-}
-
-.replay-range {
-  flex: 1;
-  min-width: 0;
-  accent-color: var(--accent);
-}
-
-/* The count must not reflow the slider as it goes 9 → 10 → 100, so it is a
-   fixed-ish tabular readout with the same mono face the transcript's other
-   counted figures use. */
-.replay-count {
-  flex: 0 0 auto;
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--text-faint);
-  white-space: nowrap;
-}
-
-/* Replay is a mode, and a mode the reader can be in without noticing is the
-   one that makes them send a message at the wrong timeline position. The strip
-   takes the accent while a replay is active; the composer's own lock note
-   says the same thing in words. */
-.replay-bar.replaying {
-  border-bottom-color: var(--accent);
-  background: var(--accent-soft);
-  color: var(--text);
-}
+/* ---------- composer lock ----------
+   The scrubber that used to sit between the top bar and the transcript is
+   gone (removed 2026-11-09 by request). What remains is the note that closes
+   the composer when there is no live session behind the transcript — today
+   that is the read-only subagent record. */
 
 .composer-lock {
   max-width: var(--column-width);

@@ -169,28 +169,12 @@
 
         <div class="main-body">
           <div class="chat-column">
-            <!-- The replay bar (BR-6). It is a flex child of the chat column
-                 and comes before the transcript, so it sits between the top
-                 bar and the conversation, in the flow rather than over it: a
-                 scrubber that covered the transcript would hide the very rows
-                 it scrubs. It ships hidden and only an opened session reveals
-                 it — a new conversation has no log to step through. -->
-            <div class="replay-bar" id="replay-bar" hidden>
-              <!-- `min` and the step are constants; `max` is the log's own
-                   last seq, which only the host knows. -->
-              <input
-                class="replay-range"
-                id="replay-range"
-                type="range"
-                min="0"
-                max="0"
-                step="1"
-                value="0"
-                aria-label="Replay position"
-              />
-              <span class="replay-count" id="replay-count"></span>
-              <button type="button" class="btn btn-quiet small" id="replay-latest" hidden></button>
-            </div>
+            <!-- There is no replay scrubber (removed 2026-11-09 by request).
+                 A session still opens by replaying its log into the
+                 transcript; what is gone is the control for stopping it at an
+                 arbitrary earlier event. The host's `atSeq` truncation entry
+                 stays — `forkSession` uses the same parameter, and the
+                 subagent read-only view depends on it. -->
             <!-- The read-only banner (BR-6 / subagent replay). A subagent's log
                  is opened for reading only, and that fact has to stay on screen
                  the whole time it is being read: the transcript looks exactly

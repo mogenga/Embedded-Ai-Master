@@ -25,10 +25,6 @@ const transcript = $("transcript");
 const input = $("input");
 const sendButton = $("send-button");
 const stopButton = $("stop-button");
-const replayBar = $("replay-bar");
-const replayRange = $("replay-range");
-const replayCount = $("replay-count");
-const replayLatest = $("replay-latest");
 const composerLock = $("composer-lock");
 const composerLockText = $("composer-lock-text");
 const statusDot = $("status-dot");
@@ -152,13 +148,6 @@ const state = {
    * transcript, which is the thing the filter is a view of.
    */
   evidenceOnly: false,
-  /**
-   * The log position the transcript shows, or null when no session is open to
-   * replay. Written only from `session_loaded` (BR-6). Two integers and
-   * nothing else: the host owns the event array, so there is nothing here to
-   * re-project from and a drag cannot trigger a re-read.
-   */
-  replay: null,
   /**
    * The subagents running right now: `id → { label, startedAt }`.
    *
@@ -406,10 +395,9 @@ function applyLocale(locale, { announce = false } = {}) {
   // `data-i18n` to sweep; the note's sentence was repainted above, and the
   // visibility rule has to be re-applied so it agrees with the new copy.
   renderEvidenceFilter();
-  // The replay bar's count and its two buttons are derived text with no
-  // `data-i18n` to sweep, and so is the sentence that explains a locked
-  // composer. Repaint them from the position already held.
-  renderReplayPosition();
+  // The sentence explaining a locked composer is derived text with no
+  // `data-i18n` to sweep; repaint it from the state already held.
+  renderComposerLock();
   // Last, after the sweep: this caption's name follows the window's state, and
   // the sweep just painted the resting one.
   applyWindowState();
@@ -888,151 +876,28 @@ function renderEvidenceFilter() {
   if (note) note.hidden = !(state.evidenceOnly && count === 0);
 }
 
-/* ---------- replay (BR-6) ---------- */
+/* ---------- composer lock ---------- */
 
 /**
- * Where the transcript is in the log, and what the whole log's range is.
+ * Close the composer when there is nothing behind it to answer a message, and
+ * say why on screen.
  *
- * `null` means "no session open to replay". The host is the only writer: it
- * attaches `lastSeq` to every `session_loaded` and `atSeq` only to a truncated
- * one, so this object is a copy of what it sent, never a second opinion. The
- * event array itself stays in the host — the renderer keeps only the two
- * positions, which is what "dragging must not re-read the log" comes down to:
- * the control has nothing to read.
- */
-function setReplay(message) {
-  // `lastSeq` is the log's own range. A session with no events to step through
-  // (`lastSeq < 0`) has nothing to scrub, so it is the same as no session.
-  if (!Number.isInteger(message.lastSeq) || message.lastSeq < 0) {
-    clearReplay();
-    return;
-  }
-  state.replay = {
-    atSeq: Number.isInteger(message.atSeq) ? message.atSeq : message.lastSeq,
-    lastSeq: message.lastSeq,
-  };
-  renderReplayPosition();
-}
-
-function clearReplay() {
-  state.replay = null;
-  if (replayBar) replayBar.hidden = true;
-  renderReplayPosition();
-}
-
-/**
- * True when the log position `atSeq` (default: the one on screen) is behind the
- * head of the log.
+ * A disabled input with no sentence reads as a broken window. The note is a
+ * sibling of the composer rather than transcript content: rebuilding the
+ * transcript must not take the sentence explaining the rebuild with it.
  *
- * One predicate for the whole control: the committed position decides whether
- * the composer is locked and the exit button is drawn, and the *dragged*
- * position decides the same about the exit button while the thumb moves. Two
- * spellings of `atSeq < lastSeq` would eventually disagree about the boundary.
- */
-function isReplaying(atSeq = state.replay?.atSeq) {
-  return state.replay !== null && atSeq < state.replay.lastSeq;
-}
-
-/** Redraw the bar and everything whose state depends on the replay position. */
-function renderReplayPosition() {
-  if (!replayBar) return;
-  const replay = state.replay;
-  if (replay === null) {
-    replayBar.hidden = true;
-    replayBar.classList.remove("replaying");
-    renderComposerLock();
-    return;
-  }
-  replayBar.hidden = false;
-  replayBar.classList.toggle("replaying", isReplaying());
-  replayRange.max = String(replay.lastSeq);
-  // The slider is set from the host's answer rather than from where the thumb
-  // was dragged: a position the host refused must not leave the thumb showing
-  // a place the transcript is not at.
-  replayRange.value = String(replay.atSeq);
-  replayCount.textContent = t.replayPosition(replay.atSeq, replay.lastSeq);
-  replayLatest.textContent = t.replayBackToLatest;
-  replayLatest.hidden = !isReplaying();
-  renderComposerLock();
-  // The strip goes away when the screen stops being "now" and comes back when
-  // it is again, so its visibility has to be re-decided wherever the replay
-  // position is.
-  renderSubagentStrip();
-}
-
-/**
- * Close or open the composer for a replay, with the reason on screen.
- *
- * A disabled input with no sentence reads as a broken window. The note names
- * the state and the way out, and it is a sibling of the composer rather than
- * transcript content: a replay redraws the transcript, and the sentence
- * explaining the redraw must survive it.
+ * One state reaches here today — the read-only subagent record. It used to be
+ * two: a replay position could lock the same box (BR-6's scrubber, removed
+ * 2026-11-09). The replay half went with the control; this stays because the
+ * read-only view still needs a locked, explained composer.
  */
 function renderComposerLock() {
-  const replaying = isReplaying();
-  input.disabled = replaying;
-  if (composerLock) composerLock.hidden = !replaying;
-  if (composerLockText) composerLockText.textContent = replaying ? t.replayLockedReason : "";
-  if (sendButton) sendButton.disabled = replaying;
-  // A second, independent reason to close the same box: the transcript is a
-  // finished subagent's record, so there is nothing behind it to answer a
-  // message. Layered on top rather than folded into the block above, because
-  // the note must say *which* of the two it is — a replay is a position the
-  // reader chose and can leave by dragging, a record has no live session at
-  // all — and because the two can never both apply (a child's log publishes no
-  // replay position).
-  if (state.readonly !== null) {
-    input.disabled = true;
-    if (composerLock) composerLock.hidden = false;
-    if (composerLockText) composerLockText.textContent = t.readonlyComposerReason;
-    if (sendButton) sendButton.disabled = true;
-  }
+  const locked = state.readonly !== null;
+  input.disabled = locked;
+  if (composerLock) composerLock.hidden = !locked;
+  if (composerLockText) composerLockText.textContent = locked ? t.readonlyComposerReason : "";
+  if (sendButton) sendButton.disabled = locked;
 }
-
-/**
- * Ask the host for a position.
- *
- * One call site for the whole control: the slider's release (`change` and
- * `pointerup` land here), "back to latest", and nothing else. The host owns
- * the log, so this is the only thing that ever reads it — dragging never
- * reaches this function.
- */
-function commitReplay(atSeq) {
-  if (state.sessionId === "") return;
-  api.send({ cmd: "loadSession", id: state.sessionId, atSeq });
-}
-
-function exitReplay() {
-  if (!isReplaying()) return;
-  commitReplay(state.replay.lastSeq);
-}
-
-// Dragging sends nothing: a command per pixel would fill the IPC pipe, and the
-// host would answer each one by re-reading and re-projecting the whole log. The
-// readout follows the thumb so the reader can see where it is going; the
-// transcript keeps showing the last committed position until the thumb is
-// released. Note what this handler does *not* do — it does not redraw rows: the
-// renderer holds two integers, not the event array, so a drag has nothing to
-// project from.
-replayRange?.addEventListener("input", () => {
-  if (!state.replay) return;
-  const at = Number(replayRange.value);
-  replayCount.textContent = t.replayPosition(at, state.replay.lastSeq);
-  replayLatest.hidden = !isReplaying(at);
-});
-
-// Release is the commit: `pointerup` for the mouse, `change` for a keyboard or
-// a programmatic set. Both land in one place so there is one send site.
-replayRange?.addEventListener("pointerup", () => {
-  commitReplay(Number(replayRange.value));
-});
-replayRange?.addEventListener("change", () => {
-  commitReplay(Number(replayRange.value));
-});
-
-replayLatest?.addEventListener("click", () => {
-  exitReplay();
-});
 
 /**
  * Open the output block of every evidence row.
@@ -1824,7 +1689,7 @@ function renderSubagentStrip() {
   if (!subagentStrip) return;
   const runs = runningSubagents();
   subagentRuns = runs;
-  if (runs.length === 0 || isReplaying() || state.readonly !== null) {
+  if (runs.length === 0 || state.readonly !== null) {
     subagentStrip.hidden = true;
     setSubagentStripOpen(false);
     subagentStripList?.replaceChildren();
@@ -2292,19 +2157,10 @@ const RUNNABLE_COMMANDS = new Set(["clear", "context", "compact", "hook"]);
  */
 function runSlashCommand({ name, args }, rawText = `/${name}`) {
   // The palette reaches this without going through `submit()`, so it gets the
-  // replay refusal too: `/compact` and `/context` speak about the head of a log
-  // the screen is not showing, and `/clear` would drop the reader into a new
-  // conversation from a position they did not choose. "kept" puts the draft
-  // the palette took back where it was.
-  if (isReplaying()) {
-    addNotice("warn", t.replayLockedReason);
-    scrollToBottom();
-    return "kept";
-  }
-  // A subagent's record refuses these for the same reason a replay does, and
-  // more sharply: `/compact` and `/context` would act on the **parent's** log
-  // while the screen shows the child's, and `/clear` would start a new
-  // conversation from a record the reader is still reading.
+  // read-only refusal too: `/compact` and `/context` would act on the
+  // **parent's** log while the screen shows the child's, and `/clear` would
+  // start a new conversation from a record the reader is still reading.
+  // "kept" puts the draft the palette took back where it was.
   if (state.readonly !== null) {
     addNotice("warn", t.readonlyComposerReason);
     scrollToBottom();
@@ -4724,15 +4580,6 @@ function handleEvent(message) {
       // The progress line belonged to the turn that was running in the old
       // session; leaving it would make the new one look busy.
       state.progress = null;
-      // Where in the log these rows came from, decided *before* the emptiness
-      // test below: a replayed prefix that happens to hold no bubbles yet is
-      // an empty stretch of a conversation, not a new conversation, and must
-      // not be offered the "start from a symptom" introduction as if it were.
-      // A new session sends `session_loaded` with no `lastSeq` (nothing to
-      // replay yet), which is what clears the bar — the same event that
-      // rebuilds this transcript, so `/clear` and the sidebar's "new chat"
-      // need no path of their own.
-      setReplay(message);
       // The read-only view is a property of this transcript, so it is decided
       // here rather than by a command the renderer sent: the host attaches
       // `readonly` to exactly the answers that are a subagent's log, and an
@@ -4753,10 +4600,9 @@ function handleEvent(message) {
       renderReadonlyBanner();
       renderSubagentStrip();
       // The box is opened or closed by the state decided above, and nothing
-      // else on this path calls it: `setReplay` only reaches it when the event
-      // carries a position, and a child's record deliberately carries none.
-      // Without this line, opening a subagent's log from a live conversation
-      // would leave a enabled composer over a transcript nothing can answer.
+      // else on this path calls it. Without this line, opening a subagent's
+      // log from a live conversation would leave an enabled composer over a
+      // transcript nothing can answer.
       renderComposerLock();
       for (const item of message.messages || []) {
         if (item.role === "user") {
@@ -4802,10 +4648,10 @@ function handleEvent(message) {
           toolGroup().appendChild(row);
         }
       }
-      // An empty prefix of a real conversation is not a new conversation: the
-      // introduction ("start from a symptom") belongs to a session with no log
-      // behind it, not to a replay that has not reached its first bubble yet.
-      if ((message.messages || []).length === 0 && !isReplaying()) {
+      // The introduction ("start from a symptom") belongs to a session with no
+      // log behind it; a session whose log has no chat rows yet still gets it,
+      // because that is the same thing to the reader.
+      if ((message.messages || []).length === 0) {
         showEmptyState();
       }
       // The plan is rebuilt from the session, not from the replayed messages:
@@ -6364,10 +6210,6 @@ function startSessionIn(target) {
   // session boundary would open the new conversation looking empty, and the
   // switch that explains why is a corner of the composer.
   setEvidenceFilter(false);
-  // A new conversation has no log, so there is nothing to scrub — and leaving
-  // the bar up until the host answers would point it at the conversation being
-  // left. Clearing it also re-enables the composer, which a replay had locked.
-  clearReplay();
   clearAttachments();
   api.send({ cmd: "newSession" });
 }
@@ -6826,19 +6668,11 @@ function rememberInHistory(text) {
 
 function submit() {
   const text = input.value.trim();
-  // A replay shows an earlier point in the log. Sending from here would append
-  // to the head while the screen shows the middle — two timelines in one
-  // window. The input is disabled in that state, so this is the keyboard path
-  // and the send button's; both are refused with the same sentence the lock
-  // note gives, and the draft stays where it is.
-  if (isReplaying()) {
-    addNotice("warn", t.replayLockedReason);
-    scrollToBottom();
-    return;
-  }
-  // A subagent's record has no live session behind it either, and the input is
-  // disabled there for the same reason. The draft stays: the reader may want
-  // to paste it into the parent conversation once they go back.
+  // A subagent's record has no live session behind it. The input is disabled
+  // there, so this is the keyboard path and the send button's; both are
+  // refused with the same sentence the lock note gives, and the draft stays:
+  // the reader may want to paste it into the parent conversation once they go
+  // back.
   if (state.readonly !== null) {
     addNotice("warn", t.readonlyComposerReason);
     scrollToBottom();
@@ -7081,15 +6915,6 @@ document.addEventListener("keydown", (event) => {
     // belongs to the field.
     if (!workbench.hidden && !isTextEntry(document.activeElement)) {
       closeWorkbench();
-      return;
-    }
-    // Leaving a replay comes after every floating surface (a panel drawn over
-    // the transcript is the more immediate thing to dismiss) and before
-    // "abort the turn": while replaying nothing is running, so the fallback's
-    // `abort` would be a command about a turn that does not exist while the
-    // screen stayed at an old position.
-    if (isReplaying()) {
-      exitReplay();
       return;
     }
     if (state.busy) api.send({ cmd: "abort" });
