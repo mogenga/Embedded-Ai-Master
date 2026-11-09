@@ -1634,12 +1634,30 @@ function paintSubagentRows(runs) {
   for (const stale of existing.slice(runs.length)) stale.remove();
 }
 
+/**
+ * How long a run may go before its row says so.
+ *
+ * Not a limit — the kernel has none by default (2026-11-09). This is the only
+ * signal the reader gets that a dispatch has been going a long while, and with
+ * no turn cap and no lifetime cap there is nothing else that would ever stop
+ * it. A number on screen is what turns "it has been a while" into a decision.
+ */
+const SUBAGENT_LONG_RUN_MS = 10 * 60 * 1000;
+
 /** One row's elapsed figure, from the kernel's start time and this clock. */
 function paintSubagentClock(row, run) {
   const clock = row.querySelector(".subagent-strip-clock");
   if (!clock) return;
+  const startedAt = Date.parse(String(run.startedAt ?? ""));
   const elapsed = elapsedClock(run.startedAt, Date.now());
   clock.textContent = elapsed === null ? t.subagentElapsedUnknown : t.subagentElapsed(elapsed);
+  // A quiet marker, not a warning: the run is doing what it was told to do.
+  // It goes on the clock rather than the limits cell because that cell is
+  // blank when nothing was set — which is now the normal case.
+  const long = Number.isFinite(startedAt) && Date.now() - startedAt >= SUBAGENT_LONG_RUN_MS;
+  clock.classList.toggle("long", long);
+  if (long) clock.title = t.subagentLongRun;
+  else clock.removeAttribute("title");
 }
 
 /**

@@ -29,12 +29,15 @@ export const subagentInputSchema = z.object({
   /** 显示名；只用于完成提示与列表，缺省时不拿 id 冒充名字。 */
   label: z.string().min(1).optional(),
   /**
-   * 子代理自己的模型调用上限；缺省 30（见 `DEFAULT_MAX_TURNS`）。
+   * 子代理自己的模型调用上限。**缺省不限**（2026-11-09）。
+   *
+   * 给这个值相当于替这次分派划一条边界；不给就一直跑到它自己结束。终止仍有
+   * `subagent_check{kill:true}` 与宿主退出时的 `killAllSubagents()`。
    */
   maxTurns: z.number().int().positive().optional(),
   /**
    * 子代理自身的寿命上限（毫秒），**不是**这次工具调用的超时——工具立即返回。
-   * 缺省 10 分钟，与 `terminal_bg` 同值。
+   * **缺省不限**，同上。
    */
   timeoutMs: z.number().int().positive().optional(),
 });
@@ -73,6 +76,15 @@ function errorMessage(error: unknown): string {
 function parentDirOf(ctx: ToolCtx): string | undefined {
   if (ctx.artifactDir === undefined || ctx.artifactDir.length === 0) return undefined;
   return path.dirname(path.resolve(ctx.artifactDir));
+}
+
+/** 「不限」要说出来，不能印成 0 或一个默认数字。 */
+function describeLimit(value: number | undefined): string {
+  return value === undefined ? "no limit" : String(value);
+}
+
+function describeTimeout(value: number | undefined): string {
+  return value === undefined ? "no limit" : `${value}ms`;
 }
 
 function summaryLine(summary: SubagentSummary): string {
@@ -178,9 +190,11 @@ export function createSubagentTools(deps: SubagentDeps): [ToolDef<SubagentInput>
         text: [
           `started subagent ${outcome.id}`,
           `session: ${sessionDir}`,
-          // 报的是**真正生效**的两个数，不是用户填的原值：填了 0 或超范围的
-          // 值会被夹到边界上，正文里再回显原值就是说谎。
-          `max turns: ${resolveSubagentMaxTurns(input.maxTurns)}, timeout: ${resolveSubagentTimeoutMs(input.timeoutMs)}ms`,
+          // 报的是**真正生效**的两个值，不是用户填的原值：填了 0 或超范围的
+          // 值会被判为无效，正文里再回显原值就是说谎。缺省是「不限」，不是
+          // 某个默认数字——这与主循环的 maxTurns 同一条语义。
+          `max turns: ${describeLimit(resolveSubagentMaxTurns(input.maxTurns))}, `
+            + `timeout: ${describeTimeout(resolveSubagentTimeoutMs(input.timeoutMs))}`,
           `use subagent_check with id="${outcome.id}" to read the result, or kill it`,
         ].join("\n"),
         detail: { id: outcome.id, sessionDir, status: "running" },

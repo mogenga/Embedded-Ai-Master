@@ -517,6 +517,40 @@ describe("elapsedClock", () => {
   });
 });
 
+describe("跑久了要有可见信号（缺省不限，没有别的机制会停它）", () => {
+  it("超过阈值的那一行加 long 类并带一句说明", () => {
+    // With no turn cap and no lifetime cap, the clock is the only thing on
+    // screen that can turn "it has been a while" into a decision. The marker
+    // is a class + title, not text: the row already says how long it has run,
+    // and repeating that as a sentence once a second would be noise.
+    const app = readRenderer("app.js");
+    const body = functionBody(app, "function paintSubagentClock(");
+    expect(body).toContain("SUBAGENT_LONG_RUN_MS");
+    expect(body).toContain('classList.toggle("long", long)');
+    expect(body).toContain("t.subagentLongRun");
+    // Not a limit: nothing here aborts or hides the row.
+    expect(body).not.toContain("abort");
+    expect(body).not.toContain("hidden");
+  });
+
+  it("阈值是 10 分钟，两种语言都有那句话", () => {
+    const app = readRenderer("app.js");
+    expect(app).toContain("const SUBAGENT_LONG_RUN_MS = 10 * 60 * 1000;");
+    const dict = readRenderer("i18n.js");
+    expect(dict.match(/subagentLongRun:/g) ?? []).toHaveLength(2);
+  });
+
+  it("缺省不限时，行里不画任何上限", () => {
+    // `subagentLimitText` returned "" for a missing turn count before this
+    // change and still does; the point of asserting it now is that the default
+    // path is the *absent* one — nothing was set, so nothing is claimed.
+    const app = readRenderer("app.js");
+    const body = functionBody(app, "function subagentLimitText(");
+    expect(body).toContain('return ""');
+    expect(body.startsWith("function subagentLimitText(")).toBe(true);
+  });
+});
+
 describe("subagentName / subagentOverflow", () => {
   it("有 label 用 label", () => {
     expect(subagentName({ id: "sa_a1b2c3d4e5f6", label: "UART 排查" })).toBe("UART 排查");

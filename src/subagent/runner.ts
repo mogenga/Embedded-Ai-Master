@@ -29,23 +29,20 @@ import type { SubagentStatus, SubagentSummary } from "./types.js";
 export const MAX_RUNNING_SUBAGENTS = 4;
 
 /**
- * 子代理的模型调用上限。
+ * 轮数与寿命**都没有默认上限**（用户决定，2026-11-09）。
  *
- * 这是**有意偏离**主循环「没有默认轮数上限」的那条原则（D-183）：子代理是被
- * 分派的一件差事，不是操作者自己开的长时间诊断，没人盯着它。给了 `maxTurns`
- * 才按给的来；缺省 30 轮足够一次「读几个文件、跑几次检索」的调查，又不至于
- * 让一个跑偏的子代理花光预算。
- */
-export const DEFAULT_MAX_TURNS = 30;
-
-/**
- * 子代理自身的寿命上限，与 `terminal_bg` 的 `DEFAULT_TIMEOUT_MS` 同值。
+ * 曾经的默认值是 30 轮 / 10 分钟，理由是「子代理是被分派的一件差事，没人盯着
+ * 它」。这条理由被推翻了：一个跑偏的子代理被静默截断，比跑久一点更糟——它交给
+ * 父会话的结论会是半截的，而且「为什么停了」只写在一条 `failed` 的 `error`
+ * 里。这与主循环「不填 `maxTurns` 就不检查轮数」是同一条原则（D-183）。
  *
- * 到点由 runner 自己的定时器 abort；终局记 `timed_out`，`killedBy: "timeout"`。
+ * 调用方仍可以显式给 `maxTurns` / `timeoutMs`：那是它为自己的用例划的边界，
+ * 与主循环的 `maxTurns` 一样按给的来。缺省 = 不限。
+ *
+ * **子代理仍会被终止**：`killSubagent` / `subagent_check{kill:true}` 与宿主退出
+ * 时的 `killAllSubagents()` 都不受这两个值影响。
  */
-export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
-
-const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
+export const MAX_TIMEOUT_MS = 24 * 60 * 60 * 1000;
 const MAX_SUMMARY_TEXT_BYTES = 8 * 1024;
 const MAX_PROMPT_PREVIEW_CHARS = 120;
 const MAX_LISTED_SUBAGENTS = 20;
@@ -187,19 +184,20 @@ function truncateToBytes(text: string, maxBytes: number): { text: string; bytes:
   return { text: text.slice(0, end), bytes: used };
 }
 
-/** 子代理实际的寿命上限（毫秒）。导出是为了让工具正文报的就是真正用的那个数。 */
-export function resolveSubagentTimeoutMs(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value) || value <= 0) {
-    return DEFAULT_TIMEOUT_MS;
-  }
+/**
+ * 子代理实际的寿命上限（毫秒），或 `undefined` 表示不限。
+ *
+ * 导出是为了让工具正文报的就是真正生效的那个数：填了非法值的人看到的应该是
+ * 「不限」，而不是一个他没写过的数字。
+ */
+export function resolveSubagentTimeoutMs(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value <= 0) return undefined;
   return Math.min(Math.max(Math.floor(value), 1), MAX_TIMEOUT_MS);
 }
 
-/** 子代理实际的轮数上限。理由同上：报出去的数字必须是生效的那个。 */
-export function resolveSubagentMaxTurns(value: number | undefined): number {
-  if (value === undefined || !Number.isFinite(value) || value < 1) {
-    return DEFAULT_MAX_TURNS;
-  }
+/** 子代理实际的轮数上限，或 `undefined` 表示不限。理由同上。 */
+export function resolveSubagentMaxTurns(value: number | undefined): number | undefined {
+  if (value === undefined || !Number.isFinite(value) || value < 1) return undefined;
   return Math.floor(value);
 }
 
@@ -360,7 +358,7 @@ function ownershipOf(parentSessionId: string, id: string): SubagentJob | undefin
 async function runJob(
   job: SubagentJob,
   prompt: string,
-  opts: { maxTurns: number; timeoutMs: number; deps: SubagentDeps },
+  opts: { maxTurns?: number; timeoutMs?: number; deps: SubagentDeps },
 ): Promise<void> {
   const { deps } = opts;
   const childDir = job.sessionDir;
@@ -387,12 +385,17 @@ async function runJob(
     // 寿命定时器从子代理**真正开跑**算起：建目录、拿锁不属于它的调查时间。
     // `opts.timeoutMs` 由 `startSubagent` 解析好传进来——同一对数字已经写进
     // `subagent_started`，这里再解析一次就是第二个口径。
-    job.timeoutTimer = setTimeout(() => {
-      if (job.settled || job.killedBy !== undefined) return;
-      job.killedBy = "timeout";
-      job.controller.abort();
-    }, opts.timeoutMs);
-    job.timeoutTimer.unref?.();
+    //
+    // 缺省**不设定时器**：没有上限就没有到点这件事。终止仍由 `killSubagent`
+    // 与 `killAllSubagents()` 负责。
+    if (opts.timeoutMs !== undefined) {
+      job.timeoutTimer = setTimeout(() => {
+        if (job.settled || job.killedBy !== undefined) return;
+        job.killedBy = "timeout";
+        job.controller.abort();
+      }, opts.timeoutMs);
+      job.timeoutTimer.unref?.();
+    }
 
     const ctx: LoopCtx = {
       session: child,
@@ -413,11 +416,18 @@ async function runJob(
       // 兜底墙钟比 runner 的 abort 晚一分钟：**正常路径必须由 abort 收尾**，
       // 否则 `query` 会自己报 `deadline` 正常结束，终局就成了 finished 而不是
       // timed_out。这一条只是「定时器没发出来的意外」的最后一道。
-      deadlineMs: opts.timeoutMs + 60_000,
+      //
+      // 没有显式上限时整键缺席：`deadlineMs` 缺省 = 不限制（与主循环同一条
+      // 语义），填一个值反而会凭空造出一个用户没要求的截止时间。
+      ...(opts.timeoutMs === undefined ? {} : { deadlineMs: opts.timeoutMs + 60_000 }),
     };
 
     let finishReason: LoopFinishReason | undefined;
-    for await (const event of query(ctx, prompt, { maxTurns: opts.maxTurns })) {
+    // `maxTurns` 缺省 = 不检查轮数（`assertBreakers` 只在它非 undefined 时判）。
+    // 整键缺席而不是传 undefined，与主循环 `runSession` 的写法一致。
+    for await (const event of query(ctx, prompt, {
+      ...(opts.maxTurns === undefined ? {} : { maxTurns: opts.maxTurns }),
+    })) {
       if (event.kind === "done") finishReason = event.finishReason;
     }
 
@@ -505,7 +515,9 @@ export async function startSubagent(
 
   // 两个上限在这里解析**一次**：同一对数字既写进 `subagent_started`，也交给
   // `runJob` 的定时器与 `query()`。`subagent` 工具正文用的是同一对 resolver，
-  // 所以三处报的是同一个数——填 0 的人看到的是夹过的边界值，不是 0。
+  // 所以三处报的是同一个数。
+  //
+  // 两者都可能是 `undefined`（= 不限），这是缺省状态：不给就跑到它自己结束。
   const maxTurns = resolveSubagentMaxTurns(opts.maxTurns);
   const timeoutMs = resolveSubagentTimeoutMs(opts.timeoutMs);
 
@@ -542,8 +554,9 @@ export async function startSubagent(
       promptPreview: job.promptPreview,
       ...(job.label === undefined ? {} : { label: job.label }),
       startedAt: job.startedAt,
-      maxTurns,
-      timeoutMs,
+      // 整键缺席 = 不限。写 `null` 或 0 会让读的人以为有一个他没设过的上限。
+      ...(maxTurns === undefined ? {} : { maxTurns }),
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
     };
     try {
       await opts.deps.onStarted(payload);

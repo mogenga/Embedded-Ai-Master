@@ -3464,6 +3464,13 @@ mark.find-hit.current {
   color: var(--text-faint);
 }
 
+/* A run that has gone a long while. Not an alarm — nothing is wrong, and by
+   default there is no limit that would ever end it — so it only moves up from
+   faint to secondary. The row's title carries the sentence. */
+.subagent-strip-clock.long {
+  color: var(--text-secondary);
+}
+
 .subagent-strip-limits {
   flex: 0 0 auto;
   font-size: var(--text-xs);

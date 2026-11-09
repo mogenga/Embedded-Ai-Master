@@ -139,6 +139,7 @@ export const dictionaries = {
     subagentLimits: (turns, minutes) =>
       minutes === "" ? `up to ${turns} turns` : `up to ${turns} turns, ${minutes}`,
     minutesShort: (n) => `${n} min`,
+    subagentLongRun: "This subagent has been running a long time. There is no turn or time limit by default; open it to read its log, or stop it from there.",
     subagentOpen: "Open this subagent's session record (read-only)",
     subagentToggle: "Show every running subagent",
     subagentStripCollapse:"Collapse the subagent list",
@@ -612,6 +613,7 @@ export const dictionaries = {
     subagentLimits: (turns, minutes) =>
       minutes === "" ? `上限 ${turns} 轮` : `上限 ${turns} 轮、${minutes}`,
     minutesShort: (n) => `${n} 分钟`,
+    subagentLongRun: "这个子代理已经跑了很久。缺省没有轮数与时限；点开可以看它的日志，也可以在那里停掉它。",
     subagentOpen: "打开这个子代理的会话记录（只读）",
     subagentToggle: "展开全部运行中的子代理",
     subagentStripCollapse:"收起子代理列表",

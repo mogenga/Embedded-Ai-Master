@@ -231,9 +231,12 @@ export type SubagentResultPayload = SubagentSummary;
  * 一条 `subagent_started` 事件的 payload。
  *
  * `maxTurns` / `timeoutMs` 是**真正生效**的两个上限，不是调用方填的原值：填 0
- * 或超范围的值会被 `resolveSubagentMaxTurns` / `resolveSubagentTimeoutMs` 夹到
- * 边界上，事件里回显原值就是说谎——而且与 `subagent` 工具正文会给出两个不同
- * 的数字。这两个数由 runner 算一次、两处共用。
+ * 或超范围的值会被 `resolveSubagentMaxTurns` / `resolveSubagentTimeoutMs` 判为
+ * 无效，事件里回显原值就是说谎——而且与 `subagent` 工具正文会给出两个不同的
+ * 数字。这两个数由 runner 算一次、两处共用。
+ *
+ * **两者都可缺席**（2026-11-09 起）：缺省不设上限，子代理跑到它自己结束。
+ * 缺席与「设为 0」不是一回事——前者是「不限」，后者不是任何有效的上限。
  */
 export interface SubagentStartedPayload {
   id: string;
@@ -241,10 +244,10 @@ export interface SubagentStartedPayload {
   promptPreview: string;
   label?: string;
   startedAt: string;
-  /** 真正生效的轮数上限，不是用户填的原值（填 0 会被夹到边界）。 */
-  maxTurns: number;
-  /** 真正生效的寿命上限（毫秒），同上。 */
-  timeoutMs: number;
+  /** 真正生效的轮数上限；缺席 = 不限。 */
+  maxTurns?: number;
+  /** 真正生效的寿命上限（毫秒）；缺席 = 不限。 */
+  timeoutMs?: number;
 }
 
 export interface AssistantPayload {

@@ -21,13 +21,13 @@ import { createSession } from "../src/session/session.js";
 import type { SessionHandle } from "../src/session/session.js";
 import type { SessionEvent, SubagentStartedPayload } from "../src/session/types.js";
 import {
-  DEFAULT_MAX_TURNS,
-  DEFAULT_TIMEOUT_MS,
   MAX_RUNNING_SUBAGENTS,
   getSubagent,
   killAllSubagents,
   killSubagent,
   listSubagents,
+  resolveSubagentMaxTurns,
+  resolveSubagentTimeoutMs,
   startSubagent,
   subagentSpendUsd,
   takeSubagentCompletions,
@@ -794,7 +794,7 @@ describe("subagent_started 生命周期事件", () => {
     expect(events[startedAt]?.seq).toBeLessThan(events[resultAt]?.seq);
   });
 
-  it("开始事件带真正生效的上限：传 0 写的是夹过的 30 / 600000", async () => {
+  it("开始事件只在真的设了上限时才带上限；传 0 等于没设", async () => {
     const h = await harness({ steps: [reply("结论：查完了。")] });
     appendStarted(h);
 
@@ -808,9 +808,10 @@ describe("subagent_started 生命周期事件", () => {
 
     const [started] = startedPayloadsOf(h.parentDir);
     expect(started?.id).toBe(outcome.id);
-    // 填 0 的人看到的是边界值，不是 0——回显原值就是说谎。
-    expect(started?.maxTurns).toBe(DEFAULT_MAX_TURNS);
-    expect(started?.timeoutMs).toBe(DEFAULT_TIMEOUT_MS);
+    // 0 不是任何有效的上限，按「没设」处理；整键缺席而不是写 0 或一个默认数字
+    // ——写了就等于声称用户设过一个他没设过的边界。
+    expect(Object.hasOwn(started ?? {}, "maxTurns")).toBe(false);
+    expect(Object.hasOwn(started ?? {}, "timeoutMs")).toBe(false);
     expect(started?.promptPreview).toBe("查一下");
     expect(started?.sessionDir).toBe(path.join(h.parentDir, "subagents", outcome.id));
     expect(typeof started?.startedAt).toBe("string");
@@ -903,8 +904,6 @@ describe("subagent_started 生命周期事件", () => {
           sessionDir: "/sessions/parent/subagents/sa_0123456789ab",
           promptPreview: "确认主频",
           startedAt: "2026-11-09T00:00:00.000Z",
-          maxTurns: DEFAULT_MAX_TURNS,
-          timeoutMs: DEFAULT_TIMEOUT_MS,
         },
       },
       { seq: 2, ts: "t", type: "tool_result", payload: { id: "c1", text: "ok" }, parent: 0 },
@@ -928,11 +927,10 @@ describe("subagent_started 生命周期事件", () => {
 
     const { events } = readSessionDir(h.parentDir);
     const started = events.find((event) => event.type === "subagent_started");
-    expect(started?.payload).toMatchObject({
-      id: outcome.id,
-      maxTurns: DEFAULT_MAX_TURNS,
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-    });
+    expect(started?.payload).toMatchObject({ id: outcome.id });
+    // 没设上限，所以两个键都不出现（缺席 = 不限）。
+    expect(Object.hasOwn(started?.payload ?? {}, "maxTurns")).toBe(false);
+    expect(Object.hasOwn(started?.payload ?? {}, "timeoutMs")).toBe(false);
   });
 
   it("runSession 接上了 onStarted：父轮次派发子代理后父日志里真有开始事件", async () => {
@@ -1006,11 +1004,7 @@ describe("subagent_started 生命周期事件", () => {
     expect(started).toBeDefined();
     const startedPayload = started?.payload as unknown as SubagentStartedPayload;
     // payload 来自 runner 算好的那一份，不是这里另算的。
-    expect(startedPayload).toMatchObject({
-      promptPreview: "查一下时钟树",
-      maxTurns: DEFAULT_MAX_TURNS,
-      timeoutMs: DEFAULT_TIMEOUT_MS,
-    });
+    expect(startedPayload).toMatchObject({ promptPreview: "查一下时钟树" });
     expect(startedPayload.id).toMatch(/^sa_[0-9a-f]{12}$/);
     expect(startedPayload.sessionDir).toBe(
       path.join(sessionDir, "subagents", String(startedPayload.id)),
@@ -1036,11 +1030,18 @@ async function freeDeps(): Promise<SubagentDeps> {
 }
 
 describe("subagent 工具的对外形态", () => {
-  it("缺省值与常量对齐：30 轮、10 分钟（与 terminal_bg 同值）", () => {
-    // 这两个数字是**产品决定**，不是随手写的：子代理是被分派的一件差事，
-    // 与主循环「没有默认轮数上限」的有意偏离，注释在 runner.ts 里。
-    expect(DEFAULT_MAX_TURNS).toBe(30);
-    expect(DEFAULT_TIMEOUT_MS).toBe(10 * 60 * 1000);
+  it("轮数与寿命都没有默认上限（2026-11-09 用户决定）", () => {
+    // 曾经有 30 轮 / 10 分钟的默认值，理由是「子代理是没人盯着的差事」。那条
+    // 理由被推翻了：静默截断一个跑偏的子代理，比让它跑久一点更糟——交给父会话
+    // 的结论会是半截的。这与主循环「不填 maxTurns 就不检查轮数」同一条语义。
+    expect(resolveSubagentMaxTurns(undefined)).toBeUndefined();
+    expect(resolveSubagentMaxTurns(0)).toBeUndefined();
+    expect(resolveSubagentMaxTurns(-3)).toBeUndefined();
+    expect(resolveSubagentTimeoutMs(undefined)).toBeUndefined();
+    expect(resolveSubagentTimeoutMs(0)).toBeUndefined();
+    // 显式给的仍然照用：那是调用方为自己的用例划的边界。
+    expect(resolveSubagentMaxTurns(7)).toBe(7);
+    expect(resolveSubagentTimeoutMs(1500)).toBe(1500);
     expect(MAX_RUNNING_SUBAGENTS).toBe(4);
   });
 
