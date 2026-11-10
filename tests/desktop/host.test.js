@@ -1465,9 +1465,17 @@ describe("desktop host", () => {
     );
     // R3: the notice carries the reason. The empty tree alone would read as
     // "this folder is empty" rather than "this folder was refused".
-    const notice = events.find((event) => event.type === "notice");
+    //
+    // **Pick the notice by its text, not by being first** (2026-11-10, CI).
+    // Boot also emits unrelated notices — `seedFirstRun` says "已接入嵌入式
+    // 工具" at `dim` when it writes the MCP seeds — and whether that one lands
+    // before this one depends on which artifacts exist on the runner. Taking
+    // `events.find(type === "notice")` asserted on the *first* notice, so the
+    // test passed locally (seeds already present, no notice) and failed in CI
+    // (`'dim' to be 'warn'`). The ordering was never the contract.
+    const notice = events.find((event) => event.type === "notice" && event.text.includes("目录读取失败"));
+    expect(notice, "找不到「目录读取失败」那条 notice").toBeDefined();
     expect(notice.level).toBe("warn");
-    expect(notice.text).toContain("目录读取失败");
     const tree = events.find((event) => event.type === "tree");
     // The empty tree is still required: the renderer parks `pendingTreeTarget`
     // until one arrives, so the expanded node would spin forever without it.
