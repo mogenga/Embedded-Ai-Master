@@ -132,6 +132,28 @@ async function tempHome(models, baseUrl) {
   return dir;
 }
 
+/** 两个 provider，各自一个网关，用来测「换 provider 也要换能力表」。 */
+async function twoProviderHome(first, second) {
+  const dir = await mkdtemp(path.join(tmpdir(), "eam-effort-host-"));
+  tempDirs.push(dir);
+  await writeFile(
+    path.join(dir, "providers.json"),
+    JSON.stringify({
+      alpha: {
+        protocol: "openai-chat-completions",
+        baseUrl: first.baseUrl,
+        models: first.models,
+      },
+      beta: {
+        protocol: "openai-chat-completions",
+        baseUrl: second.baseUrl,
+        models: second.models,
+      },
+    }),
+  );
+  return dir;
+}
+
 function runHost(home, commands, options = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [HOST], {
@@ -555,6 +577,58 @@ describe("网关目录优先于缺省映射", () => {
     // 能出现在请求体里就说明适配层已经不再用它那份白名单二次拦截。
     expect(gateway.bodies).toHaveLength(1);
     expect(gateway.bodies[0].reasoning_effort).toBe("xhigh");
+  }, HOST_TIMEOUT_MS);
+});
+
+describe("能力表按 provider 分开（2026-11-10）", () => {
+  it("换到另一个 provider 的模型时，用的是那个网关的能力，不是上一个的", async () => {
+    // 真机上的形态：`wb` 报五档、`deepseek` 报三档。同进程里切模型必须重取，
+    // 否则第二个 provider 的模型会一直查不到能力、退回缺省映射。
+    const alpha = await catalogGateway([
+      { id: "a1", reasoning_efforts: ["low", "medium", "high", "xhigh", "max"] },
+    ]);
+    const beta = await catalogGateway([
+      { id: "b1", effort: { supported_levels: ["low", "high", "max"] } },
+    ]);
+    const home = await twoProviderHome(
+      { baseUrl: alpha.baseUrl, models: { a1: { contextWindow: 8192, maxOutput: 512 } } },
+      { baseUrl: beta.baseUrl, models: { b1: { contextWindow: 8192, maxOutput: 512 } } },
+    );
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        // 等 `alpha` 的能力到位再切：`extra` 发 `xhigh` 只可能来自那个目录。
+        { cmd: "setModel", model: "beta/b1" },
+      ],
+      {
+        // 判据是 **beta 的能力生效**，不是"已经切到 beta"：切模型与取能力是
+        // 两个异步步骤，中间那个 `state` 用的是缺省映射（`extra → high`），
+        // 正好与目标值相同 —— 按它判会早一步收工。这里等 `medium → low`，
+        // 那是 beta 独有的结果（缺省映射里 medium 发 medium）。
+        until: (all) => {
+          const last = states(all).at(-1);
+          const stops = last?.effortChoices?.stops ?? [];
+          return last?.model === "beta/b1"
+            && stops.some((stop) => stop.value === "medium" && stop.sends === "low");
+        },
+        timeoutMs: 30_000,
+      },
+    );
+
+    const stops = states(events).at(-1).effortChoices.stops;
+    const byTier = Object.fromEntries(stops.map((stop) => [stop.value, stop.sends]));
+    // `beta` 只报 {low, high, max}。按「秩 ≤ 该档的最高者」：
+    //   medium(3) → low(2)    extra(5) → high(4)
+    //   high(4) → high(4)     max(6)/galaxy(7) → max(6)
+    // 关键判据是 `extra`：`alpha` 的表会把它算成 `xhigh`，`beta` 的表算成
+    // `high`。两种结果不同，所以这条能抓住「还在用上一个 provider 的表」。
+    expect(byTier.medium).toBe("low");
+    expect(byTier.extra).toBe("high");
+    expect(byTier.max).toBe("max");
+    // `xhigh` 只可能来自 `alpha`，它不该出现在 `beta` 的结果里。
+    expect(stops.some((stop) => stop.sends === "xhigh")).toBe(false);
   }, HOST_TIMEOUT_MS);
 });
 

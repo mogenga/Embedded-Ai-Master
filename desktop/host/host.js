@@ -1152,8 +1152,18 @@ let modelCatalog;
  * is rare; fetching it on every launch would put a network round-trip in front
  * of the first prompt. A day is short enough that a new model shows up without
  * the operator doing anything, long enough that launches are offline.
+ *
+ * **Keyed per provider.** One flat map used to hold whatever the *current*
+ * provider's catalogue said, so switching from one gateway to another left the
+ * second one's models missing until the entry expired (2026-11-10: the
+ * operator's DeepSeek key reports three levels, and the panel showed three
+ * defaults instead because only the other gateway had ever been fetched).
  */
 const CATALOG_CACHE_FILE = "model-catalog.json";
+
+/** The cache file when it predates per-provider keying: one flat map. */
+const CATALOG_LEGACY_VERSION = 1;
+const CATALOG_CACHE_VERSION = 2;
 const CATALOG_TTL_MS = 24 * 60 * 60 * 1000;
 /** Nothing the UI waits on: the catalog is an enhancement to `stops`. */
 const CATALOG_TIMEOUT_MS = 2000;
@@ -1162,15 +1172,28 @@ function catalogCachePath() {
   return path.join(harnessHome, CATALOG_CACHE_FILE);
 }
 
-/** The cached entries, or `undefined` when the file is missing/stale/unreadable. */
-function readCachedCatalog() {
+/**
+ * The cached catalogue for one provider, or `undefined` when that provider has
+ * no fresh entry.
+ *
+ * The file is `{ version: 2, providers: { <providerName>: { fetchedAt, models } } }`.
+ * A version-1 file (one flat `models` map) is treated as absent: it does not
+ * say which gateway its entries came from, and guessing would hand a model's
+ * capability to the wrong provider.
+ */
+function readCachedCatalog(providerName) {
   try {
     const text = readFileSync(catalogCachePath(), "utf8");
     const parsed = JSON.parse(text);
     if (typeof parsed !== "object" || parsed === null) return undefined;
-    const fetchedAt = Number(parsed.fetchedAt);
+    if (Number(parsed.version) !== CATALOG_CACHE_VERSION) return undefined;
+    const providersCache = parsed.providers;
+    if (typeof providersCache !== "object" || providersCache === null) return undefined;
+    const entry = providersCache[providerName];
+    if (typeof entry !== "object" || entry === null) return undefined;
+    const fetchedAt = Number(entry.fetchedAt);
     if (!Number.isFinite(fetchedAt) || Date.now() - fetchedAt > CATALOG_TTL_MS) return undefined;
-    const models = parsed.models;
+    const models = entry.models;
     if (typeof models !== "object" || models === null) return undefined;
     return models;
   } catch {
@@ -1180,9 +1203,27 @@ function readCachedCatalog() {
   }
 }
 
-async function writeCachedCatalog(models) {
+/** Read the whole cache file as an object, or an empty skeleton. */
+function readCatalogFile() {
   try {
-    await writeFile(catalogCachePath(), JSON.stringify({ fetchedAt: Date.now(), models }), "utf8");
+    const parsed = JSON.parse(readFileSync(catalogCachePath(), "utf8"));
+    if (typeof parsed === "object" && parsed !== null
+      && Number(parsed.version) === CATALOG_CACHE_VERSION
+      && typeof parsed.providers === "object" && parsed.providers !== null) {
+      return parsed;
+    }
+  } catch {
+    /* fall through to a fresh skeleton */
+  }
+  return { version: CATALOG_CACHE_VERSION, providers: {} };
+}
+
+/** Store one provider's catalogue, keeping every other provider's entry. */
+async function writeCachedCatalog(providerName, models) {
+  try {
+    const file = readCatalogFile();
+    file.providers[providerName] = { fetchedAt: Date.now(), models };
+    await writeFile(catalogCachePath(), JSON.stringify(file), "utf8");
   } catch {
     // A cache that cannot be written costs one network call next launch.
   }
@@ -1233,25 +1274,50 @@ async function fetchCatalog(provider) {
  * network answer differs from what the handshake used, a fresh `state` is sent
  * so the panel's stop list catches up without the operator reopening it.
  */
+/**
+ * 每次「哪个 provider 是当前的」发生变化就 +1。
+ *
+ * 抓目录是异步的，而换模型 / 改配置都可能在它飞行途中发生。没有这个代次，
+ * 先发出的那次请求会用**旧 provider** 的能力表覆盖掉新的（2026-11-10 实测：
+ * 从 `wb` 切到 `deepseek` 后，面板仍显示前者的五档）。响应回来时代次不符就
+ * 丢弃——**不写内存、也不写缓存**，缓存按 provider 分开，那一次的结果仍然
+ * 属于它自己的 provider，可以照写。
+ */
+let catalogGeneration = 0;
+
+/** 让在途的抓取作废。换模型 / 改配置时调用。 */
+function invalidateCatalog() {
+  catalogGeneration += 1;
+  modelCatalog = undefined;
+}
+
 async function refreshCatalog({ force = false } = {}) {
-  if (modelCatalog !== undefined) return modelCatalog;
-  const cached = force ? undefined : readCachedCatalog();
-  if (cached !== undefined) {
-    modelCatalog = cached;
-    return modelCatalog;
-  }
-  let provider;
+  if (modelCatalog !== undefined && !force) return modelCatalog;
+  const generation = catalogGeneration;
+  let resolved;
   try {
-    provider = kernel.resolveModelRef(providers, modelRef).provider;
+    resolved = kernel.resolveModelRef(providers, modelRef);
   } catch {
     // No resolved model means no provider to ask. An empty catalog is the
     // honest answer; the fallback levels still work.
-    modelCatalog = {};
-    return modelCatalog;
+    if (generation === catalogGeneration) modelCatalog = {};
+    return modelCatalog ?? {};
+  }
+  const { provider, providerName } = resolved;
+  const cached = force ? undefined : readCachedCatalog(providerName);
+  if (cached !== undefined) {
+    if (generation === catalogGeneration) modelCatalog = cached;
+    return cached;
   }
   const fetched = await fetchCatalog(provider);
+  // 缓存仍然写：它按 provider 分开，这一份属于刚问的那个网关，谁在用它
+  // 是另一回事。
+  if (fetched !== undefined) await writeCachedCatalog(providerName, fetched);
+  if (generation !== catalogGeneration) {
+    // 期间换过 provider：这次结果已经过时，不写回内存。
+    return modelCatalog ?? {};
+  }
   modelCatalog = fetched ?? {};
-  if (fetched !== undefined) await writeCachedCatalog(fetched);
   return modelCatalog;
 }
 
@@ -4135,6 +4201,13 @@ const handlers = {
       return;
     }
     modelRef = wanted;
+    // 换模型可能就是换 provider：缓存是**按 provider** 存的，但内存里这一份是
+    // 上一个 provider 的。清掉重取，否则新 provider 的模型会一直查不到能力
+    // （2026-11-10：`wb` → `deepseek` 时就卡在这里，那个 key 明明报了三个档）。
+    invalidateCatalog();
+    refreshCatalog()
+      .then(() => send(stateEvent()))
+      .catch(() => undefined);
     void runner?.close();
     runner = createRunner();
     send(stateEvent());
@@ -4171,7 +4244,7 @@ const handlers = {
     // table describes a gateway nobody is talking to any more. Drop it: the
     // next `effortChoices()` re-reads the cache, and a stale table would put
     // stops on the panel for a model this gateway does not have.
-    modelCatalog = undefined;
+    invalidateCatalog();
     refreshCatalog().catch(() => undefined);
     modelList = buildModelList(providers);
     const stillValid = modelList.some((model) => model.id === modelRef);
@@ -4498,7 +4571,7 @@ const handlers = {
       providersError = "";
       // Same reason as `saveProviders`: the table belongs to the gateway that
       // was configured when it was fetched.
-      modelCatalog = undefined;
+      invalidateCatalog();
       refreshCatalog().catch(() => undefined);
     } catch (error) {
       providers = {};
