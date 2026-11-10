@@ -1,6 +1,6 @@
 # AGENTS.md — Embedded-Ai-Master
 
-面向嵌入式调试场景的 agent 工具。当前已发布 **v0.3.0**（2026-11-09）：P0 内核（`src/`）、桌面前端（`desktop/`）与领域层 MCP server（`mcp-servers/`：probe / serial / keil / kb / embedded / datasheet）均已实现，测试在 `tests/`（`tests/desktop` 为协议层与宿主，`mcp-servers/*/tests` 为领域层）。按 `docs/BRD.md` 的里程碑口径，M2（领域层建设 + 扩展与安全）的主体已落地，**当前推进的是 M3**（交互与自动化：观测、todo 外化、BR-6 设备面板、BR-7 夜批管线，见「M3 剩余范围」）；阶段判断以用户确认为准，不要自行宣布进入下一阶段。构建与脚本配置见 `package.json` / `tsconfig*.json` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/ledgers/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
+面向嵌入式调试场景的 agent 工具。当前已发布 **v0.3.2**（2026-11-10）：P0 内核（`src/`）、桌面前端（`desktop/`）与领域层 MCP server（`mcp-servers/`：probe / serial / keil / kb / embedded / datasheet）均已实现，测试在 `tests/`（`tests/desktop` 为协议层与宿主，`mcp-servers/*/tests` 为领域层）。按 `docs/BRD.md` 的里程碑口径，M2（领域层建设 + 扩展与安全）的主体已落地，**当前推进的是 M3**（交互与自动化：观测、todo 外化、BR-6 设备面板、BR-7 夜批管线，见「M3 剩余范围」）；阶段判断以用户确认为准，不要自行宣布进入下一阶段。构建与脚本配置见 `package.json` / `tsconfig*.json` / `vitest.config.ts`；剩余修复与外部验证项见 `docs/ledgers/deferred-issues.md`。技术栈与命令以 `package.json` 与 `README.md` 为准，不要臆造。
 
 ## 事实源（先读这些，别猜）
 
@@ -90,6 +90,8 @@
   **界面**：对话区上方一行子代理条（几个在跑、各跑了多久），展开后逐条可点；点开是子会话的**只读回放**（宿主 `sessionId` 留在父会话，`prompt` 被拒），顶部有返回父会话的提示。路径由 `desktop/host/subagent-session.js` 解析——父子 id 各自过 `isValidSessionId`，`subagents` 是字面量。
 - **外部命令钩子**：`$HARNESS_HOME/hooks.json` 的 `preToolUse` / `postToolUse`，退出码 2 阻断、其它非 0 fail-closed，`postToolUse` 的 stdout 追加进结果正文并把 `evidence` 降为 false。接在权限层**之后**（`executeAuthorized`），所以只能收紧不能放行。契约见 `docs/operations/hooks.md`。**桌面形态不加载项目级钩子**（与 MCP / permissions 同一姿态：宿主不传 `trustProjectConfig`）。**`/hook` 列出当前生效的条目，`/hook reload` 重读——只重读给界面看，正在跑的会话仍用它启动时那份。**
 - 主循环：流式片段落盘、`thinking_delta` 推理通道、三级上下文压缩、`deadlineMs` 整跑墙钟、连续截断上限 3 次、`context_length_exceeded` 恢复一次。
+- **推理强度：三级回退**（2026-11-10）。解析某档实际发什么，依次看 ① 网关 `GET /v1/models` 报的能力（`reasoning_efforts` / `effort.supported_levels`，字段名有别名表，见 `src/model/catalog.ts`）→ ② `providers.json` 的 `reasoningLevels` → ③ `effortMap` / `DEFAULT_EFFORT_MAP`。规则是「取 ≤ 该档的最高可用值」（`resolveTierAgainst`），与 Claude Code 文档同一条。**`supportsReasoning: false` 仍最优先**；目录能推翻「用户没声明」，因为它是执行方。宿主把目录按 provider 分开缓存 24h（`$HARNESS_HOME/model-catalog.json` v2），换 provider 时作废在途抓取（代次号）。
+  **界面**：脑形滑块卡片，**固定六格**（Low/Medium/High/Extra/Max/Galaxy，`auto` 不占格）。每格下方标出该模型实际会发的协议值；没有对应值的格画 `—` 并吸附到最近可用档。契约见 `docs/specs/effort-tiers.md`。
 - 系统提示词**只有 `environment` 一节**（工作目录 / 平台 / shell / 会话日期），投影期注入、不写日志。
 
 **内核没有（不要假装有）**
@@ -127,6 +129,7 @@
 - **外部验证**（D-111 / D-157 / D-211，D-212 已关）：
   - **仍未实测**：live 网关、真实第三方 MCP、真机串口与 OpenOCD（D-111 / D-157）、Windows 代码签名（D-211）。任何「Keil / 串口链路已验证」「签名已生效」的说法在这些条目关闭前**都不成立**。
   - **2026-11-09 已实测**：干净机器安装 v0.3.0 通过；一次真实的应用内更新跑通（旧版收到 v0.3.0 提示 → 下载 → 重启安装完成），D-212 随之关闭。**只跑过一次**，后续版本仍应在发布后各验一次。
+  - **v0.3.1 与 v0.3.2 均未做上面两项验证**（2026-11-10 仅完成打包与发布）。
   - **批次 10 已标「不做」（2026-11-09）**，退出排期——但标注不改变上面那张「未实测」清单，详见 `docs/BACKLOG.md` 批次 10 的 WARNING 块。
 
 ## 危险命令测试禁令（强制，2026-10-18 事故后新增）
@@ -207,4 +210,6 @@ Windows 为一等公民（git-bash）。已知坑（详见 BRD §13 / §11.2）�
 - **内核不含领域逻辑**：探针 / 串口 / KB 等嵌入式能力一律经 MCP 挂载；`src/` 只放平台层能力。
 - **新增会话事件类型 = 四处同步**：`src/session/types.ts` 的 `EventType`、`src/session/persistence.ts` 的 `EVENT_TYPES`（读盘白名单）、`src/context/build.ts` 的投影 `switch`、`desktop/renderer/protocol.js` 的 `KNOWN_TYPES`，另加事件能力矩阵 `desktop/MATRIX.md`。少一处就是「整份日志读不出来」或「整屏未识别事件」。
 - **新增前端能力前先看 `desktop/MATRIX.md`**：内核没有的能力隐藏入口（宿主回 `notice`），不要画一个点了会报错的按钮。
+- **新增一个渲染层模块要过两道门**：`npm run check:js` 会真的 `link()` 一遍相对 import，缺导出会当场失败（2026-11-09 事故 `main.js` 的悬空 import 之后加的）；但它**不查作用域**——模块里引用了未声明的常量只有真实窗口能发现，写测试时用「常量既都有声明、也都真的被用到」那类静态断言兜（`tests/desktop/galaxy-effort.test.js` 是范例）。
+- **`desktop/renderer/styles.css` 有一条全局 `svg { width:16px; height:16px }`**（应用自己的图标语言）。组件里的 SVG **必须显式写回尺寸**，否则会被压成 16px 且没有任何报错——脑形滑块踩过（2026-11-10）。同理，组件样式用 `.ge-` 之类的前缀，别用会被 `styles.css` 命中的裸类名。
 - **工具链包管理**（`src/packs/`）是平台层，不属于领域层 MCP；其权限语义（`installPack` 允许、`removePack` 恒需审批）见 `docs/operations/toolchain-packs.md`。
