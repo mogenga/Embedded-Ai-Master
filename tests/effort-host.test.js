@@ -434,6 +434,35 @@ describe("desktop host 的推理强度", () => {
  * `low/medium/high/xhigh/max`。停靠站里出现 `extra` 只可能来自目录。
  */
 describe("网关目录优先于缺省映射", () => {
+  it("模型没有声明 supportsReasoning，但网关报了能力 → 用网关的", async () => {
+    // 用户这台网关的真实状态：`providers.json` 里每个模型只有 contextWindow，
+    // 一个推理字段都没有，而 `/v1/models` 逐个报 reasoning_efforts。
+    // 「用户没声明」不等于「模型不支持」—— 这条钉住这个区别，否则一次重构
+    // 把 `supportsReasoning` 的判断放回目录之前，滑块就会永远停在 Off。
+    const gateway = await catalogGateway([
+      {
+        id: "flash",
+        reasoning_efforts: ["low", "medium", "high", "xhigh", "max"],
+        reasoning_default_effort: "max",
+      },
+    ]);
+    const home = await tempHome(PLAIN_MODELS, gateway.baseUrl);
+
+    const events = await runHost(home, [{ cmd: "init", cwd: home }], {
+      until: (all) => states(all).some(
+        (event) => (event.effortChoices?.stops ?? []).some((stop) => stop.value === "extra"),
+      ),
+      timeoutMs: 25_000,
+    });
+
+    const stops = states(events).at(-1).effortChoices.stops;
+    expect(stops.map((stop) => stop.value)).toStrictEqual([
+      "auto", "low", "medium", "high", "extra", "max",
+    ]);
+    // 目录推翻了「不支持」的判断，所以那个标记不该再亮着。
+    expect(states(events).at(-1).effortChoices.unsupported).toBe(false);
+  }, HOST_TIMEOUT_MS);
+
   it("目录报五档时，停靠站跟着变成五档而不是三档", async () => {
     const gateway = await catalogGateway([
       {

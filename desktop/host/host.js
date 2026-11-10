@@ -141,6 +141,7 @@ try {
       resolveEffortTier,
       acceptedEfforts,
       resolveTierAgainst,
+      resolveProviderApiKey,
     },
     { isValidSessionId },
     // `resumeSession` is here rather than in the `/compact` batch below because
@@ -236,6 +237,7 @@ try {
     // 守卫，缺了就等于「网关没报能力」，回落到第 3 级。
     acceptedEfforts,
     resolveTierAgainst,
+    resolveProviderApiKey,
     // 目录解析在另一个模块，且可能在 import 期缺失（见 `catalogModule`）。
     // 这里用 getter：`kernel` 在本文件靠前处组装，那时 catalogModule 还没 await。
     get extractCatalog() {
@@ -1057,11 +1059,25 @@ function effortChoices() {
   }
   if (typeof cfg.reasoningEffort === "string") choices.default = cfg.reasoningEffort;
 
-  if (!kernel.supportsReasoning(cfg)) {
+  // **"The operator did not declare it" is not the same as "it does not work".**
+  //
+  // `supportsReasoning` answers only from `providers.json`, which is a hand-
+  // written declaration. A gateway that reports `reasoning_efforts` in its
+  // catalog knows better than an absent field, so a model with no declaration
+  // but a catalog entry gets the catalog's stops (2026-11-10; this is exactly
+  // the state the operator's own gateway is in — every model there declares
+  // nothing and reports five levels).
+  //
+  // The explicit `supportsReasoning: false` still wins: that is the operator
+  // saying "this one does not take the parameter", which no catalog should
+  // override.
+  const declared = kernel.supportsReasoning(cfg);
+  const capabilitySaysYes = capability?.efforts !== undefined && capability.efforts.length > 0;
+  if (!declared && !capabilitySaysYes) {
     // One stop, and its label says what happens rather than what could happen.
     // `unsupported` stays for any renderer-side decision that is not about the
-    // slider's length (the note is gone as of 2026-11-09; the flag is kept
-    // because it is a fact about the model, not about this control).
+    // slider's length; the flag is a fact about the model, not about this
+    // control.
     choices.unsupported = true;
     choices.stops = [{ value: "auto", label: "Off", sends: null }];
     return choices;
@@ -4711,7 +4727,13 @@ const handlers = {
       send({ type: "notice", level: "warn", text: "没有可用模型，无法设置推理强度" });
       return;
     }
-    if (!kernel.supportsReasoning(cfg)) {
+    // Same rule as `effortChoices`: a gateway that reports the model's levels
+    // knows better than an absent declaration (2026-11-10). `supportsReasoning:
+    // false` still wins — the code below only runs when the declaration is
+    // missing *and* the catalog is silent.
+    const capabilityNow = catalogFor(modelRef);
+    const catalogSaysYes = capabilityNow?.efforts !== undefined && capabilityNow.efforts.length > 0;
+    if (!kernel.supportsReasoning(cfg) && !catalogSaysYes) {
       // `auto` is still accepted: it means "send nothing", which is exactly
       // what this model's requests do, so refusing it would be false. Anything
       // else is refused, naming the model and the field to edit — "unsupported"
@@ -4734,7 +4756,7 @@ const handlers = {
     // one). The catalog's set is what makes `xhigh` / `max` acceptable at all —
     // the kernel's own whitelist deliberately stops at `high`, because it has
     // no way to know a gateway that accepts more.
-    const capability = catalogFor(modelRef);
+    const capability = capabilityNow;
     const accepted = typeof kernel.acceptedEfforts === "function"
       ? kernel.acceptedEfforts(cfg, capability)
       : undefined;
