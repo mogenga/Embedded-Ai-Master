@@ -221,6 +221,34 @@
   pointer-events: none;
 }
 
+/* 每一格实际会发的协议值（2026-11-10）。位置由 JS 按同一套
+   `TRACK_START_X + i × 358 / span` 写 left，`span` 是 translateX(-50%) 让它
+   以刻度点为中轴对齐 —— 与刻度圆点用同一个映射，两者不会错开。 */
+.ge-sends {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  /* `Recommended` 占 205..234（top 205 + line-height 29），卡片到 258 为止，
+     所以这一行落在 236..252 —— 正好用掉剩下的空白，卡片尺寸仍是规格的 258。 */
+  top: 236px;
+  height: 16px;
+  pointer-events: none;
+}
+
+.ge-send {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 12px;
+  line-height: 16px;
+  color: #6f6f6f;
+  white-space: nowrap;
+}
+
+/* 这一格在这个模型上没有请求值。短横用更暗的色，读起来是"空"而不是一个值。 */
+.ge-send.ge-send-none {
+  color: #4a4a4a;
+}
+
 /* 滑块的透明命中区：左 22、右 22、上 133、高 72、圆角 12（规格 §1）。
    `touch-action: none` 在这里也写一份：JS 里写的是内联样式，这一份保证
    样式表被单独复用时行为一致。 */

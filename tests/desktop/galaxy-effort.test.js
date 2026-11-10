@@ -590,6 +590,53 @@ describe("每档一个下标：上界是 stops.length - 1", () => {
   });
 });
 
+describe("每格实际发什么（2026-11-10 用户决定）", () => {
+  it("stops 的 sends 被原样保留，缺省时不报一个编出来的值", () => {
+    // 宿主用 `sends` 告诉界面这一格实际发什么。`null` 是「这一档在这个模型上
+    // 没有请求值」，与「字段缺席」（演示页那种只给 value/label 的调用）不同。
+    const parsed = normaliseStops([
+      { value: "auto", label: "Auto", sends: null },
+      { value: "low", label: "Low", sends: "high" },
+      { value: "medium", label: "Medium" },
+    ]);
+    expect(parsed[0].sends).toBeNull();
+    expect(parsed[1].sends).toBe("high");
+    expect(Object.hasOwn(parsed[2], "sends")).toBe(false);
+  });
+
+  it("每一格一个标签节点，位置与刻度点同一套映射", () => {
+    const source = CODE.slice(CODE.indexOf("const sendLabels"));
+    expect(source.slice(0, 900)).toContain("TRACK_START_X + index * (TRACK_END_X - TRACK_START_X) / span");
+    // 与刻度点同一个表达式 —— 两行对不上会让人以为标签属于别的格子。
+    const dots = CODE.slice(CODE.indexOf("const dots"), CODE.indexOf("const dots") + 600);
+    expect(dots).toContain("TRACK_START_X + index * (TRACK_END_X - TRACK_START_X) / span");
+  });
+
+  it("拖到没有请求值的格子会吸附到最近的可用档（指针 / 键盘 / commit 三处都过）", () => {
+    const body = bodyOf(SOURCE, "  function commit(next) {");
+    // 提交前吸附一次，兜住所有入口（外部 `setValue` 也走这里）。
+    expect(body).toContain("nearestAvailable(");
+    const up = bodyOf(SOURCE, "  function onPointerUp(event) {");
+    // 先吸附再落位：`setTarget` 决定脑形停在哪，与提交用不同的下标会让脑形
+    // 停在没有请求值的格子上。
+    expect(up).toContain("nearestAvailable(");
+    expect(up.indexOf("nearestAvailable(")).toBeLessThan(up.indexOf("setTarget("));
+    const keys = bodyOf(SOURCE, "  function keyboardTo(index) {");
+    expect(keys).toContain("nearestAvailable(");
+    // 吸附方向写明：先向上找（更强的档），再向下找。
+    const helper = bodyOf(SOURCE, "  function nearestAvailable(index) {");
+    expect(helper).toContain("if (up <= span");
+    expect(helper).toContain("if (down >= 0");
+  });
+
+  it("没有请求值的格子画短横，并加一个可区分样式的类", () => {
+    expect(CODE).toContain('node.textContent = stops[index].sends ?? "—"');
+    expect(CODE).toContain("ge-send-none");
+    const css = CSS;
+    expect(css).toContain(".ge-send-none");
+  });
+});
+
 describe("Galaxy 只在它是最高一档时启用", () => {
   it("六档：galaxy 在最后 → 下标 5", () => {
     expect(galaxyIndexOf(SIX_STOPS)).toBe(5);

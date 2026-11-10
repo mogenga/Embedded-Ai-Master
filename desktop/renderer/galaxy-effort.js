@@ -205,7 +205,10 @@ export function normaliseStops(stops) {
       || typeof stop.value !== "string" || typeof stop.label !== "string" || stop.label === "") {
       throw new Error(`createGalaxyEffort: stops[${index}] must be { value: string, label: string }`);
     }
-    return { value: stop.value, label: stop.label };
+    // `sends` 是可选的第 3 个字段：宿主用它告诉界面这一格实际发什么。
+    // 缺省（演示页那种只给 value/label 的调用）不报一个编出来的值。
+    const sends = typeof stop.sends === "string" ? stop.sends : (stop.sends === null ? null : undefined);
+    return { value: stop.value, label: stop.label, ...(sends === undefined ? {} : { sends }) };
   });
 }
 
@@ -525,6 +528,35 @@ export function createGalaxyEffort(options = {}) {
   const recommended = element("div", "ge-recommended");
   recommended.textContent = "Recommended";
 
+  /**
+   * 每格实际会发的协议值，画在轨道下方一行（2026-11-10 用户决定）。
+   *
+   * 固定六格之后，同一个值会被多个档位发出去：缺省映射把 `extra` / `max` /
+   * `galaxy` 全折成 `high`；一个最低只到 `high` 的模型，`low` 与 `medium` 也
+   * 发 `high`。只在选中时给一句 hint 不够——**没选中时看不出来**，于是六格
+   * 看起来像六种强度。
+   *
+   * 这一行把每一格的真值直接印在它下面。它与轨道同宽、同样按 `span` 均分，
+   * 位置算法与刻度点完全一致（`TRACK_START_X + i × 358 / span`），所以两者
+   * 永远对得上；`paint()` 每帧只改文本，不改布局。
+   */
+  const sendLabels = element("div", "ge-sends");
+  const sendLabelNodes = [];
+  for (let index = 0; index < stops.length; index += 1) {
+    const node = element("span", "ge-send");
+    // `sends === null` 表示这一档在这个模型上没有请求值（网关不提供 ≤ 它的
+    // 任何档）。画一个短横而不是编一个值：这一格拖过去会吸附到最近的可用档，
+    // 但「它自己发什么」的答案是"没有"。
+    node.textContent = stops[index].sends ?? "—";
+    if (stops[index].sends === null || stops[index].sends === undefined) {
+      node.classList.add("ge-send-none");
+    }
+    const nodeX = single ? TRACK_START_X : TRACK_START_X + index * (TRACK_END_X - TRACK_START_X) / span;
+    node.style.left = `${nodeX}px`;
+    sendLabelNodes.push(node);
+    sendLabels.append(node);
+  }
+
   const slider = element("div", "ge-slider");
   // 触屏上必须自己吃掉手势，否则拖动会先滚动页面、`pointermove` 中途被取消。
   // 写在元素上而不是只靠 CSS：这是**行为**而不是外观，样式表没加载时拖拽也得能用。
@@ -570,7 +602,7 @@ export function createGalaxyEffort(options = {}) {
   const radialCanvas = element("canvas", "ge-radial");
 
   slider.append(track, brain.wrap);
-  card.append(title, help, bubble, scale, recommended, radialCanvas, slider);
+  card.append(title, help, bubble, scale, recommended, sendLabels, radialCanvas, slider);
   root.append(card);
   mountNode.append(root);
 
@@ -835,9 +867,32 @@ export function createGalaxyEffort(options = {}) {
    * 单档时直接不派发：位置不可能变，发一条"用户选了那唯一一档"的命令只会让
    * 宿主以为发生过一次选择（对话框、日志、`run.json` 都会留下一条假记录）。
    */
+  /**
+   * 从某一格出发，落到**最近的、真的能发东西的**那一格。
+   *
+   * 2026-11-10 用户决定：固定六格之后，一个最低只到 `high` 的模型会在最左边
+   * 留下两格没有请求值（`sends: null`）。拖到那里**吸附**到最近的可用档，而不是
+   * 发一个空请求，也不是拒绝拖动——拒绝会让这两格看起来像坏掉的控件。
+   *
+   * 先向**上**找（更强的档），再向**下**找。向上的理由：用户拖到 `Low` 是想要
+   * 更省，这个模型给不了；给它能给的最省（`high`）比回到 `Auto`（完全不提要求）
+   * 更接近意图。全都不可用时退回 0（`Auto`），那是唯一永远成立的一格。
+   */
+  function nearestAvailable(index) {
+    const at = clamp(index, 0, span);
+    if (stops[at].sends !== null && stops[at].sends !== undefined) return at;
+    for (let step = 1; step <= span; step += 1) {
+      const up = at + step;
+      if (up <= span && stops[up].sends != null) return up;
+      const down = at - step;
+      if (down >= 0 && stops[down].sends != null) return down;
+    }
+    return 0;
+  }
+
   function commit(next) {
     if (single) return;
-    const index = normaliseValue(next, span);
+    const index = normaliseValue(nearestAvailable(normaliseValue(next, span)), span);
     const detail = { index, value: stops[index].value, label: stops[index].label };
     root.dispatchEvent(new CustomEvent("effort-change", {
       detail,
@@ -939,7 +994,9 @@ export function createGalaxyEffort(options = {}) {
     event.preventDefault();
     activePointer = null;
     if (slider.hasPointerCapture(event.pointerId)) slider.releasePointerCapture(event.pointerId);
-    const index = Math.round(valueAtPointer(event));
+    // 先吸附再落位：`setTarget` 决定脑形停在哪，`commit` 决定发什么。两处
+    // 用不同的下标会让脑形停在一个没有请求值的格子上，而界面显示的是另一档。
+    const index = nearestAvailable(Math.round(valueAtPointer(event)));
     setTarget(index);
     commit(index);
   }
@@ -962,7 +1019,9 @@ export function createGalaxyEffort(options = {}) {
    */
   function keyboardTo(index) {
     if (single) return;
-    const next = clamp(index, 0, span);
+    // 键盘与指针走同一条吸附：方向键按到没有请求值的那一格时，落点与提交
+    // 都挪到最近的可用档，而不是停在空档上。
+    const next = nearestAvailable(clamp(index, 0, span));
     setTarget(next);
     commit(next);
   }
