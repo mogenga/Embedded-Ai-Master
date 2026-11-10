@@ -43,17 +43,28 @@ const EFFORTS_KEYS = [
   "supported_effort_levels",
   "reasoning_levels",
   "efforts",
+  // DeepSeek 官方 API 的形状（2026-11-10 实测）：能力塞在一个 `effort` 对象里。
+  "effort.supported_levels",
 ] as const;
 
 const DEFAULT_EFFORT_KEYS = [
   "reasoning_default_effort",
   "default_reasoning_level",
   "default_effort",
+  "effort.default_level",
 ] as const;
 
-const FIXED_EFFORT_KEYS = ["reasoning_fixed_effort", "fixed_reasoning_effort"] as const;
+const FIXED_EFFORT_KEYS = [
+  "reasoning_fixed_effort",
+  "fixed_reasoning_effort",
+  "effort.fixed_level",
+] as const;
 
-const CAN_DISABLE_KEYS = ["reasoning_can_disable", "can_disable_reasoning"] as const;
+const CAN_DISABLE_KEYS = [
+  "reasoning_can_disable",
+  "can_disable_reasoning",
+  "effort.can_disable",
+] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -94,18 +105,38 @@ function normalizeEfforts(items: unknown): string[] | undefined {
   return [...ranked.sort((left, right) => left.rank - right.rank).map((entry) => entry.value), ...unknown];
 }
 
-/** 别名表取值：第一个**类型对**的键胜出；类型不对的键跳过，继续试下一个。 */
+/**
+ * 别名表取值：第一个**类型对**的键胜出；类型不对的键跳过，继续试下一个。
+ *
+ * 键可以写成点号路径（`"effort.supported_levels"`），用于那些把能力塞进
+ * 子对象的网关：DeepSeek 的 `GET /models` 报的是
+ * `{"effort": {"supported_levels": [...], "default_level": "high"}}`，
+ * 平铺的表一条都命中不了。点号写法让"一层嵌套"不需要第二套机制；
+ * 中途缺一层就当作这个键不存在。
+ */
 function pick<T>(
   record: Record<string, unknown>,
   keys: readonly string[],
   accept: (value: unknown) => T | undefined,
 ): T | undefined {
   for (const key of keys) {
-    if (!Object.hasOwn(record, key)) continue;
-    const value = accept(record[key]);
-    if (value !== undefined) return value;
+    const value = readPath(record, key);
+    if (value === undefined) continue;
+    const parsed = accept(value);
+    if (parsed !== undefined) return parsed;
   }
   return undefined;
+}
+
+/** 按点号路径取值；任一层不是对象或不存在就返回 `undefined`。 */
+function readPath(record: Record<string, unknown>, key: string): unknown {
+  if (!key.includes(".")) return Object.hasOwn(record, key) ? record[key] : undefined;
+  let cursor: unknown = record;
+  for (const part of key.split(".")) {
+    if (!isRecord(cursor) || !Object.hasOwn(cursor, part)) return undefined;
+    cursor = cursor[part];
+  }
+  return cursor;
 }
 
 function stringOf(value: unknown): string | undefined {

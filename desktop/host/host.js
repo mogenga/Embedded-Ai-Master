@@ -1083,20 +1083,37 @@ function effortChoices() {
     return choices;
   }
 
+  // **Always six stops, always the same six** (2026-11-10 用户决定：
+  // 「永远六格，各家模型适配做映射」).
+  //
+  // The previous shape drew one stop per distinct value the model could send,
+  // so a model with three levels got a three-stop track. That made the control
+  // honest but unrecognisable from one model to the next: the same setting was
+  // a different-length track depending on which model happened to be selected,
+  // and the operator had to relearn the scale on every switch.
+  //
+  // Now the track is a fixed scale — Low … Galaxy — and the **mapping** adapts
+  // per model: each stop resolves through `resolveTierAgainst` to the highest
+  // value the model accepts at or below that tier. That is the same rule
+  // Claude Code documents ("falls back to the highest supported level at or
+  // below the one you set") and it is what makes one fixed scale usable across
+  // models with different vocabularies.
+  //
+  // `sends` travels with each stop so the panel can disclose what a tier
+  // actually requests when it differs from the tier's own name — three stops
+  // landing on `high` must not look like three different requests.
   choices.stops = [{ value: "auto", label: "Auto", sends: null }];
-  const seen = new Set();
   for (const tier of kernel.EFFORT_TIERS) {
     const sends = choices.resolved[tier];
-    // `null` means this tier has no request value on this model (the gateway
-    // offers nothing at or below it). Skipping — rather than drawing a stop
-    // that would send nothing — is the point of the capability catalog.
-    if (sends === null || sends === undefined) continue;
-    if (seen.has(sends)) continue;
-    seen.add(sends);
-    // `value` is the tier key `setEffort` accepts, and the first tier that
-    // produces this value — never a later one, or two stops would send the
-    // same thing while claiming to be different.
-    choices.stops.push({ value: tier, label: TIER_LABELS[tier] ?? tier, sends });
+    choices.stops.push({
+      value: tier,
+      label: TIER_LABELS[tier] ?? tier,
+      // `null` = this tier has nothing to send on this model (the gateway
+      // accepts nothing at or below it). The stop stays on the track — the
+      // scale is fixed — but it is reported as unavailable rather than as a
+      // request that will not happen.
+      sends: sends === null || sends === undefined ? null : sends,
+    });
   }
   return choices;
 }

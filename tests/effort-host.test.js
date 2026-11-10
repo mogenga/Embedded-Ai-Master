@@ -199,6 +199,9 @@ function runHost(home, commands, options = {}) {
 const states = (events) => events.filter((event) => event.type === "state");
 const notices = (events) => events.filter((event) => event.type === "notice");
 
+/** 六档的固定顺序（2026-11-10 起轨道长度不再随模型变化）。 */
+const SIX = ["auto", "low", "medium", "high", "extra", "max", "galaxy"];
+
 const PLAIN_MODELS = { flash: { contextWindow: 8192, maxOutput: 512 } };
 const REASONING_MODELS = {
   flash: { contextWindow: 8192, maxOutput: 512, supportsReasoning: true },
@@ -434,11 +437,9 @@ describe("desktop host 的推理强度", () => {
  * `low/medium/high/xhigh/max`。停靠站里出现 `extra` 只可能来自目录。
  */
 describe("网关目录优先于缺省映射", () => {
-  it("模型没有声明 supportsReasoning，但网关报了能力 → 用网关的", async () => {
-    // 用户这台网关的真实状态：`providers.json` 里每个模型只有 contextWindow，
-    // 一个推理字段都没有，而 `/v1/models` 逐个报 reasoning_efforts。
-    // 「用户没声明」不等于「模型不支持」—— 这条钉住这个区别，否则一次重构
-    // 把 `supportsReasoning` 的判断放回目录之前，滑块就会永远停在 Off。
+  it("模型没有声明 supportsReasoning，但网关报了能力 → 仍然六格，映射按网关", async () => {
+    // 2026-11-10 用户决定：「永远六格，各家模型适配做映射」。
+    // 轨道长度不再随模型变化，变的是每一档映射到哪个协议值。
     const gateway = await catalogGateway([
       {
         id: "flash",
@@ -450,20 +451,23 @@ describe("网关目录优先于缺省映射", () => {
 
     const events = await runHost(home, [{ cmd: "init", cwd: home }], {
       until: (all) => states(all).some(
-        (event) => (event.effortChoices?.stops ?? []).some((stop) => stop.value === "extra"),
+        (event) => (event.effortChoices?.stops ?? []).some((stop) => stop.sends === "xhigh"),
       ),
       timeoutMs: 25_000,
     });
 
-    const stops = states(events).at(-1).effortChoices.stops;
-    expect(stops.map((stop) => stop.value)).toStrictEqual([
-      "auto", "low", "medium", "high", "extra", "max",
-    ]);
+    const last = states(events).at(-1).effortChoices;
+    expect(last.stops.map((stop) => stop.value)).toStrictEqual(SIX);
     // 目录推翻了「不支持」的判断，所以那个标记不该再亮着。
-    expect(states(events).at(-1).effortChoices.unsupported).toBe(false);
+    expect(last.unsupported).toBe(false);
+    // 映射跟着网关走：`extra` 在这个模型上发 `xhigh`，而缺省映射只会发 `high`。
+    const byTier = Object.fromEntries(last.stops.map((stop) => [stop.value, stop.sends]));
+    expect(byTier.extra).toBe("xhigh");
+    expect(byTier.max).toBe("max");
+    expect(byTier.galaxy).toBe("max");
   }, HOST_TIMEOUT_MS);
 
-  it("目录报五档时，停靠站跟着变成五档而不是三档", async () => {
+  it("目录报五档时，轨道仍是六格，但 extra 发 xhigh 而不是 high", async () => {
     const gateway = await catalogGateway([
       {
         id: "flash",
@@ -474,53 +478,46 @@ describe("网关目录优先于缺省映射", () => {
     ]);
     const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
 
-    // The catalog is fetched after `ready`, so the stop list arrives in a
-    // **second** `state`. Waiting for "more stops" would deadlock on a gateway
-    // whose catalog does not change the list; wait for the second state and
-    // assert on what it says.
     const events = await runHost(home, [{ cmd: "init", cwd: home }], {
-      // The catalog fetch is fire-and-forget after `ready`, so the second
-      // `state` is the one that carries it. Waiting for the *content* rather
-      // than for a count keeps this honest: if the follow-up event stopped
-      // arriving, the test would time out instead of passing on a count.
       until: (all) => states(all).some(
-        (event) => (event.effortChoices?.stops ?? []).some((stop) => stop.value === "extra"),
+        (event) => (event.effortChoices?.stops ?? []).some((stop) => stop.sends === "xhigh"),
       ),
       timeoutMs: 25_000,
     });
 
     const stops = states(events).at(-1).effortChoices.stops;
-    // `xhigh` 只有目录知道，缺省映射永远算不出它 → `extra` 这一档存在就是证据。
-    expect(stops.map((stop) => stop.value)).toStrictEqual([
-      "auto", "low", "medium", "high", "extra", "max",
-    ]);
-    expect(stops.find((stop) => stop.value === "extra").sends).toBe("xhigh");
-    expect(stops.find((stop) => stop.value === "max").sends).toBe("max");
-    // galaxy 落在 max 上，与 max 重复，不该单独占一格。
-    expect(stops.some((stop) => stop.value === "galaxy")).toBe(false);
+    expect(stops.map((stop) => stop.value)).toStrictEqual(SIX);
+    const sends = Object.fromEntries(stops.map((stop) => [stop.value, stop.sends]));
+    // `xhigh` 只有目录知道 —— 缺省映射永远算不出它。
+    expect(sends.extra).toBe("xhigh");
+    expect(sends.galaxy).toBe("max");
+    // Auto 不发字段，永远如此。
+    expect(sends.auto).toBeNull();
   }, HOST_TIMEOUT_MS);
 
-  it("目录说只有 high/xhigh 时，低档不出现（拖不到就发不出去）", async () => {
+  it("目录说只有 high/xhigh 时，低档仍在轨道上但标为「没有请求值」", async () => {
+    // 固定六格的代价：一个最低只到 `high` 的模型，`low` / `medium` 没有对应的
+    // 请求值。它们**保留在轨道上**（尺度固定），但 `sends` 是 null —— 界面据此
+    // 知道拖到那里不会有请求，而不是假装它能发什么。
     const gateway = await catalogGateway([
       { id: "flash", supports_reasoning: true, reasoning_efforts: ["high", "xhigh"] },
     ]);
     const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
 
     const events = await runHost(home, [{ cmd: "init", cwd: home }], {
-      // 目录到达后 `low`/`medium` 会消失 —— 那才是这次要等的形状变化。
-      // 按 "有 high" 等会在第一个 `state` 上就命中，等于没等。
-      until: (all) => {
-        const last = states(all).at(-1);
-        if (last === undefined) return false;
-        const values = (last.effortChoices?.stops ?? []).map((stop) => stop.value);
-        return values.includes("auto") && !values.includes("low");
-      },
+      until: (all) => states(all).some(
+        (event) => (event.effortChoices?.stops ?? []).some((stop) => stop.sends === "xhigh"),
+      ),
       timeoutMs: 25_000,
     });
 
     const stops = states(events).at(-1).effortChoices.stops;
-    // 秩 ≤ low / medium 的值一个都没有，所以那两档不可用 —— 停靠站从 high 起。
-    expect(stops.map((stop) => stop.value)).toStrictEqual(["auto", "high", "extra"]);
+    expect(stops.map((stop) => stop.value)).toStrictEqual(SIX);
+    const sends = Object.fromEntries(stops.map((stop) => [stop.value, stop.sends]));
+    expect(sends.low).toBeNull();
+    expect(sends.medium).toBeNull();
+    expect(sends.high).toBe("high");
+    expect(sends.extra).toBe("xhigh");
   }, HOST_TIMEOUT_MS);
 
   it("目录报的 xhigh 真的上线（适配层不再按旧白名单拒绝）", async () => {
@@ -620,7 +617,7 @@ describe("宿主报告每一档实际会发的协议值", () => {
     expect(resolved.galaxy).toBe("high");
   }, HOST_TIMEOUT_MS);
 
-  it("默认映射下只给三档：Extra / Max / Galaxy 都发 high，不该各占一格", async () => {
+  it("默认映射下六格都在，后三格都报 high（映射表要如实说出来）", async () => {
     const gateway = await completionGateway();
     const home = await tempHome(REASONING_MODELS, gateway.baseUrl);
 
@@ -629,22 +626,20 @@ describe("宿主报告每一档实际会发的协议值", () => {
     });
     const stops = states(events)[0].effortChoices.stops;
 
-    // 2026-11-09 自适应映射：滑块的每一档必须发一个**不同**的值。
-    // 默认映射把 extra / max / galaxy 全折成 high，所以它们不能各占一格
-    // —— 那会是三个名字对一个请求，正是以前要补一句声明的原因。
-    expect(stops).toStrictEqual([
-      { value: "auto", label: "Auto", sends: null },
-      { value: "low", label: "Low", sends: "low" },
-      { value: "medium", label: "Medium", sends: "medium" },
-      { value: "high", label: "High", sends: "high" },
-    ]);
-    // `sends` 是给人看的，但它的**去重**性质是可断言的核心：没有两个档位
-    // 指向同一个值。
-    const sends = stops.filter((stop) => stop.sends !== null).map((stop) => stop.sends);
-    expect(new Set(sends).size).toBe(sends.length);
+    // 六格固定（2026-11-10），但 `sends` 如实报告每一格实际发什么：
+    // 缺省映射把 extra / max / galaxy 都折成 high，所以它们必须**都**写
+    // `high` —— 面板据此显示「sends high」，不让三格看起来像三种强度。
+    expect(stops.map((stop) => stop.value)).toStrictEqual(SIX);
+    const sends = Object.fromEntries(stops.map((stop) => [stop.value, stop.sends]));
+    expect(sends.low).toBe("low");
+    expect(sends.medium).toBe("medium");
+    expect(sends.high).toBe("high");
+    expect(sends.extra).toBe("high");
+    expect(sends.max).toBe("high");
+    expect(sends.galaxy).toBe("high");
   }, HOST_TIMEOUT_MS);
 
-  it("模型把 galaxy 映到独立值时，Galaxy 才作为最高档出现", async () => {
+  it("effortMap 改过之后，六格里对应那几格的 sends 跟着改", async () => {
     const gateway = await completionGateway();
     const home = await tempHome(
       {
@@ -652,7 +647,7 @@ describe("宿主报告每一档实际会发的协议值", () => {
           contextWindow: 8192,
           maxOutput: 512,
           supportsReasoning: true,
-          // 一个真的能区分六档的模型：每档发不同的值。
+          // 一个能区分更多档的映射：extra/max 各自发不同的值。
           effortMap: { extra: "minimal", max: "none", galaxy: "high" },
         },
       },
@@ -664,13 +659,12 @@ describe("宿主报告每一档实际会发的协议值", () => {
     });
     const stops = states(events)[0].effortChoices.stops;
 
-    // 六档里有五档发不同的值（high 只出现一次），所以轨道是 Auto + 5 档。
-    // `galaxy` 映射到 high，而 high 已经被 `high` 那一档占了 —— 按「第一个
-    // 产生该值的档位」规则，Galaxy 不该出现。
-    expect(stops.map((stop) => stop.value)).toStrictEqual([
-      "auto", "low", "medium", "high", "extra", "max",
-    ]);
-    expect(stops.at(-1).sends).toBe("none");
+    // 轨道长度不变（六格），变的是每格发什么 —— 这就是「映射做适配」。
+    expect(stops.map((stop) => stop.value)).toStrictEqual(SIX);
+    const sends = Object.fromEntries(stops.map((stop) => [stop.value, stop.sends]));
+    expect(sends.extra).toBe("minimal");
+    expect(sends.max).toBe("none");
+    expect(sends.galaxy).toBe("high");
   }, HOST_TIMEOUT_MS);
 
   it("不支持推理的模型也给折算表，另带 unsupported 说明", async () => {

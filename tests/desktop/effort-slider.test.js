@@ -435,6 +435,18 @@ describe("思考强度这一块两种语言都是英文（2026-11-09 用户决�
   });
 });
 
+describe("轨道固定六格（2026-11-10 用户决定：永远六格，映射做适配）", () => {
+  it("宿主不再按发出去的值去重，六格全在", () => {
+    const host = readFileSync(path.join(ROOT, "desktop", "host", "host.js"), "utf8");
+    const body = bodyOf(host, "function effortChoices() {");
+    // 以前是 `if (seen.has(sends)) continue;` —— 按值去重会让轨道长度随模型
+    // 变化。固定尺度的做法是每格都画，把「这格发什么」放进 `sends`。
+    expect(body).not.toContain("seen.has(sends)");
+    expect(body).toContain("for (const tier of kernel.EFFORT_TIERS)");
+    expect(body).toContain("sends:");
+  });
+});
+
 describe("映射结果显示：三档默认落同一值时必须说出来", () => {
   it("宿主算的 resolved 被渲染层读了，而不是自己再算一遍", () => {
     const app = read("app.js");

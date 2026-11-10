@@ -66,6 +66,27 @@ describe("parseCatalogEntry：字段名别名表", () => {
 });
 
 describe("parseCatalogEntry：数组元素的两种形状", () => {
+  it("嵌套形状：DeepSeek 的 effort.supported_levels（2026-11-10 实测）", () => {
+    // 用户这台机器的 DeepSeek 官方 key 报的是这个形状，不是平铺的
+    // `reasoning_efforts`。只支持平铺的话，那个模型会永远停在第 3 级。
+    const entry = {
+      id: "deepseek-flash",
+      effort: { supported_levels: ["low", "high", "max"], default_level: "high" },
+    };
+    expect(parseCatalogEntry(entry)).toStrictEqual({
+      efforts: ["low", "high", "max"],
+      defaultEffort: "high",
+    });
+  });
+
+  it("嵌套路径中途缺一层时，退回平铺别名", () => {
+    // `effort` 不是对象（或者没有那个子键）不能挡住平铺字段。
+    expect(parseCatalogEntry({ effort: "weird", reasoning_efforts: ["high"] }))
+      .toStrictEqual({ efforts: ["high"] });
+    expect(parseCatalogEntry({ effort: { default_level: "low" } }))
+      .toStrictEqual({ defaultEffort: "low" });
+  });
+
   it("字符串元素原样取用", () => {
     expect(parseCatalogEntry({ reasoning_efforts: ["low", "high"] })).toEqual({
       efforts: ["low", "high"],

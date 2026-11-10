@@ -2974,12 +2974,14 @@ function renderEffortPanel() {
   const index = effortStopIndex(state.effort);
   if (effortSlider !== null) effortSlider.setValue(index >= 0 ? index : 0, { silent: true });
 
-  // The hint answers one question: what will actually go on the wire. It is
-  // empty for every stop whose own `sends` matches its name — after the
-  // adaptive change that is every stop the panel offers, so this only shows up
-  // for a value with no stop of its own (an old `run.json` holding `minimal`).
-  // `choices.resolved` is the host's answer; deriving it here would be a second
-  // source of truth for one question.
+  // The hint answers one question: what will actually go on the wire.
+  //
+  // 轨道固定六格之后（2026-11-10 用户决定「永远六格」），这句**重新变成必需**
+  // 而不是罕见提示：缺省映射把 `extra` / `max` / `galaxy` 全折成 `high`，
+  // 一个模型可能有三格发同一个值。滑块只显示档位名的话，那三格看起来像三种
+  // 强度。`resolved` 是宿主算出来的答案，这里再算一遍就是第二个真相源。
+  //
+  // 同名时不显示（`low` 发 `low` 说「sends low」是噪音）。
   const resolved = choices.resolved?.[state.effort];
   $("effort-auto-hint").textContent = typeof resolved === "string" && resolved !== state.effort
     ? t.effortSends(resolved)
