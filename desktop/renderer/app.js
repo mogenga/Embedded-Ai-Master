@@ -3256,7 +3256,15 @@ function renderModelMenu() {
   const showGroups = groups.length > 1;
   // Which provider the right-hand list is showing. The rail is a view filter,
   // not a selection: switching providers must not switch models, so this is
-  // renderer-local state, reset to the model in use whenever none is set.
+  // renderer-local state.
+  //
+  // Two resets, different jobs:
+  //  - `openModelMenu` sets it from the model in use **every time the panel
+  //    opens** — that is what makes "look at another vendor, close, reopen"
+  //    come back to the model actually being used.
+  //  - this one is the safety net for a list that changed **while the panel is
+  //    open** (a `models` event pruning the provider being viewed): the rail
+  //    must not point at a group that no longer exists.
   if (showGroups && !groups.some((group) => group.provider === state.modelRailProvider)) {
     state.modelRailProvider = providerOf(state.model ?? "");
   }
@@ -3533,6 +3541,15 @@ function formatContext(value) {
 }
 
 function openModelMenu() {
+  // **每次打开都从当前模型所在的厂商开始**（2026-11-10 用户报告）。
+  //
+  // `modelRailProvider` 是面板的**视图过滤**，不是选择：切换厂商不换模型。
+  // 但把它一直留着，会让"上次翻到了别家、看了一眼就关掉"变成"下次打开还在
+  // 别家"——面板于是不再指向当前在用的模型，用户得自己翻回去。
+  //
+  // 重置放在**打开**这一刻而不是关闭时：面板关着的时候模型也可能被别处改掉
+  // （Ctrl+E 之外的路径、外部 `models` 事件），打开时算才是当下的答案。
+  state.modelRailProvider = providerOf(state.model ?? "");
   renderModelMenu();
   modelMenu.hidden = false;
   // `aria-expanded` mirrors the popover, not the chip's own state: it is the
