@@ -3,12 +3,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { EFFORT_TIERS as KERNEL_TIERS } from "../../src/config/providers.js";
 import { dictionaries } from "../../desktop/renderer/i18n.js";
-import {
-  EFFORT_TIERS,
-  EFFORT_TIER_LABELS,
-  effortTierAt,
-  effortTierIndex,
-} from "../../desktop/renderer/effort-tiers.js";
+import { EFFORT_TIERS } from "../../desktop/renderer/effort-tiers.js";
 
 /**
  * The six-tier effort slider (Task 2 of the effort-tiers plan).
@@ -51,79 +46,22 @@ function bodyOf(text, header) {
   throw new Error(`unterminated ${header}`);
 }
 
-/** The CSS section that styles the slider, from its comment to the end of the
- *  motion overrides. Sliced so the token/colour and motion assertions below
- *  cannot be satisfied by some unrelated rule elsewhere in the file. */
-function effortCss() {
-  const css = read("styles.css");
-  const start = css.indexOf("/* The six-tier panel.");
-  expect(start, "the effort panel's style block is missing").toBeGreaterThan(-1);
-  const end = css.indexOf(':root[data-motion="reduced"] .effort-particles', start);
-  expect(end, "the effort panel's style block has no end marker").toBeGreaterThan(start);
-  return css.slice(start, end + 200);
-}
+/* 这里原本有一个 `effortCss()` 辅助函数，2026-11-10 清理时删除：它最后一个调用方
+   随原生 range 一起在 `e70db21` 退场，而且它切片的起点标记 `/* The six-tier
+   panel.` 早已不在样式表里。 */
 
 describe("六档常量与内核一致", () => {
   it("渲染层的 EFFORT_TIERS 与 src/config/providers.ts 逐项相同", () => {
     // The renderer cannot import the TypeScript constant (no bundler), so it
     // keeps its own copy. This import is the pin that keeps the copy honest:
-    // add a tier in one place only and this fails.
+    // add a tier in one place only and this fails. It is also the only reason
+    // `desktop/renderer/effort-tiers.js` still exists — nothing in `desktop/`
+    // imports it any more (2026-11-10).
     expect(EFFORT_TIERS).toStrictEqual([...KERNEL_TIERS]);
-  });
-
-  it("EFFORT_TIER_LABELS 有六个，且与 EFFORT_TIERS 同序", () => {
-    expect(EFFORT_TIER_LABELS).toHaveLength(6);
     expect(EFFORT_TIERS).toHaveLength(6);
-    expect(EFFORT_TIER_LABELS).toStrictEqual(["Low", "Medium", "High", "Extra", "Max", "Galaxy"]);
     // Order is the contract, not membership: the track reads left to right, so
     // a reordered list would relabel every stop.
     expect(EFFORT_TIERS).toStrictEqual(["low", "medium", "high", "extra", "max", "galaxy"]);
-  });
-});
-
-describe("档位与索引互逆，越界钳位", () => {
-  it("每一档的索引就是它在轨道上的位置", () => {
-    EFFORT_TIERS.forEach((tier, index) => {
-      expect(effortTierIndex(tier)).toBe(index);
-    });
-  });
-
-  it("索引 → 档位是档位 → 索引的逆", () => {
-    EFFORT_TIERS.forEach((tier) => {
-      expect(effortTierAt(effortTierIndex(tier))).toBe(tier);
-    });
-  });
-
-  it("不是档位的值得到 -1，不是 0", () => {
-    // `auto` and a protocol-only level (`minimal`) are the absence of a tier,
-    // not the low end. Returning 0 would light "Low" for a request that sends
-    // nothing of the sort.
-    for (const value of ["auto", "minimal", "none", "", null, undefined, 3]) {
-      expect(effortTierIndex(value), String(value)).toBe(-1);
-    }
-  });
-
-  it("越界索引钳到两端，NaN 落到低端", () => {
-    expect(effortTierAt(-1)).toBe("low");
-    expect(effortTierAt(-99)).toBe("low");
-    expect(effortTierAt(6)).toBe("galaxy");
-    expect(effortTierAt(99)).toBe("galaxy");
-    // A range always hands over an integer string, but a malformed value must
-    // not paint `undefined` into a label.
-    expect(effortTierAt("3")).toBe("extra");
-    expect(effortTierAt(Number.NaN)).toBe("low");
-  });
-
-  it("钳位是写明了的决定，不是静默兜底", () => {
-    // The acceptance row asks for the clamp to be explicit. The code says so
-    // in `effortTierAt`'s own doc comment, where the next reader will look.
-    const source = read("effort-tiers.js");
-    const doc = bodyOf(source, "export function effortTierAt(index)");
-    const comment = source.slice(source.indexOf("/**", source.indexOf("export function effortTierAt") - 1200),
-      source.indexOf("export function effortTierAt"));
-    expect(comment.toLowerCase()).toContain("clamp");
-    expect(doc).toContain("Math.min(");
-    expect(doc).toContain("Math.max(");
   });
 });
 
@@ -363,39 +301,15 @@ describe("思考强度这一块两种语言都是英文（2026-11-09 用户决�
    *
    * 所以这组断言与「别的文案都要翻译」相反：这里要求 zh 与 en **逐字相同**。
    * 谁把它们翻成中文，这两条会红。
+   *
+   * **2026-11-10 起档位名不在字典里了**：标签由宿主的 `stops[i].label` 给出，
+   * 六个 `effortTier*` 键随之删除。这里只剩控件自己仍在读的三条
+   * （`effortAuto` / `effortLabel` / `effortSends`）——它们仍是英文，理由不变。
    */
-  const TIER_BY_LABEL = {
-    Low: "effortTierLow",
-    Medium: "effortTierMedium",
-    High: "effortTierHigh",
-    Extra: "effortTierExtra",
-    Max: "effortTierMax",
-    Galaxy: "effortTierGalaxy",
-  };
-
   /** 控件里会渲染出来的每一项（不含 `effortSends`，那是一个函数）。 */
-  const EFFORT_KEYS = [
-    ...Object.values(TIER_BY_LABEL),
-    "effortAuto",
-    "effortLow",
-    "effortMedium",
-    "effortHigh",
-    "effortLabel",
-    "effortFixed",
-  ];
+  const EFFORT_KEYS = ["effortAuto", "effortLabel"];
 
   const CJK = /[㐀-鿿＀-￯]/;
-
-  it("每套字典都有六个档位，且都不为空", () => {
-    for (const locale of ["en", "zh"]) {
-      for (const label of EFFORT_TIER_LABELS) {
-        const key = TIER_BY_LABEL[label];
-        const text = dictionaries[locale][key];
-        expect(typeof text, `${locale}.${key}`).toBe("string");
-        expect(text.trim(), `${locale}.${key}`).not.toBe("");
-      }
-    }
-  });
 
   it("zh 的每一个思考强度键都与 en 逐字相同", () => {
     for (const key of EFFORT_KEYS) {
@@ -417,10 +331,12 @@ describe("思考强度这一块两种语言都是英文（2026-11-09 用户决�
     }
   });
 
-  it("六个档位名互不相同（两种语言都一样）", () => {
+  it("档位名不是字典条目：六个 effortTier* 键已随标签改由宿主提供而删除", () => {
     for (const locale of ["en", "zh"]) {
-      const names = EFFORT_TIER_LABELS.map((label) => dictionaries[locale][TIER_BY_LABEL[label]]);
-      expect(new Set(names).size, `${locale} has duplicate tier names`).toBe(6);
+      for (const tier of EFFORT_TIERS) {
+        const key = `effortTier${tier[0].toUpperCase()}${tier.slice(1)}`;
+        expect(Object.hasOwn(dictionaries[locale], key), `${locale}.${key}`).toBe(false);
+      }
     }
   });
 

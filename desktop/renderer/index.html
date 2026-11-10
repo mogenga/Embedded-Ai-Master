@@ -460,14 +460,14 @@
                          the Galaxy layers; this file only supplies the mount
                          point.
 
-                         **The track is as long as the model allows** (自适应
-                         映射, 2026-11-09): the host computes the stop list, so
-                         a model whose map sends `high` for its top three tiers
-                         gets three stops, and a model that takes no effort
-                         parameter at all gets one that cannot be dragged. The
-                         length of the track *is* the capability statement, which
-                         is why the disclosure sentence that used to live here
-                         is gone. -->
+                         **The track is always six stops** (2026-11-10, 用户
+                         决定「永远六格，映射做适配」): the host builds the same
+                         six for every model and each stop carries what it
+                         actually sends, which the card prints under the tick.
+                         The earlier "the length of the track is the capability
+                         statement" rule is gone with the 2026-11-09 adaptive
+                         mapping — a track that changed length per model made
+                         the same setting a different length scale. -->
                     <div class="effort-control" id="effort-control" hidden>
                       <button class="chip-button effort-picker" id="effort-picker" aria-expanded="false" aria-controls="effort-panel">
                         <span id="effort-label">Auto</span>
@@ -475,10 +475,12 @@
                       </button>
                       <div class="effort-panel" id="effort-panel" role="group" aria-label="Thinking effort" hidden>
                         <div id="effort-galaxy-mount"></div>
-                        <!-- 自适应映射之后（2026-11-09），`Auto` 成了滑块最左
-                             一档、能力声明由轨道的长度表达，所以这块只剩一句
-                             「实际会发什么」的补充说明。它画在卡片下缘之外，
-                             字号按 `1/--ge-scale` 抵掉卡片的缩放。 -->
+                        <!-- 卡片下缘之外的一块补充说明：`#effort-auto-hint`
+                             在「这一档发的东西与档位名不同」时才填一句
+                             「sends X」。它画在卡片之外，字号按
+                             `1/--ge-scale` 抵掉卡片的缩放。
+                             2026-11-10：`Auto` 那一格与「按能力缩短轨道」
+                             都已退场（轨道固定六格），这里只剩这句说明。 -->
                         <div class="effort-extras" id="effort-extras">
                           <div class="effort-panel-foot">
                             <span class="effort-auto-hint" id="effort-auto-hint"></span>

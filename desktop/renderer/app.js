@@ -395,9 +395,9 @@ function applyLocale(locale, { announce = false } = {}) {
   // The sentence explaining a locked composer is derived text with no
   // `data-i18n` to sweep; repaint it from the state already held.
   renderComposerLock();
-  // The tier names are dictionary entries reached through a computed key
-  // (`effortTier${label}`), so the `[data-i18n]` sweep above cannot find the
-  // fallback path, and the chip's own label is a tier name too.
+  // The chip's label is a tier name taken from the host's stop list, so the
+  // `[data-i18n]` sweep above has nothing to paint for it; `setEffort` repaints
+  // the chip and the `sends X` sentence below it.
   setEffort(state.effort);
   // Last, after the sweep: this caption's name follows the window's state, and
   // the sweep just painted the resting one.
@@ -2870,12 +2870,12 @@ function setMode(mode) {
 /**
  * The stops the host says this model can use.
  *
- * 2026-11-09 起宿主按模型能力算出这条列表（自适应映射）：`Auto` 打头，后面是
- * 这个模型的 `effortMap` 真正能产生的不同值，一档一个。空列表只有一个含义
- * ——**没有可用模型**，那时整块控件隐藏。
+ * 2026-11-10 起**永远是六格**（用户原话「永远六格，映射做适配」）：宿主对每个
+ * 模型都产出同样的 Low…Galaxy 六项，每项带 `sends`（这一格实际会发什么）。空
+ * 列表只有一个含义——**没有可用模型**，那时整块控件隐藏。
  *
- * 不再有「六档固定、不支持就补一句声明」那套：滑块的**长度**就是能力声明，
- * 拖到最后一档意味着唯一一件事。
+ * 2026-11-09 的「滑块长度就是能力声明」（按解析结果去重决定档位数）已被这一版
+ * 推翻：长度随模型变，等于同一个设置换模型就换一把尺子。
  */
 function effortStops() {
   return state.effortChoices?.stops ?? [];
@@ -2943,10 +2943,13 @@ function effortStopIndex(value) {
 }
 
 /**
- * How many distinct things the track can send, for the chip's own label.
+ * The chip's own label: the tier the host confirmed, or the `auto` word.
  *
- * A one-stop list is the "this model takes no effort parameter" case: the host
- * labels its single stop `Off`, and the chip says the same thing.
+ * `auto` is not a stop any more (2026-11-10 「AUTO删掉」), but the state still
+ * exists — a `run.json` with no entry for this model means "send no field",
+ * and that is what a fresh conversation starts as. A one-stop list is the
+ * "this model takes no effort parameter" case: the host labels it `Low` and
+ * freezes the track, so the chip names the same stop.
  */
 function effortChipLabel() {
   const stops = effortStops();

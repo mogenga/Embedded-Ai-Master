@@ -1,6 +1,9 @@
 # 思考强度：六档界面语言与逐模型映射
 
 > **本文是六档思考强度的唯一契约源。**
+> **2026-11-10 现状**：轨道固定六格，不再按协议值去重；`auto` 不再占一格；界面标签由
+> 宿主 `effortChoices.stops[i].label` 提供（渲染层不再持有档位名）。文中仍写「按去重后的
+> 个数决定轨道长度」的段落已按日期注明推翻，原文保留以免抹掉决策经过。
 > 实现：
 > [`src/config/providers.ts`](../../src/config/providers.ts)（`EFFORT_TIERS` / `DEFAULT_EFFORT_MAP` /
 > `resolveEffortTier` / `ModelCfg.effortMap`）、
@@ -8,7 +11,8 @@
 > 同时接受协议值与档位）、
 > [`src/index.ts`](../../src/index.ts)（`runSession` 启动时按模型折算）、
 > [`desktop/host/host.js`](../../desktop/host/host.js)（`effortChoices` / `setEffort`）、
-> [`desktop/renderer/effort-tiers.js`](../../desktop/renderer/effort-tiers.js)（渲染层同一份档位常量）、
+> [`desktop/renderer/effort-tiers.js`](../../desktop/renderer/effort-tiers.js)（渲染层同一份档位常量，
+> **只剩与内核逐项相同这条断言在用**）、
 > [`desktop/renderer/app.js`](../../desktop/renderer/app.js)（`renderEffortPanel` / `commitEffort`）。
 > 改实现要同步改本文；改本文要同步改 `desktop/MATRIX.md` 的 `setEffort` 行。
 
@@ -42,19 +46,25 @@ Galaxy 六个停止点；每个模型有一张映射表，把它折成 `none` / 
 末列**只在网关目录与 `reasoningLevels` 都没有时才生效**——见下一节的三级回退。
 有目录时 `space-bunny` 的 `extra` 会发 `xhigh`，按这张表永远算不出来。
 
-顺序即轨道顺序，是契约：`desktop/renderer/index.html` 的六个 `data-tier-index` 与滑块的
-`max="5"` 都按它排。
+顺序即轨道顺序，是契约：宿主按 `EFFORT_TIERS` 的顺序逐档产出 `stops`，滑块从左到右画这
+六格。~~`desktop/renderer/index.html` 的六个 `data-tier-index` 与滑块的 `max="5"` 都按它排。~~
+（2026-11-10 注：原生 range 已拆除，`data-tier-index` 与 `max="5"` 都不存在了；现行证据是
+`desktop/host/host.js` 的 `effortChoices` 里那句 `for (const tier of kernel.EFFORT_TIERS)`。）
 
 **界面名只有英文，不翻译**（2026-11-09，用户原话「思考强度用英文，不用自动翻译」）。
-六个名字在 `desktop/renderer/i18n.js` 的 `effortTierLow` … `effortTierGalaxy`，**中英两套
+~~六个名字在 `desktop/renderer/i18n.js` 的 `effortTierLow` … `effortTierGalaxy`，**中英两套
 字典逐字相同**——`tests/desktop/effort-slider.test.js` 钉着这一点，并且断言这些值里不出现
-中日韩字符。理由不是省事：同一个档位在规格表、`run.json` 的存档值、`providers.json` 的
-`effortMap` 键和界面标签里必须只有一个名字；以前 zh 字典里有一套中文名（低 / 中 / 高 /
-加强 / 极强 / 星系），于是同一档在四个地方有四个说法。`auto` 与面板标题 `Thinking` 同理。
+中日韩字符。~~（2026-11-10 注：六个 `effortTier*` 键已删除，档位名改由宿主的
+`stops[i].label` 提供；`tests/desktop/effort-slider.test.js` 现在钉的是「这些键不在字典里」，
+外加 `effortAuto` / `effortLabel` / `effortSends` 三条仍在使用且中英相同。）理由不是省事：
+同一个档位在规格表、`run.json` 的存档值、`providers.json` 的 `effortMap` 键和界面标签里必须
+只有一个名字；以前 zh 字典里有一套中文名（低 / 中 / 高 / 加强 / 极强 / 星系），于是同一档
+在四个地方有四个说法。`auto` 与面板标题 `Thinking` 同理。
 
 **`auto` 不是第七档。** 它是「不提要求」的哨兵：`run.json` 里删掉该模型的条目，请求体里
 完全不出现 `reasoning_effort`。缺席（不提要求，用服务商默认）与 `none`（明确关闭推理）
-是两件事，两种都要能表达。
+是两件事，两种都要能表达。**2026-11-10 起它也不再占轨道一格**（用户原话「AUTO删掉」）：
+轨道就是六个真实档位，`auto` 只作为芯片标签出现在「还没选过」的状态里。
 
 ## 三级回退：解析先看能力，再看映射（2026-11-10）
 
@@ -75,8 +85,10 @@ resolve(tier) = accepted 中秩 ≤ 该档秩的最高者        没有 → null
 
 档位的秩：`low`=2 `medium`=3 `high`=4 `extra`=5 `max`=6 `galaxy`=7。
 
-例：网关报 `{high, xhigh}`（glm-5.2）时，`low` / `medium` 解析为 `null`（不画到滑块上），
-`high`→`high`，`extra`/`max`/`galaxy`→`xhigh`。界面因此只有 `High` / `Extra` 两档。
+例：网关报 `{high, xhigh}`（glm-5.2）时，`low` / `medium` 解析为 `null`，
+`high`→`high`，`extra`/`max`/`galaxy`→`xhigh`。~~界面因此只有 `High` / `Extra` 两档。~~
+（2026-11-10 注：轨道固定六格，`null` 的两档仍然画在轨道上——每格下方标出「这一格没有
+请求值」（短横），拖过去会吸附到最近的可用档。见下面「轨道固定六格」。）
 
 这条规则与 Claude Code 文档一致：
 `"falls back to the highest supported level at or below the one you set."`
@@ -84,8 +96,16 @@ resolve(tier) = accepted 中秩 ≤ 该档秩的最高者        没有 → null
 **`supportsReasoning: false` 仍然最优先**：用户显式否定的模型不看目录。**目录与配置冲突时
 目录优先**——网关是执行方，它的表决定请求会不会被接受；配置是用户的猜测。
 
-**滑块的档位数就是解析结果去重后的个数。** 同一协议值不占两格：`space-bunny` 的
-`{low, medium, high, xhigh, max}` 给出五档（`galaxy` 与 `max` 同值，不单独出现）。
+### 轨道固定六格（2026-11-10 用户决定）
+
+**曾经**：滑块的档位数就是解析结果去重后的个数，同一协议值不占两格（`space-bunny` 的
+`{low, medium, high, xhigh, max}` 给出五档，`galaxy` 与 `max` 同值不单独出现）。
+
+**现在**：轨道永远六格，模型之间用映射适配。用户原话「永远六格」。理由是轨道长度随模型
+变化时，同一个设置在不同模型上是不同长度的尺子，换一次模型就要重新学一遍刻度的位置；固定
+尺度 + 每格如实标出实际发的值（`stops[i].sends`，界面画在刻度点下方）既统一又不撒谎。
+去重留下的问题——三档默认发同一个 `high`——仍在，但它是**已披露**的：每格下面写着实际值，
+不是靠少画几格回避。
 
 ## 缺省映射表与逐模型覆盖
 
@@ -117,8 +137,10 @@ resolve(tier) = accepted 中秩 ≤ 该档秩的最高者        没有 → null
   （`carriedFromModel` 的透传名单），不会因为点一次「保存」被抹掉。
 
 宿主在 `state.effortChoices.resolved` 里回报**每个档位这一模型实际会发的值**，界面据此
-显示「Galaxy → high」，不必让人去读配置文件。折算的唯一实现是内核的 `resolveEffortTier`，
-宿主只转述它的答案。
+显示「Galaxy → high」，不必让人去读配置文件。折算的唯一实现是内核的 `resolveEffortTier`
+（有目录时是 `resolveTierAgainst`），宿主只转述它的答案。**2026-11-10 起同一个事实还随
+每个 stop 下发（`stops[i].sends`），卡片直接画在刻度点下方**；`resolved` 与 `sends` 来自
+同一次折算，不是一个新来源。
 
 ## 为什么 `extra` / `max` / `galaxy` 默认都落到 `high`
 
@@ -168,17 +190,23 @@ resolve(tier) = accepted 中秩 ≤ 该档秩的最高者        没有 → null
 
 - **不自动探测模型支持哪些档位。** OpenAI 兼容协议不报告这项能力，`supportsReasoning`
   仍只能由用户在 `providers.json` 里声明（判据见 `src/config/providers.ts`）。
-  **但界面始终显示六档滑块**（2026-11-09，用户原话「思考强度应该始终显示」）：
+  ~~**但界面始终显示六档滑块**（2026-11-09，用户原话「思考强度应该始终显示」）：
   曾经模型没声明时整块隐藏，现在改为滑块照常显示，另附一句说明「该模型未声明支持，
-  请求不会携带该参数」，宿主用 `effortChoices.unsupported` 把这个事实单独标出来。
-  区别是：以前用**消失**表达「这个模型收不到」，现在用**说明**表达。
+  请求不会携带该参数」，宿主用 `effortChoices.unsupported` 把这个事实单独标出来。~~
+  （2026-11-10 注：**这条已被三级回退与固定六格两轮改动取代**。现在只要宿主报得出
+  模型，轨道就是六格；模型在目录里报了 `reasoning_efforts` 时按目录折算，连
+  `supportsReasoning` 没声明都照样给六格（见 `desktop/host/host.js` 的
+  `capabilitySaysYes`）。只有「完全没有可用模型」（`stops` 为空）才整块隐藏。
+  `effortChoices.unsupported` 仍按「用户显式否定」单独置位，但渲染层目前不读它。）
 - **档位与实际效果之间没有校准。** 映射表说 `max` 发 `high`，那个 `high` 在具体模型上
   有多「用功」是服务商定义的，内核无法验证。
 - **`/compact` 也用同一个选择。** 上下文压缩的摘要调用是同一模型上的真实 completion，
   所以带上同一个等级（在宿主里按同一个 `resolveEffortTier` 折算）；一个悄悄用别的强度
   跑的压缩会是第二个看不见的设置。
 - **旧字典键 `effortLow` / `effortMedium` / `effortHigh` 没有生产者了。** 它们属于旧的
-  五值下拉菜单（用协议值当标签），六档滑块改用 `effortTierLow` 等键。保留在字典里是
-  为了控制器的删除决定，删不删不影响任何界面。同理，宿主里的 `EFFORT_LEVELS` 现在只
+  五值下拉菜单（用协议值当标签），六档滑块改用 `effortTierLow` 等键。 **2026-11-10
+  清理：`effortLow` / `effortMedium` / `effortHigh` / `effortFixed` 与六个 `effortTier*`
+  已全部从两套字典删除**（读者数为 0；档位名改由宿主提供）。字典里只剩 `effortAuto` /
+  `effortLabel` / `effortSends` 三条仍在被读的。同理，宿主里的 `EFFORT_LEVELS` 现在只
   用于「协议值仍被接受」这一侧，不再是菜单内容。
 - **没有独立的历史记录。** `run.json` 只存当前选择，没有「这个会话用过哪几档」的记录。

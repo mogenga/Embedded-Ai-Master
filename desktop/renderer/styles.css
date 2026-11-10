@@ -4830,10 +4830,6 @@ mark.find-hit.current {
   box-shadow: inset 0 0 0 1px var(--warn);
 }
 
-.segmented button[data-effort="high"].active {
-  color: var(--accent-text);
-}
-
 .segment-label {
   padding: 3px 6px 3px 5px;
   font-size: var(--text-xs);
@@ -4968,8 +4964,9 @@ mark.find-hit.current {
  *
  * The card itself is styled by `galaxy-effort.css` with the spec's literal
  * numbers; this block only decides **where the popover sits** and carries the
- * two pieces the component does not own: the `Auto` button (not a seventh
- * tier, so it cannot be a stop on the track) and the disclosure sentence.
+ * one piece the component does not own: the `sends X` disclosure sentence.
+ * The `Auto` button that used to live here was removed 2026-11-10 (「AUTO删掉」);
+ * `auto` survives as a chip label, not as a control.
  *
  * Width comes from the card (440 + 2×2 border), not from a token: the spec's
  * 440×258 is a checked acceptance value, and a container narrower than the
@@ -5014,10 +5011,10 @@ mark.find-hit.current {
    spec'd component. */
 /* What the choice will actually put on the wire.
  *
- * 自适应映射之后（2026-11-09）这句几乎不会出现：每一个可选的档位发出去的就是
- * 它自己的名字，所以只有旧 `run.json` 里存着的协议值（`minimal`）这种「没有对
- * 应档位」的情况才会填上它。`Auto` 按钮与能力声明句都已删除——滑块的长度就是
- * 能力声明，档位名就是实际发的值。
+ * 现在只有两种情况会填上它：旧 `run.json` 里存着的协议值（`minimal` 这种
+ * 「没有对应档位」的），或者 `auto`（不发字段）。`Auto` 按钮与「轨道长度就是
+ * 能力声明」那套说明都已删除，轨道固定六格，每格的实际值由卡片自己画在刻度
+ * 下方（`galaxy-effort.js` 的 `.ge-sends`）。
  *
  * 位置在卡片下缘之外，字号按 `1/--ge-scale` 抵掉卡片的缩放：这块是给人读的
  * 真文本，不该跟着卡片一起缩成 8px。 */

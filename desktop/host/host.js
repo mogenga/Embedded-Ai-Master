@@ -985,9 +985,11 @@ function effortTable() {
 /**
  * The tier's display name, in the one vocabulary this control uses.
  *
- * 2026-11-09 用户决定：「思考强度用英文，不用自动翻译」. The renderer keeps an
- * identical list for its own fallback; these are the strings the host puts on
- * the wire so a client that never loaded the dictionary still gets names.
+ * 2026-11-09 用户决定：「思考强度用英文，不用自动翻译」. These are the strings
+ * the host puts on the wire so a client that never loaded the dictionary still
+ * gets names. The renderer used to keep its own copy (`EFFORT_TIER_LABELS` in
+ * `renderer/effort-tiers.js`); that copy was deleted 2026-11-10 — the labels
+ * come from here, through `stops[i].label`, and nowhere else.
  */
 const TIER_LABELS = {
   low: "Low",
@@ -1001,27 +1003,25 @@ const TIER_LABELS = {
 /**
  * What the effort popover may offer for the selected model.
  *
- * `stops` is the slider, **as long as the model can actually use** (2026-11-09,
- * 用户决定：自适应映射). It is the answer to a problem the fixed six tiers had:
- * the default map sends `high` for `extra`, `max` *and* `galaxy`, so a
- * six-stop track offered three names for one request and the panel had to
- * apologise for it in a sentence. With `stops`, the length of the track *is*
- * the disclosure — dragging to the last stop means exactly one thing.
+ * **The track is always the same six stops** (2026-11-10 用户决定：「永远六格，
+ * 各家模型适配做映射」). Every stop carries `sends`: the protocol value it
+ * resolves to on this model, or `null` when the model accepts nothing at or
+ * below that tier. The card prints that value under the tick, which is how the
+ * panel discloses that `extra` / `max` / `galaxy` all send `high` by default —
+ * without shortening the track, and without a sentence apologising for it.
  *
  * The rules, in order:
  *
- * 1. **The model takes no effort parameter at all** → one stop, labelled
- *    `Off`. The control stays on screen (2026-11-09 用户要求：思考强度应该始终
- *    显示) but cannot be dragged, because there is nothing to choose.
- * 2. Otherwise → `Auto` first (it means "send no field", which is a real state
- *    and not the absence of one), then one stop per **distinct** value the
- *    model's `effortMap` can produce, in tier order. A tier is only offered if
- *    it is the first tier that produces its value — a later tier that maps to
- *    the same value would be a second name for the same request.
+ * 1. **The model takes no effort parameter at all** → one stop, labelled `Low`
+ *    and frozen. The control stays on screen (2026-11-09 用户要求：思考强度应该
+ *    始终显示) but cannot be dragged, because there is nothing to choose.
+ * 2. Otherwise → six stops, one per `EFFORT_TIERS` entry, each with its own
+ *    `sends`. `auto` is **not** a stop (2026-11-10 「AUTO删掉」): it is the
+ *    absence of a choice, and it survives only as the chip's label.
  *
- * `resolved` (tier → protocol value) and `levels` (all six tier keys) stay: the
- * first is what the host itself uses to build `stops`, the second is what
- * `setEffort` accepts, and an old `run.json` may hold any of them.
+ * `resolved` (tier → protocol value or `null`) and `levels` (all six tier keys)
+ * stay: the first is what the host itself uses to build `stops`, the second is
+ * what `setEffort` accepts, and an old `run.json` may hold any of them.
  *
  * `default` is the level `auto` will actually send, so the panel can say what
  * the model will do without the operator having to read providers.json.

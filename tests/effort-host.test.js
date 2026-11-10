@@ -266,6 +266,11 @@ describe("desktop host 的推理强度", () => {
     // stops are tiers, and a protocol value in this list would be a stop the
     // control cannot reach.
     expect(state.effortChoices.levels).toStrictEqual(["low", "medium", "high", "extra", "max", "galaxy"]);
+    // The six display words live in the host now (`TIER_LABELS`) — the
+    // renderer's copy was deleted 2026-11-10, so this is the only place they
+    // are still pinned. They are also what the card draws, via `stops[i].label`.
+    expect(state.effortChoices.stops.map((stop) => stop.label))
+      .toStrictEqual(["Low", "Medium", "High", "Extra", "Max", "Galaxy"]);
     expect(state.effort).toBe("auto");
     expect(state.models[0].supportsReasoning).toBe(true);
     // A declared model carries no caveat.
