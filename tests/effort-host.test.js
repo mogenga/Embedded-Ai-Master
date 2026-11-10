@@ -199,8 +199,8 @@ function runHost(home, commands, options = {}) {
 const states = (events) => events.filter((event) => event.type === "state");
 const notices = (events) => events.filter((event) => event.type === "notice");
 
-/** 六档的固定顺序（2026-11-10 起轨道长度不再随模型变化）。 */
-const SIX = ["auto", "low", "medium", "high", "extra", "max", "galaxy"];
+/** 六档的固定顺序（2026-11-10）：「永远六格」+「AUTO删掉」= 正好这六个。 */
+const SIX = ["low", "medium", "high", "extra", "max", "galaxy"];
 
 const PLAIN_MODELS = { flash: { contextWindow: 8192, maxOutput: 512 } };
 const REASONING_MODELS = {
@@ -222,7 +222,7 @@ describe("desktop host 的推理强度", () => {
     // 以前这里是六档 + 一句 note，那句 note 现在删了 —— 既然拖不到任何
     // 别的地方，就没有需要道歉的东西。
     expect(state.effortChoices.stops).toStrictEqual([
-      { value: "auto", label: "Off", sends: null },
+      { value: "low", label: "Low", sends: null },
     ]);
     expect(state.effort).toBe("auto");
     expect(state.effortChoices.note).toBe("");
@@ -491,8 +491,8 @@ describe("网关目录优先于缺省映射", () => {
     // `xhigh` 只有目录知道 —— 缺省映射永远算不出它。
     expect(sends.extra).toBe("xhigh");
     expect(sends.galaxy).toBe("max");
-    // Auto 不发字段，永远如此。
-    expect(sends.auto).toBeNull();
+    // 轨道上没有 `auto`（2026-11-10 用户决定删掉），所以它不在这里。
+    expect(stops.some((stop) => stop.value === "auto")).toBe(false);
   }, HOST_TIMEOUT_MS);
 
   it("目录说只有 high/xhigh 时，低档仍在轨道上但标为「没有请求值」", async () => {

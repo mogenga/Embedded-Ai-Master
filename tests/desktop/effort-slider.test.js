@@ -292,7 +292,7 @@ describe("减少动态：应用内开关要能传到组件", () => {
   });
 });
 describe("思考强度始终显示；不支持时靠说明，不靠隐藏（2026-11-09 用户决定）", () => {
-  it("模型未声明支持时只剩一档，芯片仍在，标签是宿主给的 Off", () => {
+  it("模型未声明支持时只剩一档，芯片仍在，标签来自宿主那一条 stop", () => {
     const app = read("app.js");
     // 2026-11-09 用户决定：自适应映射 +「只剩一档，拖不动」。
     // 控件不消失（「思考强度应该始终显示」仍然成立），拖不动就说明一切。
@@ -305,7 +305,10 @@ describe("思考强度始终显示；不支持时靠说明，不靠隐藏（2026
     // 芯片的字来自宿主那一条档位的 label，不再由渲染层拼。
     const chip = bodyOf(app, "function effortChipLabel() {");
     expect(chip).toContain("stops[index].label");
-    expect(chip).toContain("stops[0].label");
+    // 没有 `auto` 那一格之后，「没选过」不能再拿第一档的名字冒充 ——
+    // 芯片要说 `Auto`，那是词不是档位（2026-11-10）。
+    expect(chip).toContain('state.effort === "auto"');
+    expect(chip).toContain("t.effortAuto");
     // Markup starts hidden: before the host has spoken there is nothing to
     // paint, and a slider shown at that moment would be a guess.
     const html = read("index.html");

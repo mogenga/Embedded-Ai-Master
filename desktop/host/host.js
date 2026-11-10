@@ -1079,7 +1079,10 @@ function effortChoices() {
     // slider's length; the flag is a fact about the model, not about this
     // control.
     choices.unsupported = true;
-    choices.stops = [{ value: "auto", label: "Off", sends: null }];
+    // 没有 `auto` 之后，「这个模型不吃参数」需要一个还能站住的单选位。
+    // 用最低档而不是造一个 `Off`：`Off` 会让轨道多出一格协议里没有的档位，
+    // 而 `low` 在这里的真实含义是「只有一档、拖不动」。
+    choices.stops = [{ value: "low", label: "Low", sends: null }];
     return choices;
   }
 
@@ -1102,7 +1105,10 @@ function effortChoices() {
   // `sends` travels with each stop so the panel can disclose what a tier
   // actually requests when it differs from the tier's own name — three stops
   // landing on `high` must not look like three different requests.
-  choices.stops = [{ value: "auto", label: "Auto", sends: null }];
+  // **没有 `auto`**（2026-11-10 用户决定：「AUTO删掉」）。轨道就是六个真实
+  // 档位，第一条就是 `low`。"不提要求"这个状态仍然存在（`run.json` 里没有该
+  // 模型的条目），只是不再占轨道上的一格。
+  choices.stops = [];
   for (const tier of kernel.EFFORT_TIERS) {
     const sends = choices.resolved[tier];
     choices.stops.push({

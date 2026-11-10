@@ -2951,12 +2951,18 @@ function effortStopIndex(value) {
 function effortChipLabel() {
   const stops = effortStops();
   if (stops.length === 0) return "";
+  // 轨道上已经没有 `auto` 那一格（2026-11-10 用户决定「AUTO删掉」），但
+  // **这个状态仍然存在**：`run.json` 里没有该模型的条目，请求不带字段。
+  // 旧的首选项、以及第一次使用时的默认值都会落在这里。
+  //
+  // 芯片必须说真话：这时不能拿第一档的名字冒充，那会显示一个用户没有选过的
+  // 档位。`Auto` 是词，不是档位——它不进轨道，只出现在标签里。
+  if (state.effort === "auto") return t.effortAuto;
   const index = effortStopIndex(state.effort);
-  // A value with no stop of its own (an old `minimal`, or `auto` where the
-  // single stop is `Off`) still has to print something truthful. `Auto` is the
-  // host's word for "send nothing", which is what those requests do.
   if (index >= 0) return stops[index].label;
-  return stops[0].label;
+  // 没有 `auto` 之后，`stops[0]` 是 `low`；一个旧 `run.json` 里的 `minimal`
+  // 之类仍然要打印得出来。
+  return state.effort;
 }
 
 /**
@@ -2973,6 +2979,8 @@ function renderEffortPanel() {
 
   const index = effortStopIndex(state.effort);
   if (effortSlider !== null) effortSlider.setValue(index >= 0 ? index : 0, { silent: true });
+  // 轨道上没有 `auto`，所以那一点只能停在 `low`；`#effort-auto-hint` 说明
+  // 它其实什么都没发（见下面的 hint 逻辑）。
 
   // The hint answers one question: what will actually go on the wire.
   //
