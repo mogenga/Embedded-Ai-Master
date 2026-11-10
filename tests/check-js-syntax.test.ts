@@ -169,3 +169,96 @@ describe("checkRoots", () => {
     expect(JSON.parse(out!)).toStrictEqual(["top-level-await.cjs"]);
   });
 });
+
+
+describe("具名 import 必须真实存在（2026-11-09 事故）", () => {
+  /**
+   * 这一组必须**起子进程**跑：`vm.SourceTextModule` 在 vitest 进程里是
+   * `undefined`（见上面那条 `.cjs` 用例的注释），而这条检查完全依赖它。
+   * 直接调 `checkRoots` 只会走 `node --check` 回退，`failures` 永远为空，
+   * 用例会以「没抓到」的样子假绿。
+   */
+  function runWithModules(dir: string): string[] | "SKIP_NO_STM" {
+    const script = [
+      "import vm from 'node:vm';",
+      "import { checkRoots } from " + JSON.stringify(SCRIPT_URL) + ";",
+      "if (typeof vm.SourceTextModule !== 'function') { console.log('SKIP_NO_STM'); process.exit(0); }",
+      "const r = await checkRoots([process.argv[1]], process.argv[1]);",
+      "console.log(JSON.stringify(r.failures.map((f) => f.file)));",
+    ].join("\n");
+    const result = spawnSync(
+      process.execPath,
+      ["--experimental-vm-modules", "--disable-warning=ExperimentalWarning", "--input-type=module", "-e", script, dir],
+      { encoding: "utf8" },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    const out = result.stdout.trim().split("\n").at(-1);
+    return out === "SKIP_NO_STM" ? "SKIP_NO_STM" : (JSON.parse(out ?? "[]") as string[]);
+  }
+
+  it("本地模块缺这个导出时点名失败", async () => {
+    const dir = await tempTree();
+    await writeFile(path.join(dir, "lib.js"), "export const present = 1;\n");
+    await writeFile(
+      path.join(dir, "user.js"),
+      'import { present, gone } from "./lib.js";\nconsole.log(present, gone);\n',
+    );
+
+    const failures = runWithModules(dir);
+    if (failures === "SKIP_NO_STM") return;
+
+    expect(failures).toStrictEqual(["user.js"]);
+  });
+
+  it("导出齐备时通过", async () => {
+    const dir = await tempTree();
+    await writeFile(path.join(dir, "lib.js"), "export const present = 1;\n");
+    await writeFile(path.join(dir, "user.js"), 'import { present } from "./lib.js";\n');
+
+    const failures = runWithModules(dir);
+    if (failures === "SKIP_NO_STM") return;
+
+    expect(failures).toStrictEqual([]);
+  });
+
+  it("多行 import 也查（scripts/ 里的写法）", async () => {
+    const dir = await tempTree();
+    await writeFile(path.join(dir, "lib.js"), "export const a = 1;\nexport const b = 2;\n");
+    await writeFile(path.join(dir, "user.js"), 'import {\n  a,\n  c,\n} from "./lib.js";\n');
+
+    const failures = runWithModules(dir);
+    if (failures === "SKIP_NO_STM") return;
+
+    expect(failures).toStrictEqual(["user.js"]);
+  });
+
+  it("node: 与裸包名的 import 不参与判定（判不了，也不该报）", async () => {
+    // 这次实现的边界：`SourceTextModule` 造不出内置模块，用空桩判会把每一句
+    // `import { readFile } from "node:fs/promises"` 都报成失败。一个总是喊狼
+    // 来了的检查会被关掉，所以范围收窄到本地模块，并把这条写进用例。
+    const dir = await tempTree();
+    await writeFile(
+      path.join(dir, "user.js"),
+      'import { readFile } from "node:fs/promises";\nimport { app } from "electron";\n',
+    );
+
+    const failures = runWithModules(dir);
+    if (failures === "SKIP_NO_STM") return;
+
+    expect(failures).toStrictEqual([]);
+  });
+
+  it("依赖自己的 node: import 不会连累调用方", async () => {
+    const dir = await tempTree();
+    await writeFile(
+      path.join(dir, "lib.js"),
+      'import { readFile } from "node:fs/promises";\nexport const a = readFile;\n',
+    );
+    await writeFile(path.join(dir, "user.js"), 'import { a } from "./lib.js";\n');
+
+    const failures = runWithModules(dir);
+    if (failures === "SKIP_NO_STM") return;
+
+    expect(failures).toStrictEqual([]);
+  });
+});

@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Galaxy Effort Slider · 演示页</title>
+    <!-- 内联空图标：避免浏览器为 favicon 再发一次请求（与 renderer/index.html 同一做法）。 -->
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./galaxy-effort.css" />
+    <style>
+      /* 演示页外壳（规格 §1、§6）：底色铺满视口，任何尺寸下都不出现滚动条。 */
+      html,
+      body {
+        height: 100%;
+      }
+
+      html {
+        overflow: hidden;
+      }
+
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: #111111;
+        font-family: Arial, Helvetica, sans-serif;
+        font-weight: 400;
+        color: #848484;
+      }
+
+      /* 舞台：945×516 的逻辑尺寸绝对不变。
+         缩放只发生在 transform 上——`translate(-50%, -50%)` 负责水平垂直居中，
+         `scale()` 由 ResizeObserver 按 min(可用宽/945, 可用高/516) 写进来。
+         `overflow: hidden` 是规格 §1 的「场景边界裁切」：卡片允许粒子溢出，
+         溢出的那部分在舞台边缘被裁掉，而不是把页面撑出滚动条。 */
+      #demo-stage {
+        position: fixed;
+        left: 50%;
+        top: 50%;
+        width: 945px;
+        height: 516px;
+        overflow: hidden;
+        background: #111111;
+        transform-origin: center;
+        transform: translate(-50%, -50%) scale(1);
+      }
+
+      /* 两个挂载槽：`createGalaxyEffort` 要一个元素做 mount，所以舞台里除了两个
+         `.ge-card` 还有这两个容器。它们没有底色、边框或内边距，视觉上只有卡片本身。
+         横向 22 + 440 + 21 + 440 + 22 = 945，纵向 (516 - 258) / 2 = 129。 */
+      .demo-slot {
+        position: absolute;
+        top: 129px;
+      }
+
+      #demo-slot-a {
+        left: 22px;
+      }
+
+      #demo-slot-b {
+        left: 483px;
+      }
+
+      /* 状态与说明：固定在视口左下角，在 `#demo-stage` 之外，因此不参与缩放。 */
+      #demo-panel {
+        position: fixed;
+        left: 16px;
+        bottom: 12px;
+        max-width: 420px;
+        font-size: 12px;
+        line-height: 18px;
+        color: #848484;
+        /* 说明区永远不挡住拖拽。 */
+        pointer-events: none;
+      }
+
+      #demo-panel p {
+        margin: 0;
+      }
+
+      #demo-last {
+        color: #e1e1e1;
+      }
+
+      /* 异常直接显示在页面上：直接双击打开时没有控制台可看。
+         没有异常时内容是空字符串，不占可见空间。 */
+      #demo-error {
+        position: fixed;
+        left: 16px;
+        top: 12px;
+        right: 16px;
+        margin: 0;
+        color: #ff8a8a;
+        font-family: Arial, Helvetica, sans-serif;
+        font-size: 12px;
+        line-height: 18px;
+        white-space: pre-wrap;
+        pointer-events: none;
+        z-index: 9;
+      }
+    </style>
+  </head>
+  <body>
+    <pre id="demo-error"></pre>
+
+    <!-- 舞台里只放两个挂载槽，剩下的全部由组件自己建。 -->
+    <div id="demo-stage">
+      <div class="demo-slot" id="demo-slot-a"></div>
+      <div class="demo-slot" id="demo-slot-b"></div>
+    </div>
+
+    <div id="demo-panel">
+      <p>拖动脑形、点轨道或用方向键（Home / End / PageUp / PageDown）。拖动中间值只改视觉，松手才派发 effort-change。</p>
+      <p id="demo-last">最近一次 effort-change：（还没有）</p>
+    </div>
+
+    <script>
+      // 模块加载期的失败（语法错误、import 解析不到）不会进入模块里的 try/catch——
+      // 那里的代码根本没开始跑。这一层把它们也写到页面上，免得出现「页面空白 +
+      // 控制台红字」。
+      //
+      // 必须是**捕获阶段**（第三个参数 true）：脚本与 `import` 的加载错误不冒泡，
+      // 冒泡阶段收不到。而模块图里的 import 失败连 `event.message` 都是空的，只能
+      // 靠 `event.target` 报一句"资源加载失败"——实测确认过这两种形态。
+      function showDemoError(message) {
+        var box = document.getElementById("demo-error");
+        if (box !== null) box.textContent = String(message);
+      }
+
+      window.addEventListener("error", function (event) {
+        if (event.message) {
+          showDemoError(event.message);
+          return;
+        }
+        var target = event.target;
+        showDemoError("资源加载失败：" + ((target && (target.src || target.href)) || "unknown"));
+      }, true);
+
+      // 兜底：1 秒后实例还没建起来，就明确说出来。比留一张空白页强——空白页在
+      // 用户眼里既可能是"还没加载完"，也可能是"坏透了"。
+      setTimeout(function () {
+        if (window.galaxyEffortDemo === undefined) {
+          var box = document.getElementById("demo-error");
+          if (box !== null && box.textContent === "") {
+            showDemoError("演示页未能初始化：模块没有跑起来（详情见开发者工具 Console）。");
+          }
+        }
+      }, 1000);
+    </script>
+
+    <script type="module">
+      import { createGalaxyEffort } from "./galaxy-effort.js";
+
+      /* 舞台的逻辑尺寸（规格 §1）。缩放系数按它算，两个数字不参与任何其他计算。 */
+      const STAGE_WIDTH = 945;
+      const STAGE_HEIGHT = 516;
+
+      const errorBox = document.getElementById("demo-error");
+
+      /** 把异常写到页面上——这是浏览器里唯一一定会被看到的错误通道。 */
+      function report(error) {
+        errorBox.textContent = String(error && error.stack ? error.stack : error);
+      }
+
+      try {
+        const stage = document.getElementById("demo-stage");
+        const lastLine = document.getElementById("demo-last");
+
+        /* 舞台缩放：只改 CSS transform。
+           不 destroy、不重建，所以缩放前后两个实例的档位、弹簧与标签都原样保留。 */
+        function fitStage() {
+          const width = document.documentElement.clientWidth;
+          const height = document.documentElement.clientHeight;
+          const factor = Math.min(width / STAGE_WIDTH, height / STAGE_HEIGHT);
+          stage.style.transform = `translate(-50%, -50%) scale(${factor})`;
+        }
+
+        fitStage();
+        const resizeObserver = new ResizeObserver(fitStage);
+        resizeObserver.observe(document.documentElement);
+
+        const slots = [
+          { label: "实例 A", node: document.getElementById("demo-slot-a") },
+          { label: "实例 B", node: document.getElementById("demo-slot-b") },
+        ];
+
+        /* 自适应映射之后（2026-11-09），档位列表由宿主给，组件不再自带六档。
+           演示页扮演宿主的角色：这里给满六档，好让六档下的褶皱与 Galaxy 都能
+           看到。第一个停在 Low，第二个停在 Galaxy，一屏之内比对两个极端。
+           第二个显式给 reducedMotion: false——缺省值将来若改了，这一页仍然按
+           「全动态」演示。 */
+        const FULL_STOPS = [
+          { value: "auto", label: "Auto" },
+          { value: "low", label: "Low" },
+          { value: "medium", label: "Medium" },
+          { value: "high", label: "High" },
+          { value: "extra", label: "Extra" },
+          { value: "max", label: "Max" },
+          { value: "galaxy", label: "Galaxy" },
+        ];
+        const instances = [
+          createGalaxyEffort({ mount: slots[0].node, stops: FULL_STOPS, value: 1 }),
+          createGalaxyEffort({
+            mount: slots[1].node,
+            stops: FULL_STOPS,
+            value: FULL_STOPS.length - 1,
+            reducedMotion: false,
+          }),
+        ];
+
+        /* 每个实例一个监听器、挂在各自的挂载槽上。共用一个监听器就只能靠
+           `event.target` 反推是哪个实例，而事件是冒泡的，反推错了也没人发现。
+           `detail` 的字段是 `{ index, value, label }`（自适应之后没有固定的档位
+           名可反查，所以事件把三样都给出来）。 */
+        slots.forEach((slot) => {
+          slot.node.addEventListener("effort-change", (event) => {
+            lastLine.textContent = `${slot.label} · index ${event.detail.index} · ${event.detail.label} (${event.detail.value})`;
+          });
+        });
+
+        // 探针（Electron）与手工调试都用得到：返回对象就挂在 window 上。
+        window.galaxyEffortDemo = { a: instances[0], b: instances[1] };
+      } catch (error) {
+        report(error);
+      }
+    </script>
+  </body>
+</html>

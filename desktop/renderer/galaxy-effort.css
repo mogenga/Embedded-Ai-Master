@@ -1,0 +1,444 @@
+/* 脑形思考强度滑块（Galaxy Effort Slider）的样式。
+ *
+ * 事实源是 `docs/specs/galaxy-effort-slider.md` §1：卡片 440×258、2px #292929、
+ * 16px 圆角、#191919、阴影 0 18px 28px -12px #0003；标题左 22 上 25、26px；
+ * 档位名 #e1e1e1（Galaxy 时 #9dcef3）；轨道 392×40 #272727 圆角 10；刻度圆点
+ * 直径 6、纵坐标 18、rgba(255,255,255,.20)；tooltip 底 #242424、边框 1px #444、
+ * 文字 #dedede 14px/20px。这些数字是用户逐条核对的验收依据，不改成设计令牌。
+ *
+ * 为什么全是 `.ge-` 前缀：这份样式表会被演示页和 composer 各自 `<link>` 进
+ * `desktop/renderer/`，而 `styles.css` 里已经有一整套 `.effort-*`（旧的六档
+ * range 面板）。裸 `.effort-panel` / `.effort-track` 会同时命中两个组件，
+ * 那种冲突只会在两个都出现在页面上时才现形。
+ *
+ * 布局一律绝对定位：规格给的是卡片内的像素坐标，用 flex 去"近似"这些坐标
+ * 会让每个数字都差一点，而这些都是逐条核对的验收项。
+ */
+
+/* ---------- 宿主要求缩小时 ----------
+ *
+ * 规格里的数字是逻辑尺寸，逐条核对的验收依据。宿主不能改它们，否则验收表与
+ * 实现就对不上了；但 composer 的弹层只有几百像素宽，440×258 的卡在那里放不
+ * 下（2026-11-09 用户原话「太大了，等比缩小」）。
+ *
+ * 做法是给**根节点**一个 `--ge-scale`：整块按它 `transform: scale()`，所有
+ * 内部尺寸一个都不动。默认 1，演示页因此逐像素等于规格；composer 里设 0.68。
+ *
+ * `transform-origin` 取左上角而不是中心：宿主要给这块留多大的位置是它自己算
+ * 的，锚在中心会让一块 300×176 的占位框里浮着一块偏移过的卡片，反过来还要
+ * 在宿主里补一次负 margin。
+ *
+ * 缩放不改坐标：`valueAtPointer` 会按 `getBoundingClientRect()` 与逻辑宽度
+ * 的比值把指针折回逻辑坐标，所以拖动在任何缩放下都落在同一个档位。
+ */
+.ge-root {
+  position: relative;
+  font-family: Arial, Helvetica, sans-serif;
+  font-weight: 400;
+  /* 卡片允许粒子溢出（规格 §1），溢出由舞台裁切，控件自己不裁。 */
+  -webkit-font-smoothing: antialiased;
+  transform: scale(var(--ge-scale, 1));
+  transform-origin: top left;
+}
+
+/* ---------- 免疫宿主图标语言的全局规则 ----------
+ *
+ * `styles.css` 有一条全局 `svg { width: 16px; height: 16px; fill: none;
+ * stroke: currentColor; stroke-width: 1.75; … }`——那是应用自己的 16px 图标
+ * 语言，对 sprite 里的字形是对的。但组件里的两个 SVG **不在那个图标集里**：
+ * 脑形是 48×48 的插画，问号是按 24px / 2px 描边规定的。
+ *
+ * CSS 声明胜过 SVG 的呈现属性，所以那条全局规则会把这两个都改成 16×16：
+ * 脑形缩成插画框左上角的一小坨（2026-11-09 用户截图报的「脑子大小、位置
+ * 不对」），问号在 70px 按钮的 24px 内边距里偏到左上角。两处都显式写回
+ * 规格值，别指望呈现属性自己顶住。
+ *
+ * 子路径的 `stroke` / `stroke-width` 不受影响：它们自己声明了（类规则或
+ * 呈现属性），继承来的值只在元素自己没有声明时才生效。
+ */
+.ge-brain svg {
+  width: 48px;
+  height: 48px;
+  fill: none;
+  flex: none;
+  stroke-width: 0;
+}
+
+.ge-help svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  flex: none;
+}
+
+/* 卡片。尺寸含边框（规格 §1「尺寸含边框」），所以 width/height 用
+   border-box 的口径直接写成 440×258。 */
+.ge-card {
+  position: relative;
+  box-sizing: border-box;
+  width: 440px;
+  height: 258px;
+  border: 2px solid #292929;
+  border-radius: 16px;
+  background: #191919;
+  box-shadow: 0 18px 28px -12px #0003;
+  /* 震动位移写在这上面（`paint()` 每帧改 transform）；`will-change` 让它走
+     合成层，否则每帧一次 transform 变化都会重排整张卡片。 */
+  will-change: transform;
+}
+
+.ge-title {
+  position: absolute;
+  left: 22px;
+  top: 25px;
+  display: flex;
+  align-items: baseline;
+  font-size: 26px;
+  line-height: 35px;
+  color: #848484;
+  white-space: nowrap;
+}
+
+/* 标题与档位名之间隔 16px（规格 §1）。用 margin 而不是空格：空格会被字体
+   折成 0.3em 左右，具体多宽取决于字体是否加载完。 */
+.ge-title-name {
+  margin-right: 16px;
+}
+
+.ge-tier {
+  color: #e1e1e1;
+}
+
+/* Galaxy 时档位名换成淡蓝（规格 §1）。 */
+.ge-tier.ge-tier-galaxy {
+  color: #9dcef3;
+}
+
+/* 拆字动画的单个字符（规格 §4：220ms/字、blur(4px)→0、translateY 5px→0）。
+   初始态由 `.ge-char` 写死，进场由 `.ge-char-in` 触发——`setTimeout` 加上这个
+   类就是一次进场，快速改档时 JS 把 timeout 清掉、节点整批换掉，旧的动画也就
+   跟着没了。 */
+.ge-char {
+  display: inline-block;
+  opacity: 0;
+  filter: blur(4px);
+  transform: translateY(5px);
+}
+
+.ge-char.ge-char-in {
+  animation: ge-char-in 220ms cubic-bezier(.2, .7, .2, 1) forwards;
+}
+
+@keyframes ge-char-in {
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateY(0);
+  }
+}
+
+/* 帮助按钮：卡片右 3、上 7 的 70×70，无底色、23px 内边距。
+   70×70 里只有 24×24 是图标，其余是透明的移动端命中区（规格 §1）。 */
+.ge-help {
+  position: absolute;
+  right: 3px;
+  top: 7px;
+  width: 70px;
+  height: 70px;
+  padding: 23px;
+  border: 0;
+  background: none;
+  color: #848484;
+  cursor: pointer;
+  /* 图标靠 padding 定位在正中心，所以按钮本身不做任何布局变换。 */
+  line-height: 0;
+}
+
+/* hover 只改颜色：规格 §1 明写"不位移或缩放"。 */
+.ge-help:hover,
+.ge-help:focus-visible {
+  color: #bfbfbf;
+}
+
+.ge-help:focus-visible {
+  outline: 2px solid #b591ff;
+  outline-offset: 4px;
+  border-radius: 50%;
+}
+
+.ge-help svg {
+  display: block;
+  stroke: currentColor;
+}
+
+/* tooltip：卡片上方 12px、左右 22（规格 §3）。 */
+.ge-tooltip {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  bottom: calc(100% + 12px);
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border: 1px solid #444;
+  border-radius: 9px;
+  background: #242424;
+  color: #dedede;
+  font-size: 14px;
+  line-height: 20px;
+  box-shadow: 0 6px 24px #0005;
+  z-index: 2;
+}
+
+.ge-tooltip[hidden] {
+  display: none;
+}
+
+/* Faster / Smarter：上 97、左右 22、24px/29px（规格 §1）。 */
+.ge-scale {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  top: 97px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 24px;
+  line-height: 29px;
+  color: #848484;
+}
+
+/* Recommended：左 47、上 205，不随档位改动（规格 §1）。 */
+.ge-recommended {
+  position: absolute;
+  left: 47px;
+  top: 205px;
+  font-size: 24px;
+  line-height: 29px;
+  color: #848484;
+  pointer-events: none;
+}
+
+/* 每一格实际会发的协议值（2026-11-10）。位置由 JS 按同一套
+   `TRACK_START_X + i × 358 / span` 写 left，`span` 是 translateX(-50%) 让它
+   以刻度点为中轴对齐 —— 与刻度圆点用同一个映射，两者不会错开。 */
+.ge-sends {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  /* `Recommended` 占 205..234（top 205 + line-height 29），卡片到 258 为止，
+     所以这一行落在 236..252 —— 正好用掉剩下的空白，卡片尺寸仍是规格的 258。 */
+  top: 236px;
+  height: 16px;
+  pointer-events: none;
+}
+
+.ge-send {
+  position: absolute;
+  transform: translateX(-50%);
+  font-size: 12px;
+  line-height: 16px;
+  color: #6f6f6f;
+  white-space: nowrap;
+}
+
+/* 这一格在这个模型上没有请求值。短横用更暗的色，读起来是"空"而不是一个值。 */
+.ge-send.ge-send-none {
+  color: #4a4a4a;
+}
+
+/* 滑块的透明命中区：左 22、右 22、上 133、高 72、圆角 12（规格 §1）。
+   `touch-action: none` 在这里也写一份：JS 里写的是内联样式，这一份保证
+   样式表被单独复用时行为一致。 */
+.ge-slider {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  top: 133px;
+  height: 72px;
+  border-radius: 12px;
+  touch-action: none;
+  /* 拖动时不要选中文字（指针在卡片上来回时会把标题选蓝）。 */
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ge-slider:focus {
+  outline: none;
+}
+
+/* 键盘焦点轮廓 2px #b591ff、offset 4（规格 §3）。不用 `:focus` 而是
+   `:focus-visible`：鼠标点完也画一圈紫框会让人以为控件被选中了。 */
+.ge-slider:focus-visible {
+  outline: 2px solid #b591ff;
+  outline-offset: 4px;
+}
+
+/* 单档（`stops.length === 1`）：滑块冻结。
+ *
+ * `data-single` 由 JS 写在根节点上。这里只做视觉与指针那一半：
+ * - `pointer-events: none` 收回整条命中区，于是没有可拖的落点、也没有 hover；
+ * - `cursor: default` 去掉任何"这里可以拖"的光标暗示（拖动手柄不存在）。
+ *
+ * 焦点框**不**在这里去掉：滑块仍在 Tab 序列里，读屏还能念出"0 / 0，Off"，
+ * 一个看得见却按不动的控件仍然需要看得见的焦点。
+ *
+ * JS 侧还有一道真正的锁（`single` 挡掉 setTarget / 指针 / 键盘 / commit）：
+ * 样式表加载失败或 `pointer-events` 被宿主覆盖时，控件仍然拖不动。 */
+.ge-root[data-single="true"] .ge-slider {
+  pointer-events: none;
+  cursor: default;
+}
+
+/* 轨道：位于命中区上 15、下 17，392×40，#272727、圆角 10、裁切内部像素
+   （规格 §1）。`overflow: hidden` 同时负责裁掉像素画布与填充的左半。
+   `top` 由 `galaxy-effort.js` 按 `TRACK_TOP` 写，这里给的 15px 是同一数值的
+   兜底——样式表被单独打开时轨道也得在正确的位置上。 */
+.ge-track {
+  position: absolute;
+  left: 0;
+  top: 15px;
+  width: 392px;
+  height: 40px;
+  border-radius: 10px;
+  background: #272727;
+  overflow: hidden;
+}
+
+/* 轨道填充：宽度与渐变由 `paint()` 每帧写（位置是连续量）。左端固定在轨道
+   原点，所以宽度就是 `trackX(position)`（规格 §4）。 */
+.ge-track-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  border-radius: 10px;
+  pointer-events: none;
+}
+
+/* 刻度：始终留在最上层（规格 §1「刻度始终保留，像素层下方绘制」）。
+   顺序由 DOM 保证（像素画布排在它前面），这里再给一个显式的层级：像素层在
+   Galaxy 的透明度最高到 0.9，靠绘制顺序不够保险——它一旦被提升成合成层，
+   就会压在刻度之上。 */
+.ge-track-dots {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+/* 刻度圆点：直径 6、纵坐标 18、rgba(255,255,255,.20)。横坐标由 JS 写 left
+   （位置把 `trackXAt` 的 16..374 按当前档位数均分，不在这里再算一遍）。
+   档位由宿主决定，所以点数与间距都不在样式表里——写死六个点会在三档的模型上
+   多出三个不存在的档位。 */
+.ge-dot {
+  position: absolute;
+  top: 18px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .20);
+}
+
+/* 第二档（`i === 1`）是 6×20 的长刻度（规格 §1）。上边距 10 让它的中点也落在
+   20，与圆点的纵坐标 18（中心 21）保持视觉上同一条线。
+   只在档位表有第二项时由 JS 加这个类：单档时那个"推荐位置"不存在，长刻度
+   没有可指的东西。 */
+.ge-dot-tall {
+  top: 10px;
+  height: 20px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, .27);
+}
+
+/* 像素画布：覆盖整条轨道（规格 §5）。宽高属性由 JS 按 DPR 设，这里只给
+   CSS 尺寸与位置——两者混着写会在缩放后对不上。 */
+.ge-pixel {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 392px;
+  height: 40px;
+  pointer-events: none;
+}
+
+/* 放射画布：卡片左 -100、上 -60，不裁切在轨道内（规格 §5）。 */
+.ge-radial {
+  position: absolute;
+  left: -100px;
+  top: -60px;
+  width: 640px;
+  height: 390px;
+  pointer-events: none;
+}
+
+/* 脑形：48×48，中心初始在命中区 (16,36)（规格 §2）。位置与 scale 由
+   `paint()` 每帧写；这里的初始值只是让它在 JS 跑起来之前不落在左上角。
+
+   父节点是 `.ge-slider`（命中区）而不是 `.ge-track`：轨道用
+   `overflow: hidden` 裁像素与圆角，脑形中心在轨道顶边之上、Galaxy 时还要
+   放大 1.45 倍，放进轨道会被削掉顶部。 */
+.ge-brain {
+  position: absolute;
+  left: -8px;
+  top: 12px;
+  width: 48px;
+  height: 48px;
+  transform-origin: 50% 50%;
+  pointer-events: none;
+}
+
+.ge-brain svg {
+  display: block;
+  /* 两层 drop-shadow 的半径与颜色来自 `galaxyState`（规格 §4）；强度用
+     `--ge-glow-strength` 在 0 时淡到没有，避免普通档位也挂着一圈光。 */
+  filter:
+    drop-shadow(0 0 var(--ge-glow-a, 4px) rgba(131, 81, 255, calc(var(--ge-glow-strength, 0) * .55)))
+    drop-shadow(0 0 var(--ge-glow-b, 9px) rgba(117, 67, 252, calc(var(--ge-glow-strength, 0) * .30)));
+  transition: filter 220ms ease-out;
+}
+
+/* 脑形填充与描边来自 `galaxyState`（规格 §4 的两个 rgb 表达式）；回退值是
+   普通档位的粉红 + 深酒红（§2）。 */
+.ge-brain-outline {
+  fill: var(--ge-brain-fill, #ff92ce);
+  stroke: var(--ge-brain-stroke, #650e3c);
+  stroke-width: 5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.ge-brain-fold {
+  stroke: var(--ge-brain-stroke, #650e3c);
+}
+
+/* 新增褶皱沿路径画出来：`pathLength="1"` 让每条路径的长度都是 1，
+   所以 dasharray 1 是整条、dashoffset 从 1 走到 0 是"画完"。
+   `--ge-fold-hidden` 由 `paint()` 按 `foldReveal` 写（规格 §4）。 */
+.ge-fold-path {
+  stroke-dashoffset: var(--ge-fold-hidden, 1);
+}
+
+/* 减少动态（规格 §6）：本组件的运动全在 JS 的 RAF 里，`reduceMotion()` 已经
+   会把它关掉；这里收掉的是纯 CSS 的那部分——拆字动画直接给终态，不要一闪。 */
+@media (prefers-reduced-motion: reduce) {
+  .ge-char {
+    opacity: 1;
+    filter: none;
+    transform: none;
+  }
+
+  .ge-char.ge-char-in {
+    animation: none;
+  }
+
+  .ge-brain svg {
+    transition: none;
+  }
+
+  .ge-card {
+    will-change: auto;
+  }
+}

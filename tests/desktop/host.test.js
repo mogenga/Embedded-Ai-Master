@@ -202,6 +202,16 @@ async function streamingGateway(text = "你好，串口没输出通常是供电�
 }
 
 async function tempHome() {
+  return tempHomeFor(await failingGateway());
+}
+
+/**
+ * The same fixture pointed at a caller-supplied gateway.
+ *
+ * Exists so a case that must inspect the wire can use its own recording server
+ * instead of `failingGateway`, which discards the request body.
+ */
+async function tempHomeFor(baseUrl) {
   const dir = await mkdtemp(path.join(tmpdir(), "eam-host-"));
   tempDirs.push(dir);
   await writeFile(
@@ -209,7 +219,7 @@ async function tempHome() {
     JSON.stringify({
       gw: {
         protocol: "openai-chat-completions",
-        baseUrl: await failingGateway(),
+        baseUrl,
         models: { flash: { contextWindow: 8192, maxOutput: 512 } },
       },
     }),
@@ -229,7 +239,7 @@ async function tempHome() {
  * a summarizable prefix, a `usage` event to measure), so a test that wants
  * either has to write one; the host is not the only author of a session file.
  */
-async function writeSession(home, { id, workdir, text = "旧会话", extraEvents = [] }) {
+async function writeSession(home, { id, workdir, model, text = "旧会话", extraEvents = [] }) {
   const dir = path.join(home, "sessions", id);
   await mkdir(dir, { recursive: true });
   await writeFile(
@@ -239,6 +249,7 @@ async function writeSession(home, { id, workdir, text = "旧会话", extraEvents
       createdAt: new Date().toISOString(),
       status: "closed",
       ...(workdir === undefined ? {} : { workdir }),
+      ...(model === undefined ? {} : { model }),
     }),
     "utf8",
   );
@@ -529,6 +540,87 @@ describe("desktop host", () => {
     },
     HOST_TIMEOUT_MS,
   );
+
+  /**
+   * `/compact` on a session whose stored choice is a **tier**.
+   *
+   * `handleCompact` builds its own provider instead of going through
+   * `runSession`, so it does not get the kernel's tier folding for free. The
+   * adapter refuses anything outside the protocol vocabulary at construction
+   * time, which turned "the operator picked Galaxy" into a compaction that
+   * could not start at all (`reasoningEffort 非法: "galaxy"`). The host folds
+   * the tier with the same `resolveEffortTier` the session uses.
+   *
+   * Asserted on the request the gateway received, because that is the only
+   * place both halves are visible: the tier must not appear on the wire, and
+   * the value it maps to must.
+   */
+  it("compact 用档位选择时按映射折算，不把档位名发给适配器", async () => {
+    // A recording gateway: the assertion is about what left the process, and
+    // `tempHome()`'s fixture answers 400 without keeping the body.
+    const bodies = [];
+    const server = createServer((req, res) => {
+      const chunks = [];
+      req.on("data", (chunk) => chunks.push(chunk));
+      req.on("end", () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        // 2026-11-10：宿主启动后会抓一次 `GET /v1/models`（网关目录）。那是
+        // 一个**没有 body** 的请求，记进来会让下面的 `JSON.parse` 炸在一个与
+        // 本用例无关的地方。只收真的有 body 的请求。
+        if (text !== "") bodies.push(text);
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: { message: "bad request (test)" } }));
+      });
+    });
+    servers.push(server);
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address();
+    const home = await tempHomeFor(`http://127.0.0.1:${port}/v1`);
+    const sessionId = "sess-tier-compact";
+    // `run.json` holds the tier, the way a click on the slider leaves it.
+    await writeFile(
+      path.join(home, "run.json"),
+      JSON.stringify({ reasoningEffortByModel: { "gw/flash": "galaxy" } }),
+      "utf8",
+    );
+    await writeSession(home, {
+      id: sessionId,
+      workdir: home,
+      model: "gw/flash",
+      text: "STM32 连不上",
+      extraEvents: [
+        { type: "assistant", payload: { content: "先查供电", toolCalls: [] } },
+        { type: "user", payload: { content: "调试日志".repeat(2000) } },
+      ],
+    });
+
+    const events = await runHost(
+      home,
+      [
+        { cmd: "init", cwd: home },
+        { cmd: "loadSession", id: sessionId },
+        { cmd: "compact" },
+      ],
+      {
+        until: (all) =>
+          all.some((event) => event.type === "session_loaded") &&
+          all.some((event) => event.type === "run_end"),
+      },
+    );
+
+    const notices = events.filter((event) => event.type === "notice");
+    // The adapter's construction-time refusal, if the fold were missing.
+    expect(notices.some((notice) => notice.text.includes("reasoningEffort 非法"))).toBe(false);
+    // The summary did reach the gateway with the mapped value; the gateway
+    // answers 400, which is the kernel's failure to report, not the host's.
+    expect(bodies.length).toBeGreaterThan(0);
+    for (const body of bodies) {
+      expect(JSON.parse(body).reasoning_effort).toBe("high");
+      // The tier name must not survive to the wire — the kernel's whitelist is
+      // unchanged, and `galaxy` on a real gateway is a 400 or a silent no-op.
+      expect(body).not.toContain("galaxy");
+    }
+  }, HOST_TIMEOUT_MS);
 
   /**
    * A stored `usage` event's split survives into the `state` of a reopened

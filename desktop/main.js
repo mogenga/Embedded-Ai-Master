@@ -38,10 +38,8 @@ import {
 import {
   blockedExternalText,
   blockedNavigationText,
-  blockedRevealText,
   checkExternalUrl,
   checkNavigationTarget,
-  checkRevealTarget,
 } from "./link-policy.js";
 import { createUpdater } from "./updater.js";
 
@@ -358,18 +356,20 @@ function startWindow(options = {}) {
     show: false,
     backgroundColor: "#0e0e10",
     title: "Embedded AI Master",
-    // Windows 任务栏/标题栏图标。
+    // 标题栏 / Alt-Tab / 窗口切换器用的图标。
     //
-    // **必须是 asar 里存在的路径**。这里曾经是 `join(here, "build", "icon.ico")`
-    // ——`build/` 是打包器的输入目录（`win.icon` 从那里读，写进 exe 的资源段），
-    // 但它**不在 `build.files` 里**，所以装好之后 asar 内根本没有这个文件。传一个
-    // 不存在的路径不会报错，Electron 只是回退到默认图标，于是任务栏显示的是
-    // Electron 的标志而不是本应用的（2026-11-09 用户报的就是这个）。
+    // 路径必须在 asar 里存在：`build/` 是打包器的**输入**目录（`win.icon` 从那里
+    // 读，写进 exe 的资源段），它不在 `build.files` 里，所以装好之后 asar 内没有
+    // 这个文件。传一个不存在的路径不会报错，Electron 静默回退到默认图标。
+    // `renderer/assets/app.ico` 在 `build.files` 里（`renderer/**/*`），开发形态与
+    // 打包形态是同一份文件、同一个路径。`build/icon.ico` 保留原样，它是
+    // electron-builder 的输入，两份逐字节相同（`sha256 c99b84fa…`）。
     //
-    // 现在指向 `renderer/assets/app.ico`：那个目录在 `build.files` 里（`renderer/**/*`），
-    // 开发形态与打包形态是**同一份文件、同一个路径**，不会再出现「开发时正常、
-    // 装完就变默认图标」。`build/icon.ico` 保留原样，它是 electron-builder 的输入，
-    // 两份逐字节相同（`sha256 c99b84fa…`）。
+    // **2026-11-09 订正**：这一行曾经被当成任务栏图标的修复，但任务栏按钮**不读
+    // 窗口图标**。它按运行时 AppUserModelID 去找认领该 AUMID 的快捷方式，用那个
+    // 快捷方式的目标 exe 的图标。窗口图标（`WM_GETICON`）与 exe 资源当时都已经是
+    // 正确的，任务栏却仍是原子——原因在下面 `setAppUserModelId` 那一行，不在
+    // 这里。别沿着「图标路径」这个方向再查一遍。
     icon: join(here, "renderer", "assets", process.platform === "win32" ? "app.ico" : "mark.png"),
     // The renderer draws its own caption buttons on Windows so they match the
     // top bar and follow the theme; macOS keeps its traffic lights.
@@ -705,9 +705,22 @@ app.on("second-instance", () => {
 
 app.whenReady().then(() => {
   if (!app.hasSingleInstanceLock()) return;
-  // Windows 任务栏归属：不设 AppUserModelId 时窗口可能被归进
-  // electron.exe 的分组，图标与通知都跟着错。
-  if (process.platform === "win32") app.setAppUserModelId("com.embedded-ai.master");
+  // Windows 任务栏归属。
+  //
+  // **这个字符串必须与 `package.json` 的 `build.appId` 逐字相同**，原因是一段
+  // 2026-11-09 查出来的因果链：任务栏按钮的图标**不取自窗口 `icon`**（窗口图标
+  // 用 `WM_GETICON` 读出来是对的，exe 的 RT_GROUP_ICON 也是对的），它按运行时
+  // AUMID 去找「认领这个 AUMID 的快捷方式」，再用**那个快捷方式的目标 exe** 的
+  // 图标。本机有一个开发期建的 `开始菜单\程序\Electron.lnk`（指向仓库里的
+  // `electron.exe`，2026-10-22 创建），它的 AUMID 恰好就是这里原来写的
+  // `com.embedded-ai.master`——于是 shell 拿 electron.exe 的原子图标画了我们的
+  // 按钮。对照实验：同一个 electron.exe、同一个图标路径，只换 AUMID，
+  // 这个串 → 原子，一个没人认领的新串 → 本应用的图标。
+  //
+  // 改动前这里是 `"com.embedded-ai.master"`，与 appId `"com.embedded-ai-master.app"`
+  // 不是同一个值，而且正好撞上了那个开发期快捷方式。装好的旧版本不会因为这一行
+  // 自动变好，要重新出包。
+  if (process.platform === "win32") app.setAppUserModelId("com.embedded-ai-master.app");
   // Read before the first window exists: its `close` handler reads the value
   // synchronously, so a window created before the read would apply the default
   // to its first close even when the file says `quit`.

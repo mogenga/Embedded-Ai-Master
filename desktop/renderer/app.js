@@ -11,6 +11,7 @@ import { providerMark } from "./provider-presets.js";
 import { providerRailRows, readProviderMeta } from "./provider-meta.js";
 import { VENDOR_MARKS } from "./vendor-marks.js";
 import { nextThinkingExpanded, normalizeTranscriptView, thinkingExpandedOnEnd } from "./thinking-view.js";
+import { createGalaxyEffort } from "./galaxy-effort.js";
 
 /** Saved preferences are restored here; the host gets them on init. */
 const savedLocale = localStorage.getItem("prometheus.locale");
@@ -68,7 +69,7 @@ const state = {
   busy: false,
   mode: "ask",
   effort: "auto",
-  effortChoices: { levels: [], default: "", fixed: "" },
+  effortChoices: { levels: [], stops: [], resolved: {}, default: "", fixed: "" },
   model: "",
   models: [],
   modelsSource: "",
@@ -394,6 +395,10 @@ function applyLocale(locale, { announce = false } = {}) {
   // The sentence explaining a locked composer is derived text with no
   // `data-i18n` to sweep; repaint it from the state already held.
   renderComposerLock();
+  // The chip's label is a tier name taken from the host's stop list, so the
+  // `[data-i18n]` sweep above has nothing to paint for it; `setEffort` repaints
+  // the chip and the `sends X` sentence below it.
+  setEffort(state.effort);
   // Last, after the sweep: this caption's name follows the window's state, and
   // the sweep just painted the resting one.
   applyWindowState();
@@ -2863,72 +2868,145 @@ function setMode(mode) {
 }
 
 /**
- * The reasoning levels the active model accepts.
+ * The stops the host says this model can use.
  *
- * The host derives this from `providers.json` (`supportsReasoning`), so an
- * empty list is a fact: the model does not take the parameter. It is not a
- * prompt to guess a default set — offering `low`/`medium`/`high` to a model
- * whose request drops the field is the lie this list exists to avoid.
+ * 2026-11-10 起**永远是六格**（用户原话「永远六格，映射做适配」）：宿主对每个
+ * 模型都产出同样的 Low…Galaxy 六项，每项带 `sends`（这一格实际会发什么）。空
+ * 列表只有一个含义——**没有可用模型**，那时整块控件隐藏。
+ *
+ * 2026-11-09 的「滑块长度就是能力声明」（按解析结果去重决定档位数）已被这一版
+ * 推翻：长度随模型变，等于同一个设置换模型就换一把尺子。
  */
-function effortLevels() {
-  return state.effortChoices?.levels ?? [];
+function effortStops() {
+  return state.effortChoices?.stops ?? [];
 }
 
 /**
- * Show or hide the chip for the model the host just described.
+ * Is a `setEffort` command awaiting the host's answer?
  *
- * A model with no levels has nothing to choose: `auto` is the only value and
- * the request sends nothing, so the control would be a menu with one row that
- * cannot change anything. It stays hidden and the reason lives in the menu's
- * `note`, which the settings page and the refusal notice also carry.
+ * A host that refuses a tier answers with a `notice` and no `state`, so the
+ * slider would keep the position the drag left it at while the next request
+ * carries the old value. This flag is what tells that refusal apart from an
+ * unrelated notice arriving mid-drag.
+ */
+let effortPending = false;
+
+/**
+ * The brain slider instance, or `null` before the panel has opened once.
+ *
+ * Created lazily: the component builds two canvases, an SVG and a RAF loop, and
+ * a conversation that never touches the slider should not pay for them. It is
+ * also the reason `destroy` exists — see `syncEffortControl`. Rebuilt whenever
+ * the stop list changes, because the stop list is a constructor argument.
+ */
+let effortSlider = null;
+/** The stop-list signature the current instance was built from. */
+let effortSliderStops = "";
+
+/**
+ * Show the chip for the model the host just described.
+ *
+ * **Always shown whenever there is a model** (2026-11-09, by request). The
+ * exception is a host with no model at all (`stops` empty for real): there is
+ * no conversation to set an effort for, and the chip would be a button with
+ * nothing behind it. That one hides — and tears the slider down, because a
+ * component still running its RAF loop behind a hidden chip is a bug nobody
+ * would look for.
  */
 function syncEffortControl() {
-  effortControl.hidden = effortLevels().length === 0;
+  const unavailable = effortStops().length === 0;
+  effortControl.hidden = unavailable;
+  // Direct lookups rather than the `effortPanel` / `effortPicker` constants,
+  // which are declared far below this and would be in their temporal dead zone
+  // if this ever ran during module evaluation.
+  if (unavailable) {
+    $("effort-panel").hidden = true;
+    $("effort-picker").setAttribute("aria-expanded", "false");
+    if (effortSlider !== null) {
+      effortSlider.destroy();
+      effortSlider = null;
+      effortSliderStops = "";
+    }
+  }
+}
+
+/**
+ * Where a `setEffort` value sits in the host's stop list.
+ *
+ * Returns -1 when the value is not one of the stops — `auto` on a model that
+ * takes no effort parameter is the common case, and so is a protocol value
+ * (`minimal`) left in an old `run.json`. The caller parks the slider at 0 in
+ * that case, which is the honest position: there is no stop for it.
+ */
+function effortStopIndex(value) {
+  return effortStops().findIndex((stop) => stop.value === value);
+}
+
+/**
+ * The chip's own label: the tier the host confirmed, or the `auto` word.
+ *
+ * `auto` is not a stop any more (2026-11-10 「AUTO删掉」), but the state still
+ * exists — a `run.json` with no entry for this model means "send no field",
+ * and that is what a fresh conversation starts as. A one-stop list is the
+ * "this model takes no effort parameter" case: the host labels it `Low` and
+ * freezes the track, so the chip names the same stop.
+ */
+function effortChipLabel() {
+  const stops = effortStops();
+  if (stops.length === 0) return "";
+  // 轨道上已经没有 `auto` 那一格（2026-11-10 用户决定「AUTO删掉」），但
+  // **这个状态仍然存在**：`run.json` 里没有该模型的条目，请求不带字段。
+  // 旧的首选项、以及第一次使用时的默认值都会落在这里。
+  //
+  // 芯片必须说真话：这时不能拿第一档的名字冒充，那会显示一个用户没有选过的
+  // 档位。`Auto` 是词，不是档位——它不进轨道，只出现在标签里。
+  if (state.effort === "auto") return t.effortAuto;
+  const index = effortStopIndex(state.effort);
+  if (index >= 0) return stops[index].label;
+  // 没有 `auto` 之后，`stops[0]` 是 `low`；一个旧 `run.json` 里的 `minimal`
+  // 之类仍然要打印得出来。
+  return state.effort;
+}
+
+/**
+ * Point the chip and the panel at the state the host last confirmed.
+ *
+ * Called on every `state`/`session_loaded` (through `setEffort`) and after a
+ * refused `setEffort` — the host answers a refusal with a `notice` and no new
+ * `state`, so without this the brain would stay where the drag left it while
+ * the request carried the old value.
+ */
+function renderEffortPanel() {
+  const choices = state.effortChoices ?? {};
+  $("effort-panel").setAttribute("aria-label", t.effortLabel);
+
+  const index = effortStopIndex(state.effort);
+  if (effortSlider !== null) effortSlider.setValue(index >= 0 ? index : 0, { silent: true });
+  // 轨道上没有 `auto`，所以那一点只能停在 `low`；`#effort-auto-hint` 说明
+  // 它其实什么都没发（见下面的 hint 逻辑）。
+
+  // The hint answers one question: what will actually go on the wire.
+  //
+  // 轨道固定六格之后（2026-11-10 用户决定「永远六格」），这句**重新变成必需**
+  // 而不是罕见提示：缺省映射把 `extra` / `max` / `galaxy` 全折成 `high`，
+  // 一个模型可能有三格发同一个值。滑块只显示档位名的话，那三格看起来像三种
+  // 强度。`resolved` 是宿主算出来的答案，这里再算一遍就是第二个真相源。
+  //
+  // 同名时不显示（`low` 发 `low` 说「sends low」是噪音）。
+  const resolved = choices.resolved?.[state.effort];
+  $("effort-auto-hint").textContent = typeof resolved === "string" && resolved !== state.effort
+    ? t.effortSends(resolved)
+    : "";
 }
 
 function setEffort(effort) {
+  // The host answered (applied or not): any in-flight commit is settled, and
+  // a later `notice` for something else must not yank the thumb.
+  effortPending = false;
   state.effort = effort;
-  $("effort-label").textContent = effort === "auto" ? t.effortAuto : effort;
+  $("effort-label").textContent = effortChipLabel();
   syncEffortControl();
-  renderEffortMenu();
-}
-
-function renderEffortMenu() {
-  const menu = $("effort-menu");
-  const choices = state.effortChoices ?? {};
-  // A model with one fixed level takes no parameter at all; saying so is
-  // clearer than showing a single row the user cannot change.
-  if (choices.fixed && effortLevels().length === 0) {
-    menu.innerHTML =
-      `<div class="effort-fixed">${escapeHtml(t.effortFixed.replace("{level}", choices.fixed))}</div>`;
-    return;
-  }
-  // Only the levels the host says this model accepts — an empty list renders
-  // no rows instead of a made-up `low`/`medium`/`high` set. `auto` is always
-  // present: it is the way back to whatever `providers.json` defaults to, and
-  // without it a level could never be un-set from this menu.
-  const rows = [{ level: "auto", label: t.effortAuto }]
-    .concat(effortLevels().map((level) => ({ level, label: level })));
-  menu.innerHTML =
-    rows
-      .map((row) => {
-        const active = row.level === state.effort;
-        // What `auto` will actually send, so the user does not have to open
-        // providers.json to find out.
-        const hint = row.level === "auto" && choices.default
-          ? `<span class="effort-hint">${escapeHtml(choices.default)}</span>`
-          : "";
-        return (
-          `<button role="menuitemradio" data-effort="${escapeHtml(row.level)}" aria-checked="${active}"` +
-          ` class="${active ? "active" : ""}">` +
-          `<span>${escapeHtml(row.label)}</span>${hint}</button>`
-        );
-      })
-      .join("") +
-    // Why there is nothing to choose, when the host gave a reason. Dim, not a
-    // warning: "this model takes no effort parameter" is a property of the
-    // model, not a fault the operator caused.
-    (choices.note ? `<div class="effort-fixed">${escapeHtml(choices.note)}</div>` : "");
+  renderEffortPanel();
 }
 
 /* ---------- model picker ---------- */
@@ -3178,7 +3256,15 @@ function renderModelMenu() {
   const showGroups = groups.length > 1;
   // Which provider the right-hand list is showing. The rail is a view filter,
   // not a selection: switching providers must not switch models, so this is
-  // renderer-local state, reset to the model in use whenever none is set.
+  // renderer-local state.
+  //
+  // Two resets, different jobs:
+  //  - `openModelMenu` sets it from the model in use **every time the panel
+  //    opens** — that is what makes "look at another vendor, close, reopen"
+  //    come back to the model actually being used.
+  //  - this one is the safety net for a list that changed **while the panel is
+  //    open** (a `models` event pruning the provider being viewed): the rail
+  //    must not point at a group that no longer exists.
   if (showGroups && !groups.some((group) => group.provider === state.modelRailProvider)) {
     state.modelRailProvider = providerOf(state.model ?? "");
   }
@@ -3455,6 +3541,15 @@ function formatContext(value) {
 }
 
 function openModelMenu() {
+  // **每次打开都从当前模型所在的厂商开始**（2026-11-10 用户报告）。
+  //
+  // `modelRailProvider` 是面板的**视图过滤**，不是选择：切换厂商不换模型。
+  // 但把它一直留着，会让"上次翻到了别家、看了一眼就关掉"变成"下次打开还在
+  // 别家"——面板于是不再指向当前在用的模型，用户得自己翻回去。
+  //
+  // 重置放在**打开**这一刻而不是关闭时：面板关着的时候模型也可能被别处改掉
+  // （Ctrl+E 之外的路径、外部 `models` 事件），打开时算才是当下的答案。
+  state.modelRailProvider = providerOf(state.model ?? "");
   renderModelMenu();
   modelMenu.hidden = false;
   // `aria-expanded` mirrors the popover, not the chip's own state: it is the
@@ -4337,6 +4432,15 @@ function handleEvent(message) {
       }
       if (message.domain === "settings" && settings.handleEvent(message) === true) {
         break;
+      }
+      // A refused `setEffort` answers with a warn and no `state`, so the thumb
+      // would keep the position the drag left it at while the request carries
+      // the old tier. Repaint from the confirmed state — only when a commit is
+      // actually in flight, so an unrelated notice cannot yank a thumb the
+      // user is still dragging.
+      if (effortPending) {
+        effortPending = false;
+        renderEffortPanel();
       }
       addNotice(message.level, message.text);
       scrollToBottom();
@@ -6758,16 +6862,18 @@ document.addEventListener("keydown", (event) => {
     // mean had no pane behind it, and an accepted shortcut that does the
     // effort cycle beats one that does nothing while the sheet lists neither.
     event.preventDefault();
-    // Silent when the model has no levels: the control is hidden, and sending
-    // anyway would earn one warning per keypress for a setting the user cannot
-    // see (D-169's complaint about this exact shortcut).
-    if (effortLevels().length === 0) return;
-    // Cycle through what this model actually accepts, not a fixed four. The
-    // index advances from the chip's current value, and the host's answering
-    // `state` is what moves it — same rule as the menu click above.
-    const order = ["auto", ...effortLevels()];
-    const next = order[(order.indexOf(state.effort) + 1) % order.length];
-    api.send({ cmd: "setEffort", effort: next });
+    // Silent when there is no model: the control is hidden, and sending anyway
+    // would earn one warning per keypress for a setting the user cannot see
+    // (D-169's complaint about this exact shortcut).
+    const stops = effortStops();
+    if (stops.length === 0) return;
+    // Cycle through the stops the host actually offers, in track order. A
+    // one-stop list cannot cycle: the key does nothing rather than sending a
+    // value that is already selected.
+    if (stops.length === 1) return;
+    const at = effortStopIndex(state.effort);
+    const next = stops[(at + 1) % stops.length];
+    api.send({ cmd: "setEffort", effort: next.value });
   } else if (key === "\\") {
     event.preventDefault();
     closeWorkbench();
@@ -7425,36 +7531,123 @@ function addMentionPath(path) {
 }
 
 const effortPicker = $("effort-picker");
-const effortMenu = $("effort-menu");
+const effortPanel = $("effort-panel");
 
-function setEffortMenu(open) {
-  if (open) renderEffortMenu();
-  effortMenu.hidden = !open;
+/**
+ * Build the brain slider into `#effort-galaxy-mount`, once.
+ *
+ * Lazy for two reasons: the component allocates two canvases and starts a RAF
+ * loop, and a conversation that never opens the panel should not pay for
+ * either. The `reducedMotion` flag is the app's own motion switch (Settings →
+ * appearance), not the OS one — the component already ORs in
+ * `prefers-reduced-motion` itself, so passing the in-app setting is what makes
+ * both switches work without duplicating the media query here.
+ */
+function ensureEffortSlider() {
+  if (typeof createGalaxyEffort !== "function") return;
+  const stops = effortStops();
+  if (stops.length === 0) return;
+  // The stop list is a constructor argument, so a model switch that changes it
+  // has to rebuild. Compare by signature rather than by identity: the host
+  // sends a fresh array on every `state`, and rebuilding on every keystroke
+  // would restart the RAF loop and the fold animation for nothing.
+  const signature = stops.map((stop) => `${stop.value}:${stop.label}`).join("|");
+  if (effortSlider !== null && signature === effortSliderStops) return;
+  if (effortSlider !== null) {
+    effortSlider.destroy();
+    effortSlider = null;
+  }
+  effortSliderStops = signature;
+  const index = effortStopIndex(state.effort);
+  effortSlider = createGalaxyEffort({
+    mount: $("effort-galaxy-mount"),
+    stops,
+    value: index >= 0 ? index : 0,
+    reducedMotion: document.documentElement.dataset.motion === "reduced",
+    // The component reports `{ index, value, label }`; `value` is what the
+    // host accepts, so it goes on the wire unchanged. `label` is a display
+    // string and must never be parsed back into a level.
+    onChange: (detail) => commitEffort(detail.value),
+  });
+}
+
+function setEffortPanel(open) {
+  if (open) {
+    // Create before painting: `renderEffortPanel` pushes the confirmed stop
+    // into the instance, and an instance built after that push would sit at
+    // the wrong stop for one frame.
+    ensureEffortSlider();
+  }
+  // Unhide **before** painting: `renderEffortPanel` pushes the confirmed stop
+  // into the instance, and a slider measured under `display: none` lays out at
+  // zero — the fold animation would start from the wrong position.
+  effortPanel.hidden = !open;
   effortPicker.setAttribute("aria-expanded", String(open));
+  if (open) {
+    renderEffortPanel();
+    // **Not** focusing the slider here (2026-11-09). Opening a panel with the
+    // mouse is not a keyboard gesture, and the slider's focus ring
+    // (`outline-offset: 4px`, spec §3) is drawn past its own 72px hit area —
+    // which ends exactly where "Recommended" begins. Auto-focusing made that
+    // ring appear on every open, drawn over the label. The slider keeps
+    // `tabindex="0"`, so Tab still reaches it and the ring still appears when
+    // the operator actually uses the keyboard, which is what the spec asks for.
+  }
 }
 
 effortPicker.addEventListener("click", (event) => {
   event.stopPropagation();
-  setEffortMenu(effortMenu.hidden);
+  setEffortPanel(effortPanel.hidden);
 });
 
-// Delegated: the menu is rebuilt whenever the model's level list changes, so
-// per-row listeners would go stale after a model switch.
-effortMenu.addEventListener("click", (event) => {
-  const button = event.target.closest("[data-effort]");
-  if (!button) return;
-  setEffortMenu(false);
-  if (button.dataset.effort === state.effort) return;
-  // The label moves when the host answers with a `state`, not here. This host
-  // can refuse a level (a stale menu, a model reloaded from disk), and moving
-  // the chip first would show a value the next request does not carry — the
-  // exact lie this control used to tell. The refusal notice is the feedback.
-  api.send({ cmd: "setEffort", effort: button.dataset.effort });
-});
+/**
+ * A committed tier choice.
+ *
+ * Sends, then lets the host's answering `state` move everything. This host can
+ * refuse a tier (a model reloaded from disk, a stale panel), and moving the
+ * chip first would show a value the next request does not carry — the exact
+ * lie this control used to tell.
+ */
+function commitEffort(tier) {
+  if (tier === state.effort) return;
+  effortPending = true;
+  api.send({ cmd: "setEffort", effort: tier });
+}
+
 
 document.addEventListener("click", (event) => {
-  if (!event.target.closest("#effort-control")) setEffortMenu(false);
+  if (!event.target.closest("#effort-control")) setEffortPanel(false);
 });
+
+// Escape closes the panel like every other composer popover. The slider itself
+// binds Escape to "back to Low" (spec §3), so this handler has to run first and
+// stop there: a key that both moves the tier and closes the panel would do
+// something the operator did not ask for. Capture phase, because the component's
+// listener sits on a node this one does not own.
+effortPanel.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape" || effortPanel.hidden) return;
+  event.stopPropagation();
+  event.preventDefault();
+  setEffortPanel(false);
+  effortPicker.focus();
+}, true);
+
+// The in-app motion switch (`documentElement.dataset.motion`) is not a media
+// query, so the component cannot see it — it only reads
+// `prefers-reduced-motion` itself. Rebuilding the instance is the honest way to
+// apply a preference the component took at construction: the alternative is a
+// second, app-only "am I reduced" check inside the render loop, which would be
+// one more place to keep in sync. The tier is re-read from `state.effort` on
+// rebuild, so nothing the operator chose is lost.
+new MutationObserver(() => {
+  if (effortSlider === null) return;
+  effortSlider.destroy();
+  effortSlider = null;
+  if (!effortPanel.hidden) {
+    ensureEffortSlider();
+    renderEffortPanel();
+  }
+}).observe(document.documentElement, { attributes: true, attributeFilter: ["data-motion"] });
 
 modelPicker.addEventListener("click", (event) => {
   event.stopPropagation();

@@ -6,8 +6,15 @@ import { loadPermissionConfig, parseInlinePermissionConfig } from "../permission
 import { PermissionConfigError } from "../permissions/errors.js";
 import type { InlinePermissionConfig } from "../permissions/config.js";
 import type { PermissionConfig, PermissionPreset, PermissionRule } from "../permissions/types.js";
-import { ConfigValidationError, isReasoningEffort, parseProviders } from "./providers.js";
-import type { ProvidersConfig, ReasoningEffort } from "./providers.js";
+import {
+  ConfigValidationError,
+  EFFORT_TIERS,
+  isEffortTier,
+  isReasoningEffort,
+  parseProviders,
+  REASONING_EFFORTS,
+} from "./providers.js";
+import type { EffortTier, ProvidersConfig, ReasoningEffort } from "./providers.js";
 
 /**
  * 应用层配置（`$HARNESS_HOME` 下的 mcp.json / permissions.json / run.json / providers.json）的读写。
@@ -62,11 +69,16 @@ export interface AppRunLimits {
    * （`systemPrompt` 也在里面，它同样不是一条「上限」），宿主是它唯一的读者和
    * 写者，改它不会碰用户的模型配置。
    *
+   * **值是协议值或界面档位**：档位（`extra` / `max` / `galaxy`）存在这里，是
+   * 「操作者选了哪一档」的忠实记录；折算成协议值发生在启动那一轮（`runSession`
+   * 按该模型当时的 `effortMap` 算）。提前折好会把「选了 Galaxy」压成一个 `high`
+   * ——改过 `effortMap` 之后这条记录就永远回不到新映射了。
+   *
    * **没有 `auto` 这个值**：缺席就是 auto——用 `providers.json` 里该模型的
    * `reasoningEffort` 默认档。把 auto 存成字面量会让「选了 auto」和「从没选过」
    * 看起来不一样，而它们对请求的含义完全相同。
    */
-  reasoningEffortByModel: Record<string, ReasoningEffort>;
+  reasoningEffortByModel: Record<string, ReasoningEffort | EffortTier>;
 }
 
 export interface AppPermissionSettings {
@@ -138,7 +150,7 @@ const DEFAULT_RUN_LIMITS: AppRunLimits = Object.freeze({
   timeoutMs: null,
   deadlineMs: null,
   systemPrompt: "",
-  reasoningEffortByModel: Object.freeze({}) as Record<string, ReasoningEffort>,
+  reasoningEffortByModel: Object.freeze({}) as Record<string, ReasoningEffort | EffortTier>,
 });
 
 const RUN_LIMIT_FIELDS = new Set([
@@ -440,26 +452,33 @@ function parseRunLimits(value: unknown, source: string): AppRunLimits {
 /**
  * 校验「每个模型选定的推理强度」这张表。
  *
- * 键是 `provider/model`，值是协议等级。`auto` 不在允许值里：它不是一个等级，
- * 而是「这张表里没有这个模型」——存成字面量会让「显式选了 auto」和「从没选过」
+ * 键是 `provider/model`，值是协议等级或界面档位。`auto` 不在允许值里：它不是一个
+ * 等级，而是「这张表里没有这个模型」——存成字面量会让「显式选了 auto」和「从没选过」
  * 变成两条不同的记录，而它们对请求的含义相同（都用 providers.json 的默认档）。
+ *
+ * 档位原样存储，不在这里折算成协议值：折算要用**当时的** `effortMap`，而这张表
+ * 是「操作者选了哪一档」的记录。提前折好，改过映射之后那条记录就再也回不到新映射。
  *
  * 空字符串键与未知等级都直接报错，不静默丢弃：一张悄悄丢掉几行的表，会让
  * 界面显示的档位与请求实际发送的档位不一致（R3）。
  */
-function parseEffortByModel(value: unknown, source: string): Record<string, ReasoningEffort> {
+function parseEffortByModel(
+  value: unknown,
+  source: string,
+): Record<string, ReasoningEffort | EffortTier> {
   if (!isRecord(value)) {
     throw invalidConfig(`运行上限 reasoningEffortByModel 必须是对象: ${source}`);
   }
-  const out: Record<string, ReasoningEffort> = {};
+  const out: Record<string, ReasoningEffort | EffortTier> = {};
   for (const [modelRef, effort] of Object.entries(value)) {
     if (modelRef.trim() === "") {
       throw invalidConfig(`运行上限 reasoningEffortByModel 含空模型引用: ${source}`);
     }
-    if (!isReasoningEffort(effort)) {
+    if (!isReasoningEffort(effort) && !isEffortTier(effort)) {
       throw invalidConfig(
         `运行上限 reasoningEffortByModel 的 ${JSON.stringify(modelRef)} 等级非法: `
-          + `${JSON.stringify(effort)}（合法值: none, minimal, low, medium, high）: ${source}`,
+          + `${JSON.stringify(effort)}（合法值: ${REASONING_EFFORTS.join(", ")}；`
+          + `档位: ${EFFORT_TIERS.join(", ")}）: ${source}`,
       );
     }
     // `Object.defineProperty` 而非 `out[modelRef] = effort`：键来自配置文件，

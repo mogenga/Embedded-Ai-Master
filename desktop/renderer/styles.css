@@ -3961,25 +3961,6 @@ mark.find-hit.current {
   text-transform: capitalize;
 }
 
-.effort-hint {
-  margin-left: auto;
-  font-size: var(--text-xs);
-  color: var(--text-faint);
-  text-transform: none;
-}
-
-.effort-fixed {
-  padding: 7px 10px;
-  font-size: var(--text-sm);
-  color: var(--text-faint);
-}
-
-.effort-menu button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 #input {
   flex: 1;
   resize: none;
@@ -4849,10 +4830,6 @@ mark.find-hit.current {
   box-shadow: inset 0 0 0 1px var(--warn);
 }
 
-.segmented button[data-effort="high"].active {
-  color: var(--accent-text);
-}
-
 .segment-label {
   padding: 3px 6px 3px 5px;
   font-size: var(--text-xs);
@@ -4983,48 +4960,96 @@ mark.find-hit.current {
   color: var(--text-faint);
 }
 
+/* ---------- effort panel (the brain slider's popover) ----------
+ *
+ * The card itself is styled by `galaxy-effort.css` with the spec's literal
+ * numbers; this block only decides **where the popover sits** and carries the
+ * one piece the component does not own: the `sends X` disclosure sentence.
+ * The `Auto` button that used to live here was removed 2026-11-10 (「AUTO删掉」);
+ * `auto` survives as a chip label, not as a control.
+ *
+ * Width comes from the card (440 + 2×2 border), not from a token: the spec's
+ * 440×258 is a checked acceptance value, and a container narrower than the
+ * card would clip the Galaxy particles that spill past it by design.
+ */
 .effort-control {
   position: relative;
 }
 
-.effort-menu {
+.effort-panel {
   position: absolute;
-  bottom: calc(100% + 6px);
-  left: 0;
-  min-width: 150px;
-  padding: 4px;
-  background: var(--surface-raised);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-popover);
+  bottom: calc(100% + 10px);
+  /* Anchored right: the chip sits at the composer's right edge, and a panel
+     growing rightwards from `left: 0` would leave the window. */
+  right: 0;
   z-index: 20;
 }
 
-.effort-menu[hidden] {
+.effort-panel[hidden] {
   display: none;
 }
 
-.effort-menu {
+/* The brain card is drawn at the spec's 440×258 and scaled down here, rather
+   than re-specified at a smaller size: the numbers in `galaxy-effort.css` are
+   the checked acceptance values, and a second set for the composer would be a
+   second thing to keep in sync. 0.68 puts the card at ~300×176 — wide enough
+   that the six stop labels still read, narrow enough for the composer popover.
+   Scaling lives on the component's root, so the demo page keeps 1. */
+#effort-galaxy-mount {
+  --ge-scale: 0.55;
+  /* A `transform` does not change the box the parent lays out, so the scaled
+     card would leave 440×258 of empty space behind it. These are that box
+     multiplied by the same scale — the numbers here have to track the one
+     above (440 × .55 = 242, 258 × .55 = 141.9). */
+  width: 242px;
+  height: 142px;
+  overflow: visible;
+}
+
+/* The row under the card. `Auto` keeps the composer's own spacing rather than
+   the card's interior geometry — it is chrome this app added, not part of the
+   spec'd component. */
+/* What the choice will actually put on the wire.
+ *
+ * 现在只有两种情况会填上它：旧 `run.json` 里存着的协议值（`minimal` 这种
+ * 「没有对应档位」的），或者 `auto`（不发字段）。`Auto` 按钮与「轨道长度就是
+ * 能力声明」那套说明都已删除，轨道固定六格，每格的实际值由卡片自己画在刻度
+ * 下方（`galaxy-effort.js` 的 `.ge-sends`）。
+ *
+ * 位置在卡片下缘之外，字号按 `1/--ge-scale` 抵掉卡片的缩放：这块是给人读的
+ * 真文本，不该跟着卡片一起缩成 8px。 */
+.effort-extras {
+  position: absolute;
+  left: 22px;
+  right: 22px;
+  top: 258px;
+  padding-top: calc(10px / var(--ge-scale, 1));
+  font-family: Arial, Helvetica, sans-serif;
+  font-size: calc(var(--text-xs) / var(--ge-scale, 1));
+  line-height: 1.45;
+}
+
+/* 组件没建起来时的落点：没有卡片可搬，就退回挂在挂载点下面。 */
+.effort-panel > .effort-extras {
+  position: static;
+  padding-top: 8px;
+  font-family: inherit;
+}
+
+.effort-panel-foot {
   display: flex;
-  flex-direction: column;
-  animation: slide-up 120ms ease-out;
+  align-items: center;
+  gap: 8px;
 }
 
-.effort-menu button {
-  padding: 6px 10px;
-  border-radius: var(--radius-sm);
-  text-align: left;
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
+.effort-auto-hint {
+  font-size: calc(var(--text-xs) / var(--ge-scale, 1));
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
 
-.effort-menu button:hover {
-  background: var(--surface-hover);
-  color: var(--text);
-}
-
-.effort-menu button.active {
-  color: var(--accent-text);
+.effort-auto-hint:empty {
+  display: none;
 }
 
 /* ---------- model picker ---------- */
@@ -5099,7 +5124,6 @@ mark.find-hit.current {
 @media (prefers-reduced-motion: reduce) {
   .model-menu,
   .mode-menu,
-  .effort-menu,
   .plus-menu {
     animation: none;
   }

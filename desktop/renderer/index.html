@@ -13,6 +13,9 @@
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="settings.css" />
+    <!-- The brain slider's own stylesheet. It is a separate file because the
+         demo page links it too; both must render the same card. -->
+    <link rel="stylesheet" href="galaxy-effort.css" />
   </head>
   <body>
     <div class="shell">
@@ -444,16 +447,46 @@
                       </button>
                       <div class="model-menu" id="model-menu" role="listbox" hidden></div>
                     </div>
-                    <!-- Visible only when the current model declares reasoning
-                         support. `syncEffortControl()` in app.js removes
-                         `hidden` from the host's reported levels, and leaves it
-                         on for a model that would drop the parameter. -->
+                    <!-- Always visible once the host has named a model
+                         (2026-11-09, by request); it stays hidden only for a
+                         host with no model at all, where there is no
+                         conversation to set an effort for.
+                         `syncEffortControl()` in app.js owns that decision.
+
+                         The panel is the brain slider (`galaxy-effort.js`,
+                         2026-11-09): it replaced a six-stop native range whose
+                         popover was too narrow for the card the spec defines
+                         (440×258). The component owns the track, the folds and
+                         the Galaxy layers; this file only supplies the mount
+                         point.
+
+                         **The track is always six stops** (2026-11-10, 用户
+                         决定「永远六格，映射做适配」): the host builds the same
+                         six for every model and each stop carries what it
+                         actually sends, which the card prints under the tick.
+                         The earlier "the length of the track is the capability
+                         statement" rule is gone with the 2026-11-09 adaptive
+                         mapping — a track that changed length per model made
+                         the same setting a different length scale. -->
                     <div class="effort-control" id="effort-control" hidden>
-                      <button class="chip-button effort-picker" id="effort-picker" aria-haspopup="menu" aria-expanded="false">
+                      <button class="chip-button effort-picker" id="effort-picker" aria-expanded="false" aria-controls="effort-panel">
                         <span id="effort-label">Auto</span>
                         <svg class="icon" aria-hidden="true"><use href="#i-chevron-down"></use></svg>
                       </button>
-                      <div class="effort-menu" id="effort-menu" role="menu" hidden></div>
+                      <div class="effort-panel" id="effort-panel" role="group" aria-label="Thinking effort" hidden>
+                        <div id="effort-galaxy-mount"></div>
+                        <!-- 卡片下缘之外的一块补充说明：`#effort-auto-hint`
+                             在「这一档发的东西与档位名不同」时才填一句
+                             「sends X」。它画在卡片之外，字号按
+                             `1/--ge-scale` 抵掉卡片的缩放。
+                             2026-11-10：`Auto` 那一格与「按能力缩短轨道」
+                             都已退场（轨道固定六格），这里只剩这句说明。 -->
+                        <div class="effort-extras" id="effort-extras">
+                          <div class="effort-panel-foot">
+                            <span class="effort-auto-hint" id="effort-auto-hint"></span>
+                          </div>
+                        </div>
+                      </div>
                     </div>
                     <div class="composer-actions">
                       <button class="stop-button" id="stop-button" data-i18n="stop" data-i18n-title="stopTitle" hidden>Stop</button>
