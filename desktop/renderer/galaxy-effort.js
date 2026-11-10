@@ -547,9 +547,27 @@ export function createGalaxyEffort(options = {}) {
     // `sends === null` 表示这一档在这个模型上没有请求值（网关不提供 ≤ 它的
     // 任何档）。画一个短横而不是编一个值：这一格拖过去会吸附到最近的可用档，
     // 但「它自己发什么」的答案是"没有"。
-    node.textContent = stops[index].sends ?? "—";
-    if (stops[index].sends === null || stops[index].sends === undefined) {
-      node.classList.add("ge-send-none");
+    // 三种情况要分开说：
+    //   `undefined` —— 调用方没提供 sends（演示页那种），这一行不该编一个值；
+    //   `null`      —— 这一档在这个模型上没有请求值，画短横；
+    //   字符串      —— 实际会发的东西。
+    // `auto` 走的是第 3 种里的特例：它**有意不发**字段，所以文字写 `none`
+    // 会被读成协议值 `none`（那是"明确关闭推理"，与"不提要求"不是一回事）。
+    // 用 `—` 但**不加** `ge-send-none` 类：那一格的语义是"什么都不发"，不是
+    // "这个模型不支持"。
+    const sends = stops[index].sends;
+    // `auto` 与「无请求值」都是 `sends: null`，但说的是两件事：
+    // `auto` 是**用户主动选的"不提要求"**（这一格永远可用），
+    // 无值档是**这个模型给不了这么低**（拖过去会吸附走）。
+    // 前者不标灰，后者标灰 —— 靠 `value` 而不是靠 `sends` 分辨。
+    const isAuto = stops[index].value === "auto";
+    if (sends === undefined) {
+      node.textContent = "";
+    } else if (sends === null) {
+      node.textContent = isAuto ? "none" : "—";
+      if (!isAuto) node.classList.add("ge-send-none");
+    } else {
+      node.textContent = sends;
     }
     const nodeX = single ? TRACK_START_X : TRACK_START_X + index * (TRACK_END_X - TRACK_START_X) / span;
     node.style.left = `${nodeX}px`;

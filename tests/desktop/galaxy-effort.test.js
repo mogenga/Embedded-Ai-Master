@@ -629,9 +629,12 @@ describe("每格实际发什么（2026-11-10 用户决定）", () => {
     expect(helper).toContain("if (down >= 0");
   });
 
-  it("没有请求值的格子画短横，并加一个可区分样式的类", () => {
-    expect(CODE).toContain('node.textContent = stops[index].sends ?? "—"');
-    expect(CODE).toContain("ge-send-none");
+  it("没有请求值的格子画短横并标灰，但 Auto 不标灰", () => {
+    // 两者 `sends` 都是 null，语义却相反：Auto 是用户主动选的「不提要求」，
+    // 无值档是「这个模型给不了这么低」。靠 `value === "auto"` 分辨。
+    expect(CODE).toContain('const isAuto = stops[index].value === "auto"');
+    expect(CODE).toContain('node.textContent = isAuto ? "none" : "—"');
+    expect(CODE).toContain("if (!isAuto) node.classList.add");
     const css = CSS;
     expect(css).toContain(".ge-send-none");
   });
