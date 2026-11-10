@@ -20,7 +20,7 @@
 | 项 | 状态 | 依据 |
 |---|---|---|
 | 仓库 | `mogenga/Embedded-Ai-Master`，**public** | GitHub API 实测 `private: false`、`visibility: public` |
-| Releases | **`v0.3.0` 为最新**（`v0.1.0`–`v0.3.0` 八个 release，各含安装包 / `.blockmap` / `latest.yml` 三个资产；`v0.3.0` 的安装包 118,399,565 字节） | `gh release view v0.3.0 --json assets` 实测（2026-11-09）：三个资产均为 `uploaded`，sha512 与 `latest.yml` 逐字一致 |
+| Releases | **`v0.3.2` 为最新**（`v0.1.0`–`v0.3.2` 十个 release，各含安装包 / `.blockmap` / `latest.yml` 三个资产；`v0.3.2` 的安装包 118,492,095 字节） | `gh release view v0.3.2 --json assets` 实测（2026-11-10）：三个资产均为 `uploaded`；远端 `latest.yml` 与本地产物 sha512 逐字一致（`wnqxWxCH…ijrA==`） |
 | 干净机器安装 | **已通过**：v0.1.5（2026-11-03）、**v0.3.0（2026-11-09）**。v0.2.0 未单独验证 | 用户报告；D-208 关闭 |
 | `desktop/package.json` 的 `build.publish` | 已配置 GitHub provider | `npx electron-builder --win --x64 --dir` 退出 0，schema 接受 |
 | `gh` CLI | **已安装且已登录**，但**不在 `PATH` 里** | 版本 2.103.2，路径 `C:\Program Files\GitHub CLI\gh.exe`；`gh auth status` 退出 0，账号 `mogenga` |
