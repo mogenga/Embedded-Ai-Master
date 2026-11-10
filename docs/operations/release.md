@@ -15,17 +15,17 @@
 
 ## 1. 当前状态（2026-11-09 更新）
 
-> 下表保留 2026-10-25 的实测依据；`Releases` 行按 `v0.3.2`（2026-11-10）改写，`干净机器安装` 仍是 `v0.3.0` 那次（`v0.3.1` / `v0.3.2` 未验），`应用内自动更新` 一行 2026-11-09 由「已接入」改为「已跑通」。`签名` 一行沿用旧结论（仍未签）。
+> 下表保留 2026-10-25 的实测依据；`Releases` 行按 `v0.3.2`（2026-11-10）改写，`干净机器安装` 与 `应用内自动更新` 两行按用户 2026-11-10 的确认覆盖到 `v0.3.2`。`签名` 一行沿用旧结论（仍未签）。
 
 | 项 | 状态 | 依据 |
 |---|---|---|
 | 仓库 | `mogenga/Embedded-Ai-Master`，**public** | GitHub API 实测 `private: false`、`visibility: public` |
 | Releases | **`v0.3.2` 为最新**（`v0.1.0`–`v0.3.2` 十个 release，各含安装包 / `.blockmap` / `latest.yml` 三个资产；`v0.3.2` 的安装包 118,492,095 字节） | `gh release view v0.3.2 --json assets` 实测（2026-11-10）：三个资产均为 `uploaded`；远端 `latest.yml` 与本地产物 sha512 逐字一致（`wnqxWxCH…ijrA==`） |
-| 干净机器安装 | **已通过**：v0.1.5（2026-11-03）、**v0.3.0（2026-11-09）**。v0.2.0 未单独验证 | 用户报告；D-208 关闭 |
+| 干净机器安装 | **已通过**：v0.1.5（2026-11-03）、v0.3.0（2026-11-09）、v0.3.1、v0.3.2（2026-11-10）。v0.2.0 未单独验证 | 用户确认；D-208 关闭 |
 | `desktop/package.json` 的 `build.publish` | 已配置 GitHub provider | `npx electron-builder --win --x64 --dir` 退出 0，schema 接受 |
 | `gh` CLI | **已安装且已登录**，但**不在 `PATH` 里** | 版本 2.103.2，路径 `C:\Program Files\GitHub CLI\gh.exe`；`gh auth status` 退出 0，账号 `mogenga` |
 | `electron-updater` | **已安装（6.8.11）** | 声明在 `desktop/package.json`（`^6.8.11`），`desktop/node_modules/electron-updater/package.json` 实测为该版本 |
-| 应用内自动更新 | **已接入并跑通一次真实更新**（`desktop/updater.js` + 主进程 IPC + 关于页） | 用户实测（2026-11-09）：旧版收到新版提示 → 下载 → 重启安装完成。实现见 §12，边界见 §12.6 |
+| 应用内自动更新 | **已接入并跑通**（`desktop/updater.js` + 主进程 IPC + 关于页） | 用户实测：v0.3.0（2026-11-09）、v0.3.1 / v0.3.2（2026-11-10）各一次，均为旧版收到新版提示 → 下载 → 重启安装完成。**每版只跑过一遍**。实现见 §12，边界见 §12.6 |
 | 签名 | 配置就位，**从未真实签过** | 本机无证书，见 `docs/operations/code-signing.md` §7 |
 | 图标 | 已配置 `build/icon.ico` | `desktop/package.json` 的 `win.icon` |
 
