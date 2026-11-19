@@ -158,3 +158,29 @@
 - `AGENTS.md`：静态检查段补 `check:ledgers`；`verify` 补全五项；新增一段写死能力边界（绿灯 ≠ 状态准确）。
 - `README.md`：命令表补 `check:ledgers`，`verify` 说明改为「上面五项」。
 - `docs/BACKLOG.md`：4.5 标完成并写明两类检查与边界。
+
+## 2026-11-11 · main 分支保护由经典规则迁移为 GitHub 规则集
+
+**用户关键原话**
+- 「main分支保护规则没有转成github的规则集啊」
+- 选择「转规则集 + 禁强推（推荐）」
+
+**关键产出**
+- 实测迁移前状态：`GET /repos/.../rulesets` 返回 `[]`（无规则集），`GET /repos/.../branches/main/protection` 有经典保护；经典保护里 `allow_force_pushes.enabled = true`（2026-11-04 的会话记录里这一步回滚后**仍是 false**，之后某次被改成 true，本次未追查是谁/何时改的——这条只按迁移那一刻实测记录），必需检查已对齐 `typecheck + syntax (fast)` 与 `build + test (offline)`（dev-notes 第 53 行那条「旧 job 名」的记录已过期，实际已在本文件后来的会话里改对）。
+- 新建仓库规则集 **`protect-main`**（id `26999717`，`gh api -X POST repos/mogenga/Embedded-Ai-Master/rulesets`）：
+  - 条件 `ref_name.include = ["~DEFAULT_BRANCH"]`，`enforcement = active`
+  - bypass：`RepositoryRole` id 5（admin）`always` —— 对应经典保护的 `enforce_admins = false`，即「开保护、我不受限制」
+  - 规则：`deletion` / `non_fast_forward` / `pull_request`（0 审批、`dismiss_stale_reviews_on_push`、`required_review_thread_resolution`、allowed_merge_methods 三种全开）/ `required_status_checks`（非 strict，两条 CI job，`integration_id` 15368 = GitHub Actions）
+  - `non_fast_forward` 是**新增**语义：经典保护当时允许强推，规则集里不再允许（admin 仍可绕过）。
+- 核验：`gh ruleset check main` → 4 条规则全部命中 `protect-main`，`current_user_can_bypass: always`。
+- 删除经典保护（`DELETE /repos/.../branches/main/protection`，删前已把整份对象备份到本机临时文件），复验：经典保护返回 `Branch not protected`，`rulesets` 只剩 `protect-main` 且 `active`，`gh ruleset check main` 仍报 4 条规则。
+
+**被拒绝或纠偏的内容**
+- 没有保留经典保护与规则集并存：两者叠加时同一件事在两处维护，且经典保护里「允许强推」与本次目标相反，共存只会让人误判到底哪条在生效。
+- 没有顺手压平 main 历史、没有改合并方式（`delete_branch_on_merge` 仍为 true，merge/squash/rebase 仍全开）。
+
+**翻车与返工**
+- 无。一次创建成功，未触发 API 校验失败。
+
+**未验证到的**
+- 规则集在**非 admin 直推**时的实际拦截效果没有实测（没有第二个写入者可以安全试验）；`gh ruleset check` 只证明规则已附着到 `main`，不证明拦截行为。仓库协作者 `LogicJump` 仍有 write 权限，真实验证需要一次刻意失败的直推，未做。
