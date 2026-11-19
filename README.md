@@ -12,6 +12,7 @@
 [![Download](https://img.shields.io/badge/download-Windows%20x64-2ea44f)](https://github.com/mogenga/Embedded-Ai-Master/releases/latest)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A524-339933?logo=node.js&logoColor=white)](https://nodejs.org)
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/mogenga/badge.svg)](https://hub.xerj.org/contributors/mogenga)
 
 [下载](#下载) · [能做什么](#能做什么) · [快速开始](#快速开始) · [文档地图](#文档地图)
 
